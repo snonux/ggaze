@@ -43,6 +43,7 @@ test_stack_has_two_views(void) {
    g_assert_nonnull(gtk_stack_get_child_by_name(p_stack, "grid"));
    g_assert_nonnull(gtk_stack_get_child_by_name(p_stack, "large"));
    g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
+   g_object_unref(p_pages);
 
    g_object_unref(p_win);
 }

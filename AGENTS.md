@@ -42,6 +42,14 @@ Shared helpers go in `tests/helpers/`; fixtures in `tests/fixtures/` (grow per
 milestone). Integration suites land with the milestone that first makes a flow
 possible — see `docs/IMPLEMENTATION.md` "Planned integration suites".
 
+**Optional realistic corpus:** `./sample-images/` (a local, NOT git-tracked
+613-image camera dump: 601 JPEG + 12 PNG, sizes up to 46MB, varied EXIF) is
+the realistic test corpus for integration tests and leak-check sessions. Any
+test or scripted session that uses it MUST skip cleanly when the directory is
+absent (so CI, which only has `tests/fixtures/`, stays green) and MUST NOT
+mutate the corpus — work on temp copies. The committed `tests/fixtures/` are
+the CI-portable baseline; `./sample-images/` is a local supplement.
+
 ## Conventions (enforced)
 
 - `docs/coding-conventions.md` summarizes; the `c-best-practices` skill wins.

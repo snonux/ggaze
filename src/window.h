@@ -5,10 +5,10 @@
  * ggaze — main window
  *
  * GgazeWindow : GtkApplicationWindow owns the layout: an AdwHeaderBar and a
- * GtkStack with two placeholder children (`grid`, `large`). M0 keeps the
- * stack empty of real views; gridview (M7) and viewer (M1) populate it. The
- * window remembers the current GFile so later milestones can build on it.
- * See docs/architecture.md "Responsibilities / window".
+ * GtkStack with two children (`grid`, `large`). The grid child is a placeholder
+ * until M7; the large child is the GgazeViewer (M1). The window remembers the
+ * current GFile so later milestones can build on it. See
+ * docs/architecture.md "Responsibilities / window".
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
