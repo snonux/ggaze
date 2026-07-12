@@ -1,5 +1,6 @@
 # ggaze build artifacts
 /build/
+/sample-images
 /build-*/
 *.o
 *.obj
