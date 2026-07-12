@@ -1,0 +1,58 @@
+# ggaze CI — Woodpecker (codeberg-native).
+#
+# Three lanes (see docs/IMPLEMENTATION.md Phase 0):
+#   minimal  all optional backends disabled; plain GdkPixbuf viewer.
+#   gegl     gegl=enabled (+ jxl/avif/heif auto) — keeps the optional path
+#            from bit-rotting.
+#   asan     minimal build under AddressSanitizer + UBSan (also drives the
+#            per-feature leak-check tasks).
+#
+# The coverage gate runs in the minimal lane and is "warn" until M10, after
+# which it is flipped to fail (see docs/IMPLEMENTATION.md Cross-cutting).
+
+matrix:
+  include:
+    - LANE: minimal
+      MESON_OPTS: "-Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled"
+      RUN_COVERAGE: "yes"
+      ENV: ""
+    - LANE: gegl
+      MESON_OPTS: "-Dgegl=enabled"
+      RUN_COVERAGE: "no"
+      ENV: ""
+    - LANE: asan
+      MESON_OPTS: "-Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled -Db_sanitize=address,undefined"
+      RUN_COVERAGE: "no"
+      ENV: "G_DEBUG=gc-friendly ASAN_OPTIONS=detect_leaks=1:abort_on_error=1"
+
+when:
+  - event: [push, pull_request, manual]
+
+steps:
+  build-and-test:
+    image: fedora:40
+    environment: ${ENV}
+    commands:
+      - dnf install -y --setopt=install_weak_deps=False
+          meson ninja-build gcc clang clang-format git
+          pkgconf-pkg-config xorg-x11-server-Xvfb
+          gtk4-devel glib2-devel libadwaita-devel
+      - |
+        if [ "$LANE" = "gegl" ]; then
+          dnf install -y --setopt=install_weak_deps=False gegl-devel babl-devel
+        fi
+      - meson setup build $MESON_OPTS
+      - ninja -C build
+      - clang-format --dry-run --Werror $(git ls-files '*.c' '*.h')
+      - |
+        if [ "$RUN_COVERAGE" = "yes" ]; then
+          # lcov/genhtml not installed in Phase 0 (gate warns until M10);
+          # add lcov + (perl-Dot-Graph or genhtml) here when M10 flips the
+          # coverage gate to fail.
+          meson setup -Db_coverage=true build-cov $MESON_OPTS
+          ninja -C build-cov
+          meson test -C build-cov
+          ninja -C build-cov coverage || echo "coverage: lcov/genhtml not installed (warn)"
+        fi
+      - meson test -C build --suite unit
+      - xvfb-run -a meson test -C build --suite integration

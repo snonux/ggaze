@@ -1,0 +1,19 @@
+# ggaze build artifacts
+/build/
+/build-*/
+*.o
+*.obj
+*.gcno
+*.gcda
+*.gcov
+coverage-html/
+
+# Meson
+/subprojects/packagecache/
+
+# Editors / OS
+.DS_Store
+*.swp
+*~
+\#*\#
+.\#*

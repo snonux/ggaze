@@ -1,0 +1,21 @@
+# ggaze meson options. See docs/tech-stack.md and docs/IMPLEMENTATION.md.
+#
+# Optional loader / image-processing backends. Each is a meson `feature`:
+#   auto      detect if installed, build if found (default; minimal CI lane
+#             forces disabled)
+#   disabled  skip
+#   enabled   require, fail if missing
+#
+# The core culling viewer never needs these; a GdkPixbuf-only build is valid.
+
+option('gegl',  type : 'feature', value : 'auto',
+   description : 'GEGL quick-enhance, crop/straighten/rotate, ICC color mgmt')
+
+option('jxl',  type : 'feature', value : 'auto',
+   description : 'JPEG XL loader backend (libjxl)')
+
+option('avif', type : 'feature', value : 'auto',
+   description : 'AVIF loader backend (libavif)')
+
+option('heif', type : 'feature', value : 'auto',
+   description : 'HEIF/HEIC loader backend (libheif)')

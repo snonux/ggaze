@@ -1,0 +1,46 @@
+---
+# ggaze .clang-format — matches docs/coding-conventions.md and the
+# c-best-practices skill. Enforced in CI with `clang-format --dry-run -Werror`.
+Language:        Cpp
+BasedOnStyle:    LLVM
+
+# 3-space indent, no tabs, 80-col limit.
+# (UseTab singular is the canonical clang-format key across LLVM >=16; the
+# older plural spelling is rejected by current toolchains.)
+ColumnLimit:     80
+IndentWidth:     3
+UseTab:          Never
+TabWidth:        3
+ContinuationIndentWidth: 3
+
+# K&R braces (opening brace on the same line).
+BreakBeforeBraces: Attach
+
+# Return type on its own line above the function name (c-best-practices).
+# AllDefinitions is accepted by both LLVM 18 (Fedora 40) and LLVM 22.
+AlwaysBreakAfterReturnType: AllDefinitions
+
+# Pointer asterisk on the variable: `Token *p_token`, not `Token* p_token`.
+PointerAlignment: Right
+
+# Keep the hand-written include order (own header, system, project).
+SortIncludes:        false
+IncludeBlocks:       Preserve
+
+# Spacing.
+SpaceBeforeParens:       ControlStatements
+SpaceAfterCStyleCast:    false
+SpacesInParentheses:     false
+SpacesInSquareBrackets:  false
+
+# No collapsing short control bodies onto one line.
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortBlocksOnASingleLine:       Empty
+AllowShortFunctionsOnASingleLine:    Empty
+AllowShortLoopsOnASingleLine:        false
+AllowShortEnumsOnASingleLine:        false
+
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: Consecutive
+AlignTrailingComments: true
