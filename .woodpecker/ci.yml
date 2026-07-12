@@ -37,6 +37,7 @@ steps:
           meson ninja-build gcc clang clang-format git
           pkgconf-pkg-config xorg-x11-server-Xvfb
           gtk4-devel glib2-devel libadwaita-devel
+          libasan libubsan
       - |
         if [ "$LANE" = "gegl" ]; then
           dnf install -y --setopt=install_weak_deps=False gegl-devel babl-devel
