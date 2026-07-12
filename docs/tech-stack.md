@@ -70,7 +70,7 @@ it. Treat as a later milestone, but design the loader signature for it now.
 - `slideshow-delay` — double (seconds)
 - `thumbnail-size` — int: grid thumbnail pixel size (resizable via `+`/`-`)
 - `hide-trashed`    — bool
-- `window-geometry` — `(iiib)` width, height, maximized; persisted, restored on launch
+- `window-geometry` — `(iiib)` (width, height, fullscreen, maximized); persisted, restored on launch
 - `destinations`    — `a(ss)`: ordered array of `(name, path)` pairs for the
   `m` move popup. List order determines auto-assigned hotkeys (`1`, `2`, …).
   Edited via the Preferences dialog (`,`) or `gsettings`.

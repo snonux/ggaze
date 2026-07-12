@@ -1,3 +1,10 @@
-# ggaze production sources. Populated from M0 onward (see docs/roadmap.md and
-# docs/architecture.md for the module map). Phase 0 ships no sources yet —
-# only the build/test/CI/convention harness, so `ninja` has no C targets here.
+# ggaze executable. The app/window code lives in libggae (see meson.build); the
+# executable only adds the entry point and the --version CLI option.
+
+ggaze_exe = executable('ggaze',
+   'main.c',
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib,
+   install : true,
+)

@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ggaze GSettings schema — org.buetow.ggaze.
+
+  ALL keys are declared up front (M0) with sensible defaults so later modules
+  just read them. See docs/tech-stack.md "Settings keys" for the intended
+  semantics; consumption lands with the matching milestones.
+
+  `window-geometry` is (iiib) = (width, height, fullscreen-as-int-0/1,
+  maximized). The width/height/maximized mapping is finalized in M10; the
+  shape is fixed here so the schema is stable.
+-->
+<schemalist>
+   <enum id="org.buetow.ggaze.sort">
+      <value nick="name" value="0"/>
+      <value nick="capture-time" value="1"/>
+      <value nick="size" value="2"/>
+   </enum>
+
+   <enum id="org.buetow.ggaze.background">
+      <value nick="black" value="0"/>
+      <value nick="dark" value="1"/>
+      <value nick="grey" value="2"/>
+      <value nick="checker" value="3"/>
+   </enum>
+
+   <enum id="org.buetow.ggaze.scroll-behavior">
+      <value nick="zoom" value="0"/>
+      <value nick="pan-when-zoomed" value="1"/>
+      <value nick="navigate" value="2"/>
+   </enum>
+
+   <schema id="org.buetow.ggaze" path="/org/buetow/ggaze/">
+      <key name="sort" enum="org.buetow.ggaze.sort">
+         <default>'name'</default>
+         <summary>Sort order</summary>
+         <description>Sort the folder by name, EXIF capture time, or size.</description>
+      </key>
+
+      <key name="wrap" type="b">
+         <default>true</default>
+         <summary>Wrap at folder ends</summary>
+         <description>Wrap prev/next at the first/last image.</description>
+      </key>
+
+      <key name="background" enum="org.buetow.ggaze.background">
+         <default>'dark'</default>
+         <summary>Viewer background</summary>
+         <description>Background behind the image in large view.</description>
+      </key>
+
+      <key name="scroll-behavior" enum="org.buetow.ggaze.scroll-behavior">
+         <default>'zoom'</default>
+         <summary>Scroll behavior</summary>
+         <description>What the mouse scroll wheel does in large view.</description>
+      </key>
+
+      <key name="slideshow-delay" type="d">
+         <default>3.0</default>
+         <summary>Slideshow delay</summary>
+         <description>Seconds between slides in slideshow mode.</description>
+      </key>
+
+      <key name="thumbnail-size" type="i">
+         <default>128</default>
+         <summary>Grid thumbnail size</summary>
+         <description>Pixel size of grid thumbnails (resizable via +/-).</description>
+      </key>
+
+      <key name="hide-trashed" type="b">
+         <default>false</default>
+         <summary>Hide trashed items</summary>
+         <description>Hide ./Trash/deleted items from the grid entirely.</description>
+      </key>
+
+      <key name="window-geometry" type="(iiib)">
+         <default>(800, 600, 0, false)</default>
+         <summary>Window geometry</summary>
+         <description>(width, height, fullscreen, maximized) restored on launch.</description>
+      </key>
+
+      <key name="destinations" type="a(ss)">
+         <default>[]</default>
+         <summary>Move destinations</summary>
+         <description>Ordered (name, path) pairs for the `m` move popup; order = hotkey order.</description>
+      </key>
+
+      <key name="editors" type="a(ss)">
+         <default>[]</default>
+         <summary>External editors</summary>
+         <description>Ordered (name, command) pairs for the `e` open-in popup; %f = current file.</description>
+      </key>
+
+      <key name="scripts" type="a(ss)">
+         <default>[]</default>
+         <summary>Shell scripts</summary>
+         <description>Ordered (name, command) pairs for the `!` run-script popup; %f/%d expanded, run via /bin/sh -c.</description>
+      </key>
+
+      <key name="enhance-presets" type="a(ss)">
+         <default>[]</default>
+         <summary>Enhance presets</summary>
+         <description>Ordered (name, gegl-graph) pairs for the `a` enhance popup (GEGL only).</description>
+      </key>
+   </schema>
+</schemalist>

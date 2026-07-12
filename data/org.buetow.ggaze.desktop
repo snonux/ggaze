@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=ggaze
+GenericName=Image Viewer
+Comment=Fast native image viewer for culling camera shoots
+# M0 stub; full MIME/keywords/AppStream wiring lands in M10.
+Exec=ggaze %f
+Icon=ggaze
+Terminal=false
+StartupNotify=true
+Categories=Graphics;Viewer;Photography;
+MimeType=image/png;image/jpeg;image/gif;image/webp;image/tiff;image/avif;image/heif;image/heic;image/jxl;
+Keywords=image;viewer;photo;camera;culling;

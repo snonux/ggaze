@@ -43,9 +43,23 @@ ggaze_conf_h = configure_file(
    configuration : conf,
 )
 
-# Include path: source root (generated header lands in the build root, which
-# meson adds automatically for targets that list ggaze_conf_h as a source).
+# Include paths: source root (generated header) + src/ (module headers).
 inc = include_directories('.')
+src_inc = include_directories('src')
+
+# --- ggaze library: the app + window (shared between the executable and
+#     tests so the GApplication/GtkApplicationWindow code is exercised without
+#     duplicating sources). Plain-C modules will join this library as they
+#     land (navigator, trash, mover, ...).
+ggaze_lib = static_library('ggaze',
+   files('src/app.c', 'src/window.c'),
+   include_directories : [inc, src_inc],
+   dependencies : [gtk4_dep, glib_dep, gio_dep, adwaita_dep],
+   install : false,
+)
+
+ggaze_deps = [gtk4_dep, glib_dep, gio_dep, adwaita_dep]
 
 subdir('src')
+subdir('data')
 subdir('tests')

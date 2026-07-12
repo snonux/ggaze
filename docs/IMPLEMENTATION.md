@@ -144,7 +144,8 @@ green (empty suites); CI builds the matrix; `clang-format --dry-run` clean.
 - `src/loader/backends/pixbuf.c` — GdkPixbuf →
   `gdk_pixbuf_apply_embedded_orientation` (decision #26) → `GdkTexture`.
 - `src/viewer.c/.h` — `GgazeViewer : GtkWidget` (custom, decision #31): zoom,
-  pan, fit, cursor-centered zoom, pan clamp; `viewer_set_texture`.
+  pan, fit, cursor-centered zoom, pan clamp, `viewer_set_texture`; scroll
+  follows `scroll-behavior` (`zoom` / `pan-when-zoomed` / `navigate`).
 - `src/window.c` — wire `open` → load → `viewer_set_texture`; large view.
 
 **Tests**
@@ -253,7 +254,7 @@ bounded memory.
   trashed/deleted; `Enter`/double-click → large; cursor sync both ways.
 - `src/trash.c/.h` — `./Trash` bin (lazy, collision suffix), restore-last,
   permanent delete.
-- Window: `d`/`D`/`u`; `d` advances; counter = remaining; `t` toggle.
+- Window: `d`/`D`/`u`; `d` advances; `D` on **>1 marked** asks a confirm dialog; counter = remaining; `t` toggle.
 
 **Tests**
 - Unit: `test_thumbnail.c`, `test_trash.c`.
@@ -273,11 +274,15 @@ bounded memory.
   acts on original file (decision #38).
 - `src/runner.c/.h` — `scripts` `a(ss)`; `/bin/sh -c`, single-quoted `%f`/`%d`
   (decision S); `wait_async`; rescan + toast on done.
-- `src/clipboard.c/.h` — `image/png` (decode in `GTask`) / `text/uri-list`;
-  union provider for one file (decision V).
+- `src/clipboard.c/.h` — copies the **displayed** image (modified if a
+  preview is active, else original) as `image/png` (decode in `GTask`) /
+  marked files as `text/uri-list`; union provider for one file (decision V).
+  `Ctrl+Shift+c` (later) copies the original/path.
 - Reusable popover (`ggaze_popup`) for move/open/scripts/(enhance later):
   `(hotkey, label)` rows + key controller firing on digit/letter.
 - Unified one-level undo `u` (decision P).
+- Mark UI: `v`/`V`/`Ctrl+a`/`Esc`; header subtitle shows `N marked`; grid
+  check-badges + large-view indicator.
 - Preferences dialog (`,`): `AdwPreferencesWindow` editing ordered `a(ss)`
   lists + sort/background/scroll/slideshow/hide-trashed.
 
@@ -296,8 +301,9 @@ bounded memory.
 - `meson` `gegl` feature; `src/enhancer.c/.h` plain-C.
 - `enhancer_get_presets` (built-in programmatic / user `gegl-graph` text,
   decision #34); `enhancer_apply` in `GTask`; `enhancer_export` →
-  `<stem>-enhanced.<ext>` same dir, collision `-1`; EXIF Orientation=1 on
-  export (decision #26).
+  `<stem>-enhanced.<ext>` same dir, collision `-1`, EXIF Orientation=1 on
+  export (decision #26); defaults to the original format (JPEG quality 95);
+  a format/quality chooser and a lossless `jpegtran`/`exiftool` path are later.
 - Viewer: preset active → import → `GeglBuffer` → apply → `GdkTexture`; not
   during scrub (decision #34); "enhanced" badge.
 - Compose order load→enhance→rotate→straighten→crop→export (decision #35).
