@@ -73,6 +73,12 @@
          <description>Hide ./Trash/deleted items from the grid entirely.</description>
       </key>
 
+      <key name="hide-raw-sidecars" type="b">
+         <default>true</default>
+         <summary>Hide RAW sidecars</summary>
+         <description>Hide RAW files (.RAF/.CR3/.NEF/...) when a JPEG with the same stem exists (toggle to reveal).</description>
+      </key>
+
       <key name="window-geometry" type="(iiib)">
          <default>(800, 600, 0, false)</default>
          <summary>Window geometry</summary>

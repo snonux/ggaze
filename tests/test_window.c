@@ -50,15 +50,21 @@ test_stack_has_two_views(void) {
 
 static void
 test_open_titles_window(void) {
-   GgazeWindow *p_win = new_window();
-
-   GFile *p_file = g_file_new_for_path("/tmp/IMG_0001.jpg");
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar       *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   GgazeWindow *p_win  = new_window();
+   GFile       *p_file = g_file_new_for_path(c_path);
    ggaze_window_open(p_win, p_file);
-
-   g_assert_cmpstr(gtk_window_get_title(GTK_WINDOW(p_win)), ==, "IMG_0001.jpg");
-
+   /* M2: opening a file lists its parent folder; the header title carries
+    * the current filename + "n/total". */
+   const gchar *c_title = gtk_window_get_title(GTK_WINDOW(p_win));
+   g_assert_nonnull(c_title);
+   g_assert_nonnull(g_strstr_len(c_title, -1, "plain.jpg"));
+   g_assert_nonnull(g_strstr_len(c_title, -1, "/"));
    g_object_unref(p_file);
    g_object_unref(p_win);
+   g_free(c_path);
 }
 
 int

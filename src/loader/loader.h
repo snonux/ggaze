@@ -27,8 +27,7 @@ G_BEGIN_DECLS
  * registered with the loader at link time. */
 typedef struct {
    gboolean (*can_load)(const guint8 *p_head, gsize u_len);
-   GdkTexture *(*load)(GFile *p_file, GCancellable *p_cancel,
-      GError **p_err);
+   GdkTexture *(*load)(GFile *p_file, GCancellable *p_cancel, GError **p_err);
 } GgazeLoaderBackend;
 
 /* Backends register a const instance; the dispatcher (loader.c) iterates

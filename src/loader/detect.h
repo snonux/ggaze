@@ -19,15 +19,15 @@ G_BEGIN_DECLS
 
 typedef enum {
    GGAZE_FMT_UNKNOWN = 0,
-   GGAZE_FMT_JPEG,    /* FF D8 FF */
-   GGAZE_FMT_PNG,     /* 89 50 4E 47 0D 0A 1A 0A */
-   GGAZE_FMT_GIF,     /* "GIF8" */
-   GGAZE_FMT_WEBP,    /* RIFF .... WEBP */
-   GGAZE_FMT_TIFF,    /* II 2A 00 | MM 00 2A */
-   GGAZE_FMT_ICO,     /* 00 00 01 00 */
-   GGAZE_FMT_JXL,     /* FF 0A | "....JXL " container */
-   GGAZE_FMT_AVIF,    /* ftyp avif/avis */
-   GGAZE_FMT_HEIF     /* ftyp heic/heix/mif1 */
+   GGAZE_FMT_JPEG, /* FF D8 FF */
+   GGAZE_FMT_PNG,  /* 89 50 4E 47 0D 0A 1A 0A */
+   GGAZE_FMT_GIF,  /* "GIF8" */
+   GGAZE_FMT_WEBP, /* RIFF .... WEBP */
+   GGAZE_FMT_TIFF, /* II 2A 00 | MM 00 2A */
+   GGAZE_FMT_ICO,  /* 00 00 01 00 */
+   GGAZE_FMT_JXL,  /* FF 0A | "....JXL " container */
+   GGAZE_FMT_AVIF, /* ftyp avif/avis */
+   GGAZE_FMT_HEIF  /* ftyp heic/heix/mif1 */
 } GgazeFormat;
 
 /* Sniff p_head (u_len bytes) and return the detected format. Never reads

@@ -14,8 +14,10 @@
 #   GGAZE_FIXTURES_DIR  committed tests/fixtures/ (CI-portable baseline)
 #   GGAZE_SAMPLE_DIR    local ./sample-images (not git-tracked; tests skip
 #                       cleanly when absent so CI stays green)
+#   GIO_USE_VFS=local   avoid gvfs daemon-VFS internal leaks under ASan
 
 fixtures_env = environment()
+fixtures_env.set('GIO_USE_VFS', 'local')
 fixtures_env.set('GGAZE_FIXTURES_DIR',
    join_paths(meson.project_source_root(), 'tests', 'fixtures'))
 fixtures_env.set('GGAZE_SAMPLE_DIR',
@@ -65,6 +67,16 @@ test_loader_pixbuf = executable(
 )
 test('loader_pixbuf', test_loader_pixbuf, suite : 'unit', env : fixtures_env)
 
+test_navigator = executable(
+   'test_navigator',
+   ['test_navigator.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('navigator', test_navigator, suite : 'unit', env : fixtures_env)
+
 # --- integration track (needs a display; CI uses xvfb-run) ---
 test_window = executable(
    'test_window',
@@ -74,7 +86,7 @@ test_window = executable(
    link_with : ggaze_lib,
    install : false,
 )
-test('window', test_window, suite : 'integration')
+test('window', test_window, suite : 'integration', env : fixtures_env)
 
 test_open_and_show = executable(
    'test_open_and_show',
@@ -87,5 +99,15 @@ test_open_and_show = executable(
 test('open_and_show', test_open_and_show,
    suite : 'integration',
    env : fixtures_env)
+
+test_walk_folder = executable(
+   'test_walk_folder',
+   ['test_walk_folder.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib,
+   install : false,
+)
+test('walk_folder', test_walk_folder, suite : 'integration', env : fixtures_env)
 
 subdir('integration')

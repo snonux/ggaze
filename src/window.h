@@ -6,9 +6,9 @@
  *
  * GgazeWindow : GtkApplicationWindow owns the layout: an AdwHeaderBar and a
  * GtkStack with two children (`grid`, `large`). The grid child is a placeholder
- * until M7; the large child is the GgazeViewer (M1). The window remembers the
- * current GFile so later milestones can build on it. See
- * docs/architecture.md "Responsibilities / window".
+ * until M7; the large child is the GgazeViewer (M1). M2 adds a Navigator over
+ * the current folder, a single GCancellable (last-write-wins), keybinding
+ * shortcuts, and a file/folder drop target. See docs/architecture.md.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -27,10 +27,17 @@ G_DECLARE_FINAL_TYPE(GgazeWindow, ggaze_window, GGAZE, WINDOW,
 /* Construct a new window attached to p_app. */
 GgazeWindow *ggaze_window_new(GgazeApp *p_app);
 
-/* Remember p_file as the current file (or folder) and title the window with
- * its basename. The GFile reference is held until replaced or the window is
- * destroyed. Real file-vs-folder handling lands in M2. */
-void ggaze_window_open(GgazeWindow *p_win, GFile *p_file);
+/* Open p_arg (a file or a folder): for a file, list its parent folder with
+ * p_arg current; for a folder, list it with the first image current. Loads the
+ * current image into the viewer and switches the stack to "large". */
+void ggaze_window_open(GgazeWindow *p_win, GFile *p_arg);
+
+/* Navigation over the current folder (bound to h/l/Left/Right/g/G via
+ * shortcuts.c). No-ops if nothing is open. */
+void ggaze_window_prev(GgazeWindow *p_win);
+void ggaze_window_next(GgazeWindow *p_win);
+void ggaze_window_first(GgazeWindow *p_win);
+void ggaze_window_last(GgazeWindow *p_win);
 
 G_END_DECLS
 

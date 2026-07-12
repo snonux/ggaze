@@ -1,11 +1,11 @@
 /*:*
  * ggaze — main window
  *
- * Implements GgazeWindow. Builds an AdwHeaderBar + a GtkStack with two named
- * children: "grid" (placeholder until M7) and "large" (the GgazeViewer from
- * M1). ggaze_window_open() loads the file via the loader and shows it in the
- * viewer. Real file-vs-folder resolution lands in M2 (navigator); M1 just loads
- * the one file. See docs/architecture.md "Responsibilities / window".
+ * GgazeWindow : GtkApplicationWindow owns an AdwHeaderBar + a GtkStack with two
+ * children ("grid" placeholder until M7, "large" = the GgazeViewer). M2 adds a
+ * Navigator over the current folder, a single GCancellable (last-write-wins),
+ * keybinding->action shortcuts, and a file/folder drop target. The header
+ * title carries "filename · n/total". See docs/architecture.md.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -15,23 +15,210 @@
 
 #include <adwaita.h>
 #include <glib.h>
+#include <gtk/gtk.h>
 
-#include "viewer.h"
 #include "loader/loader.h"
+#include "navigator.h"
+#include "shortcuts.h"
+#include "viewer.h"
 
 struct _GgazeWindow {
    GtkApplicationWindow parent_instance;
-   GFile     *p_file;   /* current file/folder, remembered for later use */
-   GtkWidget *p_stack;  /* GtkStack: grid (placeholder) / large (viewer) */
-   GtkWidget *p_viewer; /* GgazeViewer — the large view */
+   Navigator           *p_nav; /* current folder listing (NULL until open) */
+   GCancellable *p_cancel; /* single in-flight load; cancelled on each nav */
+   GtkWidget    *p_stack;  /* GtkStack: grid (placeholder) / large (viewer) */
+   GtkWidget    *p_viewer; /* GgazeViewer — the large view */
 };
 
 G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
 
+/* --- forward decls ------------------------------------------------------- */
+static void _load_current(GgazeWindow *p_win);
+static void _update_header(GgazeWindow *p_win);
+
+/* --- actions ------------------------------------------------------------- */
+
+static void
+_action_prev(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   ggaze_window_prev(GGAZE_WINDOW(p_data));
+}
+
+static void
+_action_next(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   ggaze_window_next(GGAZE_WINDOW(p_data));
+}
+
+static void
+_action_first(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   ggaze_window_first(GGAZE_WINDOW(p_data));
+}
+
+static void
+_action_last(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   ggaze_window_last(GGAZE_WINDOW(p_data));
+}
+
+static void
+_action_quit(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   gtk_window_close(GTK_WINDOW(p_data));
+}
+
+static void
+_open_dialog_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   GtkFileDialog *p_dlg  = GTK_FILE_DIALOG(p_src);
+   GError        *p_err  = NULL;
+   GFile         *p_file = gtk_file_dialog_open_finish(p_dlg, p_res, &p_err);
+   if (p_file != NULL) {
+      ggaze_window_open(GGAZE_WINDOW(p_data), p_file);
+      g_object_unref(p_file);
+   } else if (p_err != NULL) {
+      if (!g_error_matches(p_err, GTK_DIALOG_ERROR,
+                           GTK_DIALOG_ERROR_DISMISSED)) {
+         g_warning("ggaze: open dialog failed: %s", p_err->message);
+      }
+      g_error_free(p_err);
+   }
+   g_object_unref(p_data);
+}
+
+static void
+_action_open(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow   *p_win = GGAZE_WINDOW(p_data);
+   GtkFileDialog *p_dlg = gtk_file_dialog_new();
+   gtk_file_dialog_set_title(p_dlg, "Open image");
+   gtk_file_dialog_open(p_dlg, GTK_WINDOW(p_win), NULL, _open_dialog_cb,
+                        g_object_ref(p_win));
+   g_object_unref(p_dlg);
+}
+
+static const GActionEntry ACTIONS[] = {
+   {.name = "prev", .activate = _action_prev},
+   {.name = "next", .activate = _action_next},
+   {.name = "first", .activate = _action_first},
+   {.name = "last", .activate = _action_last},
+   {.name = "open", .activate = _action_open},
+   {.name = "quit", .activate = _action_quit},
+};
+
+/* --- drop target --------------------------------------------------------- */
+
+static gboolean
+drop_cb(GtkDropTarget *p_t, const GValue *p_val, gdouble d_x, gdouble d_y,
+        gpointer p_data) {
+   (void)p_t;
+   (void)d_x;
+   (void)d_y;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (!G_VALUE_HOLDS(p_val, GDK_TYPE_FILE_LIST)) {
+      return (FALSE);
+   }
+   GdkFileList *p_fl    = (GdkFileList *)g_value_get_boxed(p_val);
+   GSList      *p_files = gdk_file_list_get_files(p_fl);
+   /* Decision Z: many files -> first file's folder with the first current. */
+   if (p_files != NULL) {
+      ggaze_window_open(p_win, G_FILE(p_files->data));
+      return (TRUE);
+   }
+   return (FALSE);
+}
+
+/* --- navigator changed -> reload ----------------------------------------- */
+
+static void
+nav_changed_cb(Navigator *p_nav, gpointer p_data) {
+   (void)p_nav;
+   _load_current(GGAZE_WINDOW(p_data));
+}
+
+/* --- load current into the viewer ---------------------------------------- */
+
+static void
+_load_current(GgazeWindow *p_win) {
+   if (p_win->p_nav == NULL) {
+      return;
+   }
+   /* Single in-flight load: cancel the previous and start a new one.
+    * M1/M2 use synchronous load; M3 swaps this for a GTask. */
+   g_cancellable_cancel(p_win->p_cancel);
+   g_clear_object(&p_win->p_cancel);
+   p_win->p_cancel = g_cancellable_new();
+
+   GFile *p_cur = navigator_get_current(p_win->p_nav);
+   if (p_cur == NULL) {
+      ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), NULL);
+      _update_header(p_win);
+      return;
+   }
+
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = loader_load(p_cur, p_win->p_cancel, &p_err);
+   if (p_tex != NULL) {
+      /* Last-write-wins: only show if this is still the current file. Sync
+       * load makes this trivially true; the guard is here for M3's async path.
+       */
+      GFile *p_now = navigator_get_current(p_win->p_nav);
+      if (p_now != NULL && g_file_equal(p_now, p_cur)) {
+         ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
+         gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+      }
+      g_object_unref(p_tex);
+   } else {
+      const gchar *c_msg  = (p_err != NULL) ? p_err->message : "unknown error";
+      char        *c_name = g_file_get_basename(p_cur);
+      g_warning("ggaze: failed to load %s: %s", c_name, c_msg);
+      g_free(c_name);
+      g_clear_error(&p_err);
+   }
+   _update_header(p_win);
+}
+
+static void
+_update_header(GgazeWindow *p_win) {
+   gchar *c_title = NULL;
+   if (p_win->p_nav != NULL) {
+      GFile *p_cur   = navigator_get_current(p_win->p_nav);
+      guint  u_total = navigator_get_count(p_win->p_nav);
+      gint   i_idx   = navigator_get_current_index(p_win->p_nav);
+      if (p_cur != NULL) {
+         char *c_name = g_file_get_basename(p_cur);
+         if (u_total > 0 && i_idx >= 0) {
+            c_title =
+               g_strdup_printf("%s  \u00b7  %d/%u", c_name, i_idx + 1, u_total);
+         } else {
+            c_title = g_strdup(c_name);
+         }
+         g_free(c_name);
+      }
+   }
+   if (c_title == NULL) {
+      c_title = g_strdup("ggaze");
+   }
+   gtk_window_set_title(GTK_WINDOW(p_win), c_title);
+   g_free(c_title);
+}
+
+/* --- GObject ------------------------------------------------------------- */
+
 static void
 ggaze_window_dispose(GObject *p_obj) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_obj);
-   g_clear_object(&p_win->p_file);
+   if (p_win->p_nav != NULL) {
+      g_signal_handlers_disconnect_by_data(p_win->p_nav, p_win);
+      g_clear_object(&p_win->p_nav);
+   }
+   g_clear_object(&p_win->p_cancel);
    /* p_stack/p_viewer are GtkWidgets parented to the window; GTK releases them.
     */
    G_OBJECT_CLASS(ggaze_window_parent_class)->dispose(p_obj);
@@ -45,6 +232,8 @@ ggaze_window_class_init(GgazeWindowClass *p_klass) {
 
 static void
 ggaze_window_init(GgazeWindow *p_win) {
+   p_win->p_cancel = g_cancellable_new();
+
    /* Header bar (libadwaita, decision #29). */
    GtkWidget *p_header = adw_header_bar_new();
    gtk_window_set_titlebar(GTK_WINDOW(p_win), p_header);
@@ -66,7 +255,20 @@ ggaze_window_init(GgazeWindow *p_win) {
    gtk_stack_add_named(GTK_STACK(p_win->p_stack), p_win->p_viewer, "large");
 
    gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "grid");
+
+   /* Actions + keybindings (decision #10/#12). */
+   g_action_map_add_action_entries(G_ACTION_MAP(p_win), ACTIONS,
+                                   G_N_ELEMENTS(ACTIONS), p_win);
+   shortcuts_install(GTK_WIDGET(p_win));
+
+   /* File/folder drag-and-drop (decision #27). */
+   GtkDropTarget *p_drop =
+      gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
+   g_signal_connect(p_drop, "drop", G_CALLBACK(drop_cb), p_win);
+   gtk_widget_add_controller(GTK_WIDGET(p_win), GTK_EVENT_CONTROLLER(p_drop));
 }
+
+/* --- public -------------------------------------------------------------- */
 
 GgazeWindow *
 ggaze_window_new(GgazeApp *p_app) {
@@ -76,25 +278,70 @@ ggaze_window_new(GgazeApp *p_app) {
 }
 
 void
-ggaze_window_open(GgazeWindow *p_win, GFile *p_file) {
+ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));
-   g_return_if_fail(G_IS_FILE(p_file));
-   g_set_object(&p_win->p_file, p_file);
+   g_return_if_fail(G_IS_FILE(p_arg));
 
-   char *c_name = g_file_get_basename(p_file);
-   gtk_window_set_title(GTK_WINDOW(p_win), c_name);
-
-   /* Load and display (M1: synchronous; M3 makes this async with cancel). */
-   GError     *p_err = NULL;
-   GdkTexture *p_tex = loader_load(p_file, NULL, &p_err);
-   if (p_tex != NULL) {
-      ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
-      gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
-      g_object_unref(p_tex); /* viewer holds its own ref */
-   } else {
-      const gchar *c_msg = (p_err != NULL) ? p_err->message : "unknown error";
-      g_warning("ggaze: failed to load %s: %s", c_name, c_msg);
-      g_clear_error(&p_err);
+   if (p_win->p_nav != NULL) {
+      g_signal_handlers_disconnect_by_data(p_win->p_nav, p_win);
+      g_clear_object(&p_win->p_nav);
    }
-   g_free(c_name);
+
+   GFile    *p_dir   = NULL;
+   GFile    *p_start = NULL;
+   GFileType e_type =
+      g_file_query_file_type(p_arg, G_FILE_QUERY_INFO_NONE, NULL);
+   if (e_type == G_FILE_TYPE_DIRECTORY) {
+      p_dir = (GFile *)g_object_ref(p_arg);
+   } else {
+      p_dir   = g_file_get_parent(p_arg);
+      p_start = (GFile *)g_object_ref(p_arg);
+   }
+   if (p_dir == NULL) {
+      g_clear_object(&p_start);
+      return;
+   }
+
+   p_win->p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, TRUE, TRUE);
+   g_clear_object(&p_dir);
+   g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(nav_changed_cb), p_win);
+   if (p_start != NULL) {
+      navigator_set_current_file(p_win->p_nav, p_start);
+      g_clear_object(&p_start);
+   }
+
+   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+   _load_current(p_win);
+}
+
+void
+ggaze_window_prev(GgazeWindow *p_win) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   if (p_win->p_nav != NULL) {
+      navigator_prev(p_win->p_nav); /* emits "changed" -> _load_current */
+   }
+}
+
+void
+ggaze_window_next(GgazeWindow *p_win) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   if (p_win->p_nav != NULL) {
+      navigator_next(p_win->p_nav);
+   }
+}
+
+void
+ggaze_window_first(GgazeWindow *p_win) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   if (p_win->p_nav != NULL) {
+      navigator_first(p_win->p_nav);
+   }
+}
+
+void
+ggaze_window_last(GgazeWindow *p_win) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   if (p_win->p_nav != NULL) {
+      navigator_last(p_win->p_nav);
+   }
 }

@@ -28,7 +28,8 @@ GtkWidget *ggaze_viewer_new(void);
 /* Take p_texture (refs it; the caller still owns its own ref and should unref
  * when done). Resets to fit-to-window, clears pan. NULL clears the display. */
 void ggaze_viewer_set_texture(GgazeViewer *p_viewer, GdkTexture *p_texture);
-GdkTexture *ggaze_viewer_get_texture(GgazeViewer *p_viewer); /* (transfer none) */
+GdkTexture *
+ggaze_viewer_get_texture(GgazeViewer *p_viewer); /* (transfer none) */
 
 /* Zoom + pan actions (also reachable via the on-widget controllers). */
 void ggaze_viewer_zoom_in(GgazeViewer *p_viewer);
