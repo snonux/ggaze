@@ -53,8 +53,7 @@ src_inc = include_directories('src')
 #     tests so the GApplication/GtkApplicationWindow code is exercised without
 #     duplicating sources). Plain-C modules will join this library as they
 #     land (navigator, trash, mover, ...).
-ggaze_lib = static_library('ggaze',
-   files(
+ggaze_src = files(
       'src/app.c',
       'src/window.c',
       'src/viewer.c',
@@ -68,9 +67,32 @@ ggaze_lib = static_library('ggaze',
       'src/loader/loader.c',
       'src/loader/detect.c',
       'src/loader/backends/pixbuf.c',
-   ),
+   )
+ggaze_c_args = []
+ggaze_extra_deps = []
+
+if jxl_dep.found()
+   ggaze_src += files('src/loader/backends/jxl.c')
+   ggaze_c_args += '-DHAVE_JXL'
+   ggaze_extra_deps += jxl_dep
+endif
+if avif_dep.found()
+   ggaze_src += files('src/loader/backends/avif.c')
+   ggaze_c_args += '-DHAVE_AVIF'
+   ggaze_extra_deps += avif_dep
+endif
+if heif_dep.found()
+   ggaze_src += files('src/loader/backends/heif.c')
+   ggaze_c_args += '-DHAVE_HEIF'
+   ggaze_extra_deps += heif_dep
+endif
+
+ggaze_lib = static_library('ggaze',
+   ggaze_src,
    include_directories : [inc, src_inc],
-   dependencies : [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep, libexif_dep],
+   dependencies : [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep,
+      libexif_dep] + ggaze_extra_deps,
+   c_args : ggaze_c_args,
    install : false,
 )
 

@@ -19,8 +19,27 @@
 
 /* Registered backends, priority order (specific first, fallback LAST).
  * pixbuf_backend must remain last: it accepts GGAZE_FMT_UNKNOWN. */
+#ifdef HAVE_JXL
+extern const GgazeLoaderBackend jxl_backend;
+#endif
+#ifdef HAVE_AVIF
+extern const GgazeLoaderBackend avif_backend;
+#endif
+#ifdef HAVE_HEIF
+extern const GgazeLoaderBackend heif_backend;
+#endif
+
 static const GgazeLoaderBackend *BACKENDS[] = {
-   /* jxl_backend, avif_backend, heif_backend land here in M5. */
+#ifdef HAVE_JXL
+   &jxl_backend,
+#endif
+#ifdef HAVE_AVIF
+   &avif_backend,
+#endif
+#ifdef HAVE_HEIF
+   &heif_backend,
+#endif
+   /* pixbuf fallback (PNG/JPEG/GIF/WebP/TIFF/ICO) — must be last. */
    &pixbuf_backend,
 };
 
