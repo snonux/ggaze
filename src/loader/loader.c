@@ -65,3 +65,33 @@ loader_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
                "unsupported or unrecognized image format");
    return (NULL);
 }
+
+/* --- async wrapper (M3) -------------------------------------------------- */
+
+static void
+_load_task_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
+                  GCancellable *p_cancel) {
+   (void)p_task_data;
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = loader_load((GFile *)p_src, p_cancel, &p_err);
+   if (p_tex == NULL) {
+      g_task_return_error(p_task, p_err);
+   } else {
+      g_task_return_pointer(p_task, p_tex, (GDestroyNotify)g_object_unref);
+   }
+}
+
+void
+loader_load_async(GFile *p_file, GCancellable *p_cancel,
+                  GAsyncReadyCallback p_cb, gpointer p_data) {
+   g_return_if_fail(G_IS_FILE(p_file));
+   GTask *p_task = g_task_new(p_file, p_cancel, p_cb, p_data);
+   g_task_run_in_thread(p_task, _load_task_thread);
+   g_object_unref(p_task);
+}
+
+GdkTexture *
+loader_load_finish(GAsyncResult *p_res, GError **p_err) {
+   g_return_val_if_fail(G_IS_TASK(p_res), NULL);
+   return ((GdkTexture *)g_task_propagate_pointer((GTask *)p_res, p_err));
+}

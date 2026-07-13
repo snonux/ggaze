@@ -36,8 +36,19 @@ typedef struct {
 extern const GgazeLoaderBackend pixbuf_backend;
 
 /* Synchronously load p_file into a GdkTexture (EXIF orientation applied).
- * Returns a new GdkTexture (caller owns it) or NULL with p_err set. */
+ * Returns a new GdkTexture (caller owns it) or NULL with p_err set. Used by
+ * tests and the clipboard helpers; the window uses the async variant below. */
 GdkTexture *loader_load(GFile *p_file, GCancellable *p_cancel, GError **p_err);
+
+/* Asynchronous load: runs the sync worker in a GTask thread, returns the
+ * GdkTexture via p_cb on the main thread. The source object of the task is
+ * p_file, so the finish callback can check it against navigator.current
+ * (last-write-wins). */
+void loader_load_async(GFile *p_file, GCancellable *p_cancel,
+                       GAsyncReadyCallback p_cb, gpointer p_data);
+
+/* Finish an async load; returns the GdkTexture (transfer full) or NULL. */
+GdkTexture *loader_load_finish(GAsyncResult *p_res, GError **p_err);
 
 G_END_DECLS
 

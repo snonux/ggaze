@@ -20,12 +20,15 @@
 #include "loader/loader.h"
 #include "navigator.h"
 #include "shortcuts.h"
+#include "texturecache.h"
 #include "viewer.h"
 
 struct _GgazeWindow {
    GtkApplicationWindow parent_instance;
-   Navigator           *p_nav; /* current folder listing (NULL until open) */
-   GCancellable *p_cancel; /* single in-flight load; cancelled on each nav */
+   Navigator           *p_nav;    /* current folder listing (NULL until open) */
+   GCancellable        *p_cancel; /* visible load; cancelled on each nav */
+   GCancellable *p_prefetch_cancel; /* prefetch round; cancelled on new round */
+   TextureCache *p_cache;           /* bounded LRU of decoded GdkTextures */
    GtkWidget    *p_stack;  /* GtkStack: grid (placeholder) / large (viewer) */
    GtkWidget    *p_viewer; /* GgazeViewer — the large view */
 };
@@ -34,6 +37,7 @@ G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
 
 /* --- forward decls ------------------------------------------------------- */
 static void _load_current(GgazeWindow *p_win);
+static void _prefetch(GgazeWindow *p_win);
 static void _update_header(GgazeWindow *p_win);
 
 /* --- actions ------------------------------------------------------------- */
@@ -145,16 +149,94 @@ nav_changed_cb(Navigator *p_nav, gpointer p_data) {
 /* --- load current into the viewer ---------------------------------------- */
 
 static void
+_show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
+   ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
+   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+}
+
+/* Prefetch callback: just cache the result (never touches the viewer). p_data
+ * is a ref on the window (released here) so the window outlives the load. */
+static void
+_prefetch_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   GError      *p_err = NULL;
+   GdkTexture  *p_tex = loader_load_finish(p_res, &p_err);
+   if (p_tex != NULL) {
+      GFile *p_file = (GFile *)g_task_get_source_object((GTask *)p_res);
+      texturecache_put(p_win->p_cache, p_file, p_tex);
+      g_object_unref(p_tex);
+   } else {
+      g_clear_error(&p_err);
+   }
+   g_object_unref(p_win);
+}
+
+/* Visible-load callback: show only if this is still the current file
+ * (last-write-wins), then cache it and prefetch neighbours. */
+static void
+_load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   GError      *p_err = NULL;
+   GdkTexture  *p_tex = loader_load_finish(p_res, &p_err);
+   if (p_tex == NULL) {
+      if (p_err != NULL &&
+          !g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
+         char *c_name = g_file_get_basename(
+            (GFile *)g_task_get_source_object((GTask *)p_res));
+         g_warning("ggaze: failed to load %s: %s", c_name, p_err->message);
+         g_free(c_name);
+      }
+      g_clear_error(&p_err);
+      g_object_unref(p_win);
+      return;
+   }
+   GFile *p_loaded = (GFile *)g_task_get_source_object((GTask *)p_res);
+   GFile *p_cur    = navigator_get_current(p_win->p_nav);
+   if (p_cur != NULL && g_file_equal(p_cur, p_loaded)) {
+      _show_texture(p_win, p_tex);
+      texturecache_put(p_win->p_cache, p_loaded, p_tex);
+      _prefetch(p_win);
+   }
+   g_object_unref(p_tex);
+   g_object_unref(p_win);
+}
+
+/* Prefetch the next/previous images into the cache (not shown). Cancels the
+ * previous prefetch round so at most two prefetch loads are in flight. */
+static void
+_prefetch(GgazeWindow *p_win) {
+   if (p_win->p_nav == NULL) {
+      return;
+   }
+   g_cancellable_cancel(p_win->p_prefetch_cancel);
+   g_clear_object(&p_win->p_prefetch_cancel);
+   p_win->p_prefetch_cancel = g_cancellable_new();
+
+   gint  i_idx = navigator_get_current_index(p_win->p_nav);
+   guint u_n   = navigator_get_count(p_win->p_nav);
+   if (u_n == 0) {
+      return;
+   }
+   for (gint i_delta = -1; i_delta <= 1; i_delta += 2) {
+      gint i_j = i_idx + i_delta;
+      if (i_j < 0 || i_j >= (gint)u_n) {
+         continue;
+      }
+      GFile *p_file = navigator_get_file(p_win->p_nav, (guint)i_j);
+      if (p_file != NULL && texturecache_get(p_win->p_cache, p_file) == NULL) {
+         loader_load_async(p_file, p_win->p_prefetch_cancel,
+                           _prefetch_finish_cb, g_object_ref(p_win));
+      }
+   }
+}
+
+static void
 _load_current(GgazeWindow *p_win) {
    if (p_win->p_nav == NULL) {
       return;
    }
-   /* Single in-flight load: cancel the previous and start a new one.
-    * M1/M2 use synchronous load; M3 swaps this for a GTask. */
-   g_cancellable_cancel(p_win->p_cancel);
-   g_clear_object(&p_win->p_cancel);
-   p_win->p_cancel = g_cancellable_new();
-
    GFile *p_cur = navigator_get_current(p_win->p_nav);
    if (p_cur == NULL) {
       ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), NULL);
@@ -162,25 +244,26 @@ _load_current(GgazeWindow *p_win) {
       return;
    }
 
-   GError     *p_err = NULL;
-   GdkTexture *p_tex = loader_load(p_cur, p_win->p_cancel, &p_err);
-   if (p_tex != NULL) {
-      /* Last-write-wins: only show if this is still the current file. Sync
-       * load makes this trivially true; the guard is here for M3's async path.
-       */
-      GFile *p_now = navigator_get_current(p_win->p_nav);
-      if (p_now != NULL && g_file_equal(p_now, p_cur)) {
-         ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
-         gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
-      }
-      g_object_unref(p_tex);
-   } else {
-      const gchar *c_msg  = (p_err != NULL) ? p_err->message : "unknown error";
-      char        *c_name = g_file_get_basename(p_cur);
-      g_warning("ggaze: failed to load %s: %s", c_name, c_msg);
-      g_free(c_name);
-      g_clear_error(&p_err);
+   /* Cache hit: show immediately, no async load. */
+   GdkTexture *p_cached = texturecache_get(p_win->p_cache, p_cur);
+   if (p_cached != NULL) {
+      /* Cancel any in-flight visible load for a now-stale path. */
+      g_cancellable_cancel(p_win->p_cancel);
+      g_clear_object(&p_win->p_cancel);
+      p_win->p_cancel = g_cancellable_new();
+      _show_texture(p_win, p_cached);
+      _update_header(p_win);
+      _prefetch(p_win);
+      return;
    }
+
+   /* Cache miss: cancel the previous visible load, start a new async load.
+    * Last-write-wins is enforced in _load_finish_cb. */
+   g_cancellable_cancel(p_win->p_cancel);
+   g_clear_object(&p_win->p_cancel);
+   p_win->p_cancel = g_cancellable_new();
+   loader_load_async(p_cur, p_win->p_cancel, _load_finish_cb,
+                     g_object_ref(p_win));
    _update_header(p_win);
 }
 
@@ -218,7 +301,11 @@ ggaze_window_dispose(GObject *p_obj) {
       g_signal_handlers_disconnect_by_data(p_win->p_nav, p_win);
       g_clear_object(&p_win->p_nav);
    }
+   g_cancellable_cancel(p_win->p_prefetch_cancel);
+   g_clear_object(&p_win->p_prefetch_cancel);
+   g_cancellable_cancel(p_win->p_cancel);
    g_clear_object(&p_win->p_cancel);
+   g_clear_pointer(&p_win->p_cache, texturecache_delete);
    /* p_stack/p_viewer are GtkWidgets parented to the window; GTK releases them.
     */
    G_OBJECT_CLASS(ggaze_window_parent_class)->dispose(p_obj);
@@ -232,7 +319,9 @@ ggaze_window_class_init(GgazeWindowClass *p_klass) {
 
 static void
 ggaze_window_init(GgazeWindow *p_win) {
-   p_win->p_cancel = g_cancellable_new();
+   p_win->p_cancel          = g_cancellable_new();
+   p_win->p_prefetch_cancel = g_cancellable_new();
+   p_win->p_cache           = texturecache_new(4);
 
    /* Header bar (libadwaita, decision #29). */
    GtkWidget *p_header = adw_header_bar_new();

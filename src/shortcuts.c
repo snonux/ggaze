@@ -43,7 +43,7 @@ shortcuts_install(GtkWidget *p_widget) {
                              SHORTCUTS[u_i].u_keyval, SHORTCUTS[u_i].e_mods)),
                           gtk_named_action_new(SHORTCUTS[u_i].c_action));
       gtk_shortcut_controller_add_shortcut(GTK_SHORTCUT_CONTROLLER(p_ctrl),
-         p_s);
+                                           p_s);
    }
    gtk_widget_add_controller(p_widget, GTK_EVENT_CONTROLLER(p_ctrl));
 }

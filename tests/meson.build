@@ -77,6 +77,16 @@ test_navigator = executable(
 )
 test('navigator', test_navigator, suite : 'unit', env : fixtures_env)
 
+test_texturecache = executable(
+   'test_texturecache',
+   ['test_texturecache.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
+
 # --- integration track (needs a display; CI uses xvfb-run) ---
 test_window = executable(
    'test_window',
@@ -109,5 +119,17 @@ test_walk_folder = executable(
    install : false,
 )
 test('walk_folder', test_walk_folder, suite : 'integration', env : fixtures_env)
+
+test_responsive_nav = executable(
+   'test_responsive_nav',
+   ['test_responsive_nav.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib,
+   install : false,
+)
+test('responsive_nav', test_responsive_nav,
+   suite : 'integration',
+   env : fixtures_env)
 
 subdir('integration')

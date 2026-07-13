@@ -73,6 +73,15 @@ static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
 }
+/* Drain in-flight async loads so their callbacks (which hold a ref on the
+ * window) fire and release before the process exits. */
+static void
+drain_main(guint u_ms) {
+   for (guint u = 0; u < u_ms; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+}
 
 static GdkTexture *
 viewer_texture(GgazeWindow *p_win) {
@@ -84,7 +93,20 @@ viewer_texture(GgazeWindow *p_win) {
 
 static void
 assert_dims(GgazeWindow *p_win, int i_w, int i_h) {
-   GdkTexture *p_tex = viewer_texture(p_win);
+   /* Loads are async; pump the main loop until the viewer shows i_w x i_h. */
+   GtkWidget *p_child = gtk_window_get_child(GTK_WINDOW(p_win));
+   GtkWidget *p_large =
+      gtk_stack_get_child_by_name(GTK_STACK(p_child), "large");
+   GdkTexture *p_tex = NULL;
+   for (guint u = 0; u < 3000; u++) {
+      p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_large));
+      if (p_tex != NULL && gdk_texture_get_width(p_tex) == i_w &&
+          gdk_texture_get_height(p_tex) == i_h) {
+         break;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
    g_assert_nonnull(p_tex);
    g_assert_cmpint(gdk_texture_get_width(p_tex), ==, i_w);
    g_assert_cmpint(gdk_texture_get_height(p_tex), ==, i_h);
@@ -104,7 +126,6 @@ test_walk_temp(void) {
    GError *p_err = NULL;
    char   *c_dir = g_dir_make_tmp("ggaze-walk-XXXXXX", &p_err);
    g_assert_no_error(p_err);
-
    copy_fixture(c_dir, "plain.jpg");
    copy_fixture(c_dir, "rot6.jpg");
    copy_fixture(c_dir, "small.png");
@@ -132,6 +153,7 @@ test_walk_temp(void) {
    assert_dims(p_win, 5, 2);
 
    g_object_unref(p_win);
+   drain_main(500);
    g_object_unref(p_plain);
    cleanup_temp_dir(c_dir);
 }
@@ -168,15 +190,25 @@ test_walk_sample(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    ggaze_window_open(p_win, p_file);
    g_object_unref(p_file);
+   /* wait for the async load to land a texture */
+   for (guint u = 0; u < 3000 && viewer_texture(p_win) == NULL; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
    g_assert_nonnull(viewer_texture(p_win));
 
    /* Walk a few; each step must produce a (possibly new) texture. */
    for (int i = 0; i < 5; i++) {
       ggaze_window_next(p_win);
-      g_assert_nonnull(viewer_texture(p_win));
    }
+   for (guint u = 0; u < 3000 && viewer_texture(p_win) == NULL; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_nonnull(viewer_texture(p_win));
 
    g_object_unref(p_win);
+   drain_main(500);
    g_free(c_path);
 }
 

@@ -36,18 +36,36 @@ static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
 }
+/* Drain in-flight async loads so their callbacks (which hold a ref on the
+ * window) fire and release before the process exits. */
+static void
+drain_main(guint u_ms) {
+   for (guint u = 0; u < u_ms; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+}
 
 static void
 assert_shown_large_with_dims(GgazeWindow *p_win, int i_w, int i_h) {
    GtkWidget *p_child = gtk_window_get_child(GTK_WINDOW(p_win));
    g_assert_true(GTK_IS_STACK(p_child));
-   g_assert_cmpstr(gtk_stack_get_visible_child_name(GTK_STACK(p_child)), ==,
-                   "large");
-
    GtkWidget *p_large =
       gtk_stack_get_child_by_name(GTK_STACK(p_child), "large");
    g_assert_true(GGAZE_IS_VIEWER(p_large));
-   GdkTexture *p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_large));
+   /* Loads are async; pump until the viewer shows i_w x i_h. */
+   GdkTexture *p_tex = NULL;
+   for (guint u = 0; u < 3000; u++) {
+      p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_large));
+      if (p_tex != NULL && gdk_texture_get_width(p_tex) == i_w &&
+          gdk_texture_get_height(p_tex) == i_h) {
+         break;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpstr(gtk_stack_get_visible_child_name(GTK_STACK(p_child)), ==,
+                   "large");
    g_assert_nonnull(p_tex);
    g_assert_cmpint(gdk_texture_get_width(p_tex), ==, i_w);
    g_assert_cmpint(gdk_texture_get_height(p_tex), ==, i_h);
@@ -61,6 +79,7 @@ test_open_fixture_shows_large(void) {
    assert_shown_large_with_dims(p_win, 6, 3);
    g_object_unref(p_file);
    g_object_unref(p_win);
+   drain_main(500);
 }
 
 static void
@@ -71,6 +90,7 @@ test_open_rotated_fixture(void) {
    assert_shown_large_with_dims(p_win, 4, 8);
    g_object_unref(p_file);
    g_object_unref(p_win);
+   drain_main(500);
 }
 
 static void
@@ -108,15 +128,25 @@ test_open_sample_image(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    ggaze_window_open(p_win, p_file);
    GtkWidget *p_child = gtk_window_get_child(GTK_WINDOW(p_win));
-   g_assert_cmpstr(gtk_stack_get_visible_child_name(GTK_STACK(p_child)), ==,
-                   "large");
    GtkWidget *p_large =
       gtk_stack_get_child_by_name(GTK_STACK(p_child), "large");
-   GdkTexture *p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_large));
+   /* async load: pump until a texture lands */
+   GdkTexture *p_tex = NULL;
+   for (guint u = 0; u < 3000; u++) {
+      p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_large));
+      if (p_tex != NULL) {
+         break;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpstr(gtk_stack_get_visible_child_name(GTK_STACK(p_child)), ==,
+                   "large");
    g_assert_nonnull(p_tex); /* loaded, whatever its dims */
 
    g_object_unref(p_file);
    g_object_unref(p_win);
+   drain_main(500);
    g_free(c_path);
 }
 
