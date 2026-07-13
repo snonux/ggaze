@@ -23,11 +23,6 @@ mk_tex(void) {
    return (p_t);
 }
 
-static GFile *
-mk_file(const char *c_name) {
-   return (g_file_new_for_path(c_name));
-}
-
 static void
 test_cap_and_evict(void) {
    TextureCache *p_c      = texturecache_new(4);

@@ -77,6 +77,26 @@ test_navigator = executable(
 )
 test('navigator', test_navigator, suite : 'unit', env : fixtures_env)
 
+test_trash = executable(
+   'test_trash',
+   ['test_trash.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('trash', test_trash, suite : 'unit', env : fixtures_env)
+
+test_thumbnail = executable(
+   'test_thumbnail',
+   ['test_thumbnail.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('thumbnail', test_thumbnail, suite : 'unit', env : fixtures_env)
+
 test_texturecache = executable(
    'test_texturecache',
    ['test_texturecache.c', ggaze_conf_h],
@@ -131,5 +151,15 @@ test_responsive_nav = executable(
 test('responsive_nav', test_responsive_nav,
    suite : 'integration',
    env : fixtures_env)
+
+test_grid_cull = executable(
+   'test_grid_cull',
+   ['test_grid_cull.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib,
+   install : false,
+)
+test('grid_cull', test_grid_cull, suite : 'integration', env : fixtures_env)
 
 subdir('integration')

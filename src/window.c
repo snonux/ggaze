@@ -17,10 +17,13 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "gridview.h"
 #include "loader/loader.h"
 #include "navigator.h"
 #include "shortcuts.h"
 #include "texturecache.h"
+#include "thumbnail.h"
+#include "trash.h"
 #include "viewer.h"
 
 struct _GgazeWindow {
@@ -29,8 +32,12 @@ struct _GgazeWindow {
    GCancellable        *p_cancel; /* visible load; cancelled on each nav */
    GCancellable *p_prefetch_cancel; /* prefetch round; cancelled on new round */
    TextureCache *p_cache;           /* bounded LRU of decoded GdkTextures */
-   GtkWidget    *p_stack;  /* GtkStack: grid (placeholder) / large (viewer) */
-   GtkWidget    *p_viewer; /* GgazeViewer — the large view */
+   Thumbnail    *p_thumb;           /* TMS thumbnail cache */
+   Trash        *p_trash;           /* ./Trash bin for the current folder */
+   GtkWidget    *p_stack;           /* GtkStack: grid / large (viewer) */
+   GtkWidget    *p_viewer;          /* GgazeViewer — the large view */
+   GgazeGrid    *p_grid;      /* the thumbnail grid (the "grid" stack child) */
+   int           i_grid_size; /* current thumbnail size (64-512, decision T) */
 };
 
 G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
@@ -39,6 +46,7 @@ G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
 static void _load_current(GgazeWindow *p_win);
 static void _prefetch(GgazeWindow *p_win);
 static void _update_header(GgazeWindow *p_win);
+static void _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
 
 /* --- actions ------------------------------------------------------------- */
 
@@ -107,6 +115,160 @@ _action_open(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    g_object_unref(p_dlg);
 }
 
+/* --- M7: trash / delete / undo / view toggle / resize ------------------- */
+
+static void
+_action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL || p_win->p_trash == NULL) {
+      return;
+   }
+   GFile *p_cur = navigator_get_current(p_win->p_nav);
+   if (p_cur == NULL) {
+      return;
+   }
+   GError *p_err = NULL;
+   if (trash_bin(p_win->p_trash, p_cur, &p_err)) {
+      navigator_mark_removed(p_win->p_nav, p_cur); /* dim; emits changed */
+      navigator_next(p_win->p_nav);                /* advance; emits changed */
+   } else {
+      g_warning("ggaze: trash failed: %s", p_err->message);
+      g_clear_error(&p_err);
+   }
+}
+
+/* Permanently delete each file in p_files (the current or the marked set). */
+static void
+_do_delete_files(GgazeWindow *p_win, GList *p_files) {
+   for (GList *p_it = p_files; p_it != NULL; p_it = p_it->next) {
+      GFile  *p_f   = G_FILE(p_it->data);
+      GError *p_err = NULL;
+      if (trash_permanently_delete(p_win->p_trash, p_f, &p_err)) {
+         navigator_mark_removed(p_win->p_nav, p_f);
+      } else {
+         g_warning("ggaze: delete failed: %s", p_err->message);
+         g_clear_error(&p_err);
+      }
+   }
+   navigator_next(p_win->p_nav); /* advance off the last deleted */
+}
+
+static void
+_delete_confirm_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   GtkAlertDialog *p_dlg = GTK_ALERT_DIALOG(p_src);
+   GgazeWindow    *p_win = GGAZE_WINDOW(p_data);
+   GError         *p_err = NULL;
+   gboolean        b_ok  = gtk_alert_dialog_choose_finish(p_dlg, p_res, &p_err);
+   if (b_ok && p_win->p_nav != NULL) {
+      GList *p_marks = navigator_get_marks(p_win->p_nav);
+      _do_delete_files(p_win, p_marks);
+      g_list_free_full(p_marks, (GDestroyNotify)g_object_unref);
+   } else {
+      g_clear_error(&p_err);
+   }
+   g_object_unref(p_data);
+}
+
+static void
+_action_delete(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL || p_win->p_trash == NULL) {
+      return;
+   }
+   guint u_marks = navigator_get_mark_count(p_win->p_nav);
+   if (u_marks > 1) {
+      /* Confirm before deleting >1 marked image (decision #38). */
+      char *c_msg =
+         g_strdup_printf("Permanently delete %u marked images?", u_marks);
+      GtkAlertDialog *p_dlg =
+         gtk_alert_dialog_new("Permanently delete %u marked images?", u_marks);
+      gtk_alert_dialog_set_buttons(p_dlg,
+                                   (const char *[]){"Cancel", "Delete", NULL});
+      gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), NULL,
+                              _delete_confirm_cb, g_object_ref(p_win));
+      g_object_unref(p_dlg);
+      g_free(c_msg);
+      return;
+   }
+   GList *p_files = NULL;
+   if (u_marks == 1) {
+      p_files = navigator_get_marks(p_win->p_nav);
+   } else {
+      GFile *p_cur = navigator_get_current(p_win->p_nav);
+      if (p_cur != NULL) {
+         p_files = g_list_prepend(NULL, g_object_ref(p_cur));
+      }
+   }
+   _do_delete_files(p_win, p_files);
+   g_list_free_full(p_files, (GDestroyNotify)g_object_unref);
+}
+
+static void
+_action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_trash == NULL) {
+      return;
+   }
+   GError *p_err = NULL;
+   if (trash_restore_last(p_win->p_trash, &p_err)) {
+      navigator_rescan(p_win->p_nav); /* re-list; restored file un-removed */
+   } else {
+      g_clear_error(&p_err);
+   }
+}
+
+static void
+_action_toggle_view(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   const char  *c_cur =
+      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
+   if (g_strcmp0(c_cur, "large") == 0) {
+      gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "grid");
+   } else {
+      gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+   }
+}
+
+static void
+_action_zoom_in(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   const char  *c_cur =
+      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
+   if (g_strcmp0(c_cur, "large") == 0) {
+      ggaze_viewer_zoom_in(GGAZE_VIEWER(p_win->p_viewer));
+   } else if (p_win->p_grid != NULL) {
+      int i_sz           = CLAMP(p_win->i_grid_size + 32, 64, 512);
+      p_win->i_grid_size = i_sz;
+      ggaze_grid_set_thumbnail_size(p_win->p_grid, i_sz);
+   }
+}
+
+static void
+_action_zoom_out(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   const char  *c_cur =
+      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
+   if (g_strcmp0(c_cur, "large") == 0) {
+      ggaze_viewer_zoom_out(GGAZE_VIEWER(p_win->p_viewer));
+   } else if (p_win->p_grid != NULL) {
+      int i_sz           = CLAMP(p_win->i_grid_size - 32, 64, 512);
+      p_win->i_grid_size = i_sz;
+      ggaze_grid_set_thumbnail_size(p_win->p_grid, i_sz);
+   }
+}
+
 static const GActionEntry ACTIONS[] = {
    {.name = "prev", .activate = _action_prev},
    {.name = "next", .activate = _action_next},
@@ -114,6 +276,12 @@ static const GActionEntry ACTIONS[] = {
    {.name = "last", .activate = _action_last},
    {.name = "open", .activate = _action_open},
    {.name = "quit", .activate = _action_quit},
+   {.name = "trash", .activate = _action_trash},
+   {.name = "delete", .activate = _action_delete},
+   {.name = "undo", .activate = _action_undo},
+   {.name = "toggle-view", .activate = _action_toggle_view},
+   {.name = "zoom-in", .activate = _action_zoom_in},
+   {.name = "zoom-out", .activate = _action_zoom_out},
 };
 
 /* --- drop target --------------------------------------------------------- */
@@ -144,6 +312,14 @@ static void
 nav_changed_cb(Navigator *p_nav, gpointer p_data) {
    (void)p_nav;
    _load_current(GGAZE_WINDOW(p_data));
+}
+
+static void
+_on_grid_activate(GgazeGrid *p_grid, gpointer p_data) {
+   (void)p_grid;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+   _load_current(p_win);
 }
 
 /* --- load current into the viewer ---------------------------------------- */
@@ -271,14 +447,15 @@ static void
 _update_header(GgazeWindow *p_win) {
    gchar *c_title = NULL;
    if (p_win->p_nav != NULL) {
-      GFile *p_cur   = navigator_get_current(p_win->p_nav);
-      guint  u_total = navigator_get_count(p_win->p_nav);
-      gint   i_idx   = navigator_get_current_index(p_win->p_nav);
+      GFile *p_cur       = navigator_get_current(p_win->p_nav);
+      guint  u_remaining = navigator_get_remaining(p_win->p_nav);
+      guint  u_total     = navigator_get_count(p_win->p_nav);
+      gint   i_idx       = navigator_get_current_index(p_win->p_nav);
       if (p_cur != NULL) {
          char *c_name = g_file_get_basename(p_cur);
          if (u_total > 0 && i_idx >= 0) {
-            c_title =
-               g_strdup_printf("%s  \u00b7  %d/%u", c_name, i_idx + 1, u_total);
+            c_title = g_strdup_printf("%s  \u00b7  %d/%u", c_name, i_idx + 1,
+                                      u_remaining);
          } else {
             c_title = g_strdup(c_name);
          }
@@ -299,6 +476,9 @@ ggaze_window_dispose(GObject *p_obj) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_obj);
    if (p_win->p_nav != NULL) {
       g_signal_handlers_disconnect_by_data(p_win->p_nav, p_win);
+      if (p_win->p_grid != NULL) {
+         ggaze_grid_detach(p_win->p_grid); /* before the nav is freed */
+      }
       g_clear_object(&p_win->p_nav);
    }
    g_cancellable_cancel(p_win->p_prefetch_cancel);
@@ -306,8 +486,10 @@ ggaze_window_dispose(GObject *p_obj) {
    g_cancellable_cancel(p_win->p_cancel);
    g_clear_object(&p_win->p_cancel);
    g_clear_pointer(&p_win->p_cache, texturecache_delete);
-   /* p_stack/p_viewer are GtkWidgets parented to the window; GTK releases them.
-    */
+   g_clear_pointer(&p_win->p_trash, trash_delete);
+   g_clear_pointer(&p_win->p_thumb, thumbnail_delete);
+   /* p_stack/p_viewer/p_grid are GtkWidgets parented to the window; GTK
+    * releases them. */
    G_OBJECT_CLASS(ggaze_window_parent_class)->dispose(p_obj);
 }
 
@@ -322,13 +504,16 @@ ggaze_window_init(GgazeWindow *p_win) {
    p_win->p_cancel          = g_cancellable_new();
    p_win->p_prefetch_cancel = g_cancellable_new();
    p_win->p_cache           = texturecache_new(4);
+   p_win->p_thumb           = thumbnail_new();
+   p_win->p_trash           = NULL; /* created on open */
+   p_win->p_grid            = NULL; /* created on open */
+   p_win->i_grid_size       = 128;
 
    /* Header bar (libadwaita, decision #29). */
    GtkWidget *p_header = adw_header_bar_new();
    gtk_window_set_titlebar(GTK_WINDOW(p_win), p_header);
 
-   /* Two-view stack: "grid" is a placeholder until M7; "large" is the viewer.
-    */
+   /* Two-view stack: "grid" is created on open; placeholder until then. */
    p_win->p_stack = gtk_stack_new();
    gtk_stack_set_transition_type(GTK_STACK(p_win->p_stack),
                                  GTK_STACK_TRANSITION_TYPE_CROSSFADE);
@@ -373,6 +558,9 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
 
    if (p_win->p_nav != NULL) {
       g_signal_handlers_disconnect_by_data(p_win->p_nav, p_win);
+      if (p_win->p_grid != NULL) {
+         ggaze_grid_detach(p_win->p_grid);
+      }
       g_clear_object(&p_win->p_nav);
    }
 
@@ -392,12 +580,33 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    }
 
    p_win->p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, TRUE, TRUE);
+   g_clear_pointer(&p_win->p_trash, trash_delete);
    g_clear_object(&p_dir);
    g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(nav_changed_cb), p_win);
    if (p_start != NULL) {
       navigator_set_current_file(p_win->p_nav, p_start);
       g_clear_object(&p_start);
    }
+
+   /* Build the grid (replaces the "grid" placeholder or the old grid). */
+   {
+      GtkWidget *p_old =
+         gtk_stack_get_child_by_name(GTK_STACK(p_win->p_stack), "grid");
+      if (p_old != NULL) {
+         if (GGAZE_IS_GRID(p_old)) {
+            ggaze_grid_detach(GGAZE_GRID(p_old));
+         }
+         gtk_stack_remove(GTK_STACK(p_win->p_stack), p_old);
+      }
+   }
+   GFile *p_navdir = navigator_get_dir(p_win->p_nav);
+   p_win->p_trash  = trash_new(p_navdir);
+   p_win->p_grid   = GGAZE_GRID(
+      ggaze_grid_new(p_win->p_nav, p_win->p_thumb, p_win->i_grid_size, FALSE));
+   g_signal_connect(p_win->p_grid, "activate", G_CALLBACK(_on_grid_activate),
+                    p_win);
+   gtk_stack_add_named(GTK_STACK(p_win->p_stack), GTK_WIDGET(p_win->p_grid),
+                       "grid");
 
    gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
    _load_current(p_win);

@@ -29,6 +29,14 @@ static const ShortcutEntry SHORTCUTS[] = {
    /* open / quit / back */
    {GDK_KEY_o, 0, "win.open"},
    {GDK_KEY_q, 0, "win.quit"},
+   {GDK_KEY_d, 0, "win.trash"},
+   {GDK_KEY_D, GDK_SHIFT_MASK, "win.delete"},
+   {GDK_KEY_u, 0, "win.undo"},
+   {GDK_KEY_t, 0, "win.toggle-view"},
+   {GDK_KEY_plus, 0, "win.zoom-in"},
+   {GDK_KEY_equal, 0, "win.zoom-in"},
+   {GDK_KEY_minus, 0, "win.zoom-out"},
+   {GDK_KEY_underscore, 0, "win.zoom-out"},
 };
 
 void

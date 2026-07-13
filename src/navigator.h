@@ -50,7 +50,7 @@ GFile *navigator_get_file(Navigator *p_nav,
 gint   navigator_get_current_index(Navigator *p_nav); /* -1 if empty */
 GFile *navigator_get_current(Navigator *p_nav);       /* (transfer none) */
 guint
-navigator_get_remaining(Navigator *p_nav); /* count; M7 excludes trashed */
+navigator_get_remaining(Navigator *p_nav); /* remaining = count - removed */
 gboolean navigator_set_current(Navigator *p_nav, guint u_index);
 gboolean navigator_set_current_file(Navigator *p_nav,
                                     GFile     *p_file); /* by path */
@@ -90,6 +90,13 @@ gboolean navigator_remove(Navigator *p_nav, GFile *p_file);
 /* GFileMonitor debounce in ms (default 250; decision #28). Tests may lower it.
  */
 void navigator_set_debounce_ms(Navigator *p_nav, guint u_ms);
+
+/* --- removed/dimmed set (M7: trashed/deleted items stay listed but dimmed) --
+ */
+gboolean navigator_is_removed(Navigator *p_nav, GFile *p_file);
+void     navigator_mark_removed(Navigator *p_nav, GFile *p_file);
+gboolean navigator_unmark_removed(Navigator *p_nav, GFile *p_file);
+guint    navigator_get_removed_count(Navigator *p_nav);
 
 /* "changed" signal: emitted on sort/filter/rescan/remove/monitor event. */
 void navigator_emit_changed(Navigator *p_nav);

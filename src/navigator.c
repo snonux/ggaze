@@ -41,7 +41,8 @@ struct _Navigator {
    GgazeSort     e_sort;
    gboolean      b_wrap;
    gboolean      b_hide_raw;
-   GHashTable   *p_marks; /* GFile* (owned refs) -> presence */
+   GHashTable   *p_marks;   /* GFile* (owned refs) -> presence */
+   GHashTable   *p_removed; /* GFile* (owned refs): trashed/deleted, dimmed */
    GFileMonitor *p_monitor;
    guint         u_debounce_ms;
    guint         u_debounce_id; /* 0 = none pending */
@@ -277,6 +278,23 @@ _relist(Navigator *p_nav) {
       }
    }
 
+   /* Preserve removed (dimmed) items: keep them in the listing even if absent
+    * from disk (trashed/deleted this session); un-remove any that reappeared.
+    */
+   {
+      GHashTableIter riter;
+      gpointer       rkey;
+      g_hash_table_iter_init(&riter, p_nav->p_removed);
+      while (g_hash_table_iter_next(&riter, &rkey, NULL)) {
+         GFile *p_rf = (GFile *)rkey;
+         if (_find_index_by_file(p_nav, p_rf) < 0) {
+            g_ptr_array_add(p_nav->p_files, g_object_ref(p_rf));
+         } else {
+            g_hash_table_iter_remove(&riter);
+         }
+      }
+   }
+
    g_ptr_array_unref(p_entries);
 }
 
@@ -338,6 +356,7 @@ navigator_dispose(GObject *p_obj) {
       g_clear_object(&p_nav->p_monitor);
    }
    g_clear_pointer(&p_nav->p_marks, g_hash_table_unref);
+   g_clear_pointer(&p_nav->p_removed, g_hash_table_unref);
    g_clear_pointer(&p_nav->p_files, g_ptr_array_unref);
    g_clear_object(&p_nav->p_dir);
    G_OBJECT_CLASS(navigator_parent_class)->dispose(p_obj);
@@ -357,6 +376,9 @@ navigator_init(Navigator *p_nav) {
    p_nav->p_files =
       g_ptr_array_new_with_free_func((GDestroyNotify)g_object_unref);
    p_nav->p_marks =
+      g_hash_table_new_full((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal,
+                            (GDestroyNotify)g_object_unref, NULL);
+   p_nav->p_removed =
       g_hash_table_new_full((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal,
                             (GDestroyNotify)g_object_unref, NULL);
    p_nav->i_current     = -1;
@@ -440,7 +462,36 @@ navigator_get_current(Navigator *p_nav) {
 
 guint
 navigator_get_remaining(Navigator *p_nav) {
-   return (navigator_get_count(p_nav));
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), 0);
+   return (navigator_get_count(p_nav) - g_hash_table_size(p_nav->p_removed));
+}
+
+gboolean
+navigator_is_removed(Navigator *p_nav, GFile *p_file) {
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), FALSE);
+   return (g_hash_table_contains(p_nav->p_removed, p_file));
+}
+
+void
+navigator_mark_removed(Navigator *p_nav, GFile *p_file) {
+   g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
+   g_return_if_fail(G_IS_FILE(p_file));
+   if (!g_hash_table_contains(p_nav->p_removed, p_file)) {
+      g_hash_table_add(p_nav->p_removed, g_object_ref(p_file));
+      _emit_changed(p_nav);
+   }
+}
+
+gboolean
+navigator_unmark_removed(Navigator *p_nav, GFile *p_file) {
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), FALSE);
+   return (g_hash_table_remove(p_nav->p_removed, p_file));
+}
+
+guint
+navigator_get_removed_count(Navigator *p_nav) {
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), 0);
+   return (g_hash_table_size(p_nav->p_removed));
 }
 
 gboolean
