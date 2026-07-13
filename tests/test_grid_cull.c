@@ -89,7 +89,7 @@ new_window(void) {
 
 static GdkTexture *
 viewer_texture(GgazeWindow *p_win) {
-   GtkWidget *p_child = gtk_window_get_child(GTK_WINDOW(p_win));
+   GtkWidget *p_child = GTK_WIDGET(ggaze_window_get_stack(p_win));
    GtkWidget *p_large =
       gtk_stack_get_child_by_name(GTK_STACK(p_child), "large");
    return (ggaze_viewer_get_texture(GGAZE_VIEWER(p_large)));
@@ -120,7 +120,7 @@ test_grid_cull_temp(void) {
    /* The grid exists in the stack with 3 cells (count without toggling to
     * avoid realizing cells and firing async thumbnail requests that can't
     * complete before exit under ASan). */
-   GtkWidget *p_stack = gtk_window_get_child(GTK_WINDOW(p_win));
+   GtkWidget *p_stack = GTK_WIDGET(ggaze_window_get_stack(p_win));
    GgazeGrid *p_grid =
       GGAZE_GRID(gtk_stack_get_child_by_name(GTK_STACK(p_stack), "grid"));
    g_assert_nonnull(p_grid);
@@ -188,7 +188,7 @@ test_grid_sample(void) {
    /* The grid exists in the stack (created on open) with hundreds of cells,
     * but we don't toggle to it (that would realize cells and fire thumbnail
     * requests that can't all complete before exit under ASan). */
-   GtkWidget *p_stack = gtk_window_get_child(GTK_WINDOW(p_win));
+   GtkWidget *p_stack = GTK_WIDGET(ggaze_window_get_stack(p_win));
    GgazeGrid *p_grid =
       GGAZE_GRID(gtk_stack_get_child_by_name(GTK_STACK(p_stack), "grid"));
    g_assert_nonnull(p_grid);

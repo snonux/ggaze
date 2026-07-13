@@ -48,7 +48,7 @@ drain_main(guint u_ms) {
 
 static void
 assert_shown_large_with_dims(GgazeWindow *p_win, int i_w, int i_h) {
-   GtkWidget *p_child = gtk_window_get_child(GTK_WINDOW(p_win));
+   GtkWidget *p_child = GTK_WIDGET(ggaze_window_get_stack(p_win));
    g_assert_true(GTK_IS_STACK(p_child));
    GtkWidget *p_large =
       gtk_stack_get_child_by_name(GTK_STACK(p_child), "large");
@@ -127,7 +127,7 @@ test_open_sample_image(void) {
    GgazeWindow *p_win  = new_window();
    GFile       *p_file = g_file_new_for_path(c_path);
    ggaze_window_open(p_win, p_file);
-   GtkWidget *p_child = gtk_window_get_child(GTK_WINDOW(p_win));
+   GtkWidget *p_child = GTK_WIDGET(ggaze_window_get_stack(p_win));
    GtkWidget *p_large =
       gtk_stack_get_child_by_name(GTK_STACK(p_child), "large");
    /* async load: pump until a texture lands */

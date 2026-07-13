@@ -85,7 +85,7 @@ drain_main(guint u_ms) {
 
 static GdkTexture *
 viewer_texture(GgazeWindow *p_win) {
-   GtkWidget *p_child = gtk_window_get_child(GTK_WINDOW(p_win));
+   GtkWidget *p_child = GTK_WIDGET(ggaze_window_get_stack(p_win));
    GtkWidget *p_large =
       gtk_stack_get_child_by_name(GTK_STACK(p_child), "large");
    return (ggaze_viewer_get_texture(GGAZE_VIEWER(p_large)));
@@ -94,7 +94,7 @@ viewer_texture(GgazeWindow *p_win) {
 static void
 assert_dims(GgazeWindow *p_win, int i_w, int i_h) {
    /* Loads are async; pump the main loop until the viewer shows i_w x i_h. */
-   GtkWidget *p_child = gtk_window_get_child(GTK_WINDOW(p_win));
+   GtkWidget *p_child = GTK_WIDGET(ggaze_window_get_stack(p_win));
    GtkWidget *p_large =
       gtk_stack_get_child_by_name(GTK_STACK(p_child), "large");
    GdkTexture *p_tex = NULL;

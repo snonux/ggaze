@@ -37,6 +37,10 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_equal, 0, "win.zoom-in"},
    {GDK_KEY_minus, 0, "win.zoom-out"},
    {GDK_KEY_underscore, 0, "win.zoom-out"},
+   {GDK_KEY_f, 0, "win.fullscreen"},
+   {GDK_KEY_S, GDK_SHIFT_MASK, "win.slideshow"},
+   {GDK_KEY_i, 0, "win.info"},
+   {GDK_KEY_Escape, 0, "win.back"},
 };
 
 void

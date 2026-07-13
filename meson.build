@@ -22,6 +22,7 @@ glib_dep       = dependency('glib-2.0')
 gio_dep        = dependency('gio-2.0')
 adwaita_dep    = dependency('libadwaita-1')
 gdkpixbuf_dep  = dependency('gdk-pixbuf-2.0')  # pixbuf loader backend
+libexif_dep    = dependency('libexif')           # EXIF gather (info overlay, M4)
 
 # --- Optional backends (feature: auto/disabled/enabled). See meson_options.txt.
 gegl_dep = dependency('gegl-0.4', required : get_option('gegl'))
@@ -63,16 +64,17 @@ ggaze_lib = static_library('ggaze',
       'src/thumbnail.c',
       'src/trash.c',
       'src/gridview.c',
+      'src/info.c',
       'src/loader/loader.c',
       'src/loader/detect.c',
       'src/loader/backends/pixbuf.c',
    ),
    include_directories : [inc, src_inc],
-   dependencies : [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep],
+   dependencies : [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep, libexif_dep],
    install : false,
 )
 
-ggaze_deps = [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep]
+ggaze_deps = [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep, libexif_dep]
 
 subdir('src')
 subdir('data')

@@ -33,7 +33,7 @@ test_stack_has_two_views(void) {
    GgazeWindow *p_win = new_window();
    g_assert_nonnull(p_win);
 
-   GtkWidget *p_child = gtk_window_get_child(GTK_WINDOW(p_win));
+   GtkWidget *p_child = GTK_WIDGET(ggaze_window_get_stack(p_win));
    g_assert_nonnull(p_child);
    g_assert_true(GTK_IS_STACK(p_child));
 

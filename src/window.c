@@ -18,6 +18,7 @@
 #include <gtk/gtk.h>
 
 #include "gridview.h"
+#include "info.h"
 #include "loader/loader.h"
 #include "navigator.h"
 #include "shortcuts.h"
@@ -38,15 +39,24 @@ struct _GgazeWindow {
    GtkWidget    *p_viewer;          /* GgazeViewer — the large view */
    GgazeGrid    *p_grid;      /* the thumbnail grid (the "grid" stack child) */
    int           i_grid_size; /* current thumbnail size (64-512, decision T) */
+   GtkWidget    *p_overlay; /* GtkOverlay wrapping the stack (for info label) */
+   GtkWidget    *p_info_lbl;  /* info overlay label (auto-hides) */
+   guint         u_info_hide; /* info auto-hide timeout id (0=none) */
+   guint         u_slideshow; /* slideshow timeout id (0=off) */
+   gboolean      b_fullscreen;
+   guint         u_hdr_hide; /* fullscreen header auto-hide timeout */
 };
 
 G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
 
 /* --- forward decls ------------------------------------------------------- */
-static void _load_current(GgazeWindow *p_win);
-static void _prefetch(GgazeWindow *p_win);
-static void _update_header(GgazeWindow *p_win);
-static void _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
+static void     _load_current(GgazeWindow *p_win);
+static void     _prefetch(GgazeWindow *p_win);
+static void     _update_header(GgazeWindow *p_win);
+static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
+static void     _show_info(GgazeWindow *p_win);
+static void     _hide_info(GgazeWindow *p_win);
+static gboolean _slideshow_tick(gpointer p_data);
 
 /* --- actions ------------------------------------------------------------- */
 
@@ -269,6 +279,108 @@ _action_zoom_out(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
 }
 
+/* --- M4: fullscreen / slideshow / info / back --------------------------- */
+
+static void
+_action_fullscreen(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->b_fullscreen) {
+      gtk_window_unfullscreen(GTK_WINDOW(p_win));
+      p_win->b_fullscreen = FALSE;
+   } else {
+      gtk_window_fullscreen(GTK_WINDOW(p_win));
+      p_win->b_fullscreen = TRUE;
+   }
+}
+
+static void
+_action_slideshow(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->u_slideshow != 0) {
+      g_source_remove(p_win->u_slideshow);
+      p_win->u_slideshow = 0;
+   } else {
+      /* 3-second default; GSettings slideshow-delay wired in M10 */
+      p_win->u_slideshow = g_timeout_add_seconds(3, _slideshow_tick, p_win);
+   }
+}
+
+static void
+_action_info(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _show_info(GGAZE_WINDOW(p_data));
+}
+
+static void
+_action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->b_fullscreen) {
+      gtk_window_unfullscreen(GTK_WINDOW(p_win));
+      p_win->b_fullscreen = FALSE;
+   } else {
+      const char *c_cur =
+         gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
+      if (g_strcmp0(c_cur, "large") == 0) {
+         gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "grid");
+      } else {
+         gtk_window_close(GTK_WINDOW(p_win));
+      }
+   }
+}
+
+static gboolean
+_slideshow_tick(gpointer p_data) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav != NULL) {
+      navigator_next(p_win->p_nav);
+   }
+   return (G_SOURCE_CONTINUE);
+}
+
+static gboolean
+_info_hide_tick(gpointer p_data) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   _hide_info(p_win);
+   p_win->u_info_hide = 0;
+   return (G_SOURCE_REMOVE);
+}
+
+static void
+_show_info(GgazeWindow *p_win) {
+   if (p_win->p_nav == NULL) {
+      return;
+   }
+   GFile *p_cur = navigator_get_current(p_win->p_nav);
+   if (p_cur == NULL) {
+      return;
+   }
+   GgazeInfo *p_info = info_new(p_cur);
+   if (p_info == NULL) {
+      return;
+   }
+   char *c_text = info_format(p_info);
+   gtk_label_set_text(GTK_LABEL(p_win->p_info_lbl), c_text);
+   g_free(c_text);
+   info_delete(p_info);
+   gtk_widget_set_visible(p_win->p_info_lbl, TRUE);
+   if (p_win->u_info_hide != 0) {
+      g_source_remove(p_win->u_info_hide);
+   }
+   p_win->u_info_hide = g_timeout_add_seconds(5, _info_hide_tick, p_win);
+}
+
+static void
+_hide_info(GgazeWindow *p_win) {
+   gtk_widget_set_visible(p_win->p_info_lbl, FALSE);
+}
+
 static const GActionEntry ACTIONS[] = {
    {.name = "prev", .activate = _action_prev},
    {.name = "next", .activate = _action_next},
@@ -282,6 +394,10 @@ static const GActionEntry ACTIONS[] = {
    {.name = "toggle-view", .activate = _action_toggle_view},
    {.name = "zoom-in", .activate = _action_zoom_in},
    {.name = "zoom-out", .activate = _action_zoom_out},
+   {.name = "fullscreen", .activate = _action_fullscreen},
+   {.name = "slideshow", .activate = _action_slideshow},
+   {.name = "info", .activate = _action_info},
+   {.name = "back", .activate = _action_back},
 };
 
 /* --- drop target --------------------------------------------------------- */
@@ -485,6 +601,18 @@ ggaze_window_dispose(GObject *p_obj) {
    g_clear_object(&p_win->p_prefetch_cancel);
    g_cancellable_cancel(p_win->p_cancel);
    g_clear_object(&p_win->p_cancel);
+   if (p_win->u_slideshow != 0) {
+      g_source_remove(p_win->u_slideshow);
+      p_win->u_slideshow = 0;
+   }
+   if (p_win->u_info_hide != 0) {
+      g_source_remove(p_win->u_info_hide);
+      p_win->u_info_hide = 0;
+   }
+   if (p_win->u_hdr_hide != 0) {
+      g_source_remove(p_win->u_hdr_hide);
+      p_win->u_hdr_hide = 0;
+   }
    g_clear_pointer(&p_win->p_cache, texturecache_delete);
    g_clear_pointer(&p_win->p_trash, trash_delete);
    g_clear_pointer(&p_win->p_thumb, thumbnail_delete);
@@ -517,7 +645,17 @@ ggaze_window_init(GgazeWindow *p_win) {
    p_win->p_stack = gtk_stack_new();
    gtk_stack_set_transition_type(GTK_STACK(p_win->p_stack),
                                  GTK_STACK_TRANSITION_TYPE_CROSSFADE);
-   gtk_window_set_child(GTK_WINDOW(p_win), p_win->p_stack);
+
+   /* Wrap the stack in a GtkOverlay so the info label can float on top. */
+   p_win->p_overlay = gtk_overlay_new();
+   gtk_overlay_set_child(GTK_OVERLAY(p_win->p_overlay), p_win->p_stack);
+   p_win->p_info_lbl = gtk_label_new("");
+   gtk_widget_add_css_class(p_win->p_info_lbl, "ggaze-info");
+   gtk_widget_set_margin_start(p_win->p_info_lbl, 12);
+   gtk_widget_set_margin_top(p_win->p_info_lbl, 12);
+   gtk_widget_set_visible(p_win->p_info_lbl, FALSE);
+   gtk_overlay_add_overlay(GTK_OVERLAY(p_win->p_overlay), p_win->p_info_lbl);
+   gtk_window_set_child(GTK_WINDOW(p_win), p_win->p_overlay);
 
    GtkWidget *p_grid = gtk_label_new("grid");
    gtk_widget_add_css_class(p_grid, "dim-label");
@@ -642,4 +780,10 @@ ggaze_window_last(GgazeWindow *p_win) {
    if (p_win->p_nav != NULL) {
       navigator_last(p_win->p_nav);
    }
+}
+
+GtkStack *
+ggaze_window_get_stack(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
+   return (GTK_STACK(p_win->p_stack));
 }

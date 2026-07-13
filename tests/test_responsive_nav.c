@@ -74,7 +74,7 @@ drain_main(guint u_ms) {
 
 static GdkTexture *
 viewer_texture(GgazeWindow *p_win) {
-   GtkWidget *p_child = gtk_window_get_child(GTK_WINDOW(p_win));
+   GtkWidget *p_child = GTK_WIDGET(ggaze_window_get_stack(p_win));
    GtkWidget *p_large =
       gtk_stack_get_child_by_name(GTK_STACK(p_child), "large");
    return (ggaze_viewer_get_texture(GGAZE_VIEWER(p_large)));

@@ -32,6 +32,10 @@ GgazeWindow *ggaze_window_new(GgazeApp *p_app);
  * current image into the viewer and switches the stack to "large". */
 void ggaze_window_open(GgazeWindow *p_win, GFile *p_arg);
 
+/* The GtkStack (grid/large) — the tests use this instead of
+ * gtk_window_get_child (which now returns the wrapping GtkOverlay). */
+GtkStack *ggaze_window_get_stack(GgazeWindow *p_win);
+
 /* Navigation over the current folder (bound to h/l/Left/Right/g/G via
  * shortcuts.c). No-ops if nothing is open. */
 void ggaze_window_prev(GgazeWindow *p_win);

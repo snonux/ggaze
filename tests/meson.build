@@ -97,6 +97,16 @@ test_thumbnail = executable(
 )
 test('thumbnail', test_thumbnail, suite : 'unit', env : fixtures_env)
 
+test_info = executable(
+   'test_info',
+   ['test_info.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib,
+   install : false,
+)
+test('info', test_info, suite : 'unit', env : fixtures_env)
+
 test_texturecache = executable(
    'test_texturecache',
    ['test_texturecache.c', ggaze_conf_h],
