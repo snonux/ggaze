@@ -67,6 +67,18 @@ test_loader_pixbuf = executable(
 )
 test('loader_pixbuf', test_loader_pixbuf, suite : 'unit', env : fixtures_env)
 
+if libjpeg_dep.found()
+   test_loader_jpeg = executable(
+      'test_loader_jpeg',
+      ['test_loader_jpeg.c', ggaze_conf_h],
+      include_directories : [inc, src_inc],
+      dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
+      link_with : ggaze_lib,
+      install : false,
+   )
+   test('loader_jpeg', test_loader_jpeg, suite : 'unit', env : fixtures_env)
+endif
+
 test_navigator = executable(
    'test_navigator',
    ['test_navigator.c', ggaze_conf_h],
@@ -171,5 +183,16 @@ test_grid_cull = executable(
    install : false,
 )
 test('grid_cull', test_grid_cull, suite : 'integration', env : fixtures_env)
+
+test_progressive_jpeg = executable(
+   'test_progressive_jpeg',
+   ['test_progressive_jpeg.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib,
+   install : false,
+)
+test('progressive_jpeg', test_progressive_jpeg,
+   suite : 'integration', env : fixtures_env)
 
 subdir('integration')

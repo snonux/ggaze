@@ -19,3 +19,6 @@ option('avif', type : 'feature', value : 'auto',
 
 option('heif', type : 'feature', value : 'auto',
    description : 'HEIF/HEIC loader backend (libheif)')
+
+option('jpeg', type : 'feature', value : 'auto',
+   description : 'libjpeg-turbo direct JPEG backend (progressive low-res preview)')

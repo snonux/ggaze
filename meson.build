@@ -23,6 +23,7 @@ gio_dep        = dependency('gio-2.0')
 adwaita_dep    = dependency('libadwaita-1')
 gdkpixbuf_dep  = dependency('gdk-pixbuf-2.0')  # pixbuf loader backend
 libexif_dep    = dependency('libexif')           # EXIF gather (info overlay, M4)
+libjpeg_dep    = dependency('libjpeg')           # libjpeg-turbo direct JPEG (M6)
 
 # --- Optional backends (feature: auto/disabled/enabled). See meson_options.txt.
 gegl_dep = dependency('gegl-0.4', required : get_option('gegl'))
@@ -85,6 +86,11 @@ if heif_dep.found()
    ggaze_src += files('src/loader/backends/heif.c')
    ggaze_c_args += '-DHAVE_HEIF'
    ggaze_extra_deps += heif_dep
+endif
+if libjpeg_dep.found()
+   ggaze_src += files('src/loader/backends/jpeg.c')
+   ggaze_c_args += '-DHAVE_JPEG'
+   ggaze_extra_deps += libjpeg_dep
 endif
 
 ggaze_lib = static_library('ggaze',

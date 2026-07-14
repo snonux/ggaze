@@ -464,6 +464,34 @@ _prefetch_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    g_object_unref(p_win);
 }
 
+/* --- M6: progressive low-res preview ------------------------------------ */
+
+typedef struct {
+   GgazeWindow *p_win;
+   GdkTexture  *p_tex;
+} ProgressInvoke;
+
+static gboolean
+_on_progress_main(gpointer p_data) {
+   ProgressInvoke *p_pi = (ProgressInvoke *)p_data;
+   /* Show the partial; the full result replaces it in _load_finish_cb. */
+   ggaze_viewer_set_texture(GGAZE_VIEWER(p_pi->p_win->p_viewer), p_pi->p_tex);
+   g_object_unref(p_pi->p_tex);
+   g_object_unref(p_pi->p_win);
+   g_free(p_pi);
+   return (G_SOURCE_REMOVE);
+}
+
+static void
+_load_progress_cb(GdkTexture *p_partial, gpointer p_data) {
+   GgazeWindow    *p_win = GGAZE_WINDOW(p_data);
+   ProgressInvoke *p_pi  = g_new(ProgressInvoke, 1);
+   p_pi->p_win           = (GgazeWindow *)g_object_ref(p_win);
+   p_pi->p_tex           = (GdkTexture *)g_object_ref(p_partial);
+   g_main_context_invoke_full(NULL, G_PRIORITY_DEFAULT, _on_progress_main, p_pi,
+                              NULL);
+}
+
 /* Visible-load callback: show only if this is still the current file
  * (last-write-wins), then cache it and prefetch neighbours. */
 static void
@@ -518,7 +546,7 @@ _prefetch(GgazeWindow *p_win) {
       }
       GFile *p_file = navigator_get_file(p_win->p_nav, (guint)i_j);
       if (p_file != NULL && texturecache_get(p_win->p_cache, p_file) == NULL) {
-         loader_load_async(p_file, p_win->p_prefetch_cancel,
+         loader_load_async(p_file, p_win->p_prefetch_cancel, NULL, NULL,
                            _prefetch_finish_cb, g_object_ref(p_win));
       }
    }
@@ -554,8 +582,8 @@ _load_current(GgazeWindow *p_win) {
    g_cancellable_cancel(p_win->p_cancel);
    g_clear_object(&p_win->p_cancel);
    p_win->p_cancel = g_cancellable_new();
-   loader_load_async(p_cur, p_win->p_cancel, _load_finish_cb,
-                     g_object_ref(p_win));
+   loader_load_async(p_cur, p_win->p_cancel, _load_progress_cb,
+                     g_object_ref(p_win), _load_finish_cb, g_object_ref(p_win));
    _update_header(p_win);
 }
 

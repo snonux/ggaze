@@ -23,11 +23,19 @@
 
 G_BEGIN_DECLS
 
+/* Optional progressive-load callback (called from the worker thread with a
+ * low-res partial texture before the full decode completes). */
+typedef void (*LoaderProgressCb)(GdkTexture *p_partial, gpointer p_data);
+
 /* A loader backend. Compiled in conditionally (meson feature options) and
  * registered with the loader at link time. */
 typedef struct {
    gboolean (*can_load)(const guint8 *p_head, gsize u_len);
    GdkTexture *(*load)(GFile *p_file, GCancellable *p_cancel, GError **p_err);
+   /* Optional: two-phase load (low-res first via p_progress, then full). */
+   GdkTexture *(*load_progressive)(GFile *p_file, GCancellable *p_cancel,
+                                   LoaderProgressCb p_progress,
+                                   gpointer p_progress_data, GError **p_err);
 } GgazeLoaderBackend;
 
 /* Backends register a const instance; the dispatcher (loader.c) iterates
@@ -45,6 +53,7 @@ GdkTexture *loader_load(GFile *p_file, GCancellable *p_cancel, GError **p_err);
  * p_file, so the finish callback can check it against navigator.current
  * (last-write-wins). */
 void loader_load_async(GFile *p_file, GCancellable *p_cancel,
+                       LoaderProgressCb p_progress, gpointer p_progress_data,
                        GAsyncReadyCallback p_cb, gpointer p_data);
 
 /* Finish an async load; returns the GdkTexture (transfer full) or NULL. */
