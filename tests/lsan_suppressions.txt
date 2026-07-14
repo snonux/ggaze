@@ -1,0 +1,9 @@
+# GEGL library leaks during gegl_init and gegl_node_new_child (third-party)
+leak:gegl_init
+leak:gegl_post_parse_hook
+leak:gegl_config
+leak:babl_init
+leak:babl
+leak:gegl_node_new_child
+leak:gegl_node_new
+leak:gegl_operation

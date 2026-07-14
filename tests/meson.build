@@ -143,6 +143,23 @@ test_runner = executable(
 )
 test('runner', test_runner, suite : 'unit', env : fixtures_env)
 
+if gegl_dep.found()
+   test_enhancer = executable(
+      'test_enhancer', ['test_enhancer.c', ggaze_conf_h],
+      include_directories : [inc, src_inc],
+      dependencies : [glib_dep, gegl_dep],
+      link_with : ggaze_lib, install : false,
+   )
+   enhancer_env = environment()
+   enhancer_env.set('GIO_USE_VFS', 'local')
+   enhancer_env.set('GGAZE_FIXTURES_DIR',
+      join_paths(meson.project_source_root(), 'tests', 'fixtures'))
+   enhancer_env.set('LSAN_OPTIONS',
+      'suppressions=' + join_paths(meson.project_source_root(), 'tests',
+                                  'lsan_suppressions.txt'))
+   test('enhancer', test_enhancer, suite : 'unit', env : enhancer_env)
+endif
+
 test_texturecache = executable(
    'test_texturecache',
    ['test_texturecache.c', ggaze_conf_h],

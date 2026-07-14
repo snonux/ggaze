@@ -96,6 +96,11 @@ if libjpeg_dep.found()
    ggaze_c_args += '-DHAVE_JPEG'
    ggaze_extra_deps += libjpeg_dep
 endif
+if gegl_dep.found()
+   ggaze_src += files('src/enhancer.c')
+   ggaze_c_args += '-DHAVE_GEGL'
+   ggaze_extra_deps += gegl_dep
+endif
 
 ggaze_lib = static_library('ggaze',
    ggaze_src,
