@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metainfo for ggaze (see https://www.freedesktop.org/software/appstream/docs/) -->
+<component type="desktop-application">
+  <id>org.buetow.ggaze</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>ggaze</name>
+  <summary>Fast native image viewer for culling camera shoots</summary>
+  <description>
+    <p>ggaze (GNOME Gaze) is a small, fast, native image viewer for Fedora
+    Linux. It opens a folder of pictures, shows a thumbnail grid, and lets
+    you flip through the shoot with vi-style keys, check EXIF, trash rejects,
+    and move on — no library, no database, no sidecars.</p>
+  </description>
+  <launchable type="desktop-id">org.buetow.ggaze.desktop</launchable>
+  <url type="homepage">https://codeberg.org/snonux/ggaze</url>
+  <provides>
+    <binary>ggaze</binary>
+  </provides>
+  <categories>
+    <category>Graphics</category>
+    <category>Viewer</category>
+    <category>Photography</category>
+  </categories>
+  <keywords>
+    <keyword>image</keyword>
+    <keyword>viewer</keyword>
+    <keyword>photo</keyword>
+    <keyword>camera</keyword>
+    <keyword>culling</keyword>
+  </keywords>
+  <recommends>
+    <control>keyboard</control>
+    <control>mouse</control>
+  </recommends>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-07-12">
+      <description><p>Initial development release.</p></description>
+    </release>
+  </releases>
+</component>

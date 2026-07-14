@@ -236,4 +236,13 @@ test_progressive_jpeg = executable(
 test('progressive_jpeg', test_progressive_jpeg,
    suite : 'integration', env : fixtures_env)
 
+test_full_lifecycle = executable(
+   'test_full_lifecycle', ['test_full_lifecycle.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib, install : false,
+)
+test('full_lifecycle', test_full_lifecycle,
+   suite : 'integration', env : fixtures_env)
+
 subdir('integration')

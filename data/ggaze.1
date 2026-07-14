@@ -1,0 +1,71 @@
+.TH GGAZE 1 "2026-07-12" "ggaze 0.1.0" "User Commands"
+.SH NAME
+ggaze \- fast native image viewer for culling camera shoots
+.SH SYNOPSIS
+.B ggaze
+[\fIFILE\fR | \fIFOLDER\fR] [\fI--version\fR] [\fI--help\fR]
+.SH DESCRIPTION
+ggaze (GNOME Gaze) is a small, fast, native image viewer for Fedora Linux,
+written in C with GTK4. It opens a file or folder, shows a thumbnail grid,
+and lets you flip through the shoot with vi-style keys, check EXIF, trash
+rejects, and move on. No library, no database, no sidecars.
+.SH KEYBINDINGS
+.TP
+.B h / l / Left / Right
+Previous / next image
+.TP
+.B Enter / Esc
+Grid \[ua] large view / contextual back
+.TP
+.B i
+Info overlay (EXIF)
+.TP
+.B d / D
+Trash to ./.Trash (undoable) / permanent delete
+.TP
+.B u
+Undo last trash or delete
+.TP
+.B v / V / Ctrl+a
+Toggle mark / range mark / mark all
+.TP
+.B m
+Move marked images to a destination popup
+.TP
+.B e
+Open in an external program popup
+.TP
+.B !
+Run a shell script popup
+.TP
+.B a
+Quick GEGL enhance popup (optional)
+.TP
+.B f / S
+Fullscreen / slideshow
+.TP
+.B t
+Toggle grid \[ua] large
+.TP
+.B + / -
+Zoom in / out (large) or grow / shrink thumbnails (grid)
+.TP
+.B o
+Open file/folder dialog
+.TP
+.B ?
+Shortcuts overlay
+.TP
+.B q
+Quit
+.SH FILES
+.TP
+.I ~/.cache/thumbnails/
+freedesktop thumbnail cache (shared with other compliant apps)
+.TP
+.I ./.Trash/
+Local trash folder beside the images (recoverable, not the system trash)
+.SH SEE ALSO
+.BR feh (1),
+.BR nsxiv (1),
+.BR gthumb (1)
