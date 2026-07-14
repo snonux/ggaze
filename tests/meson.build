@@ -119,6 +119,30 @@ test_info = executable(
 )
 test('info', test_info, suite : 'unit', env : fixtures_env)
 
+test_mover = executable(
+   'test_mover', ['test_mover.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : ggaze_lib, install : false,
+)
+test('mover', test_mover, suite : 'unit', env : fixtures_env)
+
+test_opener = executable(
+   'test_opener', ['test_opener.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : ggaze_lib, install : false,
+)
+test('opener', test_opener, suite : 'unit', env : fixtures_env)
+
+test_runner = executable(
+   'test_runner', ['test_runner.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : ggaze_lib, install : false,
+)
+test('runner', test_runner, suite : 'unit', env : fixtures_env)
+
 test_texturecache = executable(
    'test_texturecache',
    ['test_texturecache.c', ggaze_conf_h],
