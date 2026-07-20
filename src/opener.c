@@ -51,9 +51,6 @@ opener_get_progs(Opener *o) {
    return o ? o->p_progs : NULL;
 }
 
-/* Expand %f → shell-escaped path. Returns a newly-allocated argv vector
- * (NULL-terminated). Caller frees with g_strfreev. */
-
 /* Replace all occurrences of c_old with c_new in c_str. Caller frees. */
 static char *
 _str_replace(const char *c_str, const char *c_old, const char *c_new) {
@@ -74,25 +71,51 @@ _str_replace(const char *c_str, const char *c_old, const char *c_new) {
    return g_string_free(p_out, FALSE);
 }
 
-static char **
-_expand_command(const char *c_cmd, GFile *p_file) {
+/* Expand %f → the file path inside an already-parsed argv.
+ *
+ * The command template is parsed with g_shell_parse_argv FIRST, so quotes,
+ * escapes, and option flags are resolved correctly; %f is then substituted
+ * into the parsed argv elements. This guarantees %f is always exactly one
+ * argv value no matter what spaces or shell metacharacters the path contains
+ * (substitution happens after shell parsing, never before).
+ *
+ * Returns a newly-allocated, NULL-terminated argv vector; caller frees with
+ * g_strfreev. On a parse error returns NULL and sets p_err — never launches
+ * malformed argv. Non-static (with the `_` prefix retained to mark it as
+ * non-public) so tests/test_opener.c can verify the argv shape directly via
+ * an extern prototype, without polluting the public opener.h. */
+char **
+_expand_command(const char *c_cmd, GFile *p_file, GError **p_err) {
+   g_return_val_if_fail(c_cmd != NULL, NULL);
+   g_return_val_if_fail(G_IS_FILE(p_file), NULL);
    char *c_path = g_file_get_path(p_file);
-   /* Simple tokenisation: split on spaces, replace %f with path. */
-   char     **parts = g_strsplit(c_cmd, " ", -1);
-   GPtrArray *argv  = g_ptr_array_new();
-   for (guint i = 0; parts[i]; i++) {
-      if (g_str_equal(parts[i], "%f"))
-         g_ptr_array_add(argv, g_strdup(c_path));
-      else if (strstr(parts[i], "%f")) {
-         char *r = _str_replace(parts[i], "%f", c_path);
-         g_ptr_array_add(argv, r ? r : g_strdup(parts[i]));
-      } else
-         g_ptr_array_add(argv, g_strdup(parts[i]));
+   if (c_path == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "opener: file has no local path");
+      return NULL;
    }
-   g_ptr_array_add(argv, NULL);
-   g_strfreev(parts);
+   /* Parse the raw template first: resolves quotes/escapes/options. */
+   char **argv = NULL;
+   if (!g_shell_parse_argv(c_cmd, NULL, &argv, p_err)) {
+      g_free(c_path);
+      return NULL;
+   }
+   /* Substitute %f into each parsed element so the path is always one argv
+    * value, regardless of spaces or shell metacharacters it contains. */
+   for (guint i = 0; argv[i]; i++) {
+      if (g_str_equal(argv[i], "%f")) {
+         g_free(argv[i]);
+         argv[i] = g_strdup(c_path);
+      } else if (strstr(argv[i], "%f")) {
+         char *r = _str_replace(argv[i], "%f", c_path);
+         if (r) {
+            g_free(argv[i]);
+            argv[i] = r;
+         }
+      }
+   }
    g_free(c_path);
-   return (char **)g_ptr_array_free(argv, FALSE);
+   return argv;
 }
 
 gboolean
@@ -101,7 +124,9 @@ opener_launch(Opener *o, GFile *p_file, const OpenerProg *p_prog,
    (void)o;
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
    g_return_val_if_fail(p_prog, FALSE);
-   char       **argv  = _expand_command(p_prog->c_command, p_file);
+   char **argv = _expand_command(p_prog->c_command, p_file, p_err);
+   if (argv == NULL)
+      return FALSE;
    GSubprocess *p_sub = g_subprocess_newv((const char *const *)argv,
                                           G_SUBPROCESS_FLAGS_NONE, p_err);
    g_strfreev(argv);
