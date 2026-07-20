@@ -448,8 +448,12 @@ _on_grid_activate(GgazeGrid *p_grid, gpointer p_data) {
 
 static void
 _show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
+   /* Only update the viewer's texture here; do NOT force the stack to "large".
+    * The stack is owned by the caller: file-open / toggle / grid-activate set
+    * "large" themselves before loading, and directory-open sets "grid".
+    * Forcing large here would yank a just-opened folder back out of the grid
+    * view the moment its first image finishes loading. */
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
-   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
 }
 
 /* Prefetch callback: just cache the result (never touches the viewer). p_data
@@ -740,7 +744,8 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    GFile    *p_start = NULL;
    GFileType e_type =
       g_file_query_file_type(p_arg, G_FILE_QUERY_INFO_NONE, NULL);
-   if (e_type == G_FILE_TYPE_DIRECTORY) {
+   gboolean b_is_dir = (e_type == G_FILE_TYPE_DIRECTORY);
+   if (b_is_dir) {
       p_dir = (GFile *)g_object_ref(p_arg);
    } else {
       p_dir   = g_file_get_parent(p_arg);
@@ -780,7 +785,12 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    gtk_stack_add_named(GTK_STACK(p_win->p_stack), GTK_WIDGET(p_win->p_grid),
                        "grid");
 
-   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+   /* Folder arg → start in the thumbnail grid (folder-to-grid behavior,
+    * docs/ui-and-interactions.md 33-47); file arg → large view on that image.
+    * _load_current is run either way so the large view is ready when toggled.
+    */
+   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack),
+                                    b_is_dir ? "grid" : "large");
    _load_current(p_win);
 }
 
