@@ -34,9 +34,16 @@ void ggaze_grid_set_hide_trashed(GgazeGrid *p_grid, gboolean b_hide);
 /* Rebuild the cells from the navigator (call after structural changes). */
 void ggaze_grid_refresh(GgazeGrid *p_grid);
 
+/* Update each cell's mark badge in place from the navigator (no rebuild). */
+void ggaze_grid_refresh_mark_badges(GgazeGrid *p_grid);
+
 /* Sync navigator.current to the flowbox's currently-selected cell, so leaving
  * the grid (Enter / toggle-to-large) opens the highlighted image. */
 gboolean ggaze_grid_sync_current(GgazeGrid *p_grid);
+
+/* Move the grid cursor one row down (i_dy = +1) or up (i_dy = -1), updating
+ * navigator.current so the header / large-view preview track the move. */
+void ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy);
 
 /* Borrowed pointer to the currently-selected cell's file (NULL if none). The
  * pointer is owned by the cell; only valid while the cell lives. */

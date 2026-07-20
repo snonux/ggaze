@@ -32,7 +32,8 @@ struct _GgazeGrid {
    int           i_size;
    gboolean      b_hide_trashed;
    guint         u_nav_handler;
-   GCancellable *p_cancel; /* cancels pending thumbnails on dispose */
+   guint         u_last_count; /* navigator count at last full refresh */
+   GCancellable *p_cancel;     /* cancels pending thumbnails on dispose */
 };
 
 G_DEFINE_TYPE(GgazeGrid, ggaze_grid, GTK_TYPE_WIDGET)
@@ -177,6 +178,16 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
       g_signal_emit(p_grid, u_activate_signal, 0);
       return (TRUE);
    }
+   if (u_kv == GDK_KEY_j) {
+      /* Move the cursor down one row (vim-style); h/l stay linear via the
+       * global win.next/win.prev shortcuts. */
+      ggaze_grid_move_cursor(p_grid, 1);
+      return (TRUE);
+   }
+   if (u_kv == GDK_KEY_k) {
+      ggaze_grid_move_cursor(p_grid, -1);
+      return (TRUE);
+   }
    if (u_kv == GDK_KEY_d) {
       /* `d` in the grid trashes the current file (window handles via action).
        */
@@ -238,6 +249,60 @@ ggaze_grid_sync_current(GgazeGrid *p_grid) {
       return (FALSE);
    }
    return (navigator_set_current_file(p_grid->p_nav, p_file));
+}
+
+/* Move the grid cursor one row down (i_dy = +1) or up (i_dy = -1), selecting
+ * the cell in the adjacent row closest to the current column. Updates
+ * navigator.current so the header and large-view preview track the move (the
+ * "changed" emission re-selects via _on_nav_changed). */
+void
+ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy) {
+   g_return_if_fail(GGAZE_IS_GRID(p_grid));
+   if (p_grid->p_nav == NULL || p_grid->p_flow == NULL) {
+      return;
+   }
+   GList *p_sel =
+      gtk_flow_box_get_selected_children(GTK_FLOW_BOX(p_grid->p_flow));
+   if (p_sel == NULL) {
+      return;
+   }
+   GtkWidget *p_cur = GTK_WIDGET(p_sel->data);
+   g_list_free(p_sel);
+   graphene_rect_t r_cur;
+   if (!gtk_widget_compute_bounds(p_cur, p_grid->p_flow, &r_cur) ||
+       r_cur.size.width == 0) {
+      return; /* not laid out yet */
+   }
+   GtkWidget *p_best  = NULL;
+   float      best_dy = 0;
+   float      best_dx = 0;
+   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
+   while (p_child != NULL) {
+      if (p_child != p_cur) {
+         graphene_rect_t r;
+         if (gtk_widget_compute_bounds(p_child, p_grid->p_flow, &r) &&
+             r.size.width != 0) {
+            float dy = r.origin.y - r_cur.origin.y;
+            if ((i_dy > 0 && dy > 0) || (i_dy < 0 && dy < 0)) {
+               float ady = ABS(dy);
+               float adx = ABS(r.origin.x - r_cur.origin.x);
+               if (p_best == NULL || ady < best_dy ||
+                   (ady == best_dy && adx < best_dx)) {
+                  p_best  = p_child;
+                  best_dy = ady;
+                  best_dx = adx;
+               }
+            }
+         }
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   if (p_best != NULL) {
+      GFile *p_f = (GFile *)g_object_get_data(G_OBJECT(p_best), "file");
+      if (p_f != NULL) {
+         navigator_set_current_file(p_grid->p_nav, p_f);
+      }
+   }
 }
 
 /* Borrowed pointer to the selected cell's file (NULL if nothing selected). */
@@ -304,13 +369,53 @@ ggaze_grid_refresh(GgazeGrid *p_grid) {
       GtkWidget *p_child = _make_cell(p_grid, p_file);
       gtk_flow_box_append(GTK_FLOW_BOX(p_grid->p_flow), p_child);
    }
+   p_grid->u_last_count = u_n;
    _select_current(p_grid);
+}
+
+/* Update every cell's "ggaze-marked" badge from the navigator's mark set
+ * in place (no rebuild), so mark changes and navigation don't blank the grid
+ * by recreating cells. */
+void
+ggaze_grid_refresh_mark_badges(GgazeGrid *p_grid) {
+   g_return_if_fail(GGAZE_IS_GRID(p_grid));
+   if (p_grid->p_nav == NULL) {
+      return;
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
+   while (p_child != NULL) {
+      GFile     *p_f = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
+      GtkWidget *p_box =
+         gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(p_child));
+      if (p_f != NULL && p_box != NULL) {
+         if (navigator_is_marked(p_grid->p_nav, p_f)) {
+            gtk_widget_add_css_class(p_box, "ggaze-marked");
+         } else {
+            gtk_widget_remove_css_class(p_box, "ggaze-marked");
+         }
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
 }
 
 static void
 _on_nav_changed(Navigator *p_nav, gpointer p_data) {
    (void)p_nav;
-   ggaze_grid_refresh(GGAZE_GRID(p_data));
+   GgazeGrid *p_grid = GGAZE_GRID(p_data);
+   if (p_grid->p_nav == NULL) {
+      return;
+   }
+   /* Only a structural change (files added/removed via rescan/trash/move)
+    * needs a full rebuild. A mere current/mark change just moves the
+    * selection and refreshes badges in place — rebuilding on every
+    * navigation keypress would recreate every GtkPicture and blank the grid
+    * while each cell re-requested its thumbnail. */
+   if (navigator_get_count(p_grid->p_nav) != p_grid->u_last_count) {
+      ggaze_grid_refresh(p_grid);
+      return;
+   }
+   ggaze_grid_refresh_mark_badges(p_grid);
+   _select_current(p_grid);
 }
 
 /* --- GObject ------------------------------------------------------------- */
