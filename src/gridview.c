@@ -268,9 +268,14 @@ ggaze_grid_finalize(GObject *p_obj) {
 
 static void
 ggaze_grid_class_init(GgazeGridClass *p_klass) {
-   GObjectClass *p_oc = G_OBJECT_CLASS(p_klass);
-   p_oc->dispose      = ggaze_grid_dispose;
-   p_oc->finalize     = ggaze_grid_finalize;
+   GObjectClass   *p_oc = G_OBJECT_CLASS(p_klass);
+   GtkWidgetClass *p_wc = GTK_WIDGET_CLASS(p_klass);
+   p_oc->dispose        = ggaze_grid_dispose;
+   p_oc->finalize       = ggaze_grid_finalize;
+   /* GgazeGrid has a single child (the GtkScrolledWindow holding the
+    * GtkFlowBox); GtkBinLayout allocates it to fill the grid so the flowbox
+    * actually gets sized and renders instead of staying a 0x0 black area. */
+   gtk_widget_class_set_layout_manager_type(p_wc, GTK_TYPE_BIN_LAYOUT);
    u_activate_signal =
       g_signal_new("activate", G_TYPE_FROM_CLASS(p_klass), G_SIGNAL_RUN_LAST, 0,
                    NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 0);
