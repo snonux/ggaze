@@ -253,6 +253,173 @@ _action_toggle_view(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
 }
 
+/* Toggle a mark on the highlighted grid cell (grid view) or the current image
+ * (large view). Marks are ggaze's multi-selection: D / Ctrl+c / m act on the
+ * marked set. Toggle does not emit navigator "changed", so the grid cell's
+ * badge is updated in place (no reflow/re-decode). */
+static void
+_action_mark(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL) {
+      return;
+   }
+   GFile      *p_target = NULL;
+   const char *c_cur =
+      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
+   if (g_strcmp0(c_cur, "grid") == 0 && p_win->p_grid != NULL) {
+      p_target = ggaze_grid_get_selected_file(p_win->p_grid);
+   }
+   if (p_target == NULL) {
+      p_target = navigator_get_current(p_win->p_nav);
+   }
+   if (p_target == NULL) {
+      return;
+   }
+   navigator_toggle_mark(p_win->p_nav, p_target);
+   if (p_win->p_grid != NULL) {
+      ggaze_grid_update_mark_badge(p_win->p_grid, p_target);
+   }
+   _update_header(p_win);
+}
+
+static void
+_action_mark_all(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL) {
+      return;
+   }
+   navigator_mark_all(p_win->p_nav); /* emits "changed" -> grid refresh */
+   _update_header(p_win);
+}
+
+/* GtkBuilder UI for the shortcuts overlay (?). Accel strings use gtk
+ * accelerator syntax: "h Left" means h OR Left triggers it. */
+static const char *SHORTCUTS_UI =
+   "<interface>"
+   "  <object class=\"GtkShortcutsWindow\" id=\"shortcuts\">"
+   "    <property name=\"modal\">True</property>"
+   "    <property name=\"section-name\">shortcuts</property>"
+   "    <child>"
+   "      <object class=\"GtkShortcutsSection\" id=\"sec\">"
+   "        <property name=\"section-name\">shortcuts</property>"
+   "        <property name=\"title\">ggaze</property>"
+   "        <child>"
+   "          <object class=\"GtkShortcutsGroup\">"
+   "            <property name=\"title\">Navigation</property>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">h Left</property>"
+   "              <property name=\"title\">Previous "
+   "image</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">l Right</property>"
+   "              <property name=\"title\">Next "
+   "image</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">g</property>"
+   "              <property name=\"title\">First "
+   "image</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">Shift+G</property>"
+   "              <property name=\"title\">Last "
+   "image</property></object></child>"
+   "          </object></child>"
+   "        <child>"
+   "          <object class=\"GtkShortcutsGroup\">"
+   "            <property name=\"title\">View</property>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">t</property>"
+   "              <property name=\"title\">Toggle large / "
+   "grid</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">f</property>"
+   "              <property "
+   "name=\"title\">Fullscreen</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">Shift+S</property>"
+   "              <property "
+   "name=\"title\">Slideshow</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">i</property>"
+   "              <property name=\"title\">Info "
+   "overlay</property></object></child>"
+   "          </object></child>"
+   "        <child>"
+   "          <object class=\"GtkShortcutsGroup\">"
+   "            <property name=\"title\">Selection (marks)</property>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">v</property>"
+   "              <property name=\"title\">Toggle mark on "
+   "highlighted</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">Ctrl+a</property>"
+   "              <property name=\"title\">Mark all</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">Escape</property>"
+   "              <property name=\"title\">Clear marks / "
+   "back</property></object></child>"
+   "          </object></child>"
+   "        <child>"
+   "          <object class=\"GtkShortcutsGroup\">"
+   "            <property name=\"title\">Files</property>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">o</property>"
+   "              <property name=\"title\">Open</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">d</property>"
+   "              <property name=\"title\">Trash</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">Shift+D</property>"
+   "              <property name=\"title\">Delete "
+   "permanently</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">u</property>"
+   "              <property name=\"title\">Undo</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">q</property>"
+   "              <property name=\"title\">Quit</property></object></child>"
+   "          </object></child>"
+   "        <child>"
+   "          <object class=\"GtkShortcutsGroup\">"
+   "            <property name=\"title\">Zoom</property>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">plus equal</property>"
+   "              <property name=\"title\">Zoom in</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">minus underscore</property>"
+   "              <property name=\"title\">Zoom out</property></object></child>"
+   "            <child><object class=\"GtkShortcutsShortcut\">"
+   "              <property name=\"accelerator\">question</property>"
+   "              <property name=\"title\">Show this "
+   "help</property></object></child>"
+   "          </object></child>"
+   "      </object></child>"
+   "    </child>"
+   "  </object></child>"
+   "</interface>";
+
+static void
+_action_shortcuts(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow        *p_win = GGAZE_WINDOW(p_data);
+   GtkBuilder         *p_b   = gtk_builder_new_from_string(SHORTCUTS_UI, -1);
+   GtkShortcutsWindow *p_w =
+      GTK_SHORTCUTS_WINDOW(gtk_builder_get_object(p_b, "shortcuts"));
+   if (p_w == NULL) {
+      g_object_unref(p_b);
+      return;
+   }
+   gtk_window_set_transient_for(GTK_WINDOW(p_w), GTK_WINDOW(p_win));
+   gtk_window_set_title(GTK_WINDOW(p_w), "ggaze — keyboard shortcuts");
+   /* Keep the builder alive for the window's lifetime, drop it on close. */
+   g_signal_connect_swapped(p_w, "destroy", G_CALLBACK(g_object_unref), p_b);
+   gtk_window_present(GTK_WINDOW(p_w));
+}
+
 static void
 _action_zoom_in(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -330,6 +497,12 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (p_win->b_fullscreen) {
       gtk_window_unfullscreen(GTK_WINDOW(p_win));
       p_win->b_fullscreen = FALSE;
+   } else if (p_win->p_nav != NULL &&
+              navigator_get_mark_count(p_win->p_nav) > 0) {
+      /* Contextual Esc: clear marks before backing out (docs/ui-and-
+       * interactions.md marks). Emits "changed" -> grid refreshes badges. */
+      navigator_clear_marks(p_win->p_nav);
+      _update_header(p_win);
    } else {
       const char *c_cur =
          gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
@@ -398,6 +571,9 @@ static const GActionEntry ACTIONS[] = {
    {.name = "delete", .activate = _action_delete},
    {.name = "undo", .activate = _action_undo},
    {.name = "toggle-view", .activate = _action_toggle_view},
+   {.name = "mark", .activate = _action_mark},
+   {.name = "mark-all", .activate = _action_mark_all},
+   {.name = "shortcuts", .activate = _action_shortcuts},
    {.name = "zoom-in", .activate = _action_zoom_in},
    {.name = "zoom-out", .activate = _action_zoom_out},
    {.name = "fullscreen", .activate = _action_fullscreen},
@@ -615,6 +791,14 @@ _update_header(GgazeWindow *p_win) {
          }
          g_free(c_name);
       }
+      /* Append the marked count so multi-selection is visible in the title. */
+      guint u_marks = navigator_get_mark_count(p_win->p_nav);
+      if (u_marks > 0 && c_title != NULL) {
+         char *c_tmp =
+            g_strdup_printf("%s  \u00b7  %u marked", c_title, u_marks);
+         g_free(c_title);
+         c_title = c_tmp;
+      }
    }
    if (c_title == NULL) {
       c_title = g_strdup("ggaze");
@@ -665,8 +849,35 @@ ggaze_window_class_init(GgazeWindowClass *p_klass) {
    p_obj_class->dispose      = ggaze_window_dispose;
 }
 
+/* Load the small ggaze stylesheet once (mark badge styling — the navigator's
+ * mark API has no visual representation without it). */
+static void
+_ensure_css(void) {
+   static gboolean b_done = FALSE;
+   if (b_done) {
+      return;
+   }
+   b_done                = TRUE;
+   GtkCssProvider *p_css = gtk_css_provider_new();
+   gtk_css_provider_load_from_string(
+      p_css, "/* marked-thumbnail badge (multi-selection). */\n"
+             ".ggaze-marked {\n"
+             "  border: 2px solid #3584e4;\n"
+             "  border-radius: 4px;\n"
+             "  background-color: rgba(53, 132, 228, 0.15);\n"
+             "}\n");
+   GdkDisplay *p_disp = gdk_display_get_default();
+   if (p_disp != NULL) {
+      gtk_style_context_add_provider_for_display(
+         p_disp, GTK_STYLE_PROVIDER(p_css),
+         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+   }
+   g_object_unref(p_css);
+}
+
 static void
 ggaze_window_init(GgazeWindow *p_win) {
+   _ensure_css();
    p_win->p_cancel          = g_cancellable_new();
    p_win->p_prefetch_cancel = g_cancellable_new();
    p_win->p_cache           = texturecache_new(4);

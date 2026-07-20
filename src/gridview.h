@@ -38,6 +38,14 @@ void ggaze_grid_refresh(GgazeGrid *p_grid);
  * the grid (Enter / toggle-to-large) opens the highlighted image. */
 gboolean ggaze_grid_sync_current(GgazeGrid *p_grid);
 
+/* Borrowed pointer to the currently-selected cell's file (NULL if none). The
+ * pointer is owned by the cell; only valid while the cell lives. */
+GFile *ggaze_grid_get_selected_file(GgazeGrid *p_grid);
+
+/* Update one cell's "ggaze-marked" badge from the navigator's mark set,
+ * without rebuilding the grid. No-op if the file's cell isn't present. */
+void ggaze_grid_update_mark_badge(GgazeGrid *p_grid, GFile *p_file);
+
 /* Number of cells currently in the grid. */
 guint ggaze_grid_get_count(GgazeGrid *p_grid);
 

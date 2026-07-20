@@ -240,6 +240,52 @@ ggaze_grid_sync_current(GgazeGrid *p_grid) {
    return (navigator_set_current_file(p_grid->p_nav, p_file));
 }
 
+/* Borrowed pointer to the selected cell's file (NULL if nothing selected). */
+GFile *
+ggaze_grid_get_selected_file(GgazeGrid *p_grid) {
+   g_return_val_if_fail(GGAZE_IS_GRID(p_grid), NULL);
+   if (p_grid->p_flow == NULL) {
+      return (NULL);
+   }
+   GList *p_sel =
+      gtk_flow_box_get_selected_children(GTK_FLOW_BOX(p_grid->p_flow));
+   if (p_sel == NULL) {
+      return (NULL);
+   }
+   GFile *p_file = (GFile *)g_object_get_data(G_OBJECT(p_sel->data), "file");
+   g_list_free(p_sel);
+   return (p_file); /* borrowed: owned by the cell's qdata */
+}
+
+/* Toggle just one cell's "ggaze-marked" css class to match the navigator's
+ * mark set, without rebuilding the grid (so toggling a mark doesn't reflow or
+ * re-request thumbnails). */
+void
+ggaze_grid_update_mark_badge(GgazeGrid *p_grid, GFile *p_file) {
+   g_return_if_fail(GGAZE_IS_GRID(p_grid));
+   if (p_file == NULL || p_grid->p_nav == NULL) {
+      return;
+   }
+   gboolean   b_marked = navigator_is_marked(p_grid->p_nav, p_file);
+   GtkWidget *p_child  = gtk_widget_get_first_child(p_grid->p_flow);
+   while (p_child != NULL) {
+      GFile *p_f = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
+      if (p_f != NULL && g_file_equal(p_f, p_file)) {
+         GtkWidget *p_box =
+            gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(p_child));
+         if (p_box != NULL) {
+            if (b_marked) {
+               gtk_widget_add_css_class(p_box, "ggaze-marked");
+            } else {
+               gtk_widget_remove_css_class(p_box, "ggaze-marked");
+            }
+         }
+         return;
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+}
+
 void
 ggaze_grid_refresh(GgazeGrid *p_grid) {
    g_return_if_fail(GGAZE_IS_GRID(p_grid));
