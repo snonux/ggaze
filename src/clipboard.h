@@ -16,6 +16,11 @@ gboolean clipboard_copy_image_finish(GAsyncResult *p_res, GError **p_err);
 /* Copy a list of files as text/uri-list to the clipboard. */
 void clipboard_copy_uris(GdkClipboard *p_clip, GList *p_files);
 
+/* Build (but do not set) a content provider offering the given files as
+ * text/uri-list (CRLF) and text/plain (newline-joined local paths). Returns
+ * a new ref; caller must unref. Useful for testing without a clipboard. */
+GdkContentProvider *clipboard_build_uri_provider(GList *p_files);
+
 G_END_DECLS
 
 #endif

@@ -63,21 +63,68 @@ clipboard_copy_image_finish(GAsyncResult *p_res, GError **p_err) {
    return FALSE;
 }
 
+/* Build a GdkContentProvider that offers the marked files as BOTH
+ * `text/uri-list` (RFC 2483: CRLF-terminated URI lines, the format file
+ * managers request) and `text/plain` (a newline-joined list of local PATHS
+ * so pasting into a text field yields readable paths rather than raw URIs;
+ * if a file has no local path, its URI is used for that line instead). The
+ * two byte-buffers are wrapped in a union so a target requesting either MIME
+ * type is satisfied. Returns a new ref the caller must unref, or NULL when
+ * the file list is empty/NULL.
+ *
+ * An empty list returns NULL rather than an empty provider: in practice
+ * clipboard_copy_uris is only invoked when marks exist, and returning NULL
+ * lets the caller leave the previous clipboard content untouched instead of
+ * replacing it with an empty payload (which GDK's bytes provider refuses to
+ * serialize anyway). */
+GdkContentProvider *
+clipboard_build_uri_provider(GList *p_files) {
+   if (p_files == NULL) {
+      return (NULL);
+   }
+   GString *p_uris  = g_string_new(NULL); /* text/uri-list body   */
+   GString *p_plain = g_string_new(NULL); /* text/plain body      */
+   for (GList *it = p_files; it; it = it->next) {
+      GFile *p_f    = G_FILE(it->data);
+      char  *c_uri  = g_file_get_uri(p_f);
+      char  *c_path = g_file_get_path(p_f);
+      /* RFC 2483: each record terminated by CRLF, incl. the last. */
+      g_string_append_printf(p_uris, "%s\r\n", c_uri);
+      /* Prefer the local path for human-readable text/plain paste;
+       * fall back to the URI for non-local (e.g. trash://) files. */
+      g_string_append_printf(p_plain, "%s\n", c_path != NULL ? c_path : c_uri);
+      g_free(c_uri);
+      g_free(c_path);
+   }
+   GBytes *p_uri_bytes   = g_bytes_new_take(p_uris->str, p_uris->len);
+   GBytes *p_plain_bytes = g_bytes_new_take(p_plain->str, p_plain->len);
+   /* g_bytes_new_take freed the GString buffers; only the structs remain. */
+   g_string_free(p_uris, FALSE);
+   g_string_free(p_plain, FALSE);
+   GdkContentProvider *p_provs[2] = {
+      gdk_content_provider_new_for_bytes("text/uri-list", p_uri_bytes),
+      gdk_content_provider_new_for_bytes("text/plain", p_plain_bytes),
+   };
+   /* new_for_bytes refs/copies the bytes; we can release our ref now. */
+   g_bytes_unref(p_uri_bytes);
+   g_bytes_unref(p_plain_bytes);
+   GdkContentProvider *p_union =
+      gdk_content_provider_new_union(p_provs, G_N_ELEMENTS(p_provs));
+   /* new_union "takes ownership" of the sub-providers: it steals our refs
+    * and frees them when the union is disposed, so we must NOT unref them
+    * here (doing so would double-free them on the union's dispose). */
+   return (p_union);
+}
+
 void
 clipboard_copy_uris(GdkClipboard *p_clip, GList *p_files) {
    g_return_if_fail(GDK_IS_CLIPBOARD(p_clip));
-   GString *p_str = g_string_new(NULL);
-   for (GList *it = p_files; it; it = it->next) {
-      char *c_uri = g_file_get_uri(G_FILE(it->data));
-      g_string_append_printf(p_str, "%s\n", c_uri);
-      g_free(c_uri);
+   GdkContentProvider *p_prov = clipboard_build_uri_provider(p_files);
+   if (p_prov == NULL) {
+      return; /* empty list: leave the clipboard untouched. */
    }
-   GValue st_val = G_VALUE_INIT;
-   g_value_init(&st_val, G_TYPE_STRING);
-   g_value_take_string(&st_val, g_strdup(p_str->str));
-   GdkContentProvider *p_prov = gdk_content_provider_new_for_value(&st_val);
+   /* gdk_clipboard_set_content takes its own ref on the provider; we still
+    * own our initial ref from clipboard_build_uri_provider, so drop it. */
    gdk_clipboard_set_content(p_clip, p_prov);
-   g_value_unset(&st_val);
    g_object_unref(p_prov);
-   g_string_free(p_str, TRUE);
 }

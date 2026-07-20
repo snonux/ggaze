@@ -254,4 +254,13 @@ test_shortcut = executable(
 test('shortcut', test_shortcut,
    suite : 'integration', env : fixtures_env)
 
+test_clipboard = executable(
+   'test_clipboard', ['test_clipboard.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib, install : false,
+)
+test('clipboard', test_clipboard,
+   suite : 'integration', env : fixtures_env)
+
 subdir('integration')
