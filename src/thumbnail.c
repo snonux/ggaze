@@ -21,7 +21,7 @@
 #define GGAZE_TMS_XLARGE 512
 
 struct Thumbnail {
-   int i_unused;
+   GThreadPool *p_pool; /* bounded decode pool, keeps the laptop off 100% */
 };
 
 typedef struct {
@@ -164,11 +164,8 @@ _thumb_task_free(gpointer p_void) {
 }
 
 static void
-_thumb_task_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
-                   GCancellable *p_cancel) {
-   (void)p_src;
-   (void)p_cancel;
-   ThumbTask *p_tt  = (ThumbTask *)p_task_data;
+_thumb_run(GTask *p_task) {
+   ThumbTask *p_tt  = (ThumbTask *)g_task_get_task_data(p_task);
    GError    *p_err = NULL;
 
    /* File mtime + size (for verify + Thumb::Size). */
@@ -201,16 +198,56 @@ _thumb_task_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
    }
 }
 
+/* Bounded pool worker: run the decode, then drop our task ref. g_task_return_*
+ * marshals the callback to the main thread regardless of which thread calls
+ * it, so this is safe from a worker. */
+static void
+_thumb_pool_func(gpointer p_data, gpointer p_user) {
+   (void)p_user;
+   GTask *p_task = G_TASK(p_data);
+   _thumb_run(p_task);
+   g_object_unref(p_task);
+}
+
+/* GTaskThreadFunc wrapper for the (unlikely) fallback to g_task_run_in_thread
+ * if the bounded pool could not be created. */
+static void
+_thumb_pool_func_wrap(GTask *p_task, gpointer p_src, gpointer p_task_data,
+                      GCancellable *p_cancel) {
+   (void)p_src;
+   (void)p_task_data;
+   (void)p_cancel;
+   _thumb_run(p_task);
+}
+
 /* --- public ------------------------------------------------------------- */
 
 Thumbnail *
 thumbnail_new(void) {
    Thumbnail *p_t = g_new(Thumbnail, 1);
+   /* Bound the decode pool to ~half the cores (max 4) so a large folder's
+    * thumbnail generation doesn't peg every CPU at 100%. g_task_return_* still
+    * delivers each result to the main thread. */
+   gint    i_max = MAX(1, MIN(g_get_num_processors() / 2, 4));
+   GError *p_err = NULL;
+   p_t->p_pool =
+      g_thread_pool_new(_thumb_pool_func, NULL, i_max, FALSE, &p_err);
+   if (p_err != NULL) {
+      g_warning("ggaze: thumbnail pool: %s", p_err->message);
+      g_error_free(p_err);
+   }
    return (p_t);
 }
 
 void
 thumbnail_delete(Thumbnail *p_t) {
+   if (p_t == NULL) {
+      return;
+   }
+   if (p_t->p_pool != NULL) {
+      /* Drop queued work immediately; don't block on running decodes. */
+      g_thread_pool_free(p_t->p_pool, TRUE, FALSE);
+   }
    g_free(p_t);
 }
 
@@ -229,8 +266,15 @@ thumbnail_get_async(Thumbnail *p_t, GFile *p_file, int i_size,
    p_tt->c_cache_path  = _cache_path(p_t, p_file, i_bucket);
    GTask *p_task       = g_task_new(p_file, p_cancel, p_cb, p_data);
    g_task_set_task_data(p_task, p_tt, _thumb_task_free);
-   g_task_run_in_thread(p_task, _thumb_task_thread);
-   g_object_unref(p_task);
+   if (p_t->p_pool != NULL) {
+      /* Push to the bounded pool (transfers our extra ref to the worker). */
+      g_thread_pool_push(p_t->p_pool, g_object_ref(p_task), NULL);
+      g_object_unref(p_task);
+   } else {
+      /* Fallback if the pool failed to create: unbounded GTask pool. */
+      g_task_run_in_thread(p_task, _thumb_pool_func_wrap);
+      g_object_unref(p_task);
+   }
 }
 
 GdkTexture *
