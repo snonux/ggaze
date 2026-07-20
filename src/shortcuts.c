@@ -47,8 +47,16 @@ void
 shortcuts_install(GtkWidget *p_widget) {
    g_return_if_fail(GTK_IS_WIDGET(p_widget));
    GtkEventController *p_ctrl = gtk_shortcut_controller_new();
+   /* GLOBAL scope: the viewer installs its own GtkEventControllerKey that
+    * consumes key events before a MANAGED-scope window controller would see
+    * them. GLOBAL-scope shortcuts are consulted for every key event at the
+    * toplevel first, so the win.* bindings fire regardless of which child has
+    * focus. Note: this is the right scope while the app has no text-entry
+    * widgets; if a search entry / settings text field is added later, bare
+    * letter shortcuts (h/l/g/o/d/u/t/f/i/...) would intercept typing, and the
+    * dispatch will need to skip editable/IM-context focus or revisit scope. */
    gtk_shortcut_controller_set_scope(GTK_SHORTCUT_CONTROLLER(p_ctrl),
-                                     GTK_SHORTCUT_SCOPE_MANAGED);
+                                     GTK_SHORTCUT_SCOPE_GLOBAL);
    for (gsize u_i = 0; u_i < G_N_ELEMENTS(SHORTCUTS); u_i++) {
       GtkShortcut *p_s =
          gtk_shortcut_new(GTK_SHORTCUT_TRIGGER(gtk_keyval_trigger_new(

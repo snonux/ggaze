@@ -245,4 +245,13 @@ test_full_lifecycle = executable(
 test('full_lifecycle', test_full_lifecycle,
    suite : 'integration', env : fixtures_env)
 
+test_shortcut = executable(
+   'test_shortcut', ['test_shortcut.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib, install : false,
+)
+test('shortcut', test_shortcut,
+   suite : 'integration', env : fixtures_env)
+
 subdir('integration')
