@@ -54,10 +54,8 @@ runner_get_scripts(Runner *r) {
 /* Single-quote a path for safe shell interpolation. Caller frees. */
 static char *
 _shell_quote(const char *c_path) {
-   /* Replace each ' with '\'' and wrap in single quotes. */
-   char *c_escaped = g_strdup_printf("'%s'", c_path);
-   /* Simple approach: g_shell_quote does this correctly. */
-   g_free(c_escaped);
+   /* g_shell_quote wraps the path in single quotes and escapes any
+    * embedded quotes, making it safe to interpolate into a sh -c script. */
    return g_shell_quote(c_path);
 }
 
@@ -102,18 +100,20 @@ runner_run(Runner *r, GFile *p_file, GFile *p_dir, const RunnerScript *p_script,
            GAsyncReadyCallback p_cb, gpointer p_data, GError **p_err) {
    (void)r;
    g_return_val_if_fail(p_script, FALSE);
-   char *c_cmd  = _expand(p_script->c_command, p_file, p_dir);
-   char *c_full = g_strdup_printf("/bin/sh -c %s", c_cmd);
-   g_free(c_cmd);
-   char **argv = NULL;
-   if (!g_shell_parse_argv(c_full, NULL, &argv, p_err)) {
-      g_free(c_full);
+   char *c_cmd = _expand(p_script->c_command, p_file, p_dir);
+   if (c_cmd == NULL) {
+      g_set_error(p_err, G_SHELL_ERROR, G_SHELL_ERROR_FAILED,
+                  "runner: failed to expand script command");
       return FALSE;
    }
-   g_free(c_full);
-   GSubprocess *p_sub = g_subprocess_newv((const char *const *)argv,
-                                          G_SUBPROCESS_FLAGS_NONE, p_err);
-   g_strfreev(argv);
+   /* Pass the whole expanded command as a single argv element to sh -c so
+    * that pipelines, redirections, && and multi-word arguments are parsed
+    * by the shell as one script (not split by g_shell_parse_argv, which
+    * would feed sh -c only the first word and treat the rest as $0/$1...).
+    * %f/%d are already single-quoted by _expand, so paths stay safe. */
+   const char  *argv[] = {"/bin/sh", "-c", c_cmd, NULL};
+   GSubprocess *p_sub = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_NONE, p_err);
+   g_free(c_cmd);
    if (p_sub == NULL)
       return FALSE;
    if (p_cb) {
