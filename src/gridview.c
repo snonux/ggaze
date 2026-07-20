@@ -171,6 +171,9 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
    (void)e_st;
    GgazeGrid *p_grid = GGAZE_GRID(p_data);
    if (u_kv == GDK_KEY_Return || u_kv == GDK_KEY_KP_Enter) {
+      /* Sync navigator.current to the highlighted cell before activating, so
+       * Enter opens the arrow-selected image, not a stale current. */
+      ggaze_grid_sync_current(p_grid);
       g_signal_emit(p_grid, u_activate_signal, 0);
       return (TRUE);
    }
@@ -211,6 +214,30 @@ _select_current(GgazeGrid *p_grid) {
       }
       p_child = gtk_widget_get_next_sibling(p_child);
    }
+}
+
+/* Sync navigator.current to the flowbox's currently-selected child, so that
+ * leaving the grid (Enter or toggle-to-large) opens the highlighted cell,
+ * not a stale current left over from when the grid was entered. Mirrors the
+ * sync _on_child_activated does for a double-click. Returns TRUE if a
+ * selection was found and current was (or already was) that file. */
+gboolean
+ggaze_grid_sync_current(GgazeGrid *p_grid) {
+   g_return_val_if_fail(GGAZE_IS_GRID(p_grid), FALSE);
+   if (p_grid->p_nav == NULL) {
+      return (FALSE);
+   }
+   GList *p_sel =
+      gtk_flow_box_get_selected_children(GTK_FLOW_BOX(p_grid->p_flow));
+   if (p_sel == NULL) {
+      return (FALSE);
+   }
+   GFile *p_file = (GFile *)g_object_get_data(G_OBJECT(p_sel->data), "file");
+   g_list_free(p_sel);
+   if (p_file == NULL) {
+      return (FALSE);
+   }
+   return (navigator_set_current_file(p_grid->p_nav, p_file));
 }
 
 void

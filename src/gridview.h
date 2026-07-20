@@ -34,6 +34,10 @@ void ggaze_grid_set_hide_trashed(GgazeGrid *p_grid, gboolean b_hide);
 /* Rebuild the cells from the navigator (call after structural changes). */
 void ggaze_grid_refresh(GgazeGrid *p_grid);
 
+/* Sync navigator.current to the flowbox's currently-selected cell, so leaving
+ * the grid (Enter / toggle-to-large) opens the highlighted image. */
+gboolean ggaze_grid_sync_current(GgazeGrid *p_grid);
+
 /* Number of cells currently in the grid. */
 guint ggaze_grid_get_count(GgazeGrid *p_grid);
 

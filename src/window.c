@@ -243,7 +243,13 @@ _action_toggle_view(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (g_strcmp0(c_cur, "large") == 0) {
       gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "grid");
    } else {
+      /* Leaving the grid: sync navigator.current to the highlighted cell so
+       * the large view opens the selected image, then load it. */
+      if (p_win->p_grid != NULL) {
+         ggaze_grid_sync_current(p_win->p_grid);
+      }
       gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+      _load_current(p_win);
    }
 }
 
