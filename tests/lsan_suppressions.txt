@@ -7,3 +7,8 @@ leak:babl
 leak:gegl_node_new_child
 leak:gegl_node_new
 leak:gegl_operation
+# GEGL's jpg-load plugin leaks a gio source buffer during jpeg_read_header
+# (third-party, in jpg-load.so).
+leak:gio_source_init
+leak:gegl_jpg_load
+leak:jpg-load

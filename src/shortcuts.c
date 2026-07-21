@@ -35,6 +35,8 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_t, 0, "win.toggle-view"},
    {GDK_KEY_v, 0, "win.mark"},
    {GDK_KEY_a, GDK_CONTROL_MASK, "win.mark-all"},
+   {GDK_KEY_a, 0, "win.enhance"},
+   {GDK_KEY_s, 0, "win.enhance-save"},
    {GDK_KEY_question, 0, "win.shortcuts"},
    {GDK_KEY_plus, 0, "win.zoom-in"},
    {GDK_KEY_equal, 0, "win.zoom-in"},

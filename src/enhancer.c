@@ -1,5 +1,10 @@
 /* enhancer.c — GEGL quick-enhance presets (optional, feature-gated). */
 #include "enhancer.h"
+#include "ggaze-config.h"
+
+#include <glib.h>
+#include <glib/gstdio.h>
+#include <string.h>
 
 struct Enhancer {
    GPtrArray *p_presets;
@@ -140,38 +145,151 @@ enhancer_apply(Enhancer *e, GeglBuffer *p_in, const EnhancerPreset *p_preset,
    return NULL;
 }
 
+/* Pick the GEGL saver op and (for jpeg) quality from the output extension.
+ * Returns the op name, or NULL if the extension is unsupported / the op is
+ * not installed. ju0: never write JPEG bytes into a .png. */
+static const char *
+_saver_for_ext(GFile *p_out) {
+   char       *c_base = g_file_get_basename(p_out);
+   const char *c_dot  = strrchr(c_base, '.');
+   const char *c_op   = NULL;
+   if (c_dot != NULL) {
+      if (g_ascii_strcasecmp(c_dot, ".jpg") == 0 ||
+          g_ascii_strcasecmp(c_dot, ".jpeg") == 0) {
+         c_op = "gegl:jpg-save";
+      } else if (g_ascii_strcasecmp(c_dot, ".png") == 0) {
+         c_op = "gegl:png-save";
+      } else if (g_ascii_strcasecmp(c_dot, ".webp") == 0) {
+         c_op = "gegl:webp-save";
+      }
+   }
+   g_free(c_base);
+   /* webp-save ships as a plugin; only promise it if installed. */
+   if (c_op != NULL && !gegl_has_operation(c_op)) {
+      return NULL;
+   }
+   return c_op;
+}
+
 gboolean
 enhancer_export(Enhancer *e, GeglBuffer *p_in, const EnhancerPreset *p_preset,
                 GFile *p_out, GError **p_err) {
    (void)e;
-   (void)p_preset;
    g_return_val_if_fail(p_in != NULL, FALSE);
    g_return_val_if_fail(p_out != NULL, FALSE);
 
-   /* Apply the preset first. */
-   GeglBuffer *p_buf = enhancer_apply(NULL, p_in, p_preset, p_err);
-   if (p_buf == NULL)
-      return FALSE;
-
    char *c_path = g_file_get_path(p_out);
    if (c_path == NULL) {
-      g_object_unref(p_buf);
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
                   "enhancer: non-local export path");
       return FALSE;
    }
 
+   const char *c_op = _saver_for_ext(p_out);
+   if (c_op == NULL) {
+      g_free(c_path);
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "enhancer: unsupported export extension");
+      return FALSE;
+   }
+
+   /* Apply the preset first. */
+   GeglBuffer *p_buf = enhancer_apply(NULL, p_in, p_preset, p_err);
+   if (p_buf == NULL) {
+      g_free(c_path);
+      return FALSE;
+   }
+
+   /* ku0: capture the save's real success. Record the output's pre-state so
+    * a pre-existing file can't masquerade as a successful save. */
+   GStatBuf st_before;
+   gboolean b_existed = (g_stat(c_path, &st_before) == 0);
+
    GeglNode *p_graph = gegl_node_new();
    GeglNode *p_src   = gegl_node_new_child(
       p_graph, "operation", "gegl:buffer-source", "buffer", p_buf, NULL);
-   GeglNode *p_save = gegl_node_new_child(p_graph, "operation", "gegl:jpg-save",
-                                          "path", c_path, NULL);
+   GeglNode *p_save;
+   if (g_str_equal(c_op, "gegl:jpg-save")) {
+      p_save = gegl_node_new_child(p_graph, "operation", c_op, "path", c_path,
+                                   "quality", 95, NULL);
+   } else {
+      p_save =
+         gegl_node_new_child(p_graph, "operation", c_op, "path", c_path, NULL);
+   }
    gegl_node_link(p_src, p_save);
    gegl_node_process(p_save);
-   gboolean b_ok = g_file_test(c_path, G_FILE_TEST_EXISTS);
-
    g_object_unref(p_graph);
    g_object_unref(p_buf);
+
+   /* Verify the save actually produced a non-empty file newer than before. */
+   GStatBuf st_after;
+   gboolean b_ok = FALSE;
+   if (g_stat(c_path, &st_after) == 0 && st_after.st_size > 0) {
+      if (!b_existed || st_after.st_mtime != st_before.st_mtime ||
+          st_after.st_size != st_before.st_size) {
+         b_ok = TRUE;
+      }
+   }
    g_free(c_path);
-   return b_ok;
+   if (!b_ok) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "enhancer: export produced no valid file");
+      return FALSE;
+   }
+   return TRUE;
 }
+
+#if GGAZE_HAVE_GEGL
+
+GeglBuffer *
+enhancer_load(GFile *p_file, GError **p_err) {
+   g_return_val_if_fail(p_file != NULL, NULL);
+   char *c_path = g_file_get_path(p_file);
+   if (c_path == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "enhancer: non-local load path");
+      return NULL;
+   }
+   GeglBuffer *p_buf   = NULL;
+   GeglNode   *p_graph = gegl_node_new();
+   GeglNode   *p_load  = gegl_node_new_child(p_graph, "operation", "gegl:load",
+                                             "path", c_path, NULL);
+   GeglNode   *p_sink  = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-sink", "buffer", &p_buf, NULL);
+   gegl_node_link(p_load, p_sink);
+   gegl_node_process(p_sink);
+   g_object_unref(p_graph);
+   if (p_buf == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "enhancer: failed to load %s", c_path);
+      g_free(c_path);
+      return NULL;
+   }
+   g_free(c_path);
+   return p_buf;
+}
+
+GdkTexture *
+enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err) {
+   g_return_val_if_fail(p_buf != NULL, NULL);
+   gint i_w = gegl_buffer_get_width(p_buf);
+   gint i_h = gegl_buffer_get_height(p_buf);
+   if (i_w <= 0 || i_h <= 0) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "enhancer: empty buffer");
+      return NULL;
+   }
+   const Babl   *p_fmt    = babl_format("R'G'B'A u8");
+   gint          i_stride = i_w * 4;
+   gsize         u_size   = (gsize)i_stride * (gsize)i_h;
+   gpointer      p_data   = g_malloc(u_size);
+   GeglRectangle rect     = {0, 0, i_w, i_h};
+   gegl_buffer_get(p_buf, &rect, 1.0, p_fmt, p_data, i_stride, GEGL_ABYSS_NONE);
+   GBytes     *p_bytes = g_bytes_new_take(p_data, u_size);
+   GdkTexture *p_tex   = gdk_memory_texture_new(
+      i_w, i_h, GDK_MEMORY_R8G8B8A8_PREMULTIPLIED, p_bytes, i_stride);
+   g_bytes_unref(p_bytes);
+   return p_tex;
+}
+
+#endif /* GGAZE_HAVE_GEGL */

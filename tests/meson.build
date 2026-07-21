@@ -147,7 +147,7 @@ if gegl_dep.found()
    test_enhancer = executable(
       'test_enhancer', ['test_enhancer.c', ggaze_conf_h],
       include_directories : [inc, src_inc],
-      dependencies : [glib_dep, gegl_dep],
+      dependencies : [glib_dep, gegl_dep, gtk4_dep],
       link_with : ggaze_lib, install : false,
    )
    enhancer_env = environment()

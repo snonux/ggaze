@@ -18,6 +18,10 @@
 
 #include <glib.h>
 
+#if GGAZE_HAVE_GEGL
+#include <gegl.h>
+#endif
+
 struct _GgazeApp {
    AdwApplication parent_instance;
 };
@@ -38,6 +42,16 @@ static void
 ggaze_app_activate(GApplication *p_app) {
    GgazeWindow *p_win = _ensure_window(GGAZE_APP(p_app));
    gtk_window_present(GTK_WINDOW(p_win));
+}
+
+static void
+ggaze_app_startup(GApplication *p_app) {
+   G_APPLICATION_CLASS(ggaze_app_parent_class)->startup(p_app);
+#if GGAZE_HAVE_GEGL
+   /* Init GEGL once before any window is created (before the first enhance
+    * call). Idempotent if already initialised. */
+   gegl_init(NULL, NULL);
+#endif
 }
 
 static void
@@ -62,6 +76,7 @@ ggaze_app_init(GgazeApp *p_app) {
 static void
 ggaze_app_class_init(GgazeAppClass *p_klass) {
    GApplicationClass *p_app_class = G_APPLICATION_CLASS(p_klass);
+   p_app_class->startup           = ggaze_app_startup;
    p_app_class->activate          = ggaze_app_activate;
    p_app_class->open              = ggaze_app_open;
 }

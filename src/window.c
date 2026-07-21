@@ -15,8 +15,11 @@
 
 #include <adwaita.h>
 #include <glib.h>
+#include <glib/gstdio.h>
+#include <string.h>
 #include <gtk/gtk.h>
 
+#include "ggaze-config.h"
 #include "gridview.h"
 #include "info.h"
 #include "loader/loader.h"
@@ -26,6 +29,9 @@
 #include "thumbnail.h"
 #include "trash.h"
 #include "viewer.h"
+#if GGAZE_HAVE_GEGL
+#include "enhancer.h"
+#endif
 
 struct _GgazeWindow {
    GtkApplicationWindow parent_instance;
@@ -45,6 +51,10 @@ struct _GgazeWindow {
    guint         u_slideshow; /* slideshow timeout id (0=off) */
    gboolean      b_fullscreen;
    guint         u_hdr_hide; /* fullscreen header auto-hide timeout */
+#if GGAZE_HAVE_GEGL
+   int       i_enhance_idx; /* active preset index (-1 = original) */
+   Enhancer *p_enhancer;    /* GEGL preset engine (NULL w/o GEGL) */
+#endif
 };
 
 G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
@@ -52,6 +62,7 @@ G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
 /* --- forward decls ------------------------------------------------------- */
 static void     _load_current(GgazeWindow *p_win);
 static void     _prefetch(GgazeWindow *p_win);
+static void     _show_texture(GgazeWindow *p_win, GdkTexture *p_tex);
 static void     _update_header(GgazeWindow *p_win);
 static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
 static void     _show_info(GgazeWindow *p_win);
@@ -440,6 +451,24 @@ static const char *SHORTCUTS_UI =
    "        </child>\n"
    "        <child>\n"
    "          <object class=\"GtkShortcutsGroup\">\n"
+   "            <property name=\"title\">Enhance</property>\n"
+   "            <child>\n"
+   "              <object class=\"GtkShortcutsShortcut\">\n"
+   "                <property name=\"accelerator\">a</property>\n"
+   "                <property name=\"title\">Cycle enhance preset "
+   "(preview)</property>\n"
+   "              </object>\n"
+   "            </child>\n"
+   "            <child>\n"
+   "              <object class=\"GtkShortcutsShortcut\">\n"
+   "                <property name=\"accelerator\">s</property>\n"
+   "                <property name=\"title\">Save enhanced copy</property>\n"
+   "              </object>\n"
+   "            </child>\n"
+   "          </object>\n"
+   "        </child>\n"
+   "        <child>\n"
+   "          <object class=\"GtkShortcutsGroup\">\n"
    "            <property name=\"title\">Zoom</property>\n"
    "            <child>\n"
    "              <object class=\"GtkShortcutsShortcut\">\n"
@@ -580,6 +609,156 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
 }
 
+#if GGAZE_HAVE_GEGL
+/* win.enhance (key 'a'): cycle the active enhance preset and preview it on
+ * the current image. Synchronous - may briefly block the UI on large images
+ * (acceptable for v1; async apply is a later milestone). On any failure reset
+ * to the original. */
+static void
+_action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL || p_win->p_enhancer == NULL) {
+      return;
+   }
+   /* Only meaningful in large view; switch there first so the result shows. */
+   const char *c_cur =
+      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
+   if (g_strcmp0(c_cur, "large") != 0) {
+      gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+   }
+
+   const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
+   gint             i_n       = (gint)(p_presets != NULL ? p_presets->len : 0);
+   gint             i_next    = p_win->i_enhance_idx + 1;
+   if (i_next >= i_n) {
+      i_next = -1; /* wrap back to original */
+   }
+   p_win->i_enhance_idx = i_next;
+
+   if (i_next < 0) {
+      _load_current(p_win); /* restore original (texturecache makes it fast) */
+      _update_header(p_win);
+      return;
+   }
+
+   GFile *p_file = navigator_get_current(p_win->p_nav);
+   if (p_file == NULL) {
+      p_win->i_enhance_idx = -1;
+      _update_header(p_win);
+      return;
+   }
+
+   GError     *p_err = NULL;
+   GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
+   GdkTexture *p_tex = NULL;
+   if (p_buf != NULL) {
+      const EnhancerPreset *p_preset =
+         g_ptr_array_index((GPtrArray *)p_presets, (guint)i_next);
+      GeglBuffer *p_enh =
+         enhancer_apply(p_win->p_enhancer, p_buf, p_preset, &p_err);
+      if (p_enh != NULL) {
+         p_tex = enhancer_buffer_to_texture(p_enh, &p_err);
+         g_object_unref(p_enh);
+      }
+      g_object_unref(p_buf);
+   }
+   if (p_tex == NULL) {
+      g_warning("ggaze: enhance failed: %s",
+                p_err != NULL ? p_err->message : "(no detail)");
+      g_clear_error(&p_err);
+      p_win->i_enhance_idx = -1;
+      _load_current(p_win);
+   } else {
+      _show_texture(p_win, p_tex);
+      g_object_unref(p_tex);
+   }
+   _update_header(p_win);
+}
+
+/* win.enhance-save (key 's'): export the current image with the active preset
+ * to <stem>-enhanced.<ext>. Never overwrites the original. No-op (with a
+ * warning) when no preview is active. */
+static void
+_action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL || p_win->p_enhancer == NULL) {
+      return;
+   }
+   if (p_win->i_enhance_idx < 0) {
+      g_warning("ggaze: nothing to save (no enhance preview active)");
+      return;
+   }
+   GFile *p_file = navigator_get_current(p_win->p_nav);
+   if (p_file == NULL) {
+      return;
+   }
+
+   /* Build <stem>-enhanced.<ext>; default .jpg for unknown extensions. */
+   char       *c_base = g_file_get_basename(p_file);
+   char       *c_dot  = strrchr(c_base, '.');
+   const char *c_ext  = ".jpg";
+   if (c_dot != NULL && (g_ascii_strcasecmp(c_dot, ".jpg") == 0 ||
+                         g_ascii_strcasecmp(c_dot, ".jpeg") == 0 ||
+                         g_ascii_strcasecmp(c_dot, ".png") == 0 ||
+                         g_ascii_strcasecmp(c_dot, ".webp") == 0)) {
+      c_ext = c_dot;
+   }
+   char *c_stem;
+   if (c_dot != NULL && c_ext == c_dot) {
+      c_stem = g_strndup(c_base, (gsize)(c_dot - c_base));
+   } else {
+      c_stem = g_strdup(c_base);
+   }
+   GFile *p_dir     = g_file_get_parent(p_file);
+   char  *c_outname = g_strdup_printf("%s-enhanced%s", c_stem, c_ext);
+   GFile *p_out     = g_file_get_child(p_dir, c_outname);
+   g_free(c_outname);
+   g_free(c_stem);
+   g_free(c_base);
+   g_object_unref(p_dir);
+
+   GError     *p_err = NULL;
+   GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
+   gboolean    b_ok  = FALSE;
+   if (p_buf != NULL) {
+      const GPtrArray      *p_presets = enhancer_get_presets(p_win->p_enhancer);
+      const EnhancerPreset *p_preset =
+         g_ptr_array_index((GPtrArray *)p_presets, (guint)p_win->i_enhance_idx);
+      b_ok = enhancer_export(p_win->p_enhancer, p_buf, p_preset, p_out, &p_err);
+      g_object_unref(p_buf);
+   }
+   char *c_saved = b_ok ? g_file_get_basename(p_out) : NULL;
+   g_object_unref(p_out);
+   if (b_ok) {
+      g_printerr("ggaze: saved %s\n", c_saved);
+   } else {
+      g_warning("ggaze: enhance-save failed: %s",
+                p_err != NULL ? p_err->message : "(no detail)");
+   }
+   g_free(c_saved);
+   g_clear_error(&p_err);
+}
+#else  /* !GGAZE_HAVE_GEGL */
+static void
+_action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   (void)p_data;
+   g_warning("ggaze: GEGL not built in");
+}
+static void
+_action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   (void)p_data;
+   g_warning("ggaze: GEGL not built in");
+}
+#endif /* GGAZE_HAVE_GEGL */
+
 static gboolean
 _slideshow_tick(gpointer p_data) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
@@ -646,6 +825,8 @@ static const GActionEntry ACTIONS[] = {
    {.name = "slideshow", .activate = _action_slideshow},
    {.name = "info", .activate = _action_info},
    {.name = "back", .activate = _action_back},
+   {.name = "enhance", .activate = _action_enhance},
+   {.name = "enhance-save", .activate = _action_enhance_save},
 };
 
 /* --- drop target --------------------------------------------------------- */
@@ -675,7 +856,13 @@ drop_cb(GtkDropTarget *p_t, const GValue *p_val, gdouble d_x, gdouble d_y,
 static void
 nav_changed_cb(Navigator *p_nav, gpointer p_data) {
    (void)p_nav;
-   _load_current(GGAZE_WINDOW(p_data));
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+#if GGAZE_HAVE_GEGL
+   /* New image starts fresh: drop any enhanced preview so we don't show a
+    * stale enhanced texture for a different file. */
+   p_win->i_enhance_idx = -1;
+#endif
+   _load_current(p_win);
 }
 
 static void
@@ -866,6 +1053,23 @@ _update_header(GgazeWindow *p_win) {
          c_title = c_tmp;
       }
    }
+#if GGAZE_HAVE_GEGL
+   /* Append the active enhance preset name when a preview is showing. */
+   if (p_win->i_enhance_idx >= 0 && p_win->p_enhancer != NULL &&
+       c_title != NULL) {
+      const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
+      if (p_presets != NULL && (guint)p_win->i_enhance_idx < p_presets->len) {
+         const EnhancerPreset *p_preset = g_ptr_array_index(
+            (GPtrArray *)p_presets, (guint)p_win->i_enhance_idx);
+         if (p_preset->c_name != NULL) {
+            char *c_tmp =
+               g_strdup_printf("%s  \u00b7  %s", c_title, p_preset->c_name);
+            g_free(c_title);
+            c_title = c_tmp;
+         }
+      }
+   }
+#endif
    if (c_title == NULL) {
       c_title = g_strdup("ggaze");
    }
@@ -904,6 +1108,9 @@ ggaze_window_dispose(GObject *p_obj) {
    g_clear_pointer(&p_win->p_cache, texturecache_delete);
    g_clear_pointer(&p_win->p_trash, trash_delete);
    g_clear_pointer(&p_win->p_thumb, thumbnail_delete);
+#if GGAZE_HAVE_GEGL
+   g_clear_pointer(&p_win->p_enhancer, enhancer_delete);
+#endif
    /* p_stack/p_viewer/p_grid are GtkWidgets parented to the window; GTK
     * releases them. */
    G_OBJECT_CLASS(ggaze_window_parent_class)->dispose(p_obj);
@@ -951,6 +1158,10 @@ ggaze_window_init(GgazeWindow *p_win) {
    p_win->p_trash           = NULL; /* created on open */
    p_win->p_grid            = NULL; /* created on open */
    p_win->i_grid_size       = 128;
+#if GGAZE_HAVE_GEGL
+   p_win->i_enhance_idx = -1; /* start on the original */
+   p_win->p_enhancer    = enhancer_new();
+#endif
 
    /* Header bar (libadwaita, decision #29). */
    GtkWidget *p_header = adw_header_bar_new();
