@@ -328,12 +328,14 @@ test_shortcut_keypath_toggle_and_back(void) {
 static void
 test_shortcut_full_table_registered(void) {
    static const char *ACTIONS[] = {
-      "win.prev",         "win.next",        "win.first",    "win.last",
-      "win.open",         "win.quit",        "win.trash",    "win.delete",
-      "win.undo",         "win.toggle-view", "win.mark",     "win.mark-all",
-      "win.shortcuts",    "win.zoom-in",     "win.zoom-out", "win.fullscreen",
-      "win.slideshow",    "win.info",        "win.back",     "win.enhance",
-      "win.enhance-save",
+      "win.prev",         "win.next",        "win.first",     "win.last",
+      "win.open",         "win.quit",        "win.trash",     "win.delete",
+      "win.undo",         "win.toggle-view", "win.mark",      "win.mark-all",
+      "win.shortcuts",    "win.zoom-in",     "win.zoom-out",  "win.fullscreen",
+      "win.slideshow",    "win.info",        "win.back",      "win.enhance",
+      "win.enhance-save", "win.enhance-1",   "win.enhance-2", "win.enhance-3",
+      "win.enhance-4",    "win.enhance-5",   "win.enhance-6", "win.enhance-7",
+      "win.enhance-8",
    };
    GgazeWindow           *p_win = new_window();
    GtkShortcutController *p_sc  = find_shortcut_controller(GTK_WIDGET(p_win));
@@ -345,7 +347,7 @@ test_shortcut_full_table_registered(void) {
    }
    /* The SHORTCUTS[] table has 25 rows now (some actions appear twice, e.g.
     * win.prev for h and Left; win.zoom-in for plus and equal). */
-   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 25);
+   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 33);
    g_object_unref(p_sc);
    g_object_unref(p_win);
    drain_main(200);
