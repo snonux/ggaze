@@ -52,8 +52,9 @@ struct _GgazeWindow {
    gboolean      b_fullscreen;
    guint         u_hdr_hide; /* fullscreen header auto-hide timeout */
 #if GGAZE_HAVE_GEGL
-   int       i_enhance_idx; /* active preset index (-1 = original) */
-   Enhancer *p_enhancer;    /* GEGL preset engine (NULL w/o GEGL) */
+   int        i_enhance_idx; /* active preset index (-1 = original) */
+   Enhancer  *p_enhancer;    /* GEGL preset engine (NULL w/o GEGL) */
+   GtkWidget *p_enhance_pop; /* the enhance popup (NULL when closed) */
 #endif
 };
 
@@ -455,8 +456,8 @@ static const char *SHORTCUTS_UI =
    "            <child>\n"
    "              <object class=\"GtkShortcutsShortcut\">\n"
    "                <property name=\"accelerator\">a</property>\n"
-   "                <property name=\"title\">Cycle enhance preset "
-   "(preview)</property>\n"
+   "                <property name=\"title\">Enhance menu (then 1-9 pick a "
+   "preset, 0 = Original)</property>\n"
    "              </object>\n"
    "            </child>\n"
    "            <child>\n"
@@ -610,52 +611,46 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 #if GGAZE_HAVE_GEGL
-/* win.enhance (key 'a'): cycle the active enhance preset and preview it on
- * the current image. Synchronous - may briefly block the UI on large images
- * (acceptable for v1; async apply is a later milestone). On any failure reset
- * to the original. */
+/* Apply preset i_idx to the current image as a live preview (i_idx = -1 =>
+ * restore the original). Switches to large view so the result shows. On any
+ * failure resets to the original. Synchronous - may briefly block the UI on
+ * large images (async apply is a later milestone). */
 static void
-_action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
-   (void)p_a;
-   (void)p_v;
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+_apply_enhance(GgazeWindow *p_win, gint i_idx) {
    if (p_win->p_nav == NULL || p_win->p_enhancer == NULL) {
       return;
    }
-   /* Only meaningful in large view; switch there first so the result shows. */
    const char *c_cur =
       gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
    if (g_strcmp0(c_cur, "large") != 0) {
       gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
    }
-
-   const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
-   gint             i_n       = (gint)(p_presets != NULL ? p_presets->len : 0);
-   gint             i_next    = p_win->i_enhance_idx + 1;
-   if (i_next >= i_n) {
-      i_next = -1; /* wrap back to original */
-   }
-   p_win->i_enhance_idx = i_next;
-
-   if (i_next < 0) {
-      _load_current(p_win); /* restore original (texturecache makes it fast) */
+   p_win->i_enhance_idx = i_idx;
+   if (i_idx < 0) {
+      _load_current(p_win); /* restore original (texturecache is fast) */
       _update_header(p_win);
       return;
    }
-
    GFile *p_file = navigator_get_current(p_win->p_nav);
    if (p_file == NULL) {
       p_win->i_enhance_idx = -1;
       _update_header(p_win);
       return;
    }
-
+   const GPtrArray      *p_presets = enhancer_get_presets(p_win->p_enhancer);
+   const EnhancerPreset *p_preset =
+      (p_presets != NULL && (guint)i_idx < p_presets->len)
+         ? g_ptr_array_index((GPtrArray *)p_presets, (guint)i_idx)
+         : NULL;
+   if (p_preset == NULL) {
+      p_win->i_enhance_idx = -1;
+      _update_header(p_win);
+      return;
+   }
    GError     *p_err = NULL;
    GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
    GdkTexture *p_tex = NULL;
    if (p_buf != NULL) {
-      const EnhancerPreset *p_preset =
-         g_ptr_array_index((GPtrArray *)p_presets, (guint)i_next);
       GeglBuffer *p_enh =
          enhancer_apply(p_win->p_enhancer, p_buf, p_preset, &p_err);
       if (p_enh != NULL) {
@@ -675,6 +670,118 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       g_object_unref(p_tex);
    }
    _update_header(p_win);
+}
+
+/* Hide the enhance popup (the "closed" signal does the real teardown). */
+static void
+_enhance_pop_popdown(GgazeWindow *p_win) {
+   if (p_win->p_enhance_pop != NULL) {
+      gtk_popover_popdown(GTK_POPOVER(p_win->p_enhance_pop));
+   }
+}
+
+/* "closed" handler: unparent + destroy the popup. */
+static void
+_enhance_pop_closed(GgazeWindow *p_win) {
+   GtkWidget *p_pop = p_win->p_enhance_pop;
+   if (p_pop == NULL) {
+      return;
+   }
+   p_win->p_enhance_pop = NULL;
+   gtk_widget_unparent(p_pop); /* drops our set_parent ref -> destroys */
+}
+
+/* Apply the preset attached to the clicked button (qdata "idx") and close. */
+static void
+_enhance_row_apply(GgazeWindow *p_win, GtkWidget *p_btn) {
+   gint i_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(p_btn), "idx"));
+   _apply_enhance(p_win, i_idx);
+   _enhance_pop_popdown(p_win);
+}
+
+/* Digit / Escape handling inside the enhance popup. */
+static gboolean
+_enhance_pop_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
+                 GdkModifierType e_st, gpointer p_data) {
+   (void)p_key;
+   (void)u_kc;
+   (void)e_st;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (u_kv >= GDK_KEY_1 && u_kv <= GDK_KEY_9) {
+      gint             i_idx     = (gint)(u_kv - GDK_KEY_1);
+      const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
+      if (p_presets != NULL && (guint)i_idx < p_presets->len) {
+         _apply_enhance(p_win, i_idx);
+         _enhance_pop_popdown(p_win);
+         return (TRUE);
+      }
+      return (FALSE);
+   }
+   if (u_kv == GDK_KEY_0) {
+      _apply_enhance(p_win, -1);
+      _enhance_pop_popdown(p_win);
+      return (TRUE);
+   }
+   if (u_kv == GDK_KEY_Escape) {
+      _enhance_pop_popdown(p_win);
+      return (TRUE);
+   }
+   return (FALSE);
+}
+
+/* win.enhance (key 'a'): open a popup listing the presets with number
+ * hotkeys (1..N = presets, 0 = Original). Click a row or press its digit to
+ * apply; Escape closes. */
+static void
+_action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL || p_win->p_enhancer == NULL) {
+      return;
+   }
+   if (p_win->p_enhance_pop != NULL) {
+      _enhance_pop_popdown(p_win); /* toggle: 'a' again closes */
+      return;
+   }
+   const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
+   if (p_presets == NULL || p_presets->len == 0) {
+      return;
+   }
+   GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+   gtk_widget_set_margin_start(p_box, 8);
+   gtk_widget_set_margin_end(p_box, 8);
+   gtk_widget_set_margin_top(p_box, 8);
+   gtk_widget_set_margin_bottom(p_box, 8);
+   for (guint i = 0; i < p_presets->len && i < 9; i++) {
+      const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_presets, i);
+      char      *c_lbl = g_strdup_printf("%u  %s", i + 1, p_pr->c_name);
+      GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
+      gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
+      g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER((gint)i));
+      g_signal_connect_swapped(p_btn, "clicked", G_CALLBACK(_enhance_row_apply),
+                               p_win);
+      gtk_box_append(GTK_BOX(p_box), p_btn);
+      g_free(c_lbl);
+   }
+   GtkWidget *p_btn0 = gtk_button_new_with_label("0  Original");
+   gtk_widget_set_halign(p_btn0, GTK_ALIGN_START);
+   g_object_set_data(G_OBJECT(p_btn0), "idx", GINT_TO_POINTER(-1));
+   g_signal_connect_swapped(p_btn0, "clicked", G_CALLBACK(_enhance_row_apply),
+                            p_win);
+   gtk_box_append(GTK_BOX(p_box), p_btn0);
+
+   GtkWidget *p_pop = gtk_popover_new();
+   gtk_popover_set_child(GTK_POPOVER(p_pop), p_box);
+   gtk_popover_set_position(GTK_POPOVER(p_pop), GTK_POS_BOTTOM);
+   gtk_widget_set_parent(p_pop, p_win->p_overlay);
+   GtkEventController *p_key = gtk_event_controller_key_new();
+   g_signal_connect(p_key, "key-pressed", G_CALLBACK(_enhance_pop_key), p_win);
+   gtk_widget_add_controller(p_pop, p_key);
+   p_win->p_enhance_pop = p_pop;
+   g_signal_connect_swapped(p_pop, "closed", G_CALLBACK(_enhance_pop_closed),
+                            p_win);
+   gtk_popover_popup(GTK_POPOVER(p_pop));
 }
 
 /* win.enhance-save (key 's'): export the current image with the active preset
