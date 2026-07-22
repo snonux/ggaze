@@ -118,22 +118,32 @@ static GdkTexture *
 _jpeg_load_progressive(GFile *p_file, GCancellable *p_cancel,
                        LoaderProgressCb p_progress, gpointer p_progress_data,
                        GError **p_err) {
-   (void)p_cancel;
    gchar *c_buf = NULL;
    gsize  u_len = 0;
-   if (!g_file_load_contents(p_file, NULL, &c_buf, &u_len, NULL, p_err)) {
+   if (!g_file_load_contents(p_file, p_cancel, &c_buf, &u_len, NULL, p_err)) {
       return (NULL);
    }
-   /* Phase 1: low-res (1/8 scale). */
+   /* Phase 1: low-res (1/8 scale). Skip once the load was superseded so a
+    * stale partial cannot be emitted for a file that is no longer current. */
    int     i_lw, i_lh;
    guint8 *p_lp = NULL;
-   if (_decode_at_scale((const guint8 *)c_buf, u_len, GGAZE_JPEG_LORES_DENOM,
+   if (!g_cancellable_is_cancelled(p_cancel) &&
+       _decode_at_scale((const guint8 *)c_buf, u_len, GGAZE_JPEG_LORES_DENOM,
                         &i_lw, &i_lh, &p_lp, NULL)) {
       GdkTexture *p_partial = _make_texture(i_lw, i_lh, p_lp);
-      if (p_progress != NULL) {
+      if (!g_cancellable_is_cancelled(p_cancel) && p_progress != NULL) {
          p_progress(p_partial, p_progress_data);
       }
       g_object_unref(p_partial);
+   }
+   /* Bail before the expensive full decode if the load was cancelled (e.g. by
+    * a rapid navigation to a different file). The GTask reports the
+    * cancellation; _load_finish_cb treats G_IO_ERROR_CANCELLED as benign. */
+   if (g_cancellable_is_cancelled(p_cancel)) {
+      g_free(c_buf);
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                  "jpeg: progressive load cancelled");
+      return (NULL);
    }
    /* Phase 2: full decode via GdkPixbuf (applies EXIF orientation). */
    char *c_path = g_file_get_path(p_file);

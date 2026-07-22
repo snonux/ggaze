@@ -1297,17 +1297,47 @@ _prefetch_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
 
 /* --- M6: progressive low-res preview ------------------------------------ */
 
+/* One LoadCtx per loader_load_async call. It carries the source GFile
+ * identity so the main-thread progress/finish callbacks can enforce
+ * last-write-wins: a result whose file no longer equals navigator.current
+ * is dropped instead of overwriting the viewer. The GTask always invokes
+ * _load_finish_cb (even on cancellation), which is the sole owner that frees
+ * the ctx, so the refs are balanced regardless of whether progress fired. */
+typedef struct {
+   GgazeWindow *p_win;  /* ref'd; outlives the load */
+   GFile       *p_file; /* ref'd; the file being loaded */
+} LoadCtx;
+
 typedef struct {
    GgazeWindow *p_win;
+   GFile       *p_file;
    GdkTexture  *p_tex;
 } ProgressInvoke;
+
+static void
+_load_ctx_free(LoadCtx *p_ctx) {
+   if (p_ctx == NULL) {
+      return;
+   }
+   g_object_unref(p_ctx->p_win);
+   g_object_unref(p_ctx->p_file);
+   g_free(p_ctx);
+}
 
 static gboolean
 _on_progress_main(gpointer p_data) {
    ProgressInvoke *p_pi = (ProgressInvoke *)p_data;
-   /* Show the partial; the full result replaces it in _load_finish_cb. */
-   ggaze_viewer_set_texture(GGAZE_VIEWER(p_pi->p_win->p_viewer), p_pi->p_tex);
+   /* Last-write-wins: show the partial only if its source file is still the
+    * current one. A stale partial from a superseded (cancelled) load is
+    * dropped here so it cannot overwrite the viewer while another image is
+    * current; the full result replaces it in _load_finish_cb. */
+   GFile *p_cur = navigator_get_current(p_pi->p_win->p_nav);
+   if (p_cur != NULL && g_file_equal(p_cur, p_pi->p_file)) {
+      ggaze_viewer_set_texture(GGAZE_VIEWER(p_pi->p_win->p_viewer),
+                               p_pi->p_tex);
+   }
    g_object_unref(p_pi->p_tex);
+   g_object_unref(p_pi->p_file);
    g_object_unref(p_pi->p_win);
    g_free(p_pi);
    return (G_SOURCE_REMOVE);
@@ -1315,9 +1345,10 @@ _on_progress_main(gpointer p_data) {
 
 static void
 _load_progress_cb(GdkTexture *p_partial, gpointer p_data) {
-   GgazeWindow    *p_win = GGAZE_WINDOW(p_data);
+   LoadCtx        *p_ctx = (LoadCtx *)p_data;
    ProgressInvoke *p_pi  = g_new(ProgressInvoke, 1);
-   p_pi->p_win           = (GgazeWindow *)g_object_ref(p_win);
+   p_pi->p_win           = (GgazeWindow *)g_object_ref(p_ctx->p_win);
+   p_pi->p_file          = (GFile *)g_object_ref(p_ctx->p_file);
    p_pi->p_tex           = (GdkTexture *)g_object_ref(p_partial);
    g_main_context_invoke_full(NULL, G_PRIORITY_DEFAULT, _on_progress_main, p_pi,
                               NULL);
@@ -1328,7 +1359,8 @@ _load_progress_cb(GdkTexture *p_partial, gpointer p_data) {
 static void
 _load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   LoadCtx     *p_ctx = (LoadCtx *)p_data;
+   GgazeWindow *p_win = p_ctx->p_win;
    GError      *p_err = NULL;
    GdkTexture  *p_tex = loader_load_finish(p_res, &p_err);
    if (p_tex == NULL) {
@@ -1340,7 +1372,7 @@ _load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
          g_free(c_name);
       }
       g_clear_error(&p_err);
-      g_object_unref(p_win);
+      _load_ctx_free(p_ctx);
       return;
    }
    GFile *p_loaded = (GFile *)g_task_get_source_object((GTask *)p_res);
@@ -1351,7 +1383,7 @@ _load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       _prefetch(p_win);
    }
    g_object_unref(p_tex);
-   g_object_unref(p_win);
+   _load_ctx_free(p_ctx);
 }
 
 /* Prefetch the next/previous images into the cache (not shown). Cancels the
@@ -1409,12 +1441,18 @@ _load_current(GgazeWindow *p_win) {
    }
 
    /* Cache miss: cancel the previous visible load, start a new async load.
-    * Last-write-wins is enforced in _load_finish_cb. */
+    * Last-write-wins is enforced in _load_progress_cb (partial) and
+    * _load_finish_cb (full result), both via the LoadCtx's source GFile. The
+    * single LoadCtx is shared by both callbacks and freed in _load_finish_cb,
+    * which the GTask always invokes. */
    g_cancellable_cancel(p_win->p_cancel);
    g_clear_object(&p_win->p_cancel);
    p_win->p_cancel = g_cancellable_new();
-   loader_load_async(p_cur, p_win->p_cancel, _load_progress_cb,
-                     g_object_ref(p_win), _load_finish_cb, g_object_ref(p_win));
+   LoadCtx *p_ctx  = g_new(LoadCtx, 1);
+   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->p_file   = (GFile *)g_object_ref(p_cur);
+   loader_load_async(p_cur, p_win->p_cancel, _load_progress_cb, p_ctx,
+                     _load_finish_cb, p_ctx);
    _update_header(p_win);
 }
 
