@@ -72,8 +72,156 @@ static void     _show_info(GgazeWindow *p_win);
 static void     _hide_info(GgazeWindow *p_win);
 static gboolean _slideshow_tick(gpointer p_data);
 #if GGAZE_HAVE_GEGL
-static void _enhance_update_highlights(GgazeWindow *p_win);
-static void _enhance_panel_reparent(GgazeWindow *p_win, gboolean b_overlay);
+static void     _enhance_update_highlights(GgazeWindow *p_win);
+static void     _enhance_panel_reparent(GgazeWindow *p_win, gboolean b_overlay);
+static gboolean _enhance_do_save(GgazeWindow *p_win);
+#endif
+
+#if GGAZE_HAVE_GEGL
+/* Export the current image with the enabled-preset chain to
+ * <stem>-enhanced.<ext>. Returns TRUE on success; prints the saved name. */
+static gboolean
+_enhance_do_save(GgazeWindow *p_win) {
+   if (p_win->p_nav == NULL || p_win->p_enhancer == NULL ||
+       p_win->u_enhance_mask == 0) {
+      return (FALSE);
+   }
+   GFile *p_file = navigator_get_current(p_win->p_nav);
+   if (p_file == NULL) {
+      return (FALSE);
+   }
+   char       *c_base = g_file_get_basename(p_file);
+   char       *c_dot  = strrchr(c_base, '.');
+   const char *c_ext  = ".jpg";
+   if (c_dot != NULL && (g_ascii_strcasecmp(c_dot, ".jpg") == 0 ||
+                         g_ascii_strcasecmp(c_dot, ".jpeg") == 0 ||
+                         g_ascii_strcasecmp(c_dot, ".png") == 0 ||
+                         g_ascii_strcasecmp(c_dot, ".webp") == 0)) {
+      c_ext = c_dot;
+   }
+   char *c_stem;
+   if (c_dot != NULL && c_ext == c_dot) {
+      c_stem = g_strndup(c_base, (gsize)(c_dot - c_base));
+   } else {
+      c_stem = g_strdup(c_base);
+   }
+   GFile *p_dir     = g_file_get_parent(p_file);
+   char  *c_outname = g_strdup_printf("%s-enhanced%s", c_stem, c_ext);
+   GFile *p_out     = g_file_get_child(p_dir, c_outname);
+   g_free(c_outname);
+   g_free(c_stem);
+   g_free(c_base);
+   g_object_unref(p_dir);
+
+   GError     *p_err = NULL;
+   GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
+   gboolean    b_ok  = FALSE;
+   if (p_buf != NULL) {
+      const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
+      b_ok = enhancer_export_chain(p_win->p_enhancer, p_buf, p_presets,
+                                   p_win->u_enhance_mask, p_out, &p_err);
+      g_object_unref(p_buf);
+   }
+   char *c_saved = b_ok ? g_file_get_basename(p_out) : NULL;
+   g_object_unref(p_out);
+   if (b_ok) {
+      g_printerr("ggaze: saved %s\n", c_saved);
+   } else {
+      g_warning("ggaze: enhance-save failed: %s",
+                p_err != NULL ? p_err->message : "(no detail)");
+   }
+   g_free(c_saved);
+   g_clear_error(&p_err);
+   return (b_ok);
+}
+
+typedef struct {
+   GgazeWindow *p_win;
+   GSourceFunc  fn;
+   gpointer     data;
+} _SaveCtx;
+
+/* Alert-dialog response: 0=Cancel, 1=Discard, 2=Save. */
+static void
+_save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
+   _SaveCtx    *p_ctx = (_SaveCtx *)p_data;
+   GgazeWindow *p_win = p_ctx->p_win;
+   GError      *p_err = NULL;
+   gint         i_btn =
+      gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(p_dlg), p_res, &p_err);
+   g_object_unref(GTK_ALERT_DIALOG(p_dlg));
+   if (p_err != NULL) { /* dismissed / error -> treat as Cancel */
+      g_clear_error(&p_err);
+      g_free(p_ctx);
+      return;
+   }
+   if (i_btn == 2) { /* Save */
+      _enhance_do_save(p_win);
+   }
+   if (i_btn == 1 || i_btn == 2) { /* Discard or Save: clear + proceed */
+      p_win->u_enhance_mask = 0;
+      _enhance_update_highlights(p_win);
+      _update_header(p_win);
+      if (p_ctx->fn != NULL) {
+         p_ctx->fn(p_ctx->data);
+      }
+   } /* Cancel: keep the preview, do not navigate. */
+   g_free(p_ctx);
+}
+
+/* If an enhance preview is active (unsaved), ask Save / Discard / Cancel
+ * before proceeding with fn. If no preview, just run fn. */
+static void
+_maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data) {
+   if (p_win->u_enhance_mask == 0 || p_win->p_enhancer == NULL) {
+      if (fn != NULL) {
+         fn(data);
+      }
+      return;
+   }
+   GtkAlertDialog *p_dlg =
+      gtk_alert_dialog_new("Save the enhanced copy before leaving this image?");
+   static const char *const c_btns[] = {"Cancel", "Discard", "Save", NULL};
+   gtk_alert_dialog_set_buttons(p_dlg, c_btns);
+   gtk_alert_dialog_set_default_button(p_dlg, 2);
+   gtk_alert_dialog_set_cancel_button(p_dlg, 0);
+   gtk_alert_dialog_set_modal(p_dlg, TRUE);
+   _SaveCtx *p_ctx = g_new(_SaveCtx, 1);
+   p_ctx->p_win    = p_win;
+   p_ctx->fn       = fn;
+   p_ctx->data     = data;
+   gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), NULL, _save_dialog_cb,
+                           p_ctx);
+}
+
+static gboolean
+_proceed_prev(gpointer d) {
+   ggaze_window_prev(GGAZE_WINDOW(d));
+   return (G_SOURCE_REMOVE);
+}
+static gboolean
+_proceed_next(gpointer d) {
+   ggaze_window_next(GGAZE_WINDOW(d));
+   return (G_SOURCE_REMOVE);
+}
+static gboolean
+_proceed_first(gpointer d) {
+   ggaze_window_first(GGAZE_WINDOW(d));
+   return (G_SOURCE_REMOVE);
+}
+static gboolean
+_proceed_last(gpointer d) {
+   ggaze_window_last(GGAZE_WINDOW(d));
+   return (G_SOURCE_REMOVE);
+}
+#else /* !GGAZE_HAVE_GEGL */
+static void
+_maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data) {
+   (void)p_win;
+   if (fn != NULL) {
+      fn(data);
+   }
+}
 #endif
 
 /* --- actions ------------------------------------------------------------- */
@@ -82,28 +230,28 @@ static void
 _action_prev(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   ggaze_window_prev(GGAZE_WINDOW(p_data));
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_prev, p_data);
 }
 
 static void
 _action_next(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   ggaze_window_next(GGAZE_WINDOW(p_data));
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_next, p_data);
 }
 
 static void
 _action_first(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   ggaze_window_first(GGAZE_WINDOW(p_data));
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_first, p_data);
 }
 
 static void
 _action_last(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   ggaze_window_last(GGAZE_WINDOW(p_data));
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_last, p_data);
 }
 
 static void
@@ -751,6 +899,13 @@ _build_enhance_panel(GgazeWindow *p_win) {
                             p_win);
    gtk_box_append(GTK_BOX(p_box), p_btn0);
 
+   /* A dim hint that 's' saves the enhanced copy. */
+   GtkWidget *p_hint = gtk_label_new("s  Save enhanced copy");
+   gtk_widget_set_halign(p_hint, GTK_ALIGN_START);
+   gtk_widget_set_margin_top(p_hint, 8);
+   gtk_widget_add_css_class(p_hint, "dim-label");
+   gtk_box_append(GTK_BOX(p_box), p_hint);
+
    GtkWidget *p_rev = gtk_revealer_new();
    gtk_revealer_set_transition_type(GTK_REVEALER(p_rev),
                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_RIGHT);
@@ -844,54 +999,7 @@ _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       g_warning("ggaze: nothing to save (no enhance preset enabled)");
       return;
    }
-   GFile *p_file = navigator_get_current(p_win->p_nav);
-   if (p_file == NULL) {
-      return;
-   }
-
-   /* Build <stem>-enhanced.<ext>; default .jpg for unknown extensions. */
-   char       *c_base = g_file_get_basename(p_file);
-   char       *c_dot  = strrchr(c_base, '.');
-   const char *c_ext  = ".jpg";
-   if (c_dot != NULL && (g_ascii_strcasecmp(c_dot, ".jpg") == 0 ||
-                         g_ascii_strcasecmp(c_dot, ".jpeg") == 0 ||
-                         g_ascii_strcasecmp(c_dot, ".png") == 0 ||
-                         g_ascii_strcasecmp(c_dot, ".webp") == 0)) {
-      c_ext = c_dot;
-   }
-   char *c_stem;
-   if (c_dot != NULL && c_ext == c_dot) {
-      c_stem = g_strndup(c_base, (gsize)(c_dot - c_base));
-   } else {
-      c_stem = g_strdup(c_base);
-   }
-   GFile *p_dir     = g_file_get_parent(p_file);
-   char  *c_outname = g_strdup_printf("%s-enhanced%s", c_stem, c_ext);
-   GFile *p_out     = g_file_get_child(p_dir, c_outname);
-   g_free(c_outname);
-   g_free(c_stem);
-   g_free(c_base);
-   g_object_unref(p_dir);
-
-   GError     *p_err = NULL;
-   GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
-   gboolean    b_ok  = FALSE;
-   if (p_buf != NULL) {
-      const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
-      b_ok = enhancer_export_chain(p_win->p_enhancer, p_buf, p_presets,
-                                   p_win->u_enhance_mask, p_out, &p_err);
-      g_object_unref(p_buf);
-   }
-   char *c_saved = b_ok ? g_file_get_basename(p_out) : NULL;
-   g_object_unref(p_out);
-   if (b_ok) {
-      g_printerr("ggaze: saved %s\n", c_saved);
-   } else {
-      g_warning("ggaze: enhance-save failed: %s",
-                p_err != NULL ? p_err->message : "(no detail)");
-   }
-   g_free(c_saved);
-   g_clear_error(&p_err);
+   _enhance_do_save(p_win);
 }
 #else  /* !GGAZE_HAVE_GEGL */
 static void
