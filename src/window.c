@@ -77,6 +77,31 @@ static void     _enhance_panel_reparent(GgazeWindow *p_win, gboolean b_overlay);
 static gboolean _enhance_do_save(GgazeWindow *p_win);
 #endif
 
+/* Navigation continuations used by _maybe_save_then after the (GEGL) save
+ * /discard dialog resolves. They are trivial wrappers over the public
+ * navigation API and do not depend on GEGL, so they are always compiled
+ * (the _action_prev/next/first/last handlers reference them regardless of
+ * the GEGL build configuration). */
+static gboolean
+_proceed_prev(gpointer d) {
+   ggaze_window_prev(GGAZE_WINDOW(d));
+   return (G_SOURCE_REMOVE);
+}
+static gboolean
+_proceed_next(gpointer d) {
+   ggaze_window_next(GGAZE_WINDOW(d));
+   return (G_SOURCE_REMOVE);
+}
+static gboolean
+_proceed_first(gpointer d) {
+   ggaze_window_first(GGAZE_WINDOW(d));
+   return (G_SOURCE_REMOVE);
+}
+static gboolean
+_proceed_last(gpointer d) {
+   ggaze_window_last(GGAZE_WINDOW(d));
+   return (G_SOURCE_REMOVE);
+}
 #if GGAZE_HAVE_GEGL
 /* Export the current image with the enabled-preset chain to
  * <stem>-enhanced.<ext>. Returns TRUE on success; prints the saved name. */
@@ -194,26 +219,6 @@ _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data) {
                            p_ctx);
 }
 
-static gboolean
-_proceed_prev(gpointer d) {
-   ggaze_window_prev(GGAZE_WINDOW(d));
-   return (G_SOURCE_REMOVE);
-}
-static gboolean
-_proceed_next(gpointer d) {
-   ggaze_window_next(GGAZE_WINDOW(d));
-   return (G_SOURCE_REMOVE);
-}
-static gboolean
-_proceed_first(gpointer d) {
-   ggaze_window_first(GGAZE_WINDOW(d));
-   return (G_SOURCE_REMOVE);
-}
-static gboolean
-_proceed_last(gpointer d) {
-   ggaze_window_last(GGAZE_WINDOW(d));
-   return (G_SOURCE_REMOVE);
-}
 #else /* !GGAZE_HAVE_GEGL */
 static void
 _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data) {
