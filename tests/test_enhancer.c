@@ -1,7 +1,9 @@
 /* test_enhancer.c — GEGL enhance unit test (gated on HAVE_GEGL). */
 #include "enhancer.h"
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <gegl.h>
+#include <unistd.h>
 
 static void
 test_builtin_presets(void) {
@@ -261,6 +263,97 @@ test_export_real_success(void) {
    g_free(tmp);
 }
 
+/* /enhancer/export_stale_dest (ku0): a pre-existing regular file at the
+ * destination must never count as success on its own. (a) A writable stale
+ * file is correctly overwritten — assert the new bytes (PNG signature) and
+ * that they differ from the stale content, not mere presence. (b) A
+ * read-only stale file the saver cannot replace must fail (FALSE + GError).
+ */
+static void
+test_export_stale_dest(void) {
+   const gchar *c_fx = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_fx);
+   char  *c_path = g_build_filename(c_fx, "plain.jpg", NULL);
+   GFile *p_file = g_file_new_for_path(c_path);
+   g_free(c_path);
+
+   GError     *p_err = NULL;
+   GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
+   g_assert_nonnull(p_buf);
+
+   Enhancer             *e = enhancer_new();
+   const EnhancerPreset *preset =
+      g_ptr_array_index((GPtrArray *)enhancer_get_presets(e), 0);
+   char *tmp = g_dir_make_tmp("ggaze-stale-XXXXXX", NULL);
+
+   /* (a) writable stale regular file: overwritten, not trusted as-is. */
+   {
+      char       *c_p   = g_build_filename(tmp, "out.png", NULL);
+      const char *stale = "STALE-CONTENT-NOT-A-PNG";
+      gsize       n_st  = strlen(stale);
+      g_assert_true(g_file_set_contents(c_p, stale, n_st, NULL));
+      GFile *p_out = g_file_new_for_path(c_p);
+      g_clear_error(&p_err);
+      gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+      g_assert_true(ok);
+      g_assert_no_error(p_err);
+      gchar *data = NULL;
+      gsize  len  = 0;
+      g_assert_true(g_file_get_contents(c_p, &data, &len, NULL));
+      g_assert_cmpint(len, >=, 8);
+      g_assert_cmpmem(data, 8, "\x89PNG\r\n\x1a\n", 8);
+      g_assert_cmpint(len, !=, (gint)n_st);
+      g_free(data);
+      g_object_unref(p_out);
+      g_unlink(c_p);
+      g_free(c_p);
+   }
+
+   /* (b) read-only stale regular file: saver cannot replace -> FALSE.
+    * Skipped when running as root: root bypasses file-mode permissions, so
+    * the save would succeed and the "cannot replace" assertion would not
+    * hold. The directory-destination case in export_real_success already
+    * covers a root-safe save failure. */
+   {
+      char       *c_p   = g_build_filename(tmp, "ro.png", NULL);
+      const char *stale = "STALE-RO";
+      gsize       n_st  = strlen(stale);
+      g_assert_true(g_file_set_contents(c_p, stale, n_st, NULL));
+      if (geteuid() == 0) {
+         g_test_skip("read-only destination test N/A as root");
+         g_unlink(c_p);
+         g_free(c_p);
+      } else {
+         g_assert_cmpint(g_chmod(c_p, 0444), ==, 0);
+         GFile *p_out = g_file_new_for_path(c_p);
+         g_clear_error(&p_err);
+         GLogLevelFlags old_mask = g_log_set_always_fatal(G_LOG_LEVEL_ERROR);
+         gboolean       ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+         g_log_set_always_fatal(old_mask);
+         g_assert_false(ok);
+         g_assert_nonnull(p_err);
+         g_clear_error(&p_err);
+         gchar *data = NULL;
+         gsize  len  = 0;
+         g_assert_true(g_file_get_contents(c_p, &data, &len, NULL));
+         g_assert_cmpmem(data, len, stale, n_st);
+         g_free(data);
+         g_chmod(c_p, 0700);
+         g_object_unref(p_out);
+         g_unlink(c_p);
+         g_free(c_p);
+      }
+   }
+
+   g_object_unref(p_buf);
+   g_object_unref(p_file);
+   enhancer_delete(e);
+   GFile *p_tmpf = g_file_new_for_path(tmp);
+   g_file_delete(p_tmpf, NULL, NULL);
+   g_object_unref(p_tmpf);
+   g_free(tmp);
+}
+
 static void
 test_apply_chain(void) {
    Enhancer        *e    = enhancer_new();
@@ -297,6 +390,7 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer/load_and_to_texture", test_load_and_to_texture);
    g_test_add_func("/enhancer/export_format", test_export_format);
    g_test_add_func("/enhancer/export_real_success", test_export_real_success);
+   g_test_add_func("/enhancer/export_stale_dest", test_export_stale_dest);
    g_test_add_func("/enhancer/apply_chain", test_apply_chain);
    return g_test_run();
 }
