@@ -165,8 +165,18 @@ _thumb_task_free(gpointer p_void) {
 
 static void
 _thumb_run(GTask *p_task) {
-   ThumbTask *p_tt  = (ThumbTask *)g_task_get_task_data(p_task);
-   GError    *p_err = NULL;
+   ThumbTask    *p_tt     = (ThumbTask *)g_task_get_task_data(p_task);
+   GCancellable *p_cancel = g_task_get_cancellable(p_task);
+   GError       *p_err    = NULL;
+
+   /* Bail before any I/O if the grid was already detached/disposed: this
+    * releases the GTask (and the picture ref it carries) promptly instead of
+    * decoding a thumbnail no one wants. */
+   if (g_cancellable_is_cancelled(p_cancel)) {
+      g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                              "thumbnail request cancelled");
+      return;
+   }
 
    /* File mtime + size (for verify + Thumb::Size). */
    GFileInfo *p_info =
@@ -188,6 +198,15 @@ _thumb_run(GTask *p_task) {
 
    GdkTexture *p_tex = _load_cached(p_tt->c_cache_path, i_mtime);
    if (p_tex == NULL) {
+      /* The decode is the expensive step; re-check cancellation first so a
+       * detached grid doesn't pay for gdk_pixbuf_new_from_file_at_scale plus
+       * a cache write it no longer needs. */
+      if (g_cancellable_is_cancelled(p_cancel)) {
+         g_clear_error(&p_err);
+         g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                 "thumbnail request cancelled");
+         return;
+      }
       p_tex = _generate(p_tt->p_file, p_tt->i_bucket, p_tt->c_cache_path,
                         i_mtime, i_size, &p_err);
    }

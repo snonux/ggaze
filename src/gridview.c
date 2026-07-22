@@ -64,6 +64,17 @@ _thumb_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       g_object_unref(p_pic);
       return;
    }
+   /* If the grid was detached/disposed (or the cell rebuilt) after this
+    * request was issued, drop the result without touching the (possibly
+    * orphaned) picture. g_task_propagate_pointer also yields NULL for a
+    * cancelled task, but checking the cancellable explicitly keeps the
+    * widget-touch path out of cancelled grids entirely. */
+   GCancellable *p_cancel = g_task_get_cancellable(G_TASK(p_res));
+   if (p_cancel != NULL && g_cancellable_is_cancelled(p_cancel)) {
+      g_clear_object(&p_d->p_expected);
+      g_object_unref(p_pic);
+      return;
+   }
    GError     *p_err = NULL;
    GdkTexture *p_tex = thumbnail_get_finish(NULL, p_res, &p_err);
    if (p_tex != NULL) {
@@ -385,6 +396,14 @@ ggaze_grid_update_mark_badge(GgazeGrid *p_grid, GFile *p_file) {
 void
 ggaze_grid_refresh(GgazeGrid *p_grid) {
    g_return_if_fail(GGAZE_IS_GRID(p_grid));
+   /* A rebuild discards every cell; cancel any in-flight thumbnail requests
+    * for the old pictures so their finish callbacks don't paint into orphaned
+    * widgets, then start a fresh cancellable for the new cells. */
+   if (p_grid->p_cancel != NULL) {
+      g_cancellable_cancel(p_grid->p_cancel);
+      g_clear_object(&p_grid->p_cancel);
+   }
+   p_grid->p_cancel = g_cancellable_new();
    _clear_flow(p_grid);
 
    guint u_n = navigator_get_count(p_grid->p_nav);
@@ -494,7 +513,11 @@ static void
 ggaze_grid_init(GgazeGrid *p_grid) {
    p_grid->i_size         = 128;
    p_grid->b_hide_trashed = FALSE;
-   p_grid->p_scrolled     = gtk_scrolled_window_new();
+   /* Owned cancellable for in-flight thumbnail requests. detach/dispose
+    * cancel it so a closing/replaced grid's worker threads and main-thread
+    * finish callbacks stop touching (possibly freed) picture widgets. */
+   p_grid->p_cancel   = g_cancellable_new();
+   p_grid->p_scrolled = gtk_scrolled_window_new();
    gtk_widget_set_parent(p_grid->p_scrolled, GTK_WIDGET(p_grid));
    gtk_widget_set_hexpand(p_grid->p_scrolled, TRUE);
    gtk_widget_set_vexpand(p_grid->p_scrolled, TRUE);
