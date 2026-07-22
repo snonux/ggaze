@@ -54,25 +54,44 @@ _avif_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
       return (NULL);
    }
 
+   /* p_dec->image is already an avifImage *, so pass it (not &p_dec->image)
+    * to the RGB conversion APIs. avifRGBImageAllocatePixels and
+    * avifImageYUVToRGB return avifResult and must be checked. */
    avifRGBImage st_rgb;
-   avifRGBImageSetDefaults(&st_rgb, &p_dec->image);
+   avifRGBImageSetDefaults(&st_rgb, p_dec->image);
    st_rgb.format = AVIF_RGB_FORMAT_RGBA;
    st_rgb.depth  = 8;
-   avifRGBImageAllocatePixels(&st_rgb);
-   avifImageYCToRGB(&p_dec->image, &st_rgb);
-
-   GdkTexture *p_tex = NULL;
-   if (st_rgb.pixels != NULL) {
-      GBytes *p_bytes = g_bytes_new_static(
-         st_rgb.pixels, (gsize)st_rgb.rowBytes * (gsize)st_rgb.height);
-      p_tex = gdk_memory_texture_new((int)st_rgb.width, (int)st_rgb.height,
-                                     GDK_MEMORY_R8G8B8A8, p_bytes,
-                                     (gsize)st_rgb.rowBytes);
-      g_bytes_unref(p_bytes);
+   e_r           = avifRGBImageAllocatePixels(&st_rgb);
+   if (e_r != AVIF_RESULT_OK) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED, "avif: %s",
+                  avifResultToString(e_r));
+      avifDecoderDestroy(p_dec);
+      return (NULL);
+   }
+   e_r = avifImageYUVToRGB(p_dec->image, &st_rgb);
+   if (e_r != AVIF_RESULT_OK) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED, "avif: %s",
+                  avifResultToString(e_r));
+      avifRGBImageFreePixels(&st_rgb);
+      avifDecoderDestroy(p_dec);
+      return (NULL);
    }
 
+   /* Copy the pixels into a buffer the GdkMemoryTexture owns. libavif's
+    * pixel buffer is freed below; a non-owning g_bytes_new_static would
+    * leave the texture backed by freed memory (use-after-free). */
+   int     i_w        = (int)st_rgb.width;
+   int     i_h        = (int)st_rgb.height;
+   gsize   u_rowbytes = (gsize)st_rgb.rowBytes;
+   gsize   u_len      = u_rowbytes * (gsize)st_rgb.height;
+   guint8 *p_own      = g_memdup2(st_rgb.pixels, u_len);
    avifRGBImageFreePixels(&st_rgb);
    avifDecoderDestroy(p_dec);
+
+   GBytes     *p_bytes = g_bytes_new_take(p_own, u_len);
+   GdkTexture *p_tex   = gdk_memory_texture_new(i_w, i_h, GDK_MEMORY_R8G8B8A8,
+                                                p_bytes, u_rowbytes);
+   g_bytes_unref(p_bytes);
    return (p_tex);
 }
 

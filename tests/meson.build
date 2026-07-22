@@ -79,6 +79,19 @@ if libjpeg_dep.found()
    test('loader_jpeg', test_loader_jpeg, suite : 'unit', env : fixtures_env)
 endif
 
+if avif_dep.found()
+   test_loader_avif = executable(
+      'test_loader_avif',
+      ['test_loader_avif.c', ggaze_conf_h],
+      include_directories : [inc, src_inc],
+      dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep,
+         avif_dep],
+      link_with : ggaze_lib,
+      install : false,
+   )
+   test('loader_avif', test_loader_avif, suite : 'unit', env : fixtures_env)
+endif
+
 test_navigator = executable(
    'test_navigator',
    ['test_navigator.c', ggaze_conf_h],
