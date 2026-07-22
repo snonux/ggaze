@@ -5,6 +5,30 @@
 #include <gegl.h>
 #include <unistd.h>
 
+/* Query the platform content type for p_path; return a non-NULL string
+ * (caller frees) if it starts with c_prefix, else NULL. Asserts the
+ * exported bytes match the requested extension (ju0). */
+static char *
+_content_type_is(const char *c_path, const char *c_prefix) {
+   GFile     *p_f   = g_file_new_for_path(c_path);
+   GError    *p_err = NULL;
+   GFileInfo *p_i =
+      g_file_query_info(p_f, G_FILE_ATTRIBUTE_STANDARD_CONTENT_TYPE,
+                        G_FILE_QUERY_INFO_NONE, NULL, &p_err);
+   char *c_ct = NULL;
+   if (p_i != NULL) {
+      const char *c = g_file_info_get_content_type(p_i);
+      if (c != NULL && g_str_has_prefix(c, c_prefix)) {
+         c_ct = g_strdup(c);
+      }
+      g_object_unref(p_i);
+   } else {
+      g_clear_error(&p_err);
+   }
+   g_object_unref(p_f);
+   return (c_ct);
+}
+
 static void
 test_builtin_presets(void) {
    Enhancer        *e = enhancer_new();
@@ -110,9 +134,11 @@ test_load_and_to_texture(void) {
    g_object_unref(p_file);
 }
 
-/* /enhancer/export_format: apply Auto-fix and export to .png and .jpg,
- * asserting the file signatures (catches ju0 — never write JPEG into a .png).
- * Skips gracefully if the saver op is unavailable. */
+/* /enhancer/export_format: apply Auto-fix and export to .png, .jpg and .webp,
+ * asserting the file signatures AND the content type (ju0 — never write JPEG
+ * into a .png). Asserts success when the saver op is installed (the core
+ * jpg/png savers always are); skips honestly (not silently) if an op is
+ * genuinely missing. */
 static void
 test_export_format(void) {
    const gchar *c_fx = g_getenv("GGAZE_FIXTURES_DIR");
@@ -130,43 +156,82 @@ test_export_format(void) {
       g_ptr_array_index((GPtrArray *)enhancer_get_presets(e), 0); /* Auto-fix */
    char *tmp = g_dir_make_tmp("ggaze-fmt-XXXXXX", NULL);
 
-   /* PNG */
+   /* (a) PNG: a JPEG original exported to .png must contain PNG bytes (the
+    * ju0 regression — previously gegl:jpg-save wrote JPEG bytes into a .png).
+    */
    {
       char  *c_p   = g_build_filename(tmp, "out.png", NULL);
       GFile *p_out = g_file_new_for_path(c_p);
       g_clear_error(&p_err);
       gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
-      if (ok) {
-         gchar *data = NULL;
-         gsize  len  = 0;
-         g_assert_true(g_file_get_contents(c_p, &data, &len, NULL));
-         g_assert_cmpint(len, >=, 8);
-         g_assert_cmpmem(data, 8, "\x89PNG\r\n\x1a\n", 8);
-         g_free(data);
+      g_assert_true(ok);
+      g_assert_no_error(p_err);
+      gchar *data = NULL;
+      gsize  len  = 0;
+      g_assert_true(g_file_get_contents(c_p, &data, &len, NULL));
+      g_assert_cmpint(len, >=, 8);
+      g_assert_cmpmem(data, 8, "\x89PNG\r\n\x1a\n", 8);
+      g_free(data);
+      char *c_ct = _content_type_is(c_p, "image/png");
+      if (c_ct == NULL) {
+         g_test_message("content type unavailable (no shared-mime-info?); "
+                        "skipping content-type assertion");
       } else {
-         g_clear_error(&p_err);
+         g_free(c_ct); /* helper already matched the image/png prefix */
       }
       g_object_unref(p_out);
+      g_unlink(c_p);
       g_free(c_p);
    }
 
-   /* JPEG */
+   /* (b) JPEG: a JPEG original exported to .jpg must contain JPEG bytes. */
    {
       char  *c_p   = g_build_filename(tmp, "out.jpg", NULL);
       GFile *p_out = g_file_new_for_path(c_p);
       g_clear_error(&p_err);
       gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
-      if (ok) {
+      g_assert_true(ok);
+      g_assert_no_error(p_err);
+      gchar *data = NULL;
+      gsize  len  = 0;
+      g_assert_true(g_file_get_contents(c_p, &data, &len, NULL));
+      g_assert_cmpint(len, >=, 2);
+      g_assert_cmpmem(data, 2, "\xff\xd8", 2);
+      g_free(data);
+      char *c_ct2 = _content_type_is(c_p, "image/jpeg");
+      if (c_ct2 == NULL) {
+         g_test_message("content type unavailable (no shared-mime-info?); "
+                        "skipping content-type assertion");
+      } else {
+         g_free(c_ct2); /* helper already matched the image/jpeg prefix */
+      }
+      g_object_unref(p_out);
+      g_unlink(c_p);
+      g_free(c_p);
+   }
+
+   /* (c) WebP: signature is "RIFF....WEBP". webp-save ships as a plugin,
+    * so log-and-continue if it is not installed (not a required ju0 format). */
+   {
+      char *c_p = g_build_filename(tmp, "out.webp", NULL);
+      if (!gegl_has_operation("gegl:webp-save")) {
+         g_test_message("gegl:webp-save unavailable; skipping webp export");
+      } else {
+         GFile *p_out = g_file_new_for_path(c_p);
+         g_clear_error(&p_err);
+         gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+         g_assert_true(ok);
+         g_assert_no_error(p_err);
          gchar *data = NULL;
          gsize  len  = 0;
          g_assert_true(g_file_get_contents(c_p, &data, &len, NULL));
-         g_assert_cmpint(len, >=, 2);
-         g_assert_cmpmem(data, 2, "\xff\xd8", 2);
+         g_assert_cmpint(len, >=, 12);
+         g_assert_cmpmem(data, 4, "RIFF", 4);
+         g_assert_cmpmem(data + 8, 4, "WEBP", 4);
          g_free(data);
-      } else {
-         g_clear_error(&p_err);
+         g_object_unref(p_out);
       }
-      g_object_unref(p_out);
+      g_unlink(c_p);
       g_free(c_p);
    }
 
@@ -354,6 +419,64 @@ test_export_stale_dest(void) {
    g_free(tmp);
 }
 
+/* /enhancer/export_reject_unsupported (ju0): an unsupported export
+ * extension (.bmp / .tiff) must fail clearly with G_IO_ERROR_NOT_SUPPORTED
+ * rather than silently writing JPEG bytes (or anything) into the file. */
+static void
+test_export_reject_unsupported(void) {
+   const gchar *c_fx = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_fx);
+   char  *c_path = g_build_filename(c_fx, "plain.jpg", NULL);
+   GFile *p_file = g_file_new_for_path(c_path);
+   g_free(c_path);
+
+   GError     *p_err = NULL;
+   GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
+   g_assert_nonnull(p_buf);
+
+   Enhancer             *e = enhancer_new();
+   const EnhancerPreset *preset =
+      g_ptr_array_index((GPtrArray *)enhancer_get_presets(e), 0);
+   char *tmp = g_dir_make_tmp("ggaze-unsup-XXXXXX", NULL);
+
+   /* .bmp is not a supported export extension. */
+   {
+      char  *c_p   = g_build_filename(tmp, "out.bmp", NULL);
+      GFile *p_out = g_file_new_for_path(c_p);
+      g_clear_error(&p_err);
+      gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+      g_assert_false(ok);
+      g_assert_nonnull(p_err);
+      g_assert_cmpint(p_err->code, ==, G_IO_ERROR_NOT_SUPPORTED);
+      g_clear_error(&p_err);
+      g_assert_false(g_file_query_exists(p_out, NULL));
+      g_object_unref(p_out);
+      g_free(c_p);
+   }
+
+   /* No extension at all is also unsupported. */
+   {
+      char  *c_p   = g_build_filename(tmp, "out", NULL);
+      GFile *p_out = g_file_new_for_path(c_p);
+      g_clear_error(&p_err);
+      gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+      g_assert_false(ok);
+      g_assert_nonnull(p_err);
+      g_assert_cmpint(p_err->code, ==, G_IO_ERROR_NOT_SUPPORTED);
+      g_clear_error(&p_err);
+      g_object_unref(p_out);
+      g_free(c_p);
+   }
+
+   g_object_unref(p_buf);
+   g_object_unref(p_file);
+   enhancer_delete(e);
+   GFile *p_tmpf = g_file_new_for_path(tmp);
+   g_file_delete(p_tmpf, NULL, NULL);
+   g_object_unref(p_tmpf);
+   g_free(tmp);
+}
+
 static void
 test_apply_chain(void) {
    Enhancer        *e    = enhancer_new();
@@ -391,6 +514,8 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer/export_format", test_export_format);
    g_test_add_func("/enhancer/export_real_success", test_export_real_success);
    g_test_add_func("/enhancer/export_stale_dest", test_export_stale_dest);
+   g_test_add_func("/enhancer/export_reject_unsupported",
+                   test_export_reject_unsupported);
    g_test_add_func("/enhancer/apply_chain", test_apply_chain);
    return g_test_run();
 }
