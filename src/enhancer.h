@@ -28,6 +28,13 @@ const GPtrArray *enhancer_get_presets(Enhancer *p_e);
 GeglBuffer *enhancer_apply(Enhancer *p_e, GeglBuffer *p_in,
                            const EnhancerPreset *p_preset, GError **p_err);
 
+/* Apply a chain of the enabled built-in presets (bit i of u_mask -> preset i)
+ * in array order, composing them. Returns a new buffer, or NULL if none are
+ * enabled / on error. */
+GeglBuffer *enhancer_apply_chain(Enhancer *p_e, GeglBuffer *p_in,
+                                 const GPtrArray *p_presets, guint8 u_mask,
+                                 GError **p_err);
+
 /* Export the enhanced buffer to a file. The saver is chosen from p_out's
  * extension: .jpg/.jpeg -> gegl:jpg-save (quality 95), .png -> gegl:png-save,
  * .webp -> gegl:webp-save (if available). Other extensions fail with
@@ -36,6 +43,11 @@ GeglBuffer *enhancer_apply(Enhancer *p_e, GeglBuffer *p_in,
 gboolean enhancer_export(Enhancer *p_e, GeglBuffer *p_in,
                          const EnhancerPreset *p_preset, GFile *p_out,
                          GError **p_err);
+
+/* Export p_in with the enabled-preset chain (u_mask) composed, to p_out. */
+gboolean enhancer_export_chain(Enhancer *p_e, GeglBuffer *p_in,
+                               const GPtrArray *p_presets, guint8 u_mask,
+                               GFile *p_out, GError **p_err);
 
 #if GGAZE_HAVE_GEGL
 /* Load a file into a GeglBuffer via the gegl:load op. Returns a new buffer

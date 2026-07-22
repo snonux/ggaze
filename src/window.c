@@ -52,10 +52,12 @@ struct _GgazeWindow {
    gboolean      b_fullscreen;
    guint         u_hdr_hide; /* fullscreen header auto-hide timeout */
 #if GGAZE_HAVE_GEGL
-   int        i_enhance_idx;   /* active preset index (-1 = original) */
-   Enhancer  *p_enhancer;      /* GEGL preset engine (NULL w/o GEGL) */
-   GtkWidget *p_enhance_panel; /* GtkRevealer side panel (NULL w/o GEGL) */
+   guint8     u_enhance_mask;    /* bit i -> preset i enabled (layered) */
+   Enhancer  *p_enhancer;        /* GEGL preset engine (NULL w/o GEGL) */
+   GtkWidget *p_enhance_panel;   /* GtkRevealer side panel (NULL w/o GEGL) */
+   GtkWidget *p_enhance_btns[8]; /* preset row buttons (for highlighting) */
 #endif
+   GtkWidget *p_content; /* horizontal box: [enhance panel] + image area */
 };
 
 G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
@@ -69,6 +71,10 @@ static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
 static void     _show_info(GgazeWindow *p_win);
 static void     _hide_info(GgazeWindow *p_win);
 static gboolean _slideshow_tick(gpointer p_data);
+#if GGAZE_HAVE_GEGL
+static void _enhance_update_highlights(GgazeWindow *p_win);
+static void _enhance_panel_reparent(GgazeWindow *p_win, gboolean b_overlay);
+#endif
 
 /* --- actions ------------------------------------------------------------- */
 
@@ -463,8 +469,8 @@ static const char *SHORTCUTS_UI =
    "            <child>\n"
    "              <object class=\"GtkShortcutsShortcut\">\n"
    "                <property name=\"accelerator\">1 2 3 4 5 6 7 8</property>\n"
-   "                <property name=\"title\">Apply enhance preset "
-   "1-8</property>\n"
+   "                <property name=\"title\">Toggle enhance preset 1-8 "
+   "(layered); 0 = Original</property>\n"
    "              </object>\n"
    "            </child>\n"
    "            <child>\n"
@@ -565,9 +571,15 @@ _action_fullscreen(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (p_win->b_fullscreen) {
       gtk_window_unfullscreen(GTK_WINDOW(p_win));
       p_win->b_fullscreen = FALSE;
+#if GGAZE_HAVE_GEGL
+      _enhance_panel_reparent(p_win, FALSE); /* back to sidebar next to image */
+#endif
    } else {
       gtk_window_fullscreen(GTK_WINDOW(p_win));
       p_win->b_fullscreen = TRUE;
+#if GGAZE_HAVE_GEGL
+      _enhance_panel_reparent(p_win, TRUE); /* overlay over the image */
+#endif
    }
 }
 
@@ -618,12 +630,27 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 #if GGAZE_HAVE_GEGL
-/* Apply preset i_idx to the current image as a live preview (i_idx = -1 =>
- * restore the original). Switches to large view so the result shows. On any
- * failure resets to the original. Synchronous - may briefly block the UI on
- * large images (async apply is a later milestone). */
+/* Update each preset button's "ggaze-enhance-on" highlight from the mask. */
 static void
-_apply_enhance(GgazeWindow *p_win, gint i_idx) {
+_enhance_update_highlights(GgazeWindow *p_win) {
+   for (guint i = 0; i < G_N_ELEMENTS(p_win->p_enhance_btns); i++) {
+      GtkWidget *p_btn = p_win->p_enhance_btns[i];
+      if (p_btn == NULL) {
+         continue;
+      }
+      if ((p_win->u_enhance_mask & (guint8)(1u << i)) != 0) {
+         gtk_widget_add_css_class(p_btn, "ggaze-enhance-on");
+      } else {
+         gtk_widget_remove_css_class(p_btn, "ggaze-enhance-on");
+      }
+   }
+}
+
+/* Apply the enabled-preset chain (u_enhance_mask) to the current image as a
+ * live preview. An empty mask restores the original. Switches to large view
+ * so the result shows. Synchronous - may briefly block on large images. */
+static void
+_apply_enhance_mask(GgazeWindow *p_win) {
    if (p_win->p_nav == NULL || p_win->p_enhancer == NULL) {
       return;
    }
@@ -632,34 +659,25 @@ _apply_enhance(GgazeWindow *p_win, gint i_idx) {
    if (g_strcmp0(c_cur, "large") != 0) {
       gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
    }
-   p_win->i_enhance_idx = i_idx;
-   if (i_idx < 0) {
+   if (p_win->u_enhance_mask == 0) {
       _load_current(p_win); /* restore original (texturecache is fast) */
       _update_header(p_win);
       return;
    }
    GFile *p_file = navigator_get_current(p_win->p_nav);
    if (p_file == NULL) {
-      p_win->i_enhance_idx = -1;
+      p_win->u_enhance_mask = 0;
+      _enhance_update_highlights(p_win);
       _update_header(p_win);
       return;
    }
-   const GPtrArray      *p_presets = enhancer_get_presets(p_win->p_enhancer);
-   const EnhancerPreset *p_preset =
-      (p_presets != NULL && (guint)i_idx < p_presets->len)
-         ? g_ptr_array_index((GPtrArray *)p_presets, (guint)i_idx)
-         : NULL;
-   if (p_preset == NULL) {
-      p_win->i_enhance_idx = -1;
-      _update_header(p_win);
-      return;
-   }
-   GError     *p_err = NULL;
-   GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
-   GdkTexture *p_tex = NULL;
+   const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
+   GError          *p_err     = NULL;
+   GeglBuffer      *p_buf     = enhancer_load(p_file, &p_err);
+   GdkTexture      *p_tex     = NULL;
    if (p_buf != NULL) {
-      GeglBuffer *p_enh =
-         enhancer_apply(p_win->p_enhancer, p_buf, p_preset, &p_err);
+      GeglBuffer *p_enh = enhancer_apply_chain(
+         p_win->p_enhancer, p_buf, p_presets, p_win->u_enhance_mask, &p_err);
       if (p_enh != NULL) {
          p_tex = enhancer_buffer_to_texture(p_enh, &p_err);
          g_object_unref(p_enh);
@@ -670,7 +688,8 @@ _apply_enhance(GgazeWindow *p_win, gint i_idx) {
       g_warning("ggaze: enhance failed: %s",
                 p_err != NULL ? p_err->message : "(no detail)");
       g_clear_error(&p_err);
-      p_win->i_enhance_idx = -1;
+      p_win->u_enhance_mask = 0;
+      _enhance_update_highlights(p_win);
       _load_current(p_win);
    } else {
       _show_texture(p_win, p_tex);
@@ -679,21 +698,26 @@ _apply_enhance(GgazeWindow *p_win, gint i_idx) {
    _update_header(p_win);
 }
 
-/* Apply the preset attached to the clicked button (qdata "idx"). The side
- * panel stays open - it's a persistent panel, not a dismissable popup. */
+/* Clicked row: idx 0..7 toggles that preset's bit; idx -1 (Original) clears
+ * the mask. Then refresh highlights + re-apply the (possibly empty) chain. */
 static void
-_enhance_row_apply(GgazeWindow *p_win, GtkWidget *p_btn) {
+_enhance_row_toggle(GgazeWindow *p_win, GtkWidget *p_btn) {
    gint i_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(p_btn), "idx"));
-   _apply_enhance(p_win, i_idx);
+   if (i_idx < 0) {
+      p_win->u_enhance_mask = 0; /* Original */
+   } else if (i_idx < (gint)G_N_ELEMENTS(p_win->p_enhance_btns)) {
+      p_win->u_enhance_mask ^= (guint8)(1u << i_idx);
+   }
+   _enhance_update_highlights(p_win);
+   _apply_enhance_mask(p_win);
 }
 
 /* Build the enhance side panel: a GtkRevealer (slide right) holding one
- * button per preset plus an "Original" row, overlaid on the left of the main
- * content. Hidden until 'a' toggles it on. Each row's label shows its hotkey
- * (1..N, 0). */
+ * button per preset plus an "Original" row, placed in the content box next to
+ * the image (reparented to the overlay in fullscreen). Hidden until 'a'. */
 static void
 _build_enhance_panel(GgazeWindow *p_win) {
-   if (p_win->p_enhancer == NULL) {
+   if (p_win->p_enhancer == NULL || p_win->p_content == NULL) {
       return;
    }
    const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
@@ -702,27 +726,28 @@ _build_enhance_panel(GgazeWindow *p_win) {
    gtk_widget_set_margin_end(p_box, 8);
    gtk_widget_set_margin_top(p_box, 8);
    gtk_widget_set_margin_bottom(p_box, 8);
-   gtk_widget_add_css_class(p_box, "osd");
-   if (p_presets != NULL) {
-      for (guint i = 0; i < p_presets->len && i < 9; i++) {
-         const EnhancerPreset *p_pr =
-            g_ptr_array_index((GPtrArray *)p_presets, i);
-         char      *c_lbl = g_strdup_printf("%u  %s", i + 1, p_pr->c_name);
-         GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
-         gtk_widget_set_size_request(p_btn, 150, -1);
-         gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
-         g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER((gint)i));
-         g_signal_connect_swapped(p_btn, "clicked",
-                                  G_CALLBACK(_enhance_row_apply), p_win);
-         gtk_box_append(GTK_BOX(p_box), p_btn);
-         g_free(c_lbl);
-      }
+   for (guint i = 0; i < G_N_ELEMENTS(p_win->p_enhance_btns); i++) {
+      const EnhancerPreset *p_pr =
+         (p_presets != NULL && i < p_presets->len)
+            ? g_ptr_array_index((GPtrArray *)p_presets, i)
+            : NULL;
+      char *c_lbl =
+         g_strdup_printf("%u  %s", i + 1, p_pr != NULL ? p_pr->c_name : "-");
+      GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
+      gtk_widget_set_size_request(p_btn, 160, -1);
+      gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
+      g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER((gint)i));
+      g_signal_connect_swapped(p_btn, "clicked",
+                               G_CALLBACK(_enhance_row_toggle), p_win);
+      gtk_box_append(GTK_BOX(p_box), p_btn);
+      p_win->p_enhance_btns[i] = p_btn;
+      g_free(c_lbl);
    }
    GtkWidget *p_btn0 = gtk_button_new_with_label("0  Original");
-   gtk_widget_set_size_request(p_btn0, 150, -1);
+   gtk_widget_set_size_request(p_btn0, 160, -1);
    gtk_widget_set_halign(p_btn0, GTK_ALIGN_START);
    g_object_set_data(G_OBJECT(p_btn0), "idx", GINT_TO_POINTER(-1));
-   g_signal_connect_swapped(p_btn0, "clicked", G_CALLBACK(_enhance_row_apply),
+   g_signal_connect_swapped(p_btn0, "clicked", G_CALLBACK(_enhance_row_toggle),
                             p_win);
    gtk_box_append(GTK_BOX(p_box), p_btn0);
 
@@ -730,12 +755,44 @@ _build_enhance_panel(GgazeWindow *p_win) {
    gtk_revealer_set_transition_type(GTK_REVEALER(p_rev),
                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_RIGHT);
    gtk_revealer_set_child(GTK_REVEALER(p_rev), p_box);
-   gtk_widget_set_halign(p_rev, GTK_ALIGN_START);
-   gtk_widget_set_valign(p_rev, GTK_ALIGN_START);
-   gtk_widget_set_margin_top(p_rev, 48);
    gtk_revealer_set_reveal_child(GTK_REVEALER(p_rev), FALSE);
-   gtk_overlay_add_overlay(GTK_OVERLAY(p_win->p_overlay), p_rev);
+   /* Sidebar (normal mode): sits in the content box next to the image. */
+   gtk_widget_set_hexpand(p_rev, FALSE);
+   gtk_widget_set_vexpand(p_rev, TRUE);
+   gtk_box_prepend(GTK_BOX(p_win->p_content), p_rev);
    p_win->p_enhance_panel = p_rev;
+}
+
+/* Move the enhance panel between the sidebar (next to the image) and an
+ * overlay over the image (used in fullscreen, where there's no side room). */
+static void
+_enhance_panel_reparent(GgazeWindow *p_win, gboolean b_overlay) {
+   GtkWidget *p_rev = p_win->p_enhance_panel;
+   if (p_rev == NULL) {
+      return;
+   }
+   GtkWidget *p_parent = gtk_widget_get_parent(p_rev);
+   if (b_overlay && p_parent != p_win->p_overlay) {
+      g_object_ref(p_rev);
+      if (p_parent == p_win->p_content) {
+         gtk_box_remove(GTK_BOX(p_win->p_content), p_rev);
+      }
+      gtk_overlay_add_overlay(GTK_OVERLAY(p_win->p_overlay), p_rev);
+      gtk_widget_set_halign(p_rev, GTK_ALIGN_START);
+      gtk_widget_set_valign(p_rev, GTK_ALIGN_START);
+      gtk_widget_set_margin_top(p_rev, 48);
+      g_object_unref(p_rev);
+   } else if (!b_overlay && p_parent != p_win->p_content) {
+      g_object_ref(p_rev);
+      if (p_parent == p_win->p_overlay) {
+         gtk_overlay_remove_overlay(GTK_OVERLAY(p_win->p_overlay), p_rev);
+      }
+      gtk_widget_set_halign(p_rev, GTK_ALIGN_FILL);
+      gtk_widget_set_valign(p_rev, GTK_ALIGN_FILL);
+      gtk_widget_set_margin_top(p_rev, 0);
+      gtk_box_prepend(GTK_BOX(p_win->p_content), p_rev);
+      g_object_unref(p_rev);
+   }
 }
 
 /* win.enhance (key 'a'): toggle the enhance side panel on/off. */
@@ -752,8 +809,7 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    gtk_revealer_set_reveal_child(GTK_REVEALER(p_win->p_enhance_panel), !b_vis);
 }
 
-/* win.enhance-N (keys 1-8): apply preset N directly (the panel need not be
- * visible). */
+/* win.enhance-N (keys 1-8): toggle preset N on/off (layered), then re-apply. */
 static void
 _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_v;
@@ -764,14 +820,18 @@ _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
    gint i_idx =
       (gint)g_ascii_strtoll(c_name + strlen("enhance-"), NULL, 10) - 1;
-   if (i_idx >= 0) {
-      _apply_enhance(p_win, i_idx);
+   if (p_win->p_enhancer == NULL || i_idx < 0 ||
+       i_idx >= (gint)G_N_ELEMENTS(p_win->p_enhance_btns)) {
+      return;
    }
+   p_win->u_enhance_mask ^= (guint8)(1u << i_idx);
+   _enhance_update_highlights(p_win);
+   _apply_enhance_mask(p_win);
 }
 
-/* win.enhance-save (key 's'): export the current image with the active preset
- * to <stem>-enhanced.<ext>. Never overwrites the original. No-op (with a
- * warning) when no preview is active. */
+/* win.enhance-save (key 's'): export the current image with the enabled-preset
+ * chain to <stem>-enhanced.<ext>. Never overwrites the original. No-op (with
+ * a warning) when no preset is enabled. */
 static void
 _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -780,8 +840,8 @@ _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (p_win->p_nav == NULL || p_win->p_enhancer == NULL) {
       return;
    }
-   if (p_win->i_enhance_idx < 0) {
-      g_warning("ggaze: nothing to save (no enhance preview active)");
+   if (p_win->u_enhance_mask == 0) {
+      g_warning("ggaze: nothing to save (no enhance preset enabled)");
       return;
    }
    GFile *p_file = navigator_get_current(p_win->p_nav);
@@ -817,10 +877,9 @@ _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
    gboolean    b_ok  = FALSE;
    if (p_buf != NULL) {
-      const GPtrArray      *p_presets = enhancer_get_presets(p_win->p_enhancer);
-      const EnhancerPreset *p_preset =
-         g_ptr_array_index((GPtrArray *)p_presets, (guint)p_win->i_enhance_idx);
-      b_ok = enhancer_export(p_win->p_enhancer, p_buf, p_preset, p_out, &p_err);
+      const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
+      b_ok = enhancer_export_chain(p_win->p_enhancer, p_buf, p_presets,
+                                   p_win->u_enhance_mask, p_out, &p_err);
       g_object_unref(p_buf);
    }
    char *c_saved = b_ok ? g_file_get_basename(p_out) : NULL;
@@ -965,8 +1024,9 @@ nav_changed_cb(Navigator *p_nav, gpointer p_data) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
 #if GGAZE_HAVE_GEGL
    /* New image starts fresh: drop any enhanced preview so we don't show a
-    * stale enhanced texture for a different file. */
-   p_win->i_enhance_idx = -1;
+    * stale enhanced texture for a different file, and clear the highlights. */
+   p_win->u_enhance_mask = 0;
+   _enhance_update_highlights(p_win);
 #endif
    _load_current(p_win);
 }
@@ -1160,19 +1220,30 @@ _update_header(GgazeWindow *p_win) {
       }
    }
 #if GGAZE_HAVE_GEGL
-   /* Append the active enhance preset name when a preview is showing. */
-   if (p_win->i_enhance_idx >= 0 && p_win->p_enhancer != NULL &&
+   /* Append the enabled enhance preset names (comma-joined) when layered. */
+   if (p_win->u_enhance_mask != 0 && p_win->p_enhancer != NULL &&
        c_title != NULL) {
       const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
-      if (p_presets != NULL && (guint)p_win->i_enhance_idx < p_presets->len) {
-         const EnhancerPreset *p_preset = g_ptr_array_index(
-            (GPtrArray *)p_presets, (guint)p_win->i_enhance_idx);
-         if (p_preset->c_name != NULL) {
+      if (p_presets != NULL) {
+         GString *p_str = g_string_new(NULL);
+         for (guint i = 0; i < p_presets->len && i < 8; i++) {
+            if ((p_win->u_enhance_mask & (guint8)(1u << i)) == 0) {
+               continue;
+            }
+            const EnhancerPreset *p_pr =
+               g_ptr_array_index((GPtrArray *)p_presets, i);
+            if (p_str->len > 0) {
+               g_string_append_c(p_str, ',');
+            }
+            g_string_append(p_str, p_pr->c_name);
+         }
+         if (p_str->len > 0) {
             char *c_tmp =
-               g_strdup_printf("%s  \u00b7  %s", c_title, p_preset->c_name);
+               g_strdup_printf("%s  \u00b7  %s", c_title, p_str->str);
             g_free(c_title);
             c_title = c_tmp;
          }
+         g_string_free(p_str, TRUE);
       }
    }
 #endif
@@ -1244,6 +1315,12 @@ _ensure_css(void) {
              "  border: 2px solid #3584e4;\n"
              "  border-radius: 4px;\n"
              "  background-color: rgba(53, 132, 228, 0.15);\n"
+             "}\n"
+             "/* enabled enhance preset row highlight. */\n"
+             ".ggaze-enhance-on {\n"
+             "  background-color: #3584e4;\n"
+             "  color: #ffffff;\n"
+             "  font-weight: bold;\n"
              "}\n");
    GdkDisplay *p_disp = gdk_display_get_default();
    if (p_disp != NULL) {
@@ -1265,8 +1342,8 @@ ggaze_window_init(GgazeWindow *p_win) {
    p_win->p_grid            = NULL; /* created on open */
    p_win->i_grid_size       = 128;
 #if GGAZE_HAVE_GEGL
-   p_win->i_enhance_idx = -1; /* start on the original */
-   p_win->p_enhancer    = enhancer_new();
+   p_win->u_enhance_mask = 0; /* start on the original */
+   p_win->p_enhancer     = enhancer_new();
 #endif
 
    /* Header bar (libadwaita, decision #29). */
@@ -1287,7 +1364,14 @@ ggaze_window_init(GgazeWindow *p_win) {
    gtk_widget_set_margin_top(p_win->p_info_lbl, 12);
    gtk_widget_set_visible(p_win->p_info_lbl, FALSE);
    gtk_overlay_add_overlay(GTK_OVERLAY(p_win->p_overlay), p_win->p_info_lbl);
-   gtk_window_set_child(GTK_WINDOW(p_win), p_win->p_overlay);
+   /* Layout: a horizontal box with the image area (overlay) taking the space,
+    * and the enhance panel slotted in next to it (or overlaid in fullscreen).
+    */
+   p_win->p_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+   gtk_widget_set_hexpand(p_win->p_overlay, TRUE);
+   gtk_widget_set_vexpand(p_win->p_overlay, TRUE);
+   gtk_box_append(GTK_BOX(p_win->p_content), p_win->p_overlay);
+   gtk_window_set_child(GTK_WINDOW(p_win), p_win->p_content);
 #if GGAZE_HAVE_GEGL
    _build_enhance_panel(p_win);
 #endif

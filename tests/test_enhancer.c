@@ -261,6 +261,33 @@ test_export_real_success(void) {
    g_free(tmp);
 }
 
+static void
+test_apply_chain(void) {
+   Enhancer        *e    = enhancer_new();
+   const GPtrArray *p    = enhancer_get_presets(e);
+   GeglRectangle    rect = {0, 0, 4, 4};
+   GeglBuffer      *buf  = gegl_buffer_new(&rect, babl_format("RGBA float"));
+   g_assert_nonnull(buf);
+   /* Compose Auto-fix (bit 0) + Sharpen (bit 6) if those ops exist. */
+   guint8      u_mask = (guint8)((1u << 0) | (1u << 6));
+   GError     *p_err  = NULL;
+   GeglBuffer *p_out  = enhancer_apply_chain(e, buf, p, u_mask, &p_err);
+   if (p_out != NULL) {
+      g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 4);
+      g_assert_cmpint(gegl_buffer_get_height(p_out), ==, 4);
+      g_object_unref(p_out);
+   } else {
+      g_clear_error(&p_err); /* ops may be unavailable; skip gracefully */
+   }
+   /* An empty mask must fail (no preset enabled). */
+   p_out = enhancer_apply_chain(e, buf, p, 0, &p_err);
+   g_assert_null(p_out);
+   g_assert_nonnull(p_err);
+   g_clear_error(&p_err);
+   g_object_unref(buf);
+   enhancer_delete(e);
+}
+
 int
 main(int argc, char **argv) {
    gegl_init(&argc, &argv);
@@ -270,5 +297,6 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer/load_and_to_texture", test_load_and_to_texture);
    g_test_add_func("/enhancer/export_format", test_export_format);
    g_test_add_func("/enhancer/export_real_success", test_export_real_success);
+   g_test_add_func("/enhancer/apply_chain", test_apply_chain);
    return g_test_run();
 }

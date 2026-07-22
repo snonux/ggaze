@@ -67,40 +67,53 @@ enhancer_get_presets(Enhancer *e) {
    return e ? e->p_presets : NULL;
 }
 
+/* Create the GEGL op node for a built-in preset (in p_graph), or NULL if the
+ * name is unknown. */
+static GeglNode *
+_op_for_builtin(GeglNode *p_graph, const char *c_name) {
+   if (g_str_equal(c_name, "Auto-fix")) {
+      return (gegl_node_new_child(p_graph, "operation", "gegl:stretch-contrast",
+                                  NULL));
+   }
+   if (g_str_equal(c_name, "Brightness")) {
+      return (gegl_node_new_child(p_graph, "operation", "gegl:exposure",
+                                  "exposure", 0.5, NULL));
+   }
+   if (g_str_equal(c_name, "Contrast")) {
+      return (gegl_node_new_child(p_graph, "operation",
+                                  "gegl:brightness-contrast", "contrast", 1.3,
+                                  NULL));
+   }
+   if (g_str_equal(c_name, "Saturation")) {
+      return (gegl_node_new_child(p_graph, "operation", "gegl:saturation",
+                                  "scale", 1.4, NULL));
+   }
+   if (g_str_equal(c_name, "Warm")) {
+      return (
+         gegl_node_new_child(p_graph, "operation", "gegl:color-enhance", NULL));
+   }
+   if (g_str_equal(c_name, "Cool")) {
+      return (gegl_node_new_child(p_graph, "operation", "gegl:exposure",
+                                  "exposure", -0.3, NULL));
+   }
+   if (g_str_equal(c_name, "Sharpen")) {
+      return (
+         gegl_node_new_child(p_graph, "operation", "gegl:unsharp-mask", NULL));
+   }
+   if (g_str_equal(c_name, "Denoise")) {
+      return (gegl_node_new_child(p_graph, "operation", "gegl:noise-reduction",
+                                  NULL));
+   }
+   return (NULL);
+}
+
 /* Build and apply a GEGL graph for a built-in preset. */
 static GeglBuffer *
 _apply_builtin(GeglBuffer *p_in, const char *c_name, GError **p_err) {
    GeglNode *p_graph = gegl_node_new();
    GeglNode *p_src   = gegl_node_new_child(
       p_graph, "operation", "gegl:buffer-source", "buffer", p_in, NULL);
-   GeglNode *p_op = NULL;
-
-   if (g_str_equal(c_name, "Auto-fix")) {
-      p_op = gegl_node_new_child(p_graph, "operation", "gegl:stretch-contrast",
-                                 NULL);
-   } else if (g_str_equal(c_name, "Brightness")) {
-      p_op = gegl_node_new_child(p_graph, "operation", "gegl:exposure",
-                                 "exposure", 0.5, NULL);
-   } else if (g_str_equal(c_name, "Contrast")) {
-      p_op =
-         gegl_node_new_child(p_graph, "operation", "gegl:brightness-contrast",
-                             "contrast", 1.3, NULL);
-   } else if (g_str_equal(c_name, "Saturation")) {
-      p_op = gegl_node_new_child(p_graph, "operation", "gegl:saturation",
-                                 "scale", 1.4, NULL);
-   } else if (g_str_equal(c_name, "Warm")) {
-      p_op =
-         gegl_node_new_child(p_graph, "operation", "gegl:color-enhance", NULL);
-   } else if (g_str_equal(c_name, "Cool")) {
-      p_op = gegl_node_new_child(p_graph, "operation", "gegl:exposure",
-                                 "exposure", -0.3, NULL);
-   } else if (g_str_equal(c_name, "Sharpen")) {
-      p_op =
-         gegl_node_new_child(p_graph, "operation", "gegl:unsharp-mask", NULL);
-   } else if (g_str_equal(c_name, "Denoise")) {
-      p_op = gegl_node_new_child(p_graph, "operation", "gegl:noise-reduction",
-                                 NULL);
-   }
+   GeglNode *p_op = _op_for_builtin(p_graph, c_name);
 
    if (p_op == NULL) {
       g_object_unref(p_graph);
@@ -116,6 +129,59 @@ _apply_builtin(GeglBuffer *p_in, const char *c_name, GError **p_err) {
    GeglNode     *p_sink  = gegl_node_new_child(
       p_graph, "operation", "gegl:buffer-sink", "buffer", &p_out, NULL);
    gegl_node_link(p_op, p_sink);
+   gegl_node_process(p_sink);
+   g_object_unref(p_graph);
+   return p_out;
+}
+
+/* Apply a chain of the enabled built-in presets (bit i of u_mask -> preset i)
+ * in array order, composing them. Returns a new buffer, or NULL if no preset
+ * is enabled or any op is unavailable. */
+GeglBuffer *
+enhancer_apply_chain(Enhancer *e, GeglBuffer *p_in, const GPtrArray *p_presets,
+                     guint8 u_mask, GError **p_err) {
+   (void)e;
+   g_return_val_if_fail(p_in != NULL, NULL);
+   g_return_val_if_fail(p_presets != NULL, NULL);
+   GeglNode *p_graph = gegl_node_new();
+   GeglNode *p_src   = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-source", "buffer", p_in, NULL);
+   GeglNode *p_prev = p_src;
+   gboolean  b_any  = FALSE;
+   for (guint i = 0; i < p_presets->len && i < 8; i++) {
+      if ((u_mask & (guint8)(1u << i)) == 0) {
+         continue;
+      }
+      const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_presets, i);
+      if (!p_pr->i_builtin) {
+         g_object_unref(p_graph);
+         g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                     "enhancer: user graph presets not chainable");
+         return NULL;
+      }
+      GeglNode *p_op = _op_for_builtin(p_graph, p_pr->c_name);
+      if (p_op == NULL) {
+         g_object_unref(p_graph);
+         g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                     "enhancer: unknown preset '%s'", p_pr->c_name);
+         return NULL;
+      }
+      gegl_node_link(p_prev, p_op);
+      p_prev = p_op;
+      b_any  = TRUE;
+   }
+   if (!b_any) {
+      g_object_unref(p_graph);
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "enhancer: no preset enabled");
+      return NULL;
+   }
+   GeglRectangle st_rect = {0, 0, gegl_buffer_get_width(p_in),
+                            gegl_buffer_get_height(p_in)};
+   GeglBuffer   *p_out   = gegl_buffer_new(&st_rect, babl_format("RGBA float"));
+   GeglNode     *p_sink  = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-sink", "buffer", &p_out, NULL);
+   gegl_node_link(p_prev, p_sink);
    gegl_node_process(p_sink);
    g_object_unref(p_graph);
    return p_out;
@@ -171,20 +237,18 @@ _saver_for_ext(GFile *p_out) {
    return c_op;
 }
 
-gboolean
-enhancer_export(Enhancer *e, GeglBuffer *p_in, const EnhancerPreset *p_preset,
-                GFile *p_out, GError **p_err) {
-   (void)e;
-   g_return_val_if_fail(p_in != NULL, FALSE);
-   g_return_val_if_fail(p_out != NULL, FALSE);
-
+/* Save p_buf to p_out with the format chosen by the output extension.
+ * ju0: pick the saver by extension (jpg q95 / png / webp). ku0: verify the
+ * save actually produced a non-empty, newer file instead of trusting a
+ * pre-existing path. Returns TRUE on a real write. */
+static gboolean
+_save_buffer(GeglBuffer *p_buf, GFile *p_out, GError **p_err) {
    char *c_path = g_file_get_path(p_out);
    if (c_path == NULL) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
                   "enhancer: non-local export path");
       return FALSE;
    }
-
    const char *c_op = _saver_for_ext(p_out);
    if (c_op == NULL) {
       g_free(c_path);
@@ -192,21 +256,10 @@ enhancer_export(Enhancer *e, GeglBuffer *p_in, const EnhancerPreset *p_preset,
                   "enhancer: unsupported export extension");
       return FALSE;
    }
-
-   /* Apply the preset first. */
-   GeglBuffer *p_buf = enhancer_apply(NULL, p_in, p_preset, p_err);
-   if (p_buf == NULL) {
-      g_free(c_path);
-      return FALSE;
-   }
-
-   /* ku0: capture the save's real success. Record the output's pre-state so
-    * a pre-existing file can't masquerade as a successful save. */
-   GStatBuf st_before;
-   gboolean b_existed = (g_stat(c_path, &st_before) == 0);
-
-   GeglNode *p_graph = gegl_node_new();
-   GeglNode *p_src   = gegl_node_new_child(
+   GStatBuf  st_before;
+   gboolean  b_existed = (g_stat(c_path, &st_before) == 0);
+   GeglNode *p_graph   = gegl_node_new();
+   GeglNode *p_src     = gegl_node_new_child(
       p_graph, "operation", "gegl:buffer-source", "buffer", p_buf, NULL);
    GeglNode *p_save;
    if (g_str_equal(c_op, "gegl:jpg-save")) {
@@ -219,9 +272,6 @@ enhancer_export(Enhancer *e, GeglBuffer *p_in, const EnhancerPreset *p_preset,
    gegl_node_link(p_src, p_save);
    gegl_node_process(p_save);
    g_object_unref(p_graph);
-   g_object_unref(p_buf);
-
-   /* Verify the save actually produced a non-empty file newer than before. */
    GStatBuf st_after;
    gboolean b_ok = FALSE;
    if (g_stat(c_path, &st_after) == 0 && st_after.st_size > 0) {
@@ -237,6 +287,39 @@ enhancer_export(Enhancer *e, GeglBuffer *p_in, const EnhancerPreset *p_preset,
       return FALSE;
    }
    return TRUE;
+}
+
+gboolean
+enhancer_export(Enhancer *e, GeglBuffer *p_in, const EnhancerPreset *p_preset,
+                GFile *p_out, GError **p_err) {
+   (void)e;
+   g_return_val_if_fail(p_in != NULL, FALSE);
+   g_return_val_if_fail(p_out != NULL, FALSE);
+   GeglBuffer *p_buf = enhancer_apply(NULL, p_in, p_preset, p_err);
+   if (p_buf == NULL) {
+      return FALSE;
+   }
+   gboolean b_ok = _save_buffer(p_buf, p_out, p_err);
+   g_object_unref(p_buf);
+   return b_ok;
+}
+
+/* Export p_in with the enabled-preset chain (u_mask) composed, to p_out. */
+gboolean
+enhancer_export_chain(Enhancer *e, GeglBuffer *p_in, const GPtrArray *p_presets,
+                      guint8 u_mask, GFile *p_out, GError **p_err) {
+   (void)e;
+   g_return_val_if_fail(p_in != NULL, FALSE);
+   g_return_val_if_fail(p_out != NULL, FALSE);
+   g_return_val_if_fail(p_presets != NULL, FALSE);
+   GeglBuffer *p_buf =
+      enhancer_apply_chain(NULL, p_in, p_presets, u_mask, p_err);
+   if (p_buf == NULL) {
+      return FALSE;
+   }
+   gboolean b_ok = _save_buffer(p_buf, p_out, p_err);
+   g_object_unref(p_buf);
+   return b_ok;
 }
 
 #if GGAZE_HAVE_GEGL
