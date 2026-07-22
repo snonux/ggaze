@@ -320,7 +320,50 @@ _action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
 }
 
-/* Permanently delete each file in p_files (the current or the marked set). */
+/* --- bulk-delete safety: captured, immutable target context -------------
+ *
+ * The >1-mark delete opens an async GtkAlertDialog. While it is pending, a
+ * single-instance open / drop can replace the folder (ggaze_window_open swaps
+ * p_nav). The dialog callback must therefore NOT re-read the navigator's
+ * marks; it deletes the targets captured here at prompt time, and only if the
+ * folder is still the same one (ggaze_window_delete_targets_still_current).
+ */
+typedef struct {
+   GgazeWindow *p_win; /* owned ref: outlives the async dialog */
+   GFile       *p_dir; /* owning directory at prompt time (owned) */
+   GList *p_files;     /* captured target GFile* list (owned, transfer full) */
+} _DeleteCtx;
+
+static void
+_delete_ctx_free(_DeleteCtx *p_ctx) {
+   if (p_ctx == NULL) {
+      return;
+   }
+   g_clear_object(&p_ctx->p_dir);
+   g_list_free_full(p_ctx->p_files, (GDestroyNotify)g_object_unref);
+   g_clear_object(&p_ctx->p_win);
+   g_free(p_ctx);
+}
+
+/* TRUE iff p_win still navigates p_dir (the folder the captured delete targets
+ * came from is still open), so a pending confirm dialog may safely delete
+ * them. FALSE if the folder was replaced (single-instance open / drop) while
+ * the dialog was pending. See window.h. */
+gboolean
+ggaze_window_delete_targets_still_current(GgazeWindow *p_win, GFile *p_dir) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   g_return_val_if_fail(G_IS_FILE(p_dir), FALSE);
+   if (p_win->p_nav == NULL) {
+      return (FALSE);
+   }
+   GFile *p_now = navigator_get_dir(p_win->p_nav);
+   if (p_now == NULL) {
+      return (FALSE);
+   }
+   return (g_file_equal(p_now, p_dir));
+}
+
+/* Permanently delete each file in p_files (the captured or current set). */
 static void
 _do_delete_files(GgazeWindow *p_win, GList *p_files) {
    for (GList *p_it = p_files; p_it != NULL; p_it = p_it->next) {
@@ -336,20 +379,40 @@ _do_delete_files(GgazeWindow *p_win, GList *p_files) {
    navigator_next(p_win->p_nav); /* advance off the last deleted */
 }
 
+/* Process a confirmed bulk-delete against the captured targets p_files
+ * (borrowed; not freed here). Deletes EXACTLY those files iff p_win still
+ * navigates p_dir; otherwise the folder was replaced while the confirm dialog
+ * was pending and the delete is refused (no files touched). Returns TRUE iff
+ * the delete proceeded. See window.h. */
+gboolean
+ggaze_window_delete_captured(GgazeWindow *p_win, GFile *p_dir, GList *p_files) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   g_return_val_if_fail(G_IS_FILE(p_dir), FALSE);
+   if (!ggaze_window_delete_targets_still_current(p_win, p_dir)) {
+      g_warning(
+         "ggaze: bulk delete refused \u2014 the folder was replaced while "
+         "the confirm dialog was pending; no files deleted.");
+      return (FALSE);
+   }
+   _do_delete_files(p_win, p_files);
+   return (TRUE);
+}
+
 static void
 _delete_confirm_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    GtkAlertDialog *p_dlg = GTK_ALERT_DIALOG(p_src);
-   GgazeWindow    *p_win = GGAZE_WINDOW(p_data);
+   _DeleteCtx     *p_ctx = (_DeleteCtx *)p_data;
    GError         *p_err = NULL;
    gboolean        b_ok  = gtk_alert_dialog_choose_finish(p_dlg, p_res, &p_err);
-   if (b_ok && p_win->p_nav != NULL) {
-      GList *p_marks = navigator_get_marks(p_win->p_nav);
-      _do_delete_files(p_win, p_marks);
-      g_list_free_full(p_marks, (GDestroyNotify)g_object_unref);
-   } else {
-      g_clear_error(&p_err);
+   if (b_ok) {
+      /* Delete the captured targets (NOT a re-read of p_nav marks): if the
+       * folder was replaced while this dialog was pending, the safety check
+       * inside ggaze_window_delete_captured refuses and no files are touched.
+       */
+      ggaze_window_delete_captured(p_ctx->p_win, p_ctx->p_dir, p_ctx->p_files);
    }
-   g_object_unref(p_data);
+   g_clear_error(&p_err);
+   _delete_ctx_free(p_ctx);
 }
 
 static void
@@ -362,17 +425,27 @@ _action_delete(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
    guint u_marks = navigator_get_mark_count(p_win->p_nav);
    if (u_marks > 1) {
-      /* Confirm before deleting >1 marked image (decision #38). */
-      char *c_msg =
-         g_strdup_printf("Permanently delete %u marked images?", u_marks);
+      /* Confirm before deleting >1 marked image (decision #38). Capture an
+       * immutable snapshot of the targets NOW so the async dialog callback
+       * deletes exactly the files named by the prompt, even if the folder is
+       * replaced (single-instance open / drop) while it is pending. */
+      GFile *p_dir   = navigator_get_dir(p_win->p_nav);
+      GList *p_marks = navigator_get_marks(p_win->p_nav); /* transfer full */
+      if (p_dir == NULL || p_marks == NULL) {
+         g_list_free_full(p_marks, (GDestroyNotify)g_object_unref);
+         return;
+      }
       GtkAlertDialog *p_dlg =
          gtk_alert_dialog_new("Permanently delete %u marked images?", u_marks);
       gtk_alert_dialog_set_buttons(p_dlg,
                                    (const char *[]){"Cancel", "Delete", NULL});
+      _DeleteCtx *p_ctx = g_new(_DeleteCtx, 1);
+      p_ctx->p_win      = (GgazeWindow *)g_object_ref(p_win);
+      p_ctx->p_dir      = (GFile *)g_object_ref(p_dir);
+      p_ctx->p_files    = p_marks; /* owned by the context now */
       gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), NULL,
-                              _delete_confirm_cb, g_object_ref(p_win));
+                              _delete_confirm_cb, p_ctx);
       g_object_unref(p_dlg);
-      g_free(c_msg);
       return;
    }
    GList *p_files = NULL;

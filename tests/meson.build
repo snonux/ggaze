@@ -297,6 +297,15 @@ test_marks = executable(
 )
 test('marks', test_marks, suite : 'integration', env : fixtures_env)
 
+test_delete_safety = executable(
+   'test_delete_safety', ['test_delete_safety.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib, install : false,
+)
+test('delete_safety', test_delete_safety,
+   suite : 'integration', env : fixtures_env)
+
 test_grid_cancel = executable(
    'test_grid_cancel',
    ['test_grid_cancel.c', ggaze_conf_h],
