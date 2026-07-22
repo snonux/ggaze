@@ -462,6 +462,38 @@ _action_mark_all(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    _update_header(p_win);
 }
 
+/* `V` range-mark: mark every file from the last `v`-toggled mark (the anchor)
+ * to the highlighted grid cell / current large-view image, inclusive. No-op
+ * if no mark has been toggled on yet (no anchor). Emits "changed" so grid
+ * badges and the header mark count refresh. */
+static void
+_action_mark_range(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL) {
+      return;
+   }
+   GFile *p_anchor = navigator_get_last_mark(p_win->p_nav);
+   if (p_anchor == NULL) {
+      return;
+   }
+   GFile      *p_target = NULL;
+   const char *c_cur =
+      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
+   if (g_strcmp0(c_cur, "grid") == 0 && p_win->p_grid != NULL) {
+      p_target = ggaze_grid_get_selected_file(p_win->p_grid);
+   }
+   if (p_target == NULL) {
+      p_target = navigator_get_current(p_win->p_nav);
+   }
+   if (p_target == NULL) {
+      return;
+   }
+   navigator_mark_range(p_win->p_nav, p_anchor, p_target);
+   _update_header(p_win);
+}
+
 /* GtkBuilder UI for the shortcuts overlay (?). Accel strings use gtk
  * accelerator syntax: "h Left" means h OR Left triggers it. */
 static const char *SHORTCUTS_UI =
@@ -553,6 +585,13 @@ static const char *SHORTCUTS_UI =
    "                <property name=\"accelerator\">v</property>\n"
    "                <property name=\"title\">Toggle mark on "
    "highlighted</property>\n"
+   "              </object>\n"
+   "            </child>\n"
+   "            <child>\n"
+   "              <object class=\"GtkShortcutsShortcut\">\n"
+   "                <property name=\"accelerator\">Shift+V</property>\n"
+   "                <property name=\"title\">Range-mark from last mark "
+   "to current</property>\n"
    "              </object>\n"
    "            </child>\n"
    "            <child>\n"
@@ -1083,6 +1122,7 @@ static const GActionEntry ACTIONS[] = {
    {.name = "toggle-view", .activate = _action_toggle_view},
    {.name = "mark", .activate = _action_mark},
    {.name = "mark-all", .activate = _action_mark_all},
+   {.name = "mark-range", .activate = _action_mark_range},
    {.name = "shortcuts", .activate = _action_shortcuts},
    {.name = "enhance-1", .activate = _action_enhance_n},
    {.name = "enhance-2", .activate = _action_enhance_n},

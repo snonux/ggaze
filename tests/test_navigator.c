@@ -304,6 +304,110 @@ test_marks(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* `v` toggle-on records the anchor used by `V` range-mark; unmarking the
+ * anchor drops it. navigator_mark_removed clears the mark (decision Q) and
+ * the anchor if it was the removed file, without touching unrelated marks. */
+static void
+test_marks_anchor_and_remove(void) {
+   char *c_dir = make_temp_dir();
+   write_file(c_dir, "a.jpg", "x", 1);
+   write_file(c_dir, "b.jpg", "x", 1);
+   write_file(c_dir, "c.jpg", "x", 1);
+   GFile *p_a = file_ref(c_dir, "a.jpg");
+   GFile *p_b = file_ref(c_dir, "b.jpg");
+   GFile *p_c = file_ref(c_dir, "c.jpg");
+
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, TRUE, TRUE);
+
+   /* No anchor until a mark is toggled on. */
+   g_assert_null(navigator_get_last_mark(p_nav));
+   navigator_toggle_mark(p_nav, p_a); /* mark a, anchor = a */
+   g_assert_true(g_file_equal(navigator_get_last_mark(p_nav), p_a));
+   g_assert_cmpint(navigator_get_mark_count(p_nav), ==, 1);
+
+   /* Range from anchor a to current c marks a, b, c. */
+   navigator_set_current_file(p_nav, p_c);
+   navigator_mark_range(p_nav, navigator_get_last_mark(p_nav), p_c);
+   g_assert_cmpint(navigator_get_mark_count(p_nav), ==, 3);
+
+   /* Unmarking the anchor drops it; the other marks remain. */
+   navigator_toggle_mark(p_nav, p_a); /* unmark a (was the anchor) */
+   g_assert_null(navigator_get_last_mark(p_nav));
+   g_assert_cmpint(navigator_get_mark_count(p_nav), ==, 2);
+   g_assert_true(navigator_is_marked(p_nav, p_b));
+   g_assert_true(navigator_is_marked(p_nav, p_c));
+
+   /* Re-marking a sets the anchor again; clearing marks drops it. */
+   navigator_toggle_mark(p_nav, p_a); /* mark a, anchor = a */
+   g_assert_true(g_file_equal(navigator_get_last_mark(p_nav), p_a));
+   navigator_clear_marks(p_nav);
+   g_assert_null(navigator_get_last_mark(p_nav));
+   g_assert_cmpint(navigator_get_mark_count(p_nav), ==, 0);
+
+   /* mark_removed clears that file's mark but leaves unrelated marks, and
+    * drops the anchor when the removed file was the anchor. */
+   navigator_toggle_mark(p_nav, p_b); /* mark b, anchor = b */
+   navigator_toggle_mark(p_nav, p_c); /* mark c, anchor = c */
+   g_assert_cmpint(navigator_get_mark_count(p_nav), ==, 2);
+   navigator_mark_removed(p_nav, p_c);
+   g_assert_false(navigator_is_marked(p_nav, p_c));
+   g_assert_true(navigator_is_marked(p_nav, p_b));
+   g_assert_cmpint(navigator_get_mark_count(p_nav), ==, 1);
+   g_assert_null(navigator_get_last_mark(p_nav)); /* anchor was c -> cleared */
+   /* mark_removed on the remaining (non-anchor) mark clears it too. */
+   navigator_mark_removed(p_nav, p_b);
+   g_assert_cmpint(navigator_get_mark_count(p_nav), ==, 0);
+
+   navigator_delete(p_nav);
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+   g_object_unref(p_c);
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
+/* The range anchor is dropped when its file leaves the listing via an
+ * external delete + rescan (the monitor path), so `V` no-ops instead of
+ * range-marking from a stale path. */
+static void
+test_marks_anchor_pruned_on_rescan(void) {
+   char *c_dir = make_temp_dir();
+   write_file(c_dir, "a.jpg", "x", 1);
+   write_file(c_dir, "b.jpg", "x", 1);
+   write_file(c_dir, "c.jpg", "x", 1);
+   GFile *p_a = file_ref(c_dir, "a.jpg");
+   GFile *p_b = file_ref(c_dir, "b.jpg");
+   GFile *p_c = file_ref(c_dir, "c.jpg");
+
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, TRUE, TRUE);
+
+   navigator_toggle_mark(p_nav, p_a); /* anchor = a */
+   navigator_toggle_mark(p_nav, p_b);
+   g_assert_cmpint(navigator_get_mark_count(p_nav), ==, 2);
+   g_assert_true(g_file_equal(navigator_get_last_mark(p_nav), p_b));
+
+   /* Externally delete a (the anchor's mark prunes on rescan). */
+   g_assert_true(g_file_delete(p_a, NULL, NULL));
+   navigator_rescan(p_nav);
+   g_assert_cmpint(navigator_get_mark_count(p_nav), ==, 1); /* b remains */
+   g_assert_false(navigator_is_marked(p_nav, p_a));
+
+   /* Externally delete b: the anchor's file is gone, so the anchor drops. */
+   g_assert_true(g_file_delete(p_b, NULL, NULL));
+   navigator_rescan(p_nav);
+   g_assert_cmpint(navigator_get_mark_count(p_nav), ==, 0);
+   g_assert_null(navigator_get_last_mark(p_nav)); /* anchor pruned */
+
+   navigator_delete(p_nav);
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+   g_object_unref(p_c);
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
 static void
 test_rescan_and_nearest_fallback(void) {
    char *c_dir = make_temp_dir();
@@ -471,6 +575,10 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/navigator/prev_next_wrap", test_prev_next_wrap);
    g_test_add_func("/navigator/set_current_file", test_set_current_file);
    g_test_add_func("/navigator/marks", test_marks);
+   g_test_add_func("/navigator/marks_anchor_and_remove",
+                   test_marks_anchor_and_remove);
+   g_test_add_func("/navigator/marks_anchor_pruned_on_rescan",
+                   test_marks_anchor_pruned_on_rescan);
    g_test_add_func("/navigator/rescan_fallback",
                    test_rescan_and_nearest_fallback);
    g_test_add_func("/navigator/remove", test_remove_clears_mark_and_falls_back);

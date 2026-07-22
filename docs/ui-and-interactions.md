@@ -124,7 +124,8 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
   — `scroll-behavior` setting.
 - **Click-drag** — pan when zoomed in.
 - **Double-click** — toggle fit ↔ 100%.
-- **Middle-click** — toggle fullscreen.
+- **Middle-click** — toggle mark on a grid cell (grid view) / toggle
+  fullscreen (large view).
 - **Touch pinch** — zoom; **swipe** — next/prev; **two-finger tap** — info.
 
 ## Zoom behavior
@@ -161,7 +162,8 @@ Loaded lazily; never blocks display of the pixels.
   small, fewer when large. Size persists in GSettings (`thumbnail-size`) and
   is restored on next launch; `0` resets to default.
 - Marks: `v` toggles a check badge on the current cell; `V` range-marks;
-  `Ctrl+a` marks all. `d`/`D`/`m` act on the marked set (or current if none).
+  `Ctrl+a` marks all; middle-click a cell toggles its mark. `d`/`D`/`m` act on the
+  marked set (or current if none).
 
 ## Selection & moving
 

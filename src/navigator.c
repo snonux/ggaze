@@ -34,15 +34,16 @@ typedef struct {
 } Entry;
 
 struct _Navigator {
-   GObject       parent_instance;
-   GFile        *p_dir;     /* owned */
-   GPtrArray    *p_files;   /* GFile* (owned refs), sorted/filtered */
-   gint          i_current; /* -1 if empty */
-   GgazeSort     e_sort;
-   gboolean      b_wrap;
-   gboolean      b_hide_raw;
-   GHashTable   *p_marks;   /* GFile* (owned refs) -> presence */
-   GHashTable   *p_removed; /* GFile* (owned refs): trashed/deleted, dimmed */
+   GObject     parent_instance;
+   GFile      *p_dir;     /* owned */
+   GPtrArray  *p_files;   /* GFile* (owned refs), sorted/filtered */
+   gint        i_current; /* -1 if empty */
+   GgazeSort   e_sort;
+   gboolean    b_wrap;
+   gboolean    b_hide_raw;
+   GHashTable *p_marks;   /* GFile* (owned refs) -> presence */
+   GHashTable *p_removed; /* GFile* (owned refs): trashed/deleted, dimmed */
+   GFile *p_last_mark;    /* anchor for `V` range-mark (owned ref, NULL=none) */
    GFileMonitor *p_monitor;
    guint         u_debounce_ms;
    guint         u_debounce_id; /* 0 = none pending */
@@ -277,6 +278,13 @@ _relist(Navigator *p_nav) {
          g_hash_table_iter_remove(&iter);
       }
    }
+   /* The range anchor must also be a live marked file: drop it if its file
+    * left the listing (external delete / rescan), so `V` no-ops instead of
+    * range-marking from a stale path. */
+   if (p_nav->p_last_mark != NULL &&
+       _find_index_by_file(p_nav, p_nav->p_last_mark) < 0) {
+      g_clear_object(&p_nav->p_last_mark);
+   }
 
    /* Preserve removed (dimmed) items: keep them in the listing even if absent
     * from disk (trashed/deleted this session); un-remove any that reappeared.
@@ -359,6 +367,7 @@ navigator_dispose(GObject *p_obj) {
    g_clear_pointer(&p_nav->p_removed, g_hash_table_unref);
    g_clear_pointer(&p_nav->p_files, g_ptr_array_unref);
    g_clear_object(&p_nav->p_dir);
+   g_clear_object(&p_nav->p_last_mark);
    G_OBJECT_CLASS(navigator_parent_class)->dispose(p_obj);
 }
 
@@ -386,6 +395,7 @@ navigator_init(Navigator *p_nav) {
    p_nav->b_wrap        = TRUE;
    p_nav->b_hide_raw    = TRUE;
    p_nav->u_debounce_ms = GGAZE_DEFAULT_DEBOUNCE_MS;
+   p_nav->p_last_mark   = NULL;
 }
 
 /* --- public API ---------------------------------------------------------- */
@@ -476,8 +486,22 @@ void
 navigator_mark_removed(Navigator *p_nav, GFile *p_file) {
    g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
    g_return_if_fail(G_IS_FILE(p_file));
-   if (!g_hash_table_contains(p_nav->p_removed, p_file)) {
+   /* Decision Q: marks clear on trash/delete. Drop this file's mark (and
+    * the range anchor if it was the anchor) without touching unrelated
+    * marks, so mark-based ops never target paths that no longer exist. */
+   gboolean b_mark_changed = g_hash_table_remove(p_nav->p_marks, p_file);
+   if (p_nav->p_last_mark != NULL && g_file_equal(p_nav->p_last_mark, p_file)) {
+      g_clear_object(&p_nav->p_last_mark);
+      b_mark_changed = TRUE;
+   }
+   gboolean b_removed_added = !g_hash_table_contains(p_nav->p_removed, p_file);
+   if (b_removed_added) {
       g_hash_table_add(p_nav->p_removed, g_object_ref(p_file));
+   }
+   /* Emit when the removed set or the marks actually changed, so grid badges
+    * and the header never go stale (e.g. re-marking a file already in
+    * p_removed, then removing it again). */
+   if (b_removed_added || b_mark_changed) {
       _emit_changed(p_nav);
    }
 }
@@ -630,8 +654,16 @@ navigator_toggle_mark(Navigator *p_nav, GFile *p_file) {
    g_return_if_fail(G_IS_FILE(p_file));
    if (g_hash_table_contains(p_nav->p_marks, p_file)) {
       g_hash_table_remove(p_nav->p_marks, p_file);
+      /* If the unmarked file was the range anchor, drop it: a subsequent `V`
+       * has no meaningful anchor once the anchor itself is unmarked. */
+      if (p_nav->p_last_mark != NULL &&
+          g_file_equal(p_nav->p_last_mark, p_file)) {
+         g_clear_object(&p_nav->p_last_mark);
+      }
    } else {
       g_hash_table_add(p_nav->p_marks, g_object_ref(p_file));
+      /* Remember this as the anchor for a later `V` range-mark. */
+      g_set_object(&p_nav->p_last_mark, p_file);
    }
 }
 
@@ -675,6 +707,7 @@ void
 navigator_clear_marks(Navigator *p_nav) {
    g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
    g_hash_table_remove_all(p_nav->p_marks);
+   g_clear_object(&p_nav->p_last_mark);
    _emit_changed(p_nav);
 }
 
@@ -696,6 +729,15 @@ navigator_get_marks(Navigator *p_nav) {
    return (g_list_reverse(p_out));
 }
 
+/* The anchor set by the last `v` toggle-on, used by `V` range-mark. Borrowed
+ * (owned by the navigator); NULL if no mark has been toggled on yet, or if the
+ * anchor was unmarked / removed / cleared. Survives re-sort (path-based). */
+GFile *
+navigator_get_last_mark(Navigator *p_nav) {
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), NULL);
+   return (p_nav->p_last_mark);
+}
+
 /* --- mutations ----------------------------------------------------------- */
 
 void
@@ -715,6 +757,9 @@ navigator_remove(Navigator *p_nav, GFile *p_file) {
    }
    /* Clear its mark first (decision Q) while the file ref is still valid. */
    g_hash_table_remove(p_nav->p_marks, p_file);
+   if (p_nav->p_last_mark != NULL && g_file_equal(p_nav->p_last_mark, p_file)) {
+      g_clear_object(&p_nav->p_last_mark);
+   }
    g_ptr_array_remove_index(p_nav->p_files, (guint)i);
    if (p_nav->p_files->len == 0) {
       p_nav->i_current = -1;

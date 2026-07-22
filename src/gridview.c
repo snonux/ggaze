@@ -196,6 +196,37 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
    return (FALSE);
 }
 
+/* Middle-click on a grid cell toggles its mark (pointer-accessible
+ * marks): select the cell, sync navigator.current to it, then dispatch the
+ * shared "win.mark" action (the window updates the header + badge exactly
+ * as `v` does). */
+static void
+_on_flow_middle_pressed(GtkGesture *p_g, gint i_n_press, gdouble d_x,
+                        gdouble d_y, gpointer p_data) {
+   (void)i_n_press;
+   if (gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(p_g)) !=
+       GDK_BUTTON_MIDDLE) {
+      return;
+   }
+   GgazeGrid *p_grid = GGAZE_GRID(p_data);
+   if (p_grid->p_nav == NULL || p_grid->p_flow == NULL) {
+      return;
+   }
+   GtkFlowBoxChild *p_child = gtk_flow_box_get_child_at_pos(
+      GTK_FLOW_BOX(p_grid->p_flow), (gint)d_x, (gint)d_y);
+   if (p_child == NULL) {
+      return;
+   }
+   /* Select + sync navigator.current so win.mark targets this cell, then
+    * dispatch the shared toggle action (handles badge + header update). */
+   gtk_flow_box_select_child(GTK_FLOW_BOX(p_grid->p_flow), p_child);
+   GFile *p_file = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
+   if (p_file != NULL) {
+      navigator_set_current_file(p_grid->p_nav, p_file);
+   }
+   gtk_widget_activate_action(GTK_WIDGET(p_grid), "win.mark", NULL);
+}
+
 /* --- refresh / rebuild --------------------------------------------------- */
 
 static void
@@ -476,6 +507,13 @@ ggaze_grid_init(GgazeGrid *p_grid) {
    GtkEventController *p_key = gtk_event_controller_key_new();
    g_signal_connect(p_key, "key-pressed", G_CALLBACK(_on_flow_key), p_grid);
    gtk_widget_add_controller(p_grid->p_flow, p_key);
+   /* Middle-click on a cell toggles its mark (pointer-accessible marks). */
+   GtkGesture *p_middle = gtk_gesture_click_new();
+   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(p_middle),
+                                 GDK_BUTTON_MIDDLE);
+   g_signal_connect(p_middle, "pressed", G_CALLBACK(_on_flow_middle_pressed),
+                    p_grid);
+   gtk_widget_add_controller(p_grid->p_flow, GTK_EVENT_CONTROLLER(p_middle));
    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(p_grid->p_scrolled),
                                  p_grid->p_flow);
 }

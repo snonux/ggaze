@@ -78,6 +78,11 @@ void     navigator_clear_marks(Navigator *p_nav);
 guint    navigator_get_mark_count(Navigator *p_nav);
 GList *navigator_get_marks(Navigator *p_nav); /* (transfer full) GFile* refs */
 
+/* Borrowed pointer to the last file marked via a `v` toggle-on - the anchor
+ * for `V` range-mark (NULL if none / cleared). Survives re-sort (path-based).
+ */
+GFile *navigator_get_last_mark(Navigator *p_nav); /* (transfer none) */
+
 /* --- mutations ---------------------------------------------------------- */
 /* Re-read the directory; if the current file is gone, fall back to nearest;
  * emit "changed". */
