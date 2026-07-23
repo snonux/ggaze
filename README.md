@@ -103,3 +103,7 @@ Contributing and agent workflow: see `AGENTS.md`.
 ## License
 
 GPL-3.0-or-later. See [`LICENSE`](LICENSE).
+
+## Note
+
+This project was created using the open-weight LLM GLM 5.2.
