@@ -29,6 +29,7 @@ GtkWidget *ggaze_grid_new(Navigator *p_nav, Thumbnail *p_thumb, int i_size,
                           gboolean b_hide_trashed);
 
 void ggaze_grid_set_thumbnail_size(GgazeGrid *p_grid, int i_size);
+int  ggaze_grid_get_thumbnail_size(GgazeGrid *p_grid);
 void ggaze_grid_set_hide_trashed(GgazeGrid *p_grid, gboolean b_hide);
 
 /* Rebuild the cells from the navigator (call after structural changes). */

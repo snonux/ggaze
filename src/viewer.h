@@ -18,6 +18,8 @@
 #include <gdk/gdk.h>
 #include <gtk/gtk.h>
 
+#include "settings.h"
+
 G_BEGIN_DECLS
 
 #define GGAZE_TYPE_VIEWER (ggaze_viewer_get_type())
@@ -37,6 +39,12 @@ void ggaze_viewer_zoom_out(GgazeViewer *p_viewer);
 void ggaze_viewer_toggle_fit_100(GgazeViewer *p_viewer);
 void ggaze_viewer_fit(GgazeViewer *p_viewer);
 void ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy);
+
+/* Configure the background colour drawn behind the image and what the scroll
+ * wheel does (applied from GSettings by the window). Defaults: dark / zoom. */
+void ggaze_viewer_set_background(GgazeViewer *p_viewer, GgazeBackground e_bg);
+void ggaze_viewer_set_scroll_behavior(GgazeViewer        *p_viewer,
+                                      GgazeScrollBehavior e_scroll);
 
 G_END_DECLS
 

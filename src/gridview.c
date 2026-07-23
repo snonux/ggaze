@@ -585,6 +585,12 @@ ggaze_grid_set_thumbnail_size(GgazeGrid *p_grid, int i_size) {
    gtk_widget_queue_resize(p_grid->p_flow);
 }
 
+int
+ggaze_grid_get_thumbnail_size(GgazeGrid *p_grid) {
+   g_return_val_if_fail(GGAZE_IS_GRID(p_grid), 0);
+   return (p_grid->i_size);
+}
+
 void
 ggaze_grid_set_hide_trashed(GgazeGrid *p_grid, gboolean b_hide) {
    g_return_if_fail(GGAZE_IS_GRID(p_grid));

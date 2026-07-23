@@ -54,6 +54,7 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_f, 0, "win.fullscreen"},
    {GDK_KEY_S, GDK_SHIFT_MASK, "win.slideshow"},
    {GDK_KEY_i, 0, "win.info"},
+   {GDK_KEY_comma, 0, "win.preferences"},
    {GDK_KEY_Escape, 0, "win.back"},
 };
 

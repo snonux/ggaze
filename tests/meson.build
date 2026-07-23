@@ -22,6 +22,23 @@ fixtures_env.set('GGAZE_FIXTURES_DIR',
    join_paths(meson.project_source_root(), 'tests', 'fixtures'))
 fixtures_env.set('GGAZE_SAMPLE_DIR',
    join_paths(meson.project_source_root(), 'sample-images'))
+# Every test that constructs a GgazeWindow calls g_settings_new(); point it at
+# the build-tree compiled schema and use the in-process memory backend so no
+# test touches the user's dconf and the schema is found without installing.
+fixtures_env.set('GSETTINGS_BACKEND', 'memory')
+fixtures_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
+
+# GSettings test environment: memory backend (in-process, no dconf) + the
+# schema compiled into the build tree (data/gschemas.compiled). Used by the
+# plain-C settings unit test and the integration test that changes settings.
+gsettings_env = environment()
+gsettings_env.set('GIO_USE_VFS', 'local')
+gsettings_env.set('GGAZE_FIXTURES_DIR',
+   join_paths(meson.project_source_root(), 'tests', 'fixtures'))
+gsettings_env.set('GGAZE_SAMPLE_DIR',
+   join_paths(meson.project_source_root(), 'sample-images'))
+gsettings_env.set('GSETTINGS_BACKEND', 'memory')
+gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 
 # --- unit track ---
 test_bootstrap = executable(
@@ -152,6 +169,15 @@ test_mover = executable(
    link_with : ggaze_lib, install : false,
 )
 test('mover', test_mover, suite : 'unit', env : fixtures_env)
+
+test_settings = executable(
+   'test_settings', ['test_settings.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : ggaze_lib, install : false,
+)
+test('settings', test_settings, suite : 'unit', env : gsettings_env,
+   depends : ggaze_gschemas)
 
 test_opener = executable(
    'test_opener', ['test_opener.c', ggaze_conf_h],
@@ -329,5 +355,14 @@ test_grid_cancel = executable(
 )
 test('grid_cancel', test_grid_cancel,
    suite : 'integration', env : fixtures_env)
+
+test_settings_ui = executable(
+   'test_settings_ui', ['test_settings_ui.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib, install : false,
+)
+test('settings_ui', test_settings_ui,
+   suite : 'integration', env : fixtures_env, depends : ggaze_gschemas)
 
 subdir('integration')

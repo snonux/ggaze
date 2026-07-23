@@ -15,23 +15,29 @@
 #include <glib.h>
 #include <graphene.h>
 
+#include "settings.h"
+
 #define GGAZE_ZOOM_FACTOR 1.25
 #define GGAZE_ZOOM_MIN 0.02
 #define GGAZE_ZOOM_MAX 64.0
 #define GGAZE_PAN_STEP 24.0
 
 struct _GgazeViewer {
-   GtkWidget   parent_instance;
-   GdkTexture *p_texture;
-   gboolean    b_fit;   /* TRUE = fit-to-window; FALSE = use d_zoom */
-   gdouble     d_zoom;  /* 1.0 = 100% (used when !b_fit) */
-   gdouble     d_pan_x; /* offset from centred, in widget px */
-   gdouble     d_pan_y;
-   gdouble     d_drag_start_pan_x;
-   gdouble     d_drag_start_pan_y;
+   GtkWidget           parent_instance;
+   GdkTexture         *p_texture;
+   gboolean            b_fit;   /* TRUE = fit-to-window; FALSE = use d_zoom */
+   gdouble             d_zoom;  /* 1.0 = 100% (used when !b_fit) */
+   gdouble             d_pan_x; /* offset from centred, in widget px */
+   gdouble             d_pan_y;
+   gdouble             d_drag_start_pan_x;
+   gdouble             d_drag_start_pan_y;
+   GgazeBackground     e_bg;     /* configurable viewer background */
+   GgazeScrollBehavior e_scroll; /* what the scroll wheel does */
 };
 
 G_DEFINE_TYPE(GgazeViewer, ggaze_viewer, GTK_TYPE_WIDGET)
+
+static guint u_navigate_sig = 0;
 
 /* --- geometry --------------------------------------------------------------
  */
@@ -162,11 +168,28 @@ ggaze_viewer_snapshot(GtkWidget *p_widget, GtkSnapshot *p_snap) {
    int          i_w = gtk_widget_get_width(p_widget);
    int          i_h = gtk_widget_get_height(p_widget);
 
-   /* Dark background (configurable via settings in M10). */
-   static const GdkRGBA BG = {0.07f, 0.07f, 0.07f, 1.0f};
-   graphene_rect_t      bg_rect =
+   /* Dark background (configurable via settings, applied by the window). */
+   GdkRGBA bg;
+   switch (p_v->e_bg) {
+   case GGAZE_BG_BLACK:
+      bg = (GdkRGBA){0.0f, 0.0f, 0.0f, 1.0f};
+      break;
+   case GGAZE_BG_GREY:
+      bg = (GdkRGBA){0.2f, 0.2f, 0.2f, 1.0f};
+      break;
+   case GGAZE_BG_CHECKER:
+      /* Flat mid-grey placeholder; a real checkerboard pattern would be drawn
+       * here. Keeps the background distinct from dark/grey for now. */
+      bg = (GdkRGBA){0.3f, 0.3f, 0.3f, 1.0f};
+      break;
+   case GGAZE_BG_DARK:
+   default:
+      bg = (GdkRGBA){0.07f, 0.07f, 0.07f, 1.0f};
+      break;
+   }
+   graphene_rect_t bg_rect =
       GRAPHENE_RECT_INIT(0.f, 0.f, (float)i_w, (float)i_h);
-   gtk_snapshot_append_color(p_snap, &BG, &bg_rect);
+   gtk_snapshot_append_color(p_snap, &bg, &bg_rect);
 
    if (p_v->p_texture == NULL) {
       return;
@@ -197,6 +220,11 @@ ggaze_viewer_class_init(GgazeViewerClass *p_klass) {
    p_wc->snapshot       = ggaze_viewer_snapshot;
    p_oc->dispose        = ggaze_viewer_dispose;
    gtk_widget_class_set_css_name(p_wc, "ggazeviewer");
+   /* "navigate": emitted by the scroll wheel in GGAZE_SCROLL_NAVIGATE mode.
+    * The int arg is +1 (next) or -1 (prev). */
+   u_navigate_sig =
+      g_signal_new("navigate", G_OBJECT_CLASS_TYPE(p_oc), G_SIGNAL_RUN_LAST, 0,
+                   NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
 }
 
 /* --- controllers ---------------------------------------------------------- */
@@ -239,6 +267,24 @@ scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
       gdk_event_get_position(p_event, &d_cx, &d_cy);
    }
 
+   switch (p_v->e_scroll) {
+   case GGAZE_SCROLL_PAN_WHEN_ZOOMED:
+      /* Only pan when zoomed in; at fit-to-window the wheel is a no-op so the
+       * event stays available for any outer controller. */
+      if (p_v->b_fit) {
+         return (FALSE);
+      }
+      ggaze_viewer_pan(p_v, 0.0, -d_dy * GGAZE_PAN_STEP);
+      return (TRUE);
+   case GGAZE_SCROLL_NAVIGATE:
+      /* Emit "navigate": d_dy > 0 -> next, < 0 -> prev. The window connects
+       * and advances the navigator. */
+      g_signal_emit(p_v, u_navigate_sig, 0, d_dy > 0.0 ? 1 : -1);
+      return (TRUE);
+   case GGAZE_SCROLL_ZOOM:
+   default:
+      break;
+   }
    gdouble d_factor =
       (d_dy < 0.0) ? GGAZE_ZOOM_FACTOR : 1.0 / GGAZE_ZOOM_FACTOR;
    _zoom_at(p_v, d_cx, d_cy, _current_scale(p_v) * d_factor);
@@ -292,6 +338,8 @@ ggaze_viewer_init(GgazeViewer *p_v) {
    p_v->d_zoom    = 1.0;
    p_v->d_pan_x   = 0.0;
    p_v->d_pan_y   = 0.0;
+   p_v->e_bg      = GGAZE_BG_DARK;
+   p_v->e_scroll  = GGAZE_SCROLL_ZOOM;
 
    gtk_widget_set_focusable(GTK_WIDGET(p_v), TRUE);
 
@@ -379,4 +427,18 @@ ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy) {
    p_viewer->d_pan_x += d_dx;
    p_viewer->d_pan_y += d_dy;
    gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
+}
+
+void
+ggaze_viewer_set_background(GgazeViewer *p_viewer, GgazeBackground e_bg) {
+   g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
+   p_viewer->e_bg = e_bg;
+   gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
+}
+
+void
+ggaze_viewer_set_scroll_behavior(GgazeViewer        *p_viewer,
+                                 GgazeScrollBehavior e_scroll) {
+   g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
+   p_viewer->e_scroll = e_scroll;
 }

@@ -345,9 +345,9 @@ test_shortcut_full_table_registered(void) {
       g_assert_nonnull(p_s);
       g_object_unref(p_s);
    }
-   /* The SHORTCUTS[] table has 34 rows now (some actions appear twice, e.g.
+   /* The SHORTCUTS[] table has 35 rows now (some actions appear twice, e.g.
     * win.prev for h and Left; win.zoom-in for plus and equal). */
-   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 34);
+   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 35);
    g_object_unref(p_sc);
    g_object_unref(p_win);
    drain_main(200);

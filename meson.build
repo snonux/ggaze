@@ -68,6 +68,8 @@ ggaze_src = files(
       'src/mover.c',
       'src/opener.c',
       'src/runner.c',
+      'src/settings.c',
+      'src/prefs.c',
       'src/clipboard.c',
       'src/loader/loader.c',
       'src/loader/detect.c',

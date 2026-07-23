@@ -23,7 +23,12 @@
 #include "gridview.h"
 #include "info.h"
 #include "loader/loader.h"
+#include "mover.h"
 #include "navigator.h"
+#include "opener.h"
+#include "prefs.h"
+#include "runner.h"
+#include "settings.h"
 #include "shortcuts.h"
 #include "texturecache.h"
 #include "thumbnail.h"
@@ -35,8 +40,12 @@
 
 struct _GgazeWindow {
    GtkApplicationWindow parent_instance;
-   Navigator           *p_nav;    /* current folder listing (NULL until open) */
-   GCancellable        *p_cancel; /* visible load; cancelled on each nav */
+   Navigator           *p_nav; /* current folder listing (NULL until open) */
+   Settings            *p_settings; /* GSettings wrapper (owned) */
+   Mover               *p_mover;    /* configured move destinations */
+   Opener              *p_opener;   /* configured external editors */
+   Runner              *p_runner;   /* configured shell scripts */
+   GCancellable        *p_cancel;   /* visible load; cancelled on each nav */
    GCancellable *p_prefetch_cancel; /* prefetch round; cancelled on new round */
    TextureCache *p_cache;           /* bounded LRU of decoded GdkTextures */
    Thumbnail    *p_thumb;           /* TMS thumbnail cache */
@@ -71,6 +80,9 @@ static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
 static void     _show_info(GgazeWindow *p_win);
 static void     _hide_info(GgazeWindow *p_win);
 static gboolean _slideshow_tick(gpointer p_data);
+static void     _apply_viewer_prefs(GgazeWindow *p_win);
+static void     _load_engine_lists(GgazeWindow *p_win);
+static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
 #if GGAZE_HAVE_GEGL
 static void     _enhance_update_highlights(GgazeWindow *p_win);
 static void     _enhance_panel_reparent(GgazeWindow *p_win, gboolean b_overlay);
@@ -857,8 +869,15 @@ _action_slideshow(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       g_source_remove(p_win->u_slideshow);
       p_win->u_slideshow = 0;
    } else {
-      /* 3-second default; GSettings slideshow-delay wired in M10 */
-      p_win->u_slideshow = g_timeout_add_seconds(3, _slideshow_tick, p_win);
+      gdouble d_delay = 3.0;
+      if (p_win->p_settings != NULL) {
+         d_delay = settings_get_slideshow_delay(p_win->p_settings);
+      }
+      if (d_delay < 0.1) {
+         d_delay = 0.1;
+      }
+      p_win->u_slideshow =
+         g_timeout_add((guint)(d_delay * 1000.0), _slideshow_tick, p_win);
    }
 }
 
@@ -1187,6 +1206,152 @@ _hide_info(GgazeWindow *p_win) {
    gtk_widget_set_visible(p_win->p_info_lbl, FALSE);
 }
 
+/* Free a temp (name, command) pair struct (OpenerProg / RunnerScript share
+ * the same two-pointer layout). Used as a GPtrArray free func for the throw-
+ * away arrays built while feeding settings into the engines. */
+static void
+_name_cmd_free(gpointer p) {
+   OpenerProg *d = (OpenerProg *)p;
+   if (d == NULL) {
+      return;
+   }
+   g_free(d->c_name);
+   g_free(d->c_command);
+   g_free(d);
+}
+
+#if GGAZE_HAVE_GEGL
+static void
+_preset_tmp_free(gpointer p) {
+   EnhancerPreset *d = (EnhancerPreset *)p;
+   if (d == NULL) {
+      return;
+   }
+   g_free(d->c_name);
+   g_free(d->c_graph);
+   g_free(d);
+}
+#endif
+
+/* Apply the scalar viewer preferences (background, scroll behavior) from the
+ * settings wrapper to the large-view widget. Called at init and after the
+ * Preferences dialog commits a change. */
+static void
+_apply_viewer_prefs(GgazeWindow *p_win) {
+   g_return_if_fail(p_win != NULL);
+   if (p_win->p_settings == NULL || p_win->p_viewer == NULL) {
+      return;
+   }
+   ggaze_viewer_set_background(GGAZE_VIEWER(p_win->p_viewer),
+                               settings_get_background(p_win->p_settings));
+   ggaze_viewer_set_scroll_behavior(
+      GGAZE_VIEWER(p_win->p_viewer),
+      settings_get_scroll_behavior(p_win->p_settings));
+}
+
+/* Feed the configured a(ss) lists into the mover/opener/runner engines (and,
+ * when GEGL is built in, the user enhance presets into the enhancer). Called
+ * at init so the engines are ready before any folder is opened. */
+static void
+_load_engine_lists(GgazeWindow *p_win) {
+   g_return_if_fail(p_win != NULL);
+   if (p_win->p_settings == NULL) {
+      return;
+   }
+   if (p_win->p_mover != NULL) {
+      GPtrArray *p = settings_get_destinations(p_win->p_settings);
+      mover_set_dests(p_win->p_mover, p);
+      g_ptr_array_unref(p);
+   }
+   if (p_win->p_opener != NULL) {
+      GPtrArray *p  = settings_get_editors(p_win->p_settings);
+      GPtrArray *pp = g_ptr_array_new_with_free_func(_name_cmd_free);
+      for (guint i = 0; i < p->len; i++) {
+         const SettingsPair *pr = g_ptr_array_index(p, i);
+         OpenerProg         *np = g_new(OpenerProg, 1);
+         np->c_name             = g_strdup(pr->c_name);
+         np->c_command          = g_strdup(pr->c_value);
+         g_ptr_array_add(pp, np);
+      }
+      opener_set_progs(p_win->p_opener, pp);
+      g_ptr_array_unref(pp);
+      g_ptr_array_unref(p);
+   }
+   if (p_win->p_runner != NULL) {
+      GPtrArray *p  = settings_get_scripts(p_win->p_settings);
+      GPtrArray *pp = g_ptr_array_new_with_free_func(_name_cmd_free);
+      for (guint i = 0; i < p->len; i++) {
+         const SettingsPair *pr = g_ptr_array_index(p, i);
+         RunnerScript       *np = g_new(RunnerScript, 1);
+         np->c_name             = g_strdup(pr->c_name);
+         np->c_command          = g_strdup(pr->c_value);
+         g_ptr_array_add(pp, np);
+      }
+      runner_set_scripts(p_win->p_runner, pp);
+      g_ptr_array_unref(pp);
+      g_ptr_array_unref(p);
+   }
+#if GGAZE_HAVE_GEGL
+   if (p_win->p_enhancer != NULL) {
+      /* Rebuild the enhancer preset list as: the existing built-in presets
+       * (deep-copied) followed by the user-defined graph presets from
+       * settings. enhancer_set_presets deep-copies again into its own array,
+       * so the temp array here owns and frees every entry. User-graph
+       * application is still TODO in enhancer_apply, but the list is plumbed
+       * so the popup (M10) and the Preferences UI see the configured entries.
+       */
+      const GPtrArray *p_cur = enhancer_get_presets(p_win->p_enhancer);
+      GPtrArray       *pp    = g_ptr_array_new_with_free_func(_preset_tmp_free);
+      for (guint i = 0; p_cur != NULL && i < p_cur->len; i++) {
+         const EnhancerPreset *pr = g_ptr_array_index((GPtrArray *)p_cur, i);
+         EnhancerPreset       *np = g_new0(EnhancerPreset, 1);
+         np->c_name               = g_strdup(pr->c_name);
+         np->c_graph              = g_strdup(pr->c_graph);
+         np->i_builtin            = pr->i_builtin;
+         g_ptr_array_add(pp, np);
+      }
+      GPtrArray *p_user = settings_get_enhance_presets(p_win->p_settings);
+      for (guint i = 0; i < p_user->len; i++) {
+         const SettingsPair *pr = g_ptr_array_index(p_user, i);
+         EnhancerPreset     *np = g_new0(EnhancerPreset, 1);
+         np->c_name             = g_strdup(pr->c_name);
+         np->c_graph            = g_strdup(pr->c_value);
+         np->i_builtin          = 0;
+         g_ptr_array_add(pp, np);
+      }
+      enhancer_set_presets(p_win->p_enhancer, pp);
+      g_ptr_array_unref(pp);
+      g_ptr_array_unref(p_user);
+   }
+#endif
+}
+
+/* Scroll-wheel navigate (GGAZE_SCROLL_NAVIGATE): advance the navigator. */
+static void
+_on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data) {
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL) {
+      return;
+   }
+   if (i_dir >= 0) {
+      navigator_next(p_win->p_nav);
+   } else {
+      navigator_prev(p_win->p_nav);
+   }
+}
+
+static void
+_action_preferences(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_settings == NULL) {
+      return;
+   }
+   prefs_show(p_win->p_settings, GTK_WIDGET(p_win));
+}
+
 static const GActionEntry ACTIONS[] = {
    {.name = "prev", .activate = _action_prev},
    {.name = "next", .activate = _action_next},
@@ -1216,6 +1381,7 @@ static const GActionEntry ACTIONS[] = {
    {.name = "slideshow", .activate = _action_slideshow},
    {.name = "info", .activate = _action_info},
    {.name = "back", .activate = _action_back},
+   {.name = "preferences", .activate = _action_preferences},
    {.name = "enhance", .activate = _action_enhance},
    {.name = "enhance-save", .activate = _action_enhance_save},
 };
@@ -1549,6 +1715,10 @@ ggaze_window_dispose(GObject *p_obj) {
    g_clear_pointer(&p_win->p_cache, texturecache_delete);
    g_clear_pointer(&p_win->p_trash, trash_delete);
    g_clear_pointer(&p_win->p_thumb, thumbnail_delete);
+   g_clear_pointer(&p_win->p_runner, runner_delete);
+   g_clear_pointer(&p_win->p_opener, opener_delete);
+   g_clear_pointer(&p_win->p_mover, mover_delete);
+   g_clear_pointer(&p_win->p_settings, settings_delete);
 #if GGAZE_HAVE_GEGL
    g_clear_pointer(&p_win->p_enhancer, enhancer_delete);
 #endif
@@ -1605,10 +1775,22 @@ ggaze_window_init(GgazeWindow *p_win) {
    p_win->p_trash           = NULL; /* created on open */
    p_win->p_grid            = NULL; /* created on open */
    p_win->i_grid_size       = 128;
+   p_win->p_settings        = settings_new();
+   p_win->p_mover           = mover_new();
+   p_win->p_opener          = opener_new();
+   p_win->p_runner          = runner_new();
+   if (p_win->p_settings != NULL) {
+      p_win->i_grid_size =
+         CLAMP(settings_get_thumbnail_size(p_win->p_settings), 64, 512);
+   }
+
 #if GGAZE_HAVE_GEGL
    p_win->u_enhance_mask = 0; /* start on the original */
    p_win->p_enhancer     = enhancer_new();
 #endif
+   /* Feed the configured a(ss) lists into the engines now that all of them
+    * (incl. the GEGL enhancer) exist. */
+   _load_engine_lists(p_win);
 
    /* Header bar (libadwaita, decision #29). */
    GtkWidget *p_header = adw_header_bar_new();
@@ -1648,6 +1830,9 @@ ggaze_window_init(GgazeWindow *p_win) {
    gtk_widget_set_hexpand(p_win->p_viewer, TRUE);
    gtk_widget_set_vexpand(p_win->p_viewer, TRUE);
    gtk_stack_add_named(GTK_STACK(p_win->p_stack), p_win->p_viewer, "large");
+   g_signal_connect(p_win->p_viewer, "navigate",
+                    G_CALLBACK(_on_viewer_navigate), p_win);
+   _apply_viewer_prefs(p_win);
 
    gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "grid");
 
@@ -1701,7 +1886,19 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
       return;
    }
 
-   p_win->p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, TRUE, TRUE);
+   /* Apply the sort/wrap/hide-raw preferences from settings (defaults if the
+    * wrapper is absent). */
+   GgazeSort e_sort         = GGAZE_SORT_NAME;
+   gboolean  b_wrap         = TRUE;
+   gboolean  b_hide_raw     = TRUE;
+   gboolean  b_hide_trashed = FALSE;
+   if (p_win->p_settings != NULL) {
+      e_sort         = settings_get_sort(p_win->p_settings);
+      b_wrap         = settings_get_wrap(p_win->p_settings);
+      b_hide_raw     = settings_get_hide_raw(p_win->p_settings);
+      b_hide_trashed = settings_get_hide_trashed(p_win->p_settings);
+   }
+   p_win->p_nav = navigator_new(p_dir, e_sort, b_wrap, b_hide_raw);
    g_clear_pointer(&p_win->p_trash, trash_delete);
    g_clear_object(&p_dir);
    g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(nav_changed_cb), p_win);
@@ -1723,8 +1920,8 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    }
    GFile *p_navdir = navigator_get_dir(p_win->p_nav);
    p_win->p_trash  = trash_new(p_navdir);
-   p_win->p_grid   = GGAZE_GRID(
-      ggaze_grid_new(p_win->p_nav, p_win->p_thumb, p_win->i_grid_size, FALSE));
+   p_win->p_grid   = GGAZE_GRID(ggaze_grid_new(
+      p_win->p_nav, p_win->p_thumb, p_win->i_grid_size, b_hide_trashed));
    g_signal_connect(p_win->p_grid, "activate", G_CALLBACK(_on_grid_activate),
                     p_win);
    gtk_stack_add_named(GTK_STACK(p_win->p_stack), GTK_WIDGET(p_win->p_grid),
