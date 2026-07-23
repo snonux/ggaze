@@ -13,6 +13,13 @@ void     clipboard_copy_image_async(GdkClipboard *p_clip, GFile *p_file,
                                     GAsyncReadyCallback p_cb, gpointer p_data);
 gboolean clipboard_copy_image_finish(GAsyncResult *p_res, GError **p_err);
 
+/* Build (but do not set) a content provider offering p_tex's pixels as
+ * image/png. The texture is already decoded, so the PNG encode
+ * (gdk_texture_save_to_png_bytes) runs synchronously here on the caller's
+ * thread. Returns a new ref the caller must unref, or NULL when p_tex is NULL
+ * or the encode fails. Useful for testing without a clipboard. */
+GdkContentProvider *clipboard_build_texture_provider(GdkTexture *p_tex);
+
 /* Copy a list of files as text/uri-list to the clipboard. */
 void clipboard_copy_uris(GdkClipboard *p_clip, GList *p_files);
 

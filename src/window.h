@@ -36,6 +36,16 @@ void ggaze_window_open(GgazeWindow *p_win, GFile *p_arg);
  * gtk_window_get_child (which now returns the wrapping GtkOverlay). */
 GtkStack *ggaze_window_get_stack(GgazeWindow *p_win);
 
+/* The GdkContentProvider win.copy (Ctrl+c) would set on the clipboard, built
+ * from the current window state WITHOUT touching the (display-backend-
+ * dependent) system clipboard, so the copy decision is testable offscreen.
+ *   - Marks present: text/uri-list + text/plain over the marked files.
+ *   - No marks: the DISPLAYED GdkTexture as image/png (the enhanced preview
+ *     when an enhance preset is active, else the original).
+ * Returns a new ref the caller must unref, or NULL when nothing is open / no
+ * marks and no texture is displayed. */
+GdkContentProvider *ggaze_window_get_copy_provider(GgazeWindow *p_win);
+
 /* Launch editor u_idx (0-based, in the configured editors list order) on the
  * ORIGINAL current file (not an enhanced preview). The opener is detached
  * (GSubprocess), so the UI stays responsive. Returns TRUE iff the program

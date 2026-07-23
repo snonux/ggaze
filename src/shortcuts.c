@@ -37,6 +37,7 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_v, 0, "win.mark"},
    {GDK_KEY_V, GDK_SHIFT_MASK, "win.mark-range"},
    {GDK_KEY_a, GDK_CONTROL_MASK, "win.mark-all"},
+   {GDK_KEY_c, GDK_CONTROL_MASK, "win.copy"},
    {GDK_KEY_a, 0, "win.enhance"},
    {GDK_KEY_s, 0, "win.enhance-save"},
    {GDK_KEY_1, 0, "win.enhance-1"},

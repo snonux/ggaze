@@ -63,6 +63,32 @@ clipboard_copy_image_finish(GAsyncResult *p_res, GError **p_err) {
    return FALSE;
 }
 
+/* --- displayed-texture PNG copy (no-marks Ctrl+c) ----------------------- */
+
+/* Build (but do not set) a content provider offering the DISPLAYED texture's
+ * pixels as image/png. The texture is already decoded (it is the one shown in
+ * the viewer), so encoding it to PNG bytes with gdk_texture_save_to_png_bytes
+ * is a CPU-only step done here on the caller's thread; per docs/ui-and-
+ * interactions.md this is fast enough to run synchronously (no large decode is
+ * re-triggered). Returns a new ref the caller must unref, or NULL when p_tex
+ * is NULL or the PNG encode fails. Useful for testing without a clipboard. */
+GdkContentProvider *
+clipboard_build_texture_provider(GdkTexture *p_tex) {
+   g_return_val_if_fail(p_tex == NULL || GDK_IS_TEXTURE(p_tex), NULL);
+   if (p_tex == NULL) {
+      return (NULL);
+   }
+   GBytes *p_bytes = gdk_texture_save_to_png_bytes(p_tex);
+   if (p_bytes == NULL) {
+      return (NULL);
+   }
+   GdkContentProvider *p_prov =
+      gdk_content_provider_new_for_bytes("image/png", p_bytes);
+   /* new_for_bytes copies/refs the bytes; release our ref. */
+   g_bytes_unref(p_bytes);
+   return (p_prov);
+}
+
 /* Build a GdkContentProvider that offers the marked files as BOTH
  * `text/uri-list` (RFC 2483: CRLF-terminated URI lines, the format file
  * managers request) and `text/plain` (a newline-joined list of local PATHS

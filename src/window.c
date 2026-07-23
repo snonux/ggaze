@@ -20,6 +20,7 @@
 #include <gtk/gtk.h>
 
 #include "ggaze-config.h"
+#include "clipboard.h"
 #include "gridview.h"
 #include "info.h"
 #include "loader/loader.h"
@@ -80,6 +81,7 @@ static void     _update_header(GgazeWindow *p_win);
 static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
 static void     _show_info(GgazeWindow *p_win);
 static void     _hide_info(GgazeWindow *p_win);
+static void     _show_status(GgazeWindow *p_win, const char *c_msg);
 static gboolean _slideshow_tick(gpointer p_data);
 static void     _apply_viewer_prefs(GgazeWindow *p_win);
 static void     _load_engine_lists(GgazeWindow *p_win);
@@ -586,6 +588,43 @@ _action_mark_range(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    _update_header(p_win);
 }
 
+/* win.copy (Ctrl+c): put the current picture on the clipboard. With marks,
+ * copy the marked files as text/uri-list (+ text/plain) so file managers and
+ * file-aware apps can paste them. With no marks, copy the DISPLAYED image
+ * pixels as image/png — the viewer's current texture, which is the enhanced
+ * preview when an enhance preset is active, else the original (docs/ui-and-
+ * interactions.md "Copy to clipboard"). The texture is already decoded, so the
+ * PNG encode (gdk_texture_save_to_png_bytes) runs synchronously and is fast
+ * enough not to block the UI on a re-decode. The viewer only ever holds the
+ * texture for navigator.current (last-write-wins invariant), so copying it is
+ * tied to the current load by construction. The decision is factored into
+ * ggaze_window_get_copy_provider so it can be tested without driving the
+ * (display-backend-dependent) system clipboard. */
+static void
+_action_copy(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow        *p_win  = GGAZE_WINDOW(p_data);
+   GdkContentProvider *p_prov = ggaze_window_get_copy_provider(p_win);
+   if (p_prov == NULL) {
+      g_warning("ggaze: copy \u2014 nothing to copy");
+      return;
+   }
+   GdkClipboard *p_clip = gtk_widget_get_clipboard(GTK_WIDGET(p_win));
+   gdk_clipboard_set_content(p_clip, p_prov);
+   g_object_unref(p_prov);
+   guint u_marks =
+      (p_win->p_nav != NULL) ? navigator_get_mark_count(p_win->p_nav) : 0;
+   if (u_marks > 0) {
+      char *c_msg =
+         g_strdup_printf("Copied %u file%s", u_marks, u_marks == 1 ? "" : "s");
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
+   } else {
+      _show_status(p_win, "Copied image");
+   }
+}
+
 /* GtkBuilder UI for the shortcuts overlay (?). Accel strings use gtk
  * accelerator syntax: "h Left" means h OR Left triggers it. */
 static const char *SHORTCUTS_UI =
@@ -732,6 +771,13 @@ static const char *SHORTCUTS_UI =
    "              <object class=\"GtkShortcutsShortcut\">\n"
    "                <property name=\"accelerator\">u</property>\n"
    "                <property name=\"title\">Undo</property>\n"
+   "              </object>\n"
+   "            </child>\n"
+   "            <child>\n"
+   "              <object class=\"GtkShortcutsShortcut\">\n"
+   "                <property name=\"accelerator\">Primary+c</property>\n"
+   "                <property name=\"title\">Copy image / marked "
+   "files</property>\n"
    "              </object>\n"
    "            </child>\n"
    "            <child>\n"
@@ -1215,6 +1261,21 @@ _hide_info(GgazeWindow *p_win) {
    gtk_widget_set_visible(p_win->p_info_lbl, FALSE);
 }
 
+/* Show a brief transient status line in the info overlay label (the project
+ * has no toast infrastructure yet; see docs/ui-and-interactions.md). Reuses
+ * the info label + its auto-hide timer so a copy confirms visually without a
+ * separate widget. The label is positioned over the stack and visible in both
+ * large and grid views. */
+static void
+_show_status(GgazeWindow *p_win, const char *c_msg) {
+   gtk_label_set_text(GTK_LABEL(p_win->p_info_lbl), c_msg);
+   gtk_widget_set_visible(p_win->p_info_lbl, TRUE);
+   if (p_win->u_info_hide != 0) {
+      g_source_remove(p_win->u_info_hide);
+   }
+   p_win->u_info_hide = g_timeout_add_seconds(2, _info_hide_tick, p_win);
+}
+
 /* Free a temp (name, command) pair struct (OpenerProg / RunnerScript share
  * the same two-pointer layout). Used as a GPtrArray free func for the throw-
  * away arrays built while feeding settings into the engines. */
@@ -1604,6 +1665,7 @@ static const GActionEntry ACTIONS[] = {
    {.name = "mark", .activate = _action_mark},
    {.name = "mark-all", .activate = _action_mark_all},
    {.name = "mark-range", .activate = _action_mark_range},
+   {.name = "copy", .activate = _action_copy},
    {.name = "shortcuts", .activate = _action_shortcuts},
    {.name = "enhance-1", .activate = _action_enhance_n},
    {.name = "enhance-2", .activate = _action_enhance_n},
@@ -2211,4 +2273,30 @@ GtkStack *
 ggaze_window_get_stack(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
    return (GTK_STACK(p_win->p_stack));
+}
+
+/* The content provider win.copy would set on the clipboard, without touching
+ * the clipboard itself (so the decision is testable independently of the
+ * display-backend-dependent system clipboard). Marks -> text/uri-list (+
+ * text/plain); no marks -> the DISPLAYED texture as image/png (the enhanced
+ * preview when a preset is active, else the original). NULL when nothing is
+ * open / no marks and no texture displayed. See window.h. */
+GdkContentProvider *
+ggaze_window_get_copy_provider(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
+   if (p_win->p_nav == NULL) {
+      return (NULL);
+   }
+   guint u_marks = navigator_get_mark_count(p_win->p_nav);
+   if (u_marks > 0) {
+      GList *p_marks = navigator_get_marks(p_win->p_nav); /* transfer full */
+      GdkContentProvider *p_prov = clipboard_build_uri_provider(p_marks);
+      g_list_free_full(p_marks, (GDestroyNotify)g_object_unref);
+      return (p_prov);
+   }
+   GdkTexture *p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_win->p_viewer));
+   if (p_tex == NULL) {
+      return (NULL);
+   }
+   return (clipboard_build_texture_provider(p_tex));
 }

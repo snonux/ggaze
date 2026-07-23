@@ -328,6 +328,14 @@ test_clipboard = executable(
 test('clipboard', test_clipboard,
    suite : 'integration', env : fixtures_env)
 
+test_copy = executable(
+   'test_copy', ['test_copy.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib, install : false,
+)
+test('copy', test_copy, suite : 'integration', env : fixtures_env)
+
 test_marks = executable(
    'test_marks', ['test_marks.c', ggaze_conf_h],
    include_directories : [inc, src_inc],
