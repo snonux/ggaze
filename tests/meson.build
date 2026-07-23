@@ -122,6 +122,19 @@ if jxl_dep.found()
    test('loader_jxl', test_loader_jxl, suite : 'unit', env : fixtures_env)
 endif
 
+if heif_dep.found()
+   test_loader_heif = executable(
+      'test_loader_heif',
+      ['test_loader_heif.c', ggaze_conf_h],
+      include_directories : [inc, src_inc],
+      dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep,
+         heif_dep],
+      link_with : ggaze_lib,
+      install : false,
+   )
+   test('loader_heif', test_loader_heif, suite : 'unit', env : fixtures_env)
+endif
+
 test_navigator = executable(
    'test_navigator',
    ['test_navigator.c', ggaze_conf_h],
