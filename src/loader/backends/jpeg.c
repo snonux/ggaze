@@ -6,6 +6,18 @@
  * completes and is returned. Uses libjpeg-turbo's jpeg_mem_src + scale_num/
  * scale_denom for the low-res phase. Compiled when meson feature `jpeg` is on.
  *
+ * Safety: both the low-res and full decode go through the shared
+ * _decode_at_scale(), which treats libjpeg's reported dimensions as
+ * untrusted. A JPEG SOF marker can declare up to 65535x65535 using only a
+ * few header bytes, with no actual pixel data required, so
+ * _jpeg_check_dims() bounds width/height against GGAZE_JPEG_MAX_SIDE/
+ * GGAZE_JPEG_MAX_PIXELS and computes the RGB/RGBA buffer sizes with checked
+ * guint64 arithmetic BEFORE either g_malloc() call — g_malloc() aborts the
+ * process on failure, so an unbounded multi-gigabyte request would crash
+ * ggaze rather than fail gracefully. A bound violation yields a recoverable
+ * G_IO_ERROR (mirroring the checked-allocation pattern already applied to
+ * heif.c and jxl.c), never an abort or overflowed loop counter.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -21,6 +33,21 @@
 
 #define GGAZE_JPEG_LORES_DENOM 8
 
+/* Per-dimension and total-pixel caps, matching jxl.c's GGAZE_JXL_MAX_SIDE/
+ * GGAZE_JXL_MAX_PIXELS convention: reject a maximum-dimension JPEG header
+ * before allocating rather than after. A real JPEG SOF marker can declare up
+ * to 65535x65535 (the format's 16-bit width/height fields) using only a
+ * handful of header bytes — libjpeg reports those dimensions as soon as
+ * jpeg_start_decompress() returns, before any entropy-coded scan data is
+ * read, so an attacker needs no real pixel data to reach the allocations in
+ * _decode_at_scale(). 32768 per side / 100M total pixels (~400 MB RGBA)
+ * comfortably admits real camera photos while keeping the RGB/RGBA buffers
+ * well under the multi-GB sizes that would abort the process (g_malloc calls
+ * abort() on failure — unlike libjpeg's own allocator, whose OOM path calls
+ * error_exit() and is caught by the setjmp/longjmp trap below). */
+#define GGAZE_JPEG_MAX_SIDE 32768
+#define GGAZE_JPEG_MAX_PIXELS 100000000ULL
+
 struct _jerr_jmp {
    struct jpeg_error_mgr pub;
    jmp_buf               buf;
@@ -32,8 +59,71 @@ _jerr_exit(j_common_ptr p_cinfo) {
    longjmp(p_ej->buf, 1);
 }
 
+/* Validate libjpeg's post-scale output dimensions and compute the RGB row
+ * stride plus the RGB/RGBA buffer sizes with checked arithmetic. On success
+ * stores the values in p_rowstride/p_rgb_len/p_rgba_len and returns TRUE; on
+ * failure sets a recoverable GError and returns FALSE. Must run before
+ * either g_malloc() in _decode_at_scale() below. */
+static gboolean
+_jpeg_check_dims(int i_w, int i_h, gsize *p_rowstride, gsize *p_rgb_len,
+                 gsize *p_rgba_len, GError **p_err) {
+   if (i_w <= 0 || i_h <= 0) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "jpeg: invalid dimensions (%dx%d)", i_w, i_h);
+      return (FALSE);
+   }
+   if (i_w > GGAZE_JPEG_MAX_SIDE || i_h > GGAZE_JPEG_MAX_SIDE) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "jpeg: image too large (%dx%d, max %d per side)", i_w, i_h,
+                  GGAZE_JPEG_MAX_SIDE);
+      return (FALSE);
+   }
+   guint64 u_pixels = (guint64)i_w * (guint64)i_h;
+   if (u_pixels > GGAZE_JPEG_MAX_PIXELS) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "jpeg: pixel count too large (%llu, max %llu)",
+                  (unsigned long long)u_pixels,
+                  (unsigned long long)GGAZE_JPEG_MAX_PIXELS);
+      return (FALSE);
+   }
+   /* i_w/i_h are already capped at GGAZE_JPEG_MAX_SIDE, so these products
+    * cannot approach G_MAXSIZE on any 64-bit build; the check is kept for
+    * parity with heif.c/jxl.c and for 32-bit portability. */
+   guint64 u_rowstride = (guint64)i_w * 3u;
+   guint64 u_rgb_len   = (guint64)i_h * u_rowstride;
+   guint64 u_rgba_len  = u_pixels * 4u;
+   if (u_rgb_len > (guint64)G_MAXSIZE || u_rgba_len > (guint64)G_MAXSIZE) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "jpeg: buffer size overflows gsize");
+      return (FALSE);
+   }
+   *p_rowstride = (gsize)u_rowstride;
+   *p_rgb_len   = (gsize)u_rgb_len;
+   *p_rgba_len  = (gsize)u_rgba_len;
+   return (TRUE);
+}
+
+/* Convert planar RGB pixels to interleaved RGBA (alpha forced to 255).
+ * u_pixels/u_rgba_len are the already-validated (_jpeg_check_dims) pixel
+ * count and output byte length, so the index arithmetic below cannot
+ * overflow. Caller frees the returned buffer. */
+static guint8 *
+_rgb_to_rgba(const guint8 *p_rgb, gsize u_pixels, gsize u_rgba_len) {
+   guint8 *p_rgba = g_malloc(u_rgba_len);
+   for (gsize u = 0; u < u_pixels; u++) {
+      p_rgba[u * 4 + 0] = p_rgb[u * 3 + 0];
+      p_rgba[u * 4 + 1] = p_rgb[u * 3 + 1];
+      p_rgba[u * 4 + 2] = p_rgb[u * 3 + 2];
+      p_rgba[u * 4 + 3] = 255;
+   }
+   return (p_rgba);
+}
+
 /* Decode JPEG data at the given scale denominator, returning RGBA pixels.
- * Caller frees *pp_pixels. Returns TRUE on success. */
+ * Caller frees *pp_pixels. Returns TRUE on success. Dimensions are bounded
+ * and buffer sizes computed with checked arithmetic (_jpeg_check_dims)
+ * before either allocation, so a maximum-dimension header is rejected with a
+ * G_IO_ERROR instead of overflowing i_w*i_h or forcing a g_malloc abort. */
 static gboolean
 _decode_at_scale(const guint8 *p_data, gsize u_len, int i_denom, int *p_w,
                  int *p_h, guint8 **pp_pixels, GError **p_err) {
@@ -54,30 +144,28 @@ _decode_at_scale(const guint8 *p_data, gsize u_len, int i_denom, int *p_w,
    cinfo.out_color_space = JCS_RGB;
    jpeg_start_decompress(&cinfo);
 
-   int     i_w         = (int)cinfo.output_width;
-   int     i_h         = (int)cinfo.output_height;
-   int     i_rowstride = i_w * 3;
-   guint8 *p_rgb       = g_malloc((gsize)i_h * (gsize)i_rowstride);
+   int   i_w = (int)cinfo.output_width;
+   int   i_h = (int)cinfo.output_height;
+   gsize u_rowstride, u_rgb_len, u_rgba_len;
+   if (!_jpeg_check_dims(i_w, i_h, &u_rowstride, &u_rgb_len, &u_rgba_len,
+                         p_err)) {
+      jpeg_destroy_decompress(&cinfo);
+      return (FALSE);
+   }
+   guint8 *p_rgb = g_malloc(u_rgb_len);
 
    while (cinfo.output_scanline < (JDIMENSION)i_h) {
-      guint8 *p_rows[1] = {p_rgb + (gsize)cinfo.output_scanline * i_rowstride};
+      guint8 *p_rows[1] = {p_rgb + (gsize)cinfo.output_scanline * u_rowstride};
       jpeg_read_scanlines(&cinfo, p_rows, 1);
    }
    jpeg_finish_decompress(&cinfo);
    jpeg_destroy_decompress(&cinfo);
 
-   /* Convert RGB → RGBA. */
-   guint8 *p_rgba = g_malloc((gsize)i_w * (gsize)i_h * 4u);
-   for (int i = 0; i < i_w * i_h; i++) {
-      p_rgba[i * 4 + 0] = p_rgb[i * 3 + 0];
-      p_rgba[i * 4 + 1] = p_rgb[i * 3 + 1];
-      p_rgba[i * 4 + 2] = p_rgb[i * 3 + 2];
-      p_rgba[i * 4 + 3] = 255;
-   }
+   gsize u_pixels = (gsize)i_w * (gsize)i_h;
+   *pp_pixels     = _rgb_to_rgba(p_rgb, u_pixels, u_rgba_len);
    g_free(p_rgb);
-   *p_w       = i_w;
-   *p_h       = i_h;
-   *pp_pixels = p_rgba;
+   *p_w = i_w;
+   *p_h = i_h;
    return (TRUE);
 }
 
