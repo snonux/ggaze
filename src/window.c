@@ -392,7 +392,9 @@ _do_delete_files(GgazeWindow *p_win, GList *p_files) {
          g_clear_error(&p_err);
       }
    }
-   navigator_next(p_win->p_nav); /* advance off the last deleted */
+   navigator_next(p_win->p_nav); /* skip removed entries -> next live (or
+                                  * park at -1 when none remain, which clears
+                                  * the viewer via the "changed" reload) */
 }
 
 /* Process a confirmed bulk-delete against the captured targets p_files

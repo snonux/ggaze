@@ -163,6 +163,18 @@ _find_index_by_file(Navigator *p_nav, GFile *p_file) {
    return (-1);
 }
 
+/* TRUE iff the entry at u_index is live: present in the listing and not in
+ * the removed/dimmed set. Removed entries stay listed (for grid dimming) but
+ * are never a valid navigation target (last-write-wins). */
+static gboolean
+_is_live_index(Navigator *p_nav, guint u_index) {
+   if (u_index >= p_nav->p_files->len) {
+      return (FALSE);
+   }
+   GFile *p_file = (GFile *)g_ptr_array_index(p_nav->p_files, u_index);
+   return (!g_hash_table_contains(p_nav->p_removed, p_file));
+}
+
 /* Re-read the directory, filter, hide-raw, sort, and commit; keep the current
  * file by path, falling back to the nearest by position if it is gone. */
 static void
@@ -547,24 +559,51 @@ navigator_set_current_file(Navigator *p_nav, GFile *p_file) {
    return (TRUE);
 }
 
+/* Advance the cursor by i_delta (+1 next / -1 prev), skipping removed
+ * (dimmed) entries so the cursor always lands on a live file when one
+ * exists. Wraps when b_wrap is set. With no live entry other than the
+ * current, the cursor stays put; with no live entry at all, it parks at -1
+ * so the viewer clears (last-write-wins: current is never a removed path). */
 static gboolean
 _advance(Navigator *p_nav, gint i_delta) {
    if (p_nav->p_files->len == 0) {
       return (FALSE);
    }
-   gint i_new = p_nav->i_current + i_delta;
-   if (i_new < 0 || i_new >= (gint)p_nav->p_files->len) {
-      if (!p_nav->b_wrap) {
-         return (FALSE);
+   gint i_n    = (gint)p_nav->p_files->len;
+   gint i_step = (i_delta >= 0) ? 1 : -1;
+   /* Scan from the neighbour of the current cursor in the step direction,
+    * wrapping when enabled, until a live entry is found. A cursor with no
+    * current (-1) scans from the first/last position. */
+   gint i_start = p_nav->i_current;
+   if (i_start < 0) {
+      i_start = (i_step > 0) ? -1 : i_n;
+   }
+   for (gint i = 1; i <= i_n; i++) {
+      gint i_cand = i_start + i_step * i;
+      if (i_cand < 0 || i_cand >= i_n) {
+         if (!p_nav->b_wrap) {
+            break; /* no wrap: stop at the listing edge */
+         }
+         i_cand = (i_cand < 0) ? i_cand + i_n : i_cand - i_n;
       }
-      i_new = (i_new < 0) ? (gint)p_nav->p_files->len - 1 : 0;
+      if (_is_live_index(p_nav, (guint)i_cand)) {
+         if (i_cand == p_nav->i_current) {
+            return (FALSE); /* the only live entry is the current one */
+         }
+         p_nav->i_current = i_cand;
+         _emit_changed(p_nav);
+         return (TRUE);
+      }
    }
-   if (i_new == p_nav->i_current) {
-      return (FALSE);
+   /* No live neighbour found. If the cursor sits on a removed entry, park it
+    * at -1 so the viewer clears instead of showing a nonexistent file. */
+   if (p_nav->i_current >= 0 &&
+       !_is_live_index(p_nav, (guint)p_nav->i_current)) {
+      p_nav->i_current = -1;
+      _emit_changed(p_nav);
+      return (TRUE);
    }
-   p_nav->i_current = i_new;
-   _emit_changed(p_nav);
-   return (TRUE);
+   return (FALSE);
 }
 
 gboolean
@@ -579,19 +618,40 @@ navigator_next(Navigator *p_nav) {
    return (_advance(p_nav, 1));
 }
 
+/* Move the cursor to the first (b_first) or last live entry, skipping
+ * removed/dimmed ones. Parks at -1 if no live entry exists, so the viewer
+ * clears instead of showing a nonexistent file. */
+static gboolean
+_goto_edge(Navigator *p_nav, gboolean b_first) {
+   if (p_nav->p_files->len == 0) {
+      return (FALSE);
+   }
+   gint i_n = (gint)p_nav->p_files->len;
+   for (gint i = 0; i < i_n; i++) {
+      guint u_idx = (guint)(b_first ? i : i_n - 1 - i);
+      if (_is_live_index(p_nav, u_idx)) {
+         return (navigator_set_current(p_nav, u_idx));
+      }
+   }
+   /* No live entry: park at -1 if the cursor is on a removed one. */
+   if (p_nav->i_current >= 0) {
+      p_nav->i_current = -1;
+      _emit_changed(p_nav);
+      return (TRUE);
+   }
+   return (FALSE);
+}
+
 gboolean
 navigator_first(Navigator *p_nav) {
    g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), FALSE);
-   return (navigator_set_current(p_nav, 0));
+   return (_goto_edge(p_nav, TRUE));
 }
 
 gboolean
 navigator_last(Navigator *p_nav) {
    g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), FALSE);
-   if (p_nav->p_files->len == 0) {
-      return (FALSE);
-   }
-   return (navigator_set_current(p_nav, p_nav->p_files->len - 1));
+   return (_goto_edge(p_nav, FALSE));
 }
 
 GgazeSort

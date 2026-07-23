@@ -566,6 +566,217 @@ test_remove_before_cursor(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* --- navigation over removed/dimmed entries (fu0) --------------------- */
+
+/* next/prev skip removed (dimmed) entries and land on a live one. With three
+ * files and the middle one removed, next from the first lands on the third,
+ * and prev from the third lands on the first. */
+static void
+test_nav_skips_removed(void) {
+   char *c_dir = make_temp_dir();
+   write_file(c_dir, "a.jpg", "x", 1);
+   write_file(c_dir, "b.jpg", "x", 1);
+   write_file(c_dir, "c.jpg", "x", 1);
+   GFile *p_a = file_ref(c_dir, "a.jpg");
+   GFile *p_b = file_ref(c_dir, "b.jpg");
+   GFile *p_c = file_ref(c_dir, "c.jpg");
+
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, TRUE, TRUE);
+   navigator_mark_removed(p_nav, p_b); /* b dimmed; current still a (idx 0) */
+   g_assert_cmpint(navigator_get_remaining(p_nav), ==, 2);
+
+   /* next from a skips b -> c. */
+   g_assert_true(navigator_next(p_nav));
+   assert_name(navigator_get_current(p_nav), "c.jpg");
+   /* prev from c skips b -> a. */
+   g_assert_true(navigator_prev(p_nav));
+   assert_name(navigator_get_current(p_nav), "a.jpg");
+
+   navigator_delete(p_nav);
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+   g_object_unref(p_c);
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
+/* Wrap skips removed entries: with a, c live and b removed, next from c wraps
+ * to a (not b), and prev from a wraps to c (not b). */
+static void
+test_nav_wrap_skips_removed(void) {
+   char *c_dir = make_temp_dir();
+   write_file(c_dir, "a.jpg", "x", 1);
+   write_file(c_dir, "b.jpg", "x", 1);
+   write_file(c_dir, "c.jpg", "x", 1);
+   GFile *p_a = file_ref(c_dir, "a.jpg");
+   GFile *p_b = file_ref(c_dir, "b.jpg");
+   GFile *p_c = file_ref(c_dir, "c.jpg");
+
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, TRUE, TRUE);
+   navigator_mark_removed(p_nav, p_b);
+
+   navigator_set_current_file(p_nav, p_c); /* current = c (idx 2) */
+   g_assert_true(navigator_next(p_nav));   /* wrap: c -> a (skip b) */
+   assert_name(navigator_get_current(p_nav), "a.jpg");
+   g_assert_true(navigator_prev(p_nav)); /* wrap: a -> c (skip b) */
+   assert_name(navigator_get_current(p_nav), "c.jpg");
+
+   navigator_delete(p_nav);
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+   g_object_unref(p_c);
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
+/* With wrap off, next/prev stop at the listing edge rather than wrap, and
+ * still skip removed entries in-bounds. */
+static void
+test_nav_nowrap_stops_at_edge(void) {
+   char *c_dir = make_temp_dir();
+   write_file(c_dir, "a.jpg", "x", 1);
+   write_file(c_dir, "b.jpg", "x", 1);
+   write_file(c_dir, "c.jpg", "x", 1);
+   GFile *p_a = file_ref(c_dir, "a.jpg");
+   GFile *p_b = file_ref(c_dir, "b.jpg");
+   GFile *p_c = file_ref(c_dir, "c.jpg");
+
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, FALSE, TRUE);
+   navigator_mark_removed(p_nav, p_b);
+
+   navigator_set_current_file(p_nav, p_a); /* current = a (idx 0) */
+   g_assert_true(navigator_next(p_nav));   /* a -> c (skip b, in-bounds) */
+   assert_name(navigator_get_current(p_nav), "c.jpg");
+   g_assert_false(navigator_next(p_nav)); /* at edge, no wrap */
+   assert_name(navigator_get_current(p_nav), "c.jpg");
+   g_assert_true(navigator_prev(p_nav)); /* c -> a (skip b, in-bounds) */
+   assert_name(navigator_get_current(p_nav), "a.jpg");
+   g_assert_false(navigator_prev(p_nav)); /* at edge, no wrap */
+
+   navigator_delete(p_nav);
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+   g_object_unref(p_c);
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
+/* When every entry is removed, next/prev park the cursor at -1 (no live
+ * target) so the viewer clears; the entries stay listed for grid dimming. */
+static void
+test_nav_all_removed_parks(void) {
+   char *c_dir = make_temp_dir();
+   write_file(c_dir, "a.jpg", "x", 1);
+   write_file(c_dir, "b.jpg", "x", 1);
+   GFile *p_a = file_ref(c_dir, "a.jpg");
+   GFile *p_b = file_ref(c_dir, "b.jpg");
+
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, TRUE, TRUE);
+   navigator_mark_removed(p_nav, p_a);
+   navigator_mark_removed(p_nav, p_b);
+   g_assert_cmpint(navigator_get_count(p_nav), ==, 2); /* still listed */
+   g_assert_cmpint(navigator_get_remaining(p_nav), ==, 0);
+
+   /* current was a (removed): next parks at -1. */
+   g_assert_true(navigator_next(p_nav));
+   g_assert_cmpint(navigator_get_current_index(p_nav), ==, -1);
+   g_assert_null(navigator_get_current(p_nav));
+   /* Further navigation is a no-op (already no live target). */
+   g_assert_false(navigator_next(p_nav));
+   g_assert_false(navigator_prev(p_nav));
+   g_assert_cmpint(navigator_get_current_index(p_nav), ==, -1);
+
+   navigator_delete(p_nav);
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
+/* first/last skip removed entries and land on the first/last live one; with
+ * all removed they park at -1. */
+static void
+test_first_last_skip_removed(void) {
+   char *c_dir = make_temp_dir();
+   write_file(c_dir, "a.jpg", "x", 1);
+   write_file(c_dir, "b.jpg", "x", 1);
+   write_file(c_dir, "c.jpg", "x", 1);
+   write_file(c_dir, "d.jpg", "x", 1);
+   GFile *p_a = file_ref(c_dir, "a.jpg");
+   GFile *p_b = file_ref(c_dir, "b.jpg");
+   GFile *p_c = file_ref(c_dir, "c.jpg");
+   GFile *p_d = file_ref(c_dir, "d.jpg");
+
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, TRUE, TRUE);
+   navigator_mark_removed(p_nav, p_b); /* middle block removed */
+   navigator_mark_removed(p_nav, p_c);
+   g_assert_cmpint(navigator_get_remaining(p_nav), ==, 2); /* a, d live */
+
+   /* current is a (the first live): last skips b,c -> d, then first skips
+    * b,c -> a. */
+   g_assert_true(navigator_last(p_nav));
+   assert_name(navigator_get_current(p_nav), "d.jpg");
+   g_assert_true(navigator_first(p_nav));
+   assert_name(navigator_get_current(p_nav), "a.jpg");
+
+   /* Remove the last two live entries: first/last park at -1. */
+   navigator_mark_removed(p_nav, p_a);
+   navigator_mark_removed(p_nav, p_d);
+   g_assert_cmpint(navigator_get_remaining(p_nav), ==, 0);
+   g_assert_true(navigator_first(p_nav));
+   g_assert_cmpint(navigator_get_current_index(p_nav), ==, -1);
+   g_assert_null(navigator_get_current(p_nav));
+
+   navigator_delete(p_nav);
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+   g_object_unref(p_c);
+   g_object_unref(p_d);
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
+/* Bulk-remove a contiguous block (the bulk-delete scenario from fu0): mark b
+ * and c removed while current is b, then a single next lands on a live entry
+ * (d), not on the adjacent removed c. */
+static void
+test_bulk_remove_then_next(void) {
+   char *c_dir = make_temp_dir();
+   write_file(c_dir, "a.jpg", "x", 1);
+   write_file(c_dir, "b.jpg", "x", 1);
+   write_file(c_dir, "c.jpg", "x", 1);
+   write_file(c_dir, "d.jpg", "x", 1);
+   GFile *p_a = file_ref(c_dir, "a.jpg");
+   GFile *p_b = file_ref(c_dir, "b.jpg");
+   GFile *p_c = file_ref(c_dir, "c.jpg");
+   GFile *p_d = file_ref(c_dir, "d.jpg");
+
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, TRUE, TRUE);
+   navigator_set_current_file(p_nav, p_b); /* current = b (idx 1) */
+   navigator_mark_removed(p_nav, p_b);     /* current now on a removed file */
+   navigator_mark_removed(p_nav, p_c);     /* adjacent removed block */
+   g_assert_cmpint(navigator_get_remaining(p_nav), ==, 2); /* a, d live */
+
+   /* A single next must skip c and land on d (live), not c (removed). */
+   g_assert_true(navigator_next(p_nav));
+   assert_name(navigator_get_current(p_nav), "d.jpg");
+   g_assert_false(navigator_is_removed(p_nav, navigator_get_current(p_nav)));
+
+   navigator_delete(p_nav);
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+   g_object_unref(p_c);
+   g_object_unref(p_d);
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -587,5 +798,16 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/navigator/monitor_add", test_monitor_add);
    g_test_add_func("/navigator/changed_signal", test_changed_signal);
    g_test_add_func("/navigator/empty_dir", test_empty_dir);
+   g_test_add_func("/navigator/nav_skips_removed", test_nav_skips_removed);
+   g_test_add_func("/navigator/nav_wrap_skips_removed",
+                   test_nav_wrap_skips_removed);
+   g_test_add_func("/navigator/nav_nowrap_stops_at_edge",
+                   test_nav_nowrap_stops_at_edge);
+   g_test_add_func("/navigator/nav_all_removed_parks",
+                   test_nav_all_removed_parks);
+   g_test_add_func("/navigator/first_last_skip_removed",
+                   test_first_last_skip_removed);
+   g_test_add_func("/navigator/bulk_remove_then_next",
+                   test_bulk_remove_then_next);
    return (g_test_run());
 }
