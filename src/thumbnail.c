@@ -5,6 +5,12 @@
  * x-large bucket (512) for >256 (decision #37/T). Caches PNG keyed by md5(URI),
  * stores Thumb::URI/MTime/Size, verifies mtime. Async decode via GTask.
  *
+ * JPEG-specific guard (mu0 review round 2): _generate() calls
+ * gdk_pixbuf_new_from_file_at_scale() directly on the source file, bypassing
+ * src/loader/loader.c entirely, so it did not inherit that module's
+ * oversized-declared-header guard. See _thumb_reject_if_oversized_jpeg()
+ * below.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -15,6 +21,8 @@
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
+
+#include "loader/detect.h"
 
 #define GGAZE_TMS_NORMAL 128
 #define GGAZE_TMS_LARGE 256
@@ -111,29 +119,33 @@ _load_cached(const char *c_path, gint64 i_mtime) {
    return (p_tex);
 }
 
-/* Decode the image at <= i_bucket px (preserving aspect), apply EXIF
- * orientation, and write a TMS PNG to c_cache_path. Returns the texture. */
-static GdkTexture *
-_generate(GFile *p_file, int i_bucket, const char *c_cache_path, gint64 i_mtime,
-          gint64 i_size, GError **p_err) {
-   char *c_path = g_file_get_path(p_file);
-   if (c_path == NULL) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                  "cannot thumbnail a non-local file");
-      return (NULL);
+/* Reject c_path if it is a JPEG whose declared header dimensions exceed
+ * GGAZE_JPEG_MAX_SIDE/GGAZE_JPEG_MAX_PIXELS, before handing it to
+ * gdk_pixbuf_new_from_file_at_scale(). _generate() runs in the (1-4 worker)
+ * thumbnail GThreadPool, triggered per-cell just by scrolling a directory
+ * into view (gridview.c's _on_pic_map) -- no click needed -- so a handful of
+ * malicious files in one folder can otherwise stall the whole pool for ~28s
+ * each (mu0 review round 2: GdkPixbuf/glycin pre-allocates a huge sparse
+ * memfd off the declared size before its own internal cap rejects it).
+ * Mirrors pixbuf.c's/jpeg.c's twin guards; on rejection sets *p_err exactly
+ * as gdk_pixbuf_new_from_file_at_scale() itself would have on failure, so
+ * _generate()'s caller needs no new failure-handling path. */
+static gboolean
+_thumb_reject_if_oversized_jpeg(const char *c_path, GError **p_err) {
+   guint32 u_w, u_h;
+   if (!detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h)) {
+      return (TRUE);
    }
-   GdkPixbuf *p_pix = gdk_pixbuf_new_from_file_at_scale(c_path, i_bucket,
-                                                        i_bucket, TRUE, p_err);
-   g_free(c_path);
-   if (p_pix == NULL) {
-      return (NULL);
-   }
-   GdkPixbuf *p_oriented = gdk_pixbuf_apply_embedded_orientation(p_pix);
-   GdkPixbuf *p_use =
-      (p_oriented != NULL) ? p_oriented : GDK_PIXBUF(g_object_ref(p_pix));
-   g_object_unref(p_pix);
+   return (detect_jpeg_dims_within_bounds(u_w, u_h, p_err));
+}
 
-   /* Best-effort write to the cache; failure to write is non-fatal. */
+/* Best-effort write of p_use to c_cache_path as a TMS PNG (Thumb::URI/MTime/
+ * Size). Failure to write is non-fatal -- the texture is still returned to
+ * the caller even if the on-disk cache entry could not be created. Split out
+ * of _generate() to keep it near the ~30-line-per-function convention. */
+static void
+_write_cache(GFile *p_file, GdkPixbuf *p_use, const char *c_cache_path,
+             gint64 i_mtime, gint64 i_size) {
    char c_mtime[32];
    char c_size[32];
    g_snprintf(c_mtime, sizeof(c_mtime), "%" G_GINT64_FORMAT, i_mtime);
@@ -147,6 +159,35 @@ _generate(GFile *p_file, int i_bucket, const char *c_cache_path, gint64 i_mtime,
       g_error_free(p_werr);
    }
    g_free(c_uri);
+}
+
+/* Decode the image at <= i_bucket px (preserving aspect), apply EXIF
+ * orientation, and write a TMS PNG to c_cache_path. Returns the texture. */
+static GdkTexture *
+_generate(GFile *p_file, int i_bucket, const char *c_cache_path, gint64 i_mtime,
+          gint64 i_size, GError **p_err) {
+   char *c_path = g_file_get_path(p_file);
+   if (c_path == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "cannot thumbnail a non-local file");
+      return (NULL);
+   }
+   if (!_thumb_reject_if_oversized_jpeg(c_path, p_err)) {
+      g_free(c_path);
+      return (NULL);
+   }
+   GdkPixbuf *p_pix = gdk_pixbuf_new_from_file_at_scale(c_path, i_bucket,
+                                                        i_bucket, TRUE, p_err);
+   g_free(c_path);
+   if (p_pix == NULL) {
+      return (NULL);
+   }
+   GdkPixbuf *p_oriented = gdk_pixbuf_apply_embedded_orientation(p_pix);
+   GdkPixbuf *p_use =
+      (p_oriented != NULL) ? p_oriented : GDK_PIXBUF(g_object_ref(p_pix));
+   g_object_unref(p_pix);
+
+   _write_cache(p_file, p_use, c_cache_path, i_mtime, i_size);
 
    GdkTexture *p_tex = _texture_from_pixbuf(p_use);
    g_object_unref(p_use);

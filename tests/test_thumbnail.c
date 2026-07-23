@@ -14,12 +14,14 @@
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
+#include <unistd.h>
 
 static const char *GGAZE_FX_DIR;
 static char       *GGAZE_CACHE_DIR;
 
 static GdkTexture *GGAZE_RESULT;
 static GMainLoop  *GGAZE_LOOP;
+static GError     *GGAZE_ERR;
 
 static void
 _thumb_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
@@ -28,6 +30,16 @@ _thumb_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    GError *p_err = NULL;
    GGAZE_RESULT  = thumbnail_get_finish(NULL, p_res, &p_err);
    g_assert_no_error(p_err);
+   g_main_loop_quit(GGAZE_LOOP);
+}
+
+/* Like _thumb_cb, but for tests that expect the load to fail: stores the
+ * GError in GGAZE_ERR (caller frees) instead of asserting success. */
+static void
+_thumb_err_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   (void)p_data;
+   GGAZE_RESULT = thumbnail_get_finish(NULL, p_res, &GGAZE_ERR);
    g_main_loop_quit(GGAZE_LOOP);
 }
 
@@ -119,6 +131,80 @@ test_different_bucket(void) {
    g_object_unref(p_file);
 }
 
+/* Locate the baseline SOF0 marker (0xFF 0xC0) in a JPEG byte buffer and
+ * overwrite its declared height/width with 65500 (0xFFDC), the largest value
+ * libjpeg's own JPEG_MAX_DIMENSION check still accepts at header-read time.
+ * Mirrors tests/test_loader_jpeg.c's _patch_sof_dims_huge. */
+static void
+_patch_sof_dims_huge(guint8 *p_buf, gsize u_len) {
+   for (gsize u = 0; u + 8 < u_len; u++) {
+      if (p_buf[u] == 0xff && p_buf[u + 1] == 0xc0) {
+         p_buf[u + 5] = 0xff;
+         p_buf[u + 6] = 0xdc;
+         p_buf[u + 7] = 0xff;
+         p_buf[u + 8] = 0xdc;
+         return;
+      }
+   }
+   g_assert_not_reached();
+}
+
+/* mu0 review round 2: _generate() called gdk_pixbuf_new_from_file_at_scale()
+ * directly on the source file, bypassing loader.c's guard entirely --
+ * reachable simply by scrolling a directory in grid view past a malicious
+ * JPEG (gridview.c's _on_pic_map -> thumbnail_get_async, no click needed).
+ * Exercises the REAL public entry point (thumbnail_get_async(), the same
+ * call gridview.c makes) with the crafted 65500x65500-SOF0 header, and
+ * asserts both a clean error and a tight wall-clock budget: pre-fix this
+ * stalled ~28s per file (GdkPixbuf/glycin pre-allocating a huge sparse memfd
+ * off the declared size before its own internal cap rejected it). */
+static void
+test_oversized_jpeg(void) {
+   char  *c_src = g_build_filename(GGAZE_FX_DIR, "plain.jpg", NULL);
+   gchar *p_buf = NULL;
+   gsize  u_len = 0;
+   g_assert_true(g_file_get_contents(c_src, &p_buf, &u_len, NULL));
+   g_free(c_src);
+   _patch_sof_dims_huge((guint8 *)p_buf, u_len);
+
+   gchar  *c_tmp = NULL;
+   GError *p_sub = NULL;
+   gint i_fd = g_file_open_tmp("ggaze-thumb-oversized-XXXXXX", &c_tmp, &p_sub);
+   g_assert_no_error(p_sub);
+   g_assert_cmpint(i_fd, >=, 0);
+   g_assert_cmpint((glong)write(i_fd, p_buf, u_len), ==, (glong)u_len);
+   close(i_fd);
+   g_free(p_buf);
+
+   Thumbnail *p_t    = thumbnail_new();
+   GFile     *p_file = g_file_new_for_path(c_tmp);
+
+   GGAZE_RESULT   = NULL;
+   GGAZE_ERR      = NULL;
+   GGAZE_LOOP     = g_main_loop_new(NULL, FALSE);
+   gint64 i_start = g_get_monotonic_time();
+   thumbnail_get_async(p_t, p_file, 128, NULL, _thumb_err_cb, NULL);
+   g_main_loop_run(GGAZE_LOOP);
+   g_main_loop_unref(GGAZE_LOOP);
+   GGAZE_LOOP     = NULL;
+   gdouble d_secs = (g_get_monotonic_time() - i_start) / 1e6;
+
+   g_assert_null(GGAZE_RESULT);
+   g_assert_nonnull(GGAZE_ERR);
+   g_assert_cmpuint(GGAZE_ERR->domain, ==, (guint)G_IO_ERROR);
+   g_error_free(GGAZE_ERR);
+   GGAZE_ERR = NULL;
+   /* 5s leaves generous headroom above the microsecond-scale header peek
+    * while catching a regression back to the ~28s stall long before any CI
+    * per-test timeout would. */
+   g_assert_cmpfloat(d_secs, <, 5.0);
+
+   thumbnail_delete(p_t);
+   g_object_unref(p_file);
+   unlink(c_tmp);
+   g_free(c_tmp);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -137,6 +223,7 @@ main(int i_argc, char **c_argv) {
 
    g_test_add_func("/thumbnail/generate_and_cache", test_generate_and_cache);
    g_test_add_func("/thumbnail/different_bucket", test_different_bucket);
+   g_test_add_func("/thumbnail/oversized_jpeg", test_oversized_jpeg);
 
    int i_ret = g_test_run();
 

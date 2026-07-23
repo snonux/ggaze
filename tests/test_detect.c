@@ -10,7 +10,9 @@
 
 #include "loader/detect.h"
 
+#include <gio/gio.h>
 #include <glib.h>
+#include <unistd.h>
 
 /* Locate the baseline SOF0 marker (0xFF 0xC0) in a JPEG byte buffer and
  * overwrite its declared height/width with 65500 (0xFFDC), mirroring
@@ -192,6 +194,91 @@ test_jpeg_peek_dims_null_and_empty(void) {
    g_assert_false(detect_jpeg_peek_dims(h, G_N_ELEMENTS(h), &u_w, &u_h));
 }
 
+/* Write p_data (u_len bytes) to a unique temp file; caller frees the
+ * returned path with g_free and removes the file with unlink. Mirrors the
+ * _write_tmp helper in tests/test_loader_jpeg.c. */
+static gchar *
+_write_tmp(const guint8 *p_data, gsize u_len) {
+   gchar  *c_tmp = NULL;
+   GError *p_sub = NULL;
+   gint    i_fd  = g_file_open_tmp("ggaze-detect-XXXXXX", &c_tmp, &p_sub);
+   g_assert_no_error(p_sub);
+   g_assert_cmpint(i_fd, >=, 0);
+   g_assert_cmpint((glong)write(i_fd, p_data, u_len), ==, (glong)u_len);
+   close(i_fd);
+   return (c_tmp);
+}
+
+/* detect_jpeg_peek_dims_from_path() (mu0 review round 2): the path-based
+ * twin used by call sites (thumbnail.c, info.c) that hand a path straight to
+ * a decoder rather than loading bytes themselves first. */
+static void
+test_jpeg_peek_dims_from_path_plain(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+
+   guint32 u_w = 0, u_h = 0;
+   g_assert_true(detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h));
+   g_assert_cmpuint(u_w, ==, 6);
+   g_assert_cmpuint(u_h, ==, 3);
+   g_free(c_path);
+}
+
+static void
+test_jpeg_peek_dims_from_path_oversized(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar  *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   guint8 *p_buf  = NULL;
+   gsize   u_len  = 0;
+   g_assert_true(g_file_get_contents(c_path, (gchar **)&p_buf, &u_len, NULL));
+   g_free(c_path);
+   _patch_sof_dims_huge(p_buf, u_len);
+   gchar *c_tmp = _write_tmp(p_buf, u_len);
+   g_free(p_buf);
+
+   guint32 u_w = 0, u_h = 0;
+   g_assert_true(detect_jpeg_peek_dims_from_path(c_tmp, &u_w, &u_h));
+   g_assert_cmpuint(u_w, ==, 65500);
+   g_assert_cmpuint(u_h, ==, 65500);
+   g_assert_false(detect_jpeg_dims_within_bounds(u_w, u_h, NULL));
+
+   unlink(c_tmp);
+   g_free(c_tmp);
+}
+
+static void
+test_jpeg_peek_dims_from_path_missing(void) {
+   guint32 u_w = 0xdeadbeef, u_h = 0xdeadbeef;
+   g_assert_false(detect_jpeg_peek_dims_from_path("/nonexistent/ggaze-mu0.jpg",
+                                                  &u_w, &u_h));
+}
+
+/* detect_jpeg_dims_within_bounds() (mu0 review round 2): the bound
+ * comparison + GError shared by every call site. */
+static void
+test_jpeg_dims_within_bounds(void) {
+   GError *p_err = NULL;
+   g_assert_true(detect_jpeg_dims_within_bounds(6, 3, &p_err));
+   g_assert_no_error(p_err);
+}
+
+static void
+test_jpeg_dims_within_bounds_oversized_sets_error(void) {
+   GError *p_err = NULL;
+   g_assert_false(detect_jpeg_dims_within_bounds(65500, 65500, &p_err));
+   g_assert_nonnull(p_err);
+   g_assert_cmpuint(p_err->domain, ==, (guint)G_IO_ERROR);
+   g_error_free(p_err);
+}
+
+static void
+test_jpeg_dims_within_bounds_null_err_ok(void) {
+   /* Callers that don't propagate a GError (info.c) may pass NULL. */
+   g_assert_false(detect_jpeg_dims_within_bounds(65500, 65500, NULL));
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -219,5 +306,17 @@ main(int i_argc, char **c_argv) {
                    test_jpeg_peek_dims_truncated);
    g_test_add_func("/detect/jpeg_peek_dims/null_and_empty",
                    test_jpeg_peek_dims_null_and_empty);
+   g_test_add_func("/detect/jpeg_peek_dims_from_path/plain",
+                   test_jpeg_peek_dims_from_path_plain);
+   g_test_add_func("/detect/jpeg_peek_dims_from_path/oversized",
+                   test_jpeg_peek_dims_from_path_oversized);
+   g_test_add_func("/detect/jpeg_peek_dims_from_path/missing",
+                   test_jpeg_peek_dims_from_path_missing);
+   g_test_add_func("/detect/jpeg_dims_within_bounds/ok",
+                   test_jpeg_dims_within_bounds);
+   g_test_add_func("/detect/jpeg_dims_within_bounds/oversized_sets_error",
+                   test_jpeg_dims_within_bounds_oversized_sets_error);
+   g_test_add_func("/detect/jpeg_dims_within_bounds/null_err_ok",
+                   test_jpeg_dims_within_bounds_null_err_ok);
    return (g_test_run());
 }

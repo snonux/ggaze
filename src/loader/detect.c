@@ -1,10 +1,16 @@
 /*:*
  * ggaze — image format detection
  *
- * Magic-byte sniffing. Pure functions, no I/O, no GTK -> unit-testable. Also
- * home to detect_jpeg_peek_dims(), a dependency-free JPEG header-only
- * dimension scan shared by jpeg.c and pixbuf.c so both can reject an
- * oversized declared header before decoding (mu0).
+ * Magic-byte sniffing. No GTK -> unit-testable. detect_format() and
+ * detect_jpeg_peek_dims() are pure functions (no I/O) operating on bytes
+ * already in memory. detect_jpeg_peek_dims_from_path() is the one exception:
+ * it does a small bounded read (GGAZE_JPEG_PEEK_LEN) for call sites that
+ * hand a path straight to a decoder rather than loading bytes themselves
+ * (thumbnail.c, info.c). detect_jpeg_peek_dims()/_from_path() plus
+ * detect_jpeg_dims_within_bounds() let every JPEG-decoding call site
+ * (pixbuf.c, jpeg.c, thumbnail.c, info.c) reject an oversized declared
+ * header before decoding, without duplicating the bound comparison or error
+ * message (mu0).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -12,6 +18,7 @@
 
 #include "detect.h"
 
+#include <gio/gio.h>
 #include <string.h>
 
 GgazeFormat
@@ -152,4 +159,40 @@ detect_jpeg_peek_dims(const guint8 *p_buf, gsize u_len, guint32 *p_w,
       u_i += 2 + (gsize)u_seglen;
    }
    return (FALSE);
+}
+
+gboolean
+detect_jpeg_peek_dims_from_path(const char *c_path, guint32 *p_w,
+                                guint32 *p_h) {
+   if (c_path == NULL) {
+      return (FALSE);
+   }
+   GFile            *p_file = g_file_new_for_path(c_path);
+   GFileInputStream *p_in   = g_file_read(p_file, NULL, NULL);
+   g_object_unref(p_file);
+   if (p_in == NULL) {
+      return (FALSE);
+   }
+   guint8 buf[GGAZE_JPEG_PEEK_LEN];
+   gssize n =
+      g_input_stream_read(G_INPUT_STREAM(p_in), buf, sizeof(buf), NULL, NULL);
+   g_object_unref(p_in);
+   if (n <= 0) {
+      return (FALSE);
+   }
+   return (detect_jpeg_peek_dims(buf, (gsize)n, p_w, p_h));
+}
+
+gboolean
+detect_jpeg_dims_within_bounds(guint32 u_w, guint32 u_h, GError **p_err) {
+   if (u_w > GGAZE_JPEG_MAX_SIDE || u_h > GGAZE_JPEG_MAX_SIDE ||
+       (guint64)u_w * u_h > GGAZE_JPEG_MAX_PIXELS) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "jpeg: image too large (%ux%u, max %d per side / %llu "
+                  "pixels)",
+                  u_w, u_h, GGAZE_JPEG_MAX_SIDE,
+                  (unsigned long long)GGAZE_JPEG_MAX_PIXELS);
+      return (FALSE);
+   }
+   return (TRUE);
 }

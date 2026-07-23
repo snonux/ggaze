@@ -48,16 +48,7 @@ _pixbuf_reject_if_oversized_jpeg(const guint8 *p_buf, gsize u_len,
    if (!detect_jpeg_peek_dims(p_buf, u_len, &u_w, &u_h)) {
       return (TRUE);
    }
-   if (u_w > GGAZE_JPEG_MAX_SIDE || u_h > GGAZE_JPEG_MAX_SIDE ||
-       (guint64)u_w * u_h > GGAZE_JPEG_MAX_PIXELS) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                  "jpeg: image too large (%ux%u, max %d per side / %llu "
-                  "pixels)",
-                  u_w, u_h, GGAZE_JPEG_MAX_SIDE,
-                  (unsigned long long)GGAZE_JPEG_MAX_PIXELS);
-      return (FALSE);
-   }
-   return (TRUE);
+   return (detect_jpeg_dims_within_bounds(u_w, u_h, p_err));
 }
 
 static gboolean
