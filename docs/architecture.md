@@ -193,6 +193,14 @@ key '1' → runner_run(current_path, dir, scripts[0], on_done, &err)
         → g_subprocess_wait_async; ggaze stays responsive; toast: "running…"
 on done → navigator_rescan() (scripts may add/remove files)
         → toast: "usbimport finished (exit 0)" or error
+
+   Folder-identity safety (mirrors eu0): the completion callback captures the
+   folder the script ran against at launch time and rescans ONLY if the window
+   still navigates that same folder. A single-instance open / drop that
+   replaced the folder while the script ran does NOT trigger a rescan of the
+   new folder (the script never touched it); only the completion status is
+   shown. The callback holds an owned window ref and checks a disposed flag so
+   it is safe if the window was closed while the script ran.
 ```
 
 ## Data flow (quick enhance, GEGL)

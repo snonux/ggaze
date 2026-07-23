@@ -55,6 +55,21 @@ GdkContentProvider *ggaze_window_get_copy_provider(GgazeWindow *p_win);
  * invoke. */
 gboolean ggaze_window_open_external_index(GgazeWindow *p_win, guint u_idx);
 
+/* Run script u_idx (0-based, in the configured scripts list order) on the
+ * ORIGINAL current file (%f) and the current folder (%d) via /bin/sh -c,
+ * asynchronously (GSubprocess), so the UI stays responsive. On completion the
+ * navigator is rescanned (scripts may add/remove files) and a status line
+ * reports success or the exit status / error. The rescan is folder-identity
+ * safe: the folder the script ran against is captured at launch time, and the
+ * completion callback only rescans it if the window still navigates that same
+ * folder (a single-instance open / drop that replaced the folder while the
+ * script ran does NOT trigger a rescan of the new folder). Returns TRUE iff the
+ * script was started; FALSE (with a g_warning + status) on a launch error, an
+ * out-of-range index, or when nothing is open / no scripts are configured. This
+ * is the testable run path the `!` run-script popup (and its hotkeys) invoke.
+ */
+gboolean ggaze_window_run_script_index(GgazeWindow *p_win, guint u_idx);
+
 /* Navigation over the current folder (bound to h/l/Left/Right/g/G via
  * shortcuts.c). No-ops if nothing is open. */
 void ggaze_window_prev(GgazeWindow *p_win);

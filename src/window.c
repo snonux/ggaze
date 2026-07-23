@@ -52,16 +52,18 @@ struct _GgazeWindow {
    Thumbnail    *p_thumb;           /* TMS thumbnail cache */
    Trash        *p_trash;           /* ./Trash bin for the current folder */
    GtkWidget    *p_stack;           /* GtkStack: grid / large (viewer) */
-   GtkWidget *p_open_ext_pop; /* `e` open-external popover (NULL when none) */
-   GtkWidget *p_viewer;       /* GgazeViewer — the large view */
-   GgazeGrid *p_grid;         /* the thumbnail grid (the "grid" stack child) */
-   int        i_grid_size;    /* current thumbnail size (64-512, decision T) */
+   GtkWidget *p_open_ext_pop;   /* `e` open-external popover (NULL when none) */
+   GtkWidget *p_run_script_pop; /* `!` run-script popover (NULL when none) */
+   GtkWidget *p_viewer;         /* GgazeViewer — the large view */
+   GgazeGrid *p_grid;      /* the thumbnail grid (the "grid" stack child) */
+   int        i_grid_size; /* current thumbnail size (64-512, decision T) */
    GtkWidget *p_overlay;   /* GtkOverlay wrapping the stack (for info label) */
    GtkWidget *p_info_lbl;  /* info overlay label (auto-hides) */
    guint      u_info_hide; /* info auto-hide timeout id (0=none) */
    guint      u_slideshow; /* slideshow timeout id (0=off) */
    gboolean   b_fullscreen;
    guint      u_hdr_hide; /* fullscreen header auto-hide timeout */
+   gboolean   b_disposed; /* set in dispose; async callbacks check it */
 #if GGAZE_HAVE_GEGL
    guint8     u_enhance_mask;    /* bit i -> preset i enabled (layered) */
    Enhancer  *p_enhancer;        /* GEGL preset engine (NULL w/o GEGL) */
@@ -86,6 +88,7 @@ static gboolean _slideshow_tick(gpointer p_data);
 static void     _apply_viewer_prefs(GgazeWindow *p_win);
 static void     _load_engine_lists(GgazeWindow *p_win);
 static void     _open_ext_destroy(GgazeWindow *p_win);
+static void     _run_script_destroy(GgazeWindow *p_win);
 static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
 #if GGAZE_HAVE_GEGL
 static void     _enhance_update_highlights(GgazeWindow *p_win);
@@ -755,6 +758,13 @@ static const char *SHORTCUTS_UI =
    "                <property name=\"accelerator\">e</property>\n"
    "                <property name=\"title\">Open in external "
    "program</property>\n"
+   "              </object>\n"
+   "            </child>\n"
+   "            <child>\n"
+   "              <object class=\"GtkShortcutsShortcut\">\n"
+   "                <property name=\"accelerator\">exclam</property>\n"
+   "                <property name=\"title\">Run a configured shell "
+   "script</property>\n"
    "              </object>\n"
    "            </child>\n"
    "            <child>\n"
@@ -1442,11 +1452,12 @@ _action_preferences(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * program").
  */
 
-/* Auto-assigned hotkey character for editor index u_idx, in list order:
+/* Auto-assigned hotkey character for popup row index u_idx, in list order:
  * 1..9, then 0, then a..z. Returns 0 for an index beyond the 36-hotkey
- * range (such entries are shown without a hotkey and are click-only). */
+ * range (such entries are shown without a hotkey and are click-only). Shared
+ * by the open-external (`e`) and run-script (`!`) popovers (decision O). */
 static char
-_open_ext_hotkey_char(guint u_idx) {
+_popup_hotkey_char(guint u_idx) {
    if (u_idx < 9) {
       return ((char)('1' + u_idx));
    }
@@ -1459,10 +1470,11 @@ _open_ext_hotkey_char(guint u_idx) {
    return (0);
 }
 
-/* Map a keyval to an editor index (1-9 -> 0-8, 0 -> 9, a-z -> 10-35), or
- * -1 for any other key. Used by the popover's key controller. */
+/* Map a keyval to a popup row index (1-9 -> 0-8, 0 -> 9, a-z -> 10-35),
+ * or -1 for any other key. Used by the open-external and run-script popover
+ * key controllers. */
 static gint
-_open_ext_key_to_index(guint u_keyval) {
+_popup_key_to_index(guint u_keyval) {
    if (u_keyval >= GDK_KEY_1 && u_keyval <= GDK_KEY_9) {
       return ((gint)(u_keyval - GDK_KEY_1));
    }
@@ -1523,7 +1535,7 @@ _open_ext_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
    if (e_state != 0) {
       return (GDK_EVENT_PROPAGATE);
    }
-   gint i_idx = _open_ext_key_to_index(u_keyval);
+   gint i_idx = _popup_key_to_index(u_keyval);
    if (i_idx < 0) {
       return (GDK_EVENT_PROPAGATE);
    }
@@ -1603,7 +1615,7 @@ _action_open_external(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       }
       for (guint i = 0; i < u_n; i++) {
          const OpenerProg *p_pr = g_ptr_array_index((GPtrArray *)p_progs, i);
-         char              c_hk = _open_ext_hotkey_char(i);
+         char              c_hk = _popup_hotkey_char(i);
          char             *c_lbl =
             g_strdup_printf("%c  %s", c_hk != 0 ? c_hk : ' ',
                             p_pr->c_name != NULL ? p_pr->c_name : "(unnamed)");
@@ -1652,6 +1664,288 @@ ggaze_window_open_external_index(GgazeWindow *p_win, guint u_idx) {
    return (b_ok);
 }
 
+/* --- M8: run a configured shell script (`!`) ----------------------------
+ *
+ * `!` pops up a GtkPopover listing the configured scripts (settings `scripts`
+ * a(ss)), each with an auto-assigned hotkey in list order: 1..9, then 0, then
+ * a..z (cap 36, decision O). A hotkey or a row click runs runner_run on the
+ * ORIGINAL current file (%f = navigator_get_current) and the current folder
+ * (%d = navigator_get_dir) via /bin/sh -c, asynchronously (GSubprocess) so the
+ * UI stays responsive. Esc or an outside click cancels. The popover is its own
+ * GtkNative / GtkShortcutManager, so the parent window's GLOBAL-scope shortcuts
+ * do not fire for key events on the popover's surface (same property the
+ * open-external popover relies on). Empty-scripts case: a message row points
+ * at Preferences (`,`), like the empty-editors handling.
+ *
+ * On completion the navigator is rescanned (scripts may add/remove files) and
+ * a status line reports success or the exit status / error. The rescan is the
+ * key correctness concern: the script ran against a SPECIFIC folder, captured
+ * at launch time. While it ran, a single-instance open / drop can replace
+ * p_nav with a different folder. The async completion callback must NOT rescan
+ * the new folder (the script never touched it). It validates, eu0-style, that
+ * p_win still navigates the captured folder before rescanning; otherwise it
+ * only shows the completion status. The callback also holds an owned ref to
+ * the window and checks b_disposed, because the window may have been closed
+ * while the script ran (dispose destroys the child widgets, so the status
+ * label would dangle without that guard).
+ */
+
+/* Captured at launch time for the async completion callback. Owns its refs so
+ * it outlives the script even if the window's folder is replaced or the window
+ * is closed. Freed in every path of _run_done_cb. */
+typedef struct {
+   GgazeWindow *p_win;  /* owned ref; outlives the script */
+   GFile       *p_dir;  /* owned: folder the script ran against */
+   char        *c_name; /* owned: script name, for the status message */
+} _RunCtx;
+
+static void
+_run_ctx_free(_RunCtx *p_ctx) {
+   if (p_ctx == NULL) {
+      return;
+   }
+   g_clear_object(&p_ctx->p_win);
+   g_clear_object(&p_ctx->p_dir);
+   g_clear_pointer(&p_ctx->c_name, g_free);
+   g_free(p_ctx);
+}
+
+/* Async completion: finish the subprocess, rescan ONLY if the window still
+ * navigates the captured folder, and report success / exit status / error.
+ * Safe if the folder was replaced (no rescan of the new folder) or the window
+ * was closed (b_disposed: no widget touch). */
+static void
+_run_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   _RunCtx     *p_ctx  = (_RunCtx *)p_data;
+   GgazeWindow *p_win  = p_ctx->p_win;
+   GError      *p_err  = NULL;
+   int          i_code = runner_run_finish(NULL, p_res, &p_err);
+
+   /* Rescan only the folder the script ran against, and only if the window
+    * is still alive and still navigates it. If the folder was replaced
+    * (single-instance open / drop) the script's changes belong to the OLD
+    * folder, not the new one, so do not rescan the new listing. */
+   if (!p_win->b_disposed && p_win->p_nav != NULL) {
+      GFile *p_now = navigator_get_dir(p_win->p_nav);
+      if (p_now != NULL && g_file_equal(p_now, p_ctx->p_dir)) {
+         navigator_rescan(p_win->p_nav); /* emits "changed" -> grid + reload */
+      }
+   }
+
+   /* Feedback. Skip the status label if the window was closed (its child
+    * widgets were destroyed in dispose). */
+   if (!p_win->b_disposed) {
+      if (i_code == 0) {
+         char *c_msg = g_strdup_printf("Script '%s' done", p_ctx->c_name);
+         _show_status(p_win, c_msg);
+         g_free(c_msg);
+      } else if (i_code > 0) {
+         char *c_msg = g_strdup_printf("Script '%s' failed (exit %d)",
+                                       p_ctx->c_name, i_code);
+         _show_status(p_win, c_msg);
+         g_free(c_msg);
+      } else { /* -1: launch / wait error */
+         char *c_msg =
+            g_strdup_printf("Script '%s' failed: %s", p_ctx->c_name,
+                            p_err != NULL ? p_err->message : "(no detail)");
+         _show_status(p_win, c_msg);
+         g_free(c_msg);
+      }
+   }
+   g_clear_error(&p_err);
+   _run_ctx_free(p_ctx);
+}
+
+/* Synchronously tear down the current run-script popover (unparent + clear the
+ * field). Safe to call when none is open. The popover's "closed" handler
+ * (autohide / outside-click dismissal) also routes here. */
+static void
+_run_script_destroy(GgazeWindow *p_win) {
+   if (p_win->p_run_script_pop == NULL) {
+      return;
+   }
+   GtkWidget *p_pop = p_win->p_run_script_pop;
+   p_win->p_run_script_pop =
+      NULL; /* first, so a re-entrant "closed" is a no-op */
+   gtk_widget_unparent(p_pop);
+}
+
+static void
+_run_script_closed_cb(GtkPopover *p_pop, gpointer p_data) {
+   (void)p_pop;
+   _run_script_destroy(GGAZE_WINDOW(p_data));
+}
+
+/* Row click (mouse): run that script on the original current file + folder,
+ * then close the popover. */
+static void
+_run_script_row_clicked_cb(GtkButton *p_btn, gpointer p_data) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   guint u_idx = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(p_btn), "idx"));
+   ggaze_window_run_script_index(p_win, u_idx);
+   _run_script_destroy(p_win);
+}
+
+/* Popover key controller: Esc cancels; a bare digit/letter hotkey runs the
+ * matching script and closes the popover. Modified keys are propagated. */
+static gboolean
+_run_script_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval,
+                           guint u_kc, GdkModifierType e_state,
+                           gpointer p_data) {
+   (void)p_c;
+   (void)u_kc;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (u_keyval == GDK_KEY_Escape) {
+      _run_script_destroy(p_win);
+      return (GDK_EVENT_STOP);
+   }
+   if (e_state != 0) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   gint i_idx = _popup_key_to_index(u_keyval);
+   if (i_idx < 0) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   const GPtrArray *p_scripts =
+      p_win->p_runner != NULL ? runner_get_scripts(p_win->p_runner) : NULL;
+   if (p_scripts == NULL || (guint)i_idx >= p_scripts->len) {
+      return (GDK_EVENT_PROPAGATE); /* no script bound to that hotkey */
+   }
+   ggaze_window_run_script_index(p_win, (guint)i_idx);
+   _run_script_destroy(p_win);
+   return (GDK_EVENT_STOP);
+}
+
+/* Build and pop up the run-script popover listing the configured scripts. If
+ * none are configured, shows a single message row pointing at Preferences
+ * (`,`) instead. */
+static void
+_action_run_script(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL) {
+      return; /* nothing open */
+   }
+   /* Toggle: a second `!` while the popover is up just closes it. */
+   if (p_win->p_run_script_pop != NULL) {
+      _run_script_destroy(p_win);
+      return;
+   }
+
+   const GPtrArray *p_scripts =
+      p_win->p_runner != NULL ? runner_get_scripts(p_win->p_runner) : NULL;
+   GtkWidget *p_pop = gtk_popover_new();
+   gtk_popover_set_position(GTK_POPOVER(p_pop), GTK_POS_TOP);
+   gtk_popover_set_pointing_to(GTK_POPOVER(p_pop),
+                               &(const GdkRectangle){0, 0, 1, 1});
+   g_signal_connect(GTK_POPOVER(p_pop), "closed",
+                    G_CALLBACK(_run_script_closed_cb), p_win);
+   GtkEventController *p_kc = gtk_event_controller_key_new();
+   gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
+   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_run_script_key_pressed_cb),
+                    p_win);
+   gtk_widget_add_controller(p_pop, p_kc);
+
+   GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+   gtk_widget_set_margin_start(p_box, 8);
+   gtk_widget_set_margin_end(p_box, 8);
+   gtk_widget_set_margin_top(p_box, 8);
+   gtk_widget_set_margin_bottom(p_box, 8);
+   gtk_popover_set_child(GTK_POPOVER(p_pop), p_box);
+
+   if (p_scripts == NULL || p_scripts->len == 0) {
+      GtkWidget *p_lbl =
+         gtk_label_new("No scripts configured. Press , to open Preferences.");
+      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
+      gtk_box_append(GTK_BOX(p_box), p_lbl);
+   } else {
+      GtkWidget *p_lbl = gtk_label_new("Run script:");
+      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
+      gtk_box_append(GTK_BOX(p_box), p_lbl);
+
+      guint u_n = p_scripts->len;
+      if (u_n > 36) {
+         u_n = 36; /* cap hotkeys at 1-9,0,a-z (decision O) */
+      }
+      for (guint i = 0; i < u_n; i++) {
+         const RunnerScript *p_sc =
+            g_ptr_array_index((GPtrArray *)p_scripts, i);
+         char  c_hk = _popup_hotkey_char(i);
+         char *c_lbl =
+            g_strdup_printf("%c  %s", c_hk != 0 ? c_hk : ' ',
+                            p_sc->c_name != NULL ? p_sc->c_name : "(unnamed)");
+         GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
+         gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
+         g_object_set_data(G_OBJECT(p_btn), "idx", GUINT_TO_POINTER(i));
+         g_signal_connect(p_btn, "clicked",
+                          G_CALLBACK(_run_script_row_clicked_cb), p_win);
+         gtk_box_append(GTK_BOX(p_box), p_btn);
+         g_free(c_lbl);
+         if (i == 0) {
+            gtk_widget_grab_focus(p_btn); /* ensure the popover gets keys */
+         }
+      }
+   }
+
+   gtk_widget_set_parent(p_pop, p_win->p_stack);
+   p_win->p_run_script_pop = p_pop;
+   gtk_popover_popup(GTK_POPOVER(p_pop));
+}
+
+/* Run script u_idx (0-based, in the configured scripts list order) on the
+ * ORIGINAL current file (%f) and the current folder (%d), asynchronously. The
+ * completion callback (_run_done_cb) rescans the captured folder and reports
+ * status. Returns TRUE iff the script was started; FALSE (with a g_warning +
+ * status) on a launch error, an out-of-range index, or when nothing is open /
+ * no scripts are configured. This is the testable run path the `!` popup (and
+ * its hotkeys) invoke. See window.h. */
+gboolean
+ggaze_window_run_script_index(GgazeWindow *p_win, guint u_idx) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   if (p_win->p_nav == NULL || p_win->p_runner == NULL) {
+      return (FALSE);
+   }
+   const GPtrArray *p_scripts = runner_get_scripts(p_win->p_runner);
+   if (p_scripts == NULL || u_idx >= p_scripts->len) {
+      return (FALSE);
+   }
+   GFile *p_cur = navigator_get_current(p_win->p_nav);
+   GFile *p_dir = navigator_get_dir(p_win->p_nav);
+   if (p_dir == NULL) {
+      return (FALSE);
+   }
+   const RunnerScript *p_sc  = g_ptr_array_index((GPtrArray *)p_scripts, u_idx);
+   _RunCtx            *p_ctx = g_new(_RunCtx, 1);
+   p_ctx->p_win              = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->p_dir              = (GFile *)g_object_ref(p_dir);
+   p_ctx->c_name  = g_strdup(p_sc->c_name != NULL ? p_sc->c_name : "(unnamed)");
+   GError  *p_err = NULL;
+   gboolean b_ok = runner_run(p_win->p_runner, p_cur, p_dir, p_sc, _run_done_cb,
+                              p_ctx, &p_err);
+   if (!b_ok) {
+      g_warning("ggaze: run-script '%s' failed to start: %s", p_ctx->c_name,
+                p_err != NULL ? p_err->message : "(no detail)");
+      char *c_msg =
+         g_strdup_printf("Script '%s' failed to start: %s", p_ctx->c_name,
+                         p_err != NULL ? p_err->message : "(no detail)");
+      if (!p_win->b_disposed) {
+         _show_status(p_win, c_msg);
+      }
+      g_free(c_msg);
+      g_clear_error(&p_err);
+      _run_ctx_free(p_ctx);
+      return (FALSE);
+   }
+   char *c_msg = g_strdup_printf("Running '%s'…", p_ctx->c_name);
+   if (!p_win->b_disposed) {
+      _show_status(p_win, c_msg);
+   }
+   g_free(c_msg);
+   return (TRUE);
+}
+
 static const GActionEntry ACTIONS[] = {
    {.name = "prev", .activate = _action_prev},
    {.name = "next", .activate = _action_next},
@@ -1659,6 +1953,7 @@ static const GActionEntry ACTIONS[] = {
    {.name = "last", .activate = _action_last},
    {.name = "open", .activate = _action_open},
    {.name = "open-external", .activate = _action_open_external},
+   {.name = "run-script", .activate = _action_run_script},
    {.name = "quit", .activate = _action_quit},
    {.name = "trash", .activate = _action_trash},
    {.name = "delete", .activate = _action_delete},
@@ -1991,6 +2286,7 @@ _update_header(GgazeWindow *p_win) {
 static void
 ggaze_window_dispose(GObject *p_obj) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_obj);
+   p_win->b_disposed = TRUE; /* async callbacks check this before touching UI */
    if (p_win->p_nav != NULL) {
       g_signal_handlers_disconnect_by_data(p_win->p_nav, p_win);
       if (p_win->p_grid != NULL) {
@@ -2003,6 +2299,7 @@ ggaze_window_dispose(GObject *p_obj) {
    g_cancellable_cancel(p_win->p_cancel);
    g_clear_object(&p_win->p_cancel);
    _open_ext_destroy(p_win);
+   _run_script_destroy(p_win);
    if (p_win->u_slideshow != 0) {
       g_source_remove(p_win->u_slideshow);
       p_win->u_slideshow = 0;

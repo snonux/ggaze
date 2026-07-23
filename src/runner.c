@@ -129,7 +129,22 @@ runner_run_finish(Runner *r, GAsyncResult *p_res, GError **p_err) {
    GSubprocess *p_sub = G_SUBPROCESS(g_async_result_get_source_object(p_res));
    if (p_sub == NULL)
       return -1;
-   gboolean ok = g_subprocess_wait_check_finish(p_sub, p_res, p_err);
+   gboolean ok    = g_subprocess_wait_check_finish(p_sub, p_res, p_err);
+   int      i_ret = 0;
+   if (!ok) {
+      /* Distinguish a normal non-zero exit (G_SPAWN_EXIT_ERROR) from a
+       * launch/wait failure: report the real exit status in the former so
+       * the UI can show "failed (exit N)". -1 means an error (no exit code).
+       * The exit status is only valid while p_sub is alive, so read it before
+       * unreffing. */
+      if (p_err != NULL && *p_err != NULL &&
+          (*p_err)->domain == G_SPAWN_EXIT_ERROR) {
+         i_ret = (int)g_subprocess_get_exit_status(p_sub);
+         g_clear_error(p_err); /* not an error: it just exited non-zero */
+      } else {
+         i_ret = -1;
+      }
+   }
    g_object_unref(p_sub);
-   return ok ? 0 : -1;
+   return i_ret;
 }
