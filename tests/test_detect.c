@@ -12,6 +12,24 @@
 
 #include <glib.h>
 
+/* Locate the baseline SOF0 marker (0xFF 0xC0) in a JPEG byte buffer and
+ * overwrite its declared height/width with 65500 (0xFFDC), mirroring
+ * tests/test_loader_jpeg.c's _patch_sof_dims_huge (kept as a local copy
+ * since this test binary does not link that one). */
+static void
+_patch_sof_dims_huge(guint8 *p_buf, gsize u_len) {
+   for (gsize u = 0; u + 8 < u_len; u++) {
+      if (p_buf[u] == 0xff && p_buf[u + 1] == 0xc0) {
+         p_buf[u + 5] = 0xff;
+         p_buf[u + 6] = 0xdc;
+         p_buf[u + 7] = 0xff;
+         p_buf[u + 8] = 0xdc;
+         return;
+      }
+   }
+   g_assert_not_reached();
+}
+
 static void
 test_jpeg(void) {
    const guint8 h[] = {0xFF, 0xD8, 0xFF, 0xE0, 0x10, 0x00};
@@ -91,6 +109,89 @@ test_empty_and_short(void) {
    g_assert_cmpint(detect_format(h, 1), ==, GGAZE_FMT_UNKNOWN);
 }
 
+/* detect_jpeg_peek_dims(): real-file coverage using the committed fixtures,
+ * plus the crafted-oversized-header case that motivated adding it (mu0
+ * review: GdkPixbuf stalls ~28s on this exact input instead of failing
+ * fast, so backends must reject it before decoding). */
+static void
+test_jpeg_peek_dims_plain(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar  *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   guint8 *p_buf  = NULL;
+   gsize   u_len  = 0;
+   g_assert_true(g_file_get_contents(c_path, (gchar **)&p_buf, &u_len, NULL));
+   g_free(c_path);
+
+   guint32 u_w = 0, u_h = 0;
+   g_assert_true(detect_jpeg_peek_dims(p_buf, u_len, &u_w, &u_h));
+   g_assert_cmpuint(u_w, ==, 6);
+   g_assert_cmpuint(u_h, ==, 3);
+   g_free(p_buf);
+}
+
+static void
+test_jpeg_peek_dims_rotated_uses_raw_dims(void) {
+   /* rot6.jpg is 8x4 as declared by its SOF0 (EXIF Orientation=6 rotates it
+    * to 4x8 only once a decoder applies the tag); the header-only peek must
+    * report the raw, undecoded 8x4. */
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar  *c_path = g_build_filename(c_dir, "rot6.jpg", NULL);
+   guint8 *p_buf  = NULL;
+   gsize   u_len  = 0;
+   g_assert_true(g_file_get_contents(c_path, (gchar **)&p_buf, &u_len, NULL));
+   g_free(c_path);
+
+   guint32 u_w = 0, u_h = 0;
+   g_assert_true(detect_jpeg_peek_dims(p_buf, u_len, &u_w, &u_h));
+   g_assert_cmpuint(u_w, ==, 8);
+   g_assert_cmpuint(u_h, ==, 4);
+   g_free(p_buf);
+}
+
+static void
+test_jpeg_peek_dims_oversized(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar  *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   guint8 *p_buf  = NULL;
+   gsize   u_len  = 0;
+   g_assert_true(g_file_get_contents(c_path, (gchar **)&p_buf, &u_len, NULL));
+   g_free(c_path);
+
+   _patch_sof_dims_huge(p_buf, u_len);
+   guint32 u_w = 0, u_h = 0;
+   g_assert_true(detect_jpeg_peek_dims(p_buf, u_len, &u_w, &u_h));
+   g_assert_cmpuint(u_w, ==, 65500);
+   g_assert_cmpuint(u_h, ==, 65500);
+   g_assert_cmpuint((guint64)u_w * u_h, >, GGAZE_JPEG_MAX_PIXELS);
+   g_free(p_buf);
+}
+
+static void
+test_jpeg_peek_dims_not_jpeg(void) {
+   const guint8 h[] = {'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd'};
+   guint32      u_w = 0xdeadbeef, u_h = 0xdeadbeef;
+   g_assert_false(detect_jpeg_peek_dims(h, G_N_ELEMENTS(h), &u_w, &u_h));
+}
+
+static void
+test_jpeg_peek_dims_truncated(void) {
+   /* SOI + start of an APP0 marker, no SOF, no scan data. */
+   const guint8 h[] = {0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'};
+   guint32      u_w = 0, u_h = 0;
+   g_assert_false(detect_jpeg_peek_dims(h, G_N_ELEMENTS(h), &u_w, &u_h));
+}
+
+static void
+test_jpeg_peek_dims_null_and_empty(void) {
+   guint32 u_w = 0, u_h = 0;
+   g_assert_false(detect_jpeg_peek_dims(NULL, 0, &u_w, &u_h));
+   const guint8 h[] = {0xFF, 0xD8};
+   g_assert_false(detect_jpeg_peek_dims(h, G_N_ELEMENTS(h), &u_w, &u_h));
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -107,5 +208,16 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/detect/heif", test_heif);
    g_test_add_func("/detect/unknown_garbage", test_unknown_garbage);
    g_test_add_func("/detect/empty_and_short", test_empty_and_short);
+   g_test_add_func("/detect/jpeg_peek_dims/plain", test_jpeg_peek_dims_plain);
+   g_test_add_func("/detect/jpeg_peek_dims/rotated_uses_raw_dims",
+                   test_jpeg_peek_dims_rotated_uses_raw_dims);
+   g_test_add_func("/detect/jpeg_peek_dims/oversized",
+                   test_jpeg_peek_dims_oversized);
+   g_test_add_func("/detect/jpeg_peek_dims/not_jpeg",
+                   test_jpeg_peek_dims_not_jpeg);
+   g_test_add_func("/detect/jpeg_peek_dims/truncated",
+                   test_jpeg_peek_dims_truncated);
+   g_test_add_func("/detect/jpeg_peek_dims/null_and_empty",
+                   test_jpeg_peek_dims_null_and_empty);
    return (g_test_run());
 }

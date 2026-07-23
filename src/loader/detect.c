@@ -1,7 +1,10 @@
 /*:*
  * ggaze — image format detection
  *
- * Magic-byte sniffing. Pure function, no I/O, no GTK -> unit-testable.
+ * Magic-byte sniffing. Pure functions, no I/O, no GTK -> unit-testable. Also
+ * home to detect_jpeg_peek_dims(), a dependency-free JPEG header-only
+ * dimension scan shared by jpeg.c and pixbuf.c so both can reject an
+ * oversized declared header before decoding (mu0).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -79,4 +82,74 @@ detect_format(const guint8 *p_head, gsize u_len) {
    }
 
    return (GGAZE_FMT_UNKNOWN);
+}
+
+/* JPEG marker codes relevant to the SOF scan below. SOF0-SOF15 span
+ * 0xC0-0xCF, but three codes in that range are reused for non-frame
+ * segments and must be skipped rather than misread as a frame header. */
+#define GGAZE_JPEG_MARKER_DHT 0xC4
+#define GGAZE_JPEG_MARKER_JPG 0xC8
+#define GGAZE_JPEG_MARKER_DAC 0xCC
+#define GGAZE_JPEG_MARKER_SOS 0xDA
+
+static gboolean
+_is_sof_marker(guint8 u_marker) {
+   return (u_marker >= 0xC0 && u_marker <= 0xCF &&
+           u_marker != GGAZE_JPEG_MARKER_DHT &&
+           u_marker != GGAZE_JPEG_MARKER_JPG &&
+           u_marker != GGAZE_JPEG_MARKER_DAC);
+}
+
+/* Read a SOF segment's height/width at u_i (the segment's marker byte
+ * offset) into *p_w and *p_h. Caller has already verified u_i+9 <= u_len, so no
+ * further bounds check is needed: length(2) precision(1) height(2)
+ * width(2), starting right after the 2-byte marker. */
+static void
+_read_sof_dims(const guint8 *p_buf, gsize u_i, guint32 *p_w, guint32 *p_h) {
+   *p_h = ((guint32)p_buf[u_i + 5] << 8) | p_buf[u_i + 6];
+   *p_w = ((guint32)p_buf[u_i + 7] << 8) | p_buf[u_i + 8];
+}
+
+gboolean
+detect_jpeg_peek_dims(const guint8 *p_buf, gsize u_len, guint32 *p_w,
+                      guint32 *p_h) {
+   if (p_buf == NULL || u_len < 4 || p_buf[0] != 0xFF || p_buf[1] != 0xD8) {
+      return (FALSE);
+   }
+   gsize u_i = 2;
+   while (u_i + 4 <= u_len) {
+      if (p_buf[u_i] != 0xFF) {
+         u_i++; /* resync on a stray non-marker byte */
+         continue;
+      }
+      guint8 u_marker = p_buf[u_i + 1];
+      /* 0xFF fill bytes may pad before the real marker code; TEM (0x01) and
+       * RSTn/SOI/EOI (0xD0-0xD9) carry no length segment and never precede
+       * the first SOF in a well-formed stream, so skip past just the marker
+       * pair rather than misreading the next two bytes as a length. */
+      if (u_marker == 0xFF) {
+         u_i++;
+         continue;
+      }
+      if (u_marker == 0x01 || (u_marker >= 0xD0 && u_marker <= 0xD9)) {
+         u_i += 2;
+         continue;
+      }
+      guint32 u_seglen = ((guint32)p_buf[u_i + 2] << 8) | p_buf[u_i + 3];
+      if (u_seglen < 2) {
+         return (FALSE); /* malformed: length must include itself */
+      }
+      if (_is_sof_marker(u_marker)) {
+         if (u_i + 9 > u_len) {
+            return (FALSE); /* truncated SOF segment */
+         }
+         _read_sof_dims(p_buf, u_i, p_w, p_h);
+         return (TRUE);
+      }
+      if (u_marker == GGAZE_JPEG_MARKER_SOS) {
+         return (FALSE); /* scan data reached, no SOF seen first */
+      }
+      u_i += 2 + (gsize)u_seglen;
+   }
+   return (FALSE);
 }

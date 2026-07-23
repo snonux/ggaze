@@ -8,6 +8,16 @@
  * from a pixbuf is headless). Fixture dir comes from $GGAZE_FIXTURES_DIR
  * (set by meson). See ./sample-images for the optional realistic corpus.
  *
+ * test_oversized_jpeg (mu0 review) exercises loader_load() -- the real
+ * public dispatch entry point used by clipboard.c and any prefetch without
+ * a progress callback -- with a JPEG whose SOF0 declares 65500x65500. Pre-
+ * fix, this drove pixbuf.c's GdkPixbufLoader into a ~28s stall (glycin
+ * pre-allocating a huge sparse memfd off the declared size before its own
+ * internal cap rejected it); it never crashed, but it never returned
+ * quickly either. The test asserts both a clean G_IO_ERROR *and* a tight
+ * wall-clock budget, so a regression of the pre-decode guard shows up as a
+ * failing assertion rather than a merely-slow-but-passing test.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -138,6 +148,54 @@ test_corrupt_jpeg(void) {
    g_error_free(p_err);
 }
 
+/* Locate the baseline SOF0 marker (0xFF 0xC0) in a JPEG byte buffer and
+ * overwrite its declared height/width with 65500 (0xFFDC), the largest
+ * value libjpeg's own JPEG_MAX_DIMENSION check still accepts at header-read
+ * time. Mirrors tests/test_loader_jpeg.c's _patch_sof_dims_huge and
+ * tests/test_detect.c's local copy (kept separate per test binary rather
+ * than shared, matching this suite's existing helper-per-file convention). */
+static void
+_patch_sof_dims_huge(guint8 *p_buf, gsize u_len) {
+   for (gsize u = 0; u + 8 < u_len; u++) {
+      if (p_buf[u] == 0xff && p_buf[u + 1] == 0xc0) {
+         p_buf[u + 5] = 0xff;
+         p_buf[u + 6] = 0xdc;
+         p_buf[u + 7] = 0xff;
+         p_buf[u + 8] = 0xdc;
+         return;
+      }
+   }
+   g_assert_not_reached();
+}
+
+static void
+test_oversized_jpeg(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar  *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   guint8 *p_buf  = NULL;
+   gsize   u_len  = 0;
+   g_assert_true(g_file_get_contents(c_path, (gchar **)&p_buf, &u_len, NULL));
+   g_free(c_path);
+   _patch_sof_dims_huge(p_buf, u_len);
+
+   gint64      i_start = g_get_monotonic_time();
+   GError     *p_err   = NULL;
+   GdkTexture *p_tex   = load_bytes(p_buf, u_len, &p_err);
+   gdouble     d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
+   g_free(p_buf);
+
+   g_assert_null(p_tex);
+   g_assert_nonnull(p_err);
+   g_assert_cmpuint(p_err->domain, ==, (guint)G_IO_ERROR);
+   g_error_free(p_err);
+   /* Pre-fix this call observed a ~28s stall; 5s leaves generous headroom
+    * above the microsecond-scale header peek while still catching a
+    * regression back to the GdkPixbuf-driven stall long before any CI
+    * per-test timeout would. */
+   g_assert_cmpfloat(d_secs, <, 5.0);
+}
+
 static void
 test_rgba_png(void) {
    /* 5x2 RGBA PNG -> exercises the has-alpha branch of texture_from_pixbuf. */
@@ -158,6 +216,7 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/loader/pixbuf/unsupported_avif", test_unsupported_avif);
    g_test_add_func("/loader/pixbuf/unsupported_heif", test_unsupported_heif);
    g_test_add_func("/loader/pixbuf/corrupt_jpeg", test_corrupt_jpeg);
+   g_test_add_func("/loader/pixbuf/oversized_jpeg", test_oversized_jpeg);
    g_test_add_func("/loader/pixbuf/rgba_png", test_rgba_png);
    return (g_test_run());
 }

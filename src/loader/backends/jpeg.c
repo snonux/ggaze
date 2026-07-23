@@ -6,17 +6,44 @@
  * completes and is returned. Uses libjpeg-turbo's jpeg_mem_src + scale_num/
  * scale_denom for the low-res phase. Compiled when meson feature `jpeg` is on.
  *
- * Safety: both the low-res and full decode go through the shared
- * _decode_at_scale(), which treats libjpeg's reported dimensions as
+ * Safety, libjpeg side: both the low-res and full *direct* decode (i.e. via
+ * this file's own _decode_at_scale(), used by _jpeg_load() and phase 1 of
+ * _jpeg_load_progressive()) treat libjpeg's reported dimensions as
  * untrusted. A JPEG SOF marker can declare up to 65535x65535 using only a
  * few header bytes, with no actual pixel data required, so
- * _jpeg_check_dims() bounds width/height against GGAZE_JPEG_MAX_SIDE/
- * GGAZE_JPEG_MAX_PIXELS and computes the RGB/RGBA buffer sizes with checked
- * guint64 arithmetic BEFORE either g_malloc() call — g_malloc() aborts the
- * process on failure, so an unbounded multi-gigabyte request would crash
- * ggaze rather than fail gracefully. A bound violation yields a recoverable
- * G_IO_ERROR (mirroring the checked-allocation pattern already applied to
- * heif.c and jxl.c), never an abort or overflowed loop counter.
+ * _jpeg_check_dims() bounds width/height against detect.h's
+ * GGAZE_JPEG_MAX_SIDE/GGAZE_JPEG_MAX_PIXELS and computes the RGB/RGBA buffer
+ * sizes with checked guint64 arithmetic BEFORE either g_malloc() call —
+ * g_malloc() aborts the process on failure, so an unbounded multi-gigabyte
+ * request would crash ggaze rather than fail gracefully. A bound violation
+ * yields a recoverable G_IO_ERROR (mirroring the checked-allocation pattern
+ * already applied to heif.c and jxl.c), never an abort or overflowed loop
+ * counter. NOTE: the loader dispatcher (loader.c) currently never calls
+ * jpeg_backend.load() for a synchronous loader_load() (BACKENDS[] omits
+ * jpeg_backend; sync JPEG loads fall through to pixbuf.c), so this guard is
+ * presently reachable only via _jpeg_load_progressive()'s phase-1 low-res
+ * decode -- real defense-in-depth, not dead code, but its libjpeg-side
+ * bound can never actually trigger there because libjpeg's own
+ * JPEG_MAX_DIMENSION (65500) at 1/8 scale tops out at 8188x8188 (~67M
+ * pixels), already under the cap. See tests/test_loader_jpeg.c for the
+ * direct-call coverage of this path regardless.
+ *
+ * Safety, GdkPixbuf side: phase 2 of _jpeg_load_progressive() (the full
+ * decode users actually see when browsing, per window.c's _load_current)
+ * hands off to gdk_pixbuf_new_from_file() for EXIF-orientation-aware
+ * decoding, and pixbuf.c's fallback backend does the equivalent via
+ * GdkPixbufLoader for every other reachable JPEG path (sync loader_load(),
+ * prefetch). Neither goes through _decode_at_scale(), so the guard above
+ * does not cover them. Empirically (mu0 review), gdk-pixbuf 2.44's JPEG
+ * loader (glycin) does NOT abort/crash on a maximum-dimension declared
+ * header -- it pre-allocates a huge sparse memfd sized off the declared
+ * dimensions, then stalls for ~28s before its own internal size cap (8 GB)
+ * rejects the file with a clean GError. That is a real, reachable
+ * unbounded-latency DoS (not a crash), so both GdkPixbuf entry points are
+ * now preceded by detect_jpeg_peek_dims() + the same GGAZE_JPEG_MAX_SIDE/
+ * GGAZE_JPEG_MAX_PIXELS caps, applied to the file's real bytes without
+ * invoking any decoder (see _jpeg_reject_if_oversized() below and its
+ * twin in pixbuf.c).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -32,21 +59,6 @@
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
 #define GGAZE_JPEG_LORES_DENOM 8
-
-/* Per-dimension and total-pixel caps, matching jxl.c's GGAZE_JXL_MAX_SIDE/
- * GGAZE_JXL_MAX_PIXELS convention: reject a maximum-dimension JPEG header
- * before allocating rather than after. A real JPEG SOF marker can declare up
- * to 65535x65535 (the format's 16-bit width/height fields) using only a
- * handful of header bytes — libjpeg reports those dimensions as soon as
- * jpeg_start_decompress() returns, before any entropy-coded scan data is
- * read, so an attacker needs no real pixel data to reach the allocations in
- * _decode_at_scale(). 32768 per side / 100M total pixels (~400 MB RGBA)
- * comfortably admits real camera photos while keeping the RGB/RGBA buffers
- * well under the multi-GB sizes that would abort the process (g_malloc calls
- * abort() on failure — unlike libjpeg's own allocator, whose OOM path calls
- * error_exit() and is caught by the setjmp/longjmp trap below). */
-#define GGAZE_JPEG_MAX_SIDE 32768
-#define GGAZE_JPEG_MAX_PIXELS 100000000ULL
 
 struct _jerr_jmp {
    struct jpeg_error_mgr pub;
@@ -202,40 +214,61 @@ _jpeg_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    return (_make_texture(i_w, i_h, p_pixels));
 }
 
+/* Reject p_buf/u_len (the full JPEG file, still in memory) if its declared
+ * header dimensions exceed GGAZE_JPEG_MAX_SIDE/GGAZE_JPEG_MAX_PIXELS, using
+ * detect_jpeg_peek_dims()'s dependency-free marker scan -- no decoder
+ * invoked. Must run before handing the file to GdkPixbuf (see this file's
+ * top-of-file "Safety, GdkPixbuf side" comment for why). Returns TRUE
+ * (proceed) when no SOF marker is found or dimensions are within bounds, so
+ * a malformed/truncated file still reaches the real decoder for its own
+ * error; FALSE (with *p_err set to a G_IO_ERROR) when oversized. */
+static gboolean
+_jpeg_reject_if_oversized(const guint8 *p_buf, gsize u_len, GError **p_err) {
+   guint32 u_w, u_h;
+   if (!detect_jpeg_peek_dims(p_buf, u_len, &u_w, &u_h)) {
+      return (TRUE);
+   }
+   if (u_w > GGAZE_JPEG_MAX_SIDE || u_h > GGAZE_JPEG_MAX_SIDE ||
+       (guint64)u_w * u_h > GGAZE_JPEG_MAX_PIXELS) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "jpeg: image too large (%ux%u, max %d per side / %llu "
+                  "pixels)",
+                  u_w, u_h, GGAZE_JPEG_MAX_SIDE,
+                  (unsigned long long)GGAZE_JPEG_MAX_PIXELS);
+      return (FALSE);
+   }
+   return (TRUE);
+}
+
+/* Build a GdkTexture (RGBA) from an already-oriented GdkPixbuf. Adds an
+ * alpha channel first if the source lacks one. Caller keeps ownership of
+ * p_pix; the returned texture holds its own ref via p_rgba. */
 static GdkTexture *
-_jpeg_load_progressive(GFile *p_file, GCancellable *p_cancel,
-                       LoaderProgressCb p_progress, gpointer p_progress_data,
-                       GError **p_err) {
-   gchar *c_buf = NULL;
-   gsize  u_len = 0;
-   if (!g_file_load_contents(p_file, p_cancel, &c_buf, &u_len, NULL, p_err)) {
-      return (NULL);
-   }
-   /* Phase 1: low-res (1/8 scale). Skip once the load was superseded so a
-    * stale partial cannot be emitted for a file that is no longer current. */
-   int     i_lw, i_lh;
-   guint8 *p_lp = NULL;
-   if (!g_cancellable_is_cancelled(p_cancel) &&
-       _decode_at_scale((const guint8 *)c_buf, u_len, GGAZE_JPEG_LORES_DENOM,
-                        &i_lw, &i_lh, &p_lp, NULL)) {
-      GdkTexture *p_partial = _make_texture(i_lw, i_lh, p_lp);
-      if (!g_cancellable_is_cancelled(p_cancel) && p_progress != NULL) {
-         p_progress(p_partial, p_progress_data);
-      }
-      g_object_unref(p_partial);
-   }
-   /* Bail before the expensive full decode if the load was cancelled (e.g. by
-    * a rapid navigation to a different file). The GTask reports the
-    * cancellation; _load_finish_cb treats G_IO_ERROR_CANCELLED as benign. */
-   if (g_cancellable_is_cancelled(p_cancel)) {
-      g_free(c_buf);
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED,
-                  "jpeg: progressive load cancelled");
-      return (NULL);
-   }
-   /* Phase 2: full decode via GdkPixbuf (applies EXIF orientation). */
+_jpeg_pixbuf_to_texture(GdkPixbuf *p_pix) {
+   int        i_w         = gdk_pixbuf_get_width(p_pix);
+   int        i_h         = gdk_pixbuf_get_height(p_pix);
+   GdkPixbuf *p_rgba      = gdk_pixbuf_get_has_alpha(p_pix)
+                               ? GDK_PIXBUF(g_object_ref(p_pix))
+                               : gdk_pixbuf_add_alpha(p_pix, FALSE, 0, 0, 0);
+   int        i_rowstride = gdk_pixbuf_get_rowstride(p_rgba);
+   guchar    *p_px        = gdk_pixbuf_get_pixels(p_rgba);
+   gsize      u_len   = (gsize)(i_h - 1) * (gsize)i_rowstride + (gsize)i_w * 4u;
+   GBytes    *p_bytes = g_bytes_new_with_free_func(
+      p_px, u_len, (GDestroyNotify)g_object_unref, p_rgba);
+   GdkTexture *p_tex = gdk_memory_texture_new(i_w, i_h, GDK_MEMORY_R8G8B8A8,
+                                              p_bytes, (gsize)i_rowstride);
+   g_bytes_unref(p_bytes);
+   return (p_tex);
+}
+
+/* Phase 2 of the progressive load: full decode via GdkPixbuf, which applies
+ * EXIF orientation (something _decode_at_scale()/libjpeg does not do here).
+ * Caller (_jpeg_load_progressive) must already have run
+ * _jpeg_reject_if_oversized() on this file's bytes -- this function trusts
+ * that check happened and does not repeat it. */
+static GdkTexture *
+_jpeg_full_decode_via_pixbuf(GFile *p_file, GError **p_err) {
    char *c_path = g_file_get_path(p_file);
-   g_free(c_buf);
    if (c_path == NULL) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED, "jpeg: non-local file");
       return (NULL);
@@ -251,22 +284,51 @@ _jpeg_load_progressive(GFile *p_file, GCancellable *p_cancel,
    GdkPixbuf *p_use =
       (p_oriented != NULL) ? p_oriented : GDK_PIXBUF(g_object_ref(p_pix));
    g_object_unref(p_pix);
-   /* Convert to GdkTexture (RGBA). */
-   int        i_w         = gdk_pixbuf_get_width(p_use);
-   int        i_h         = gdk_pixbuf_get_height(p_use);
-   GdkPixbuf *p_rgba      = gdk_pixbuf_get_has_alpha(p_use)
-                               ? GDK_PIXBUF(g_object_ref(p_use))
-                               : gdk_pixbuf_add_alpha(p_use, FALSE, 0, 0, 0);
-   int        i_rowstride = gdk_pixbuf_get_rowstride(p_rgba);
-   guchar    *p_px        = gdk_pixbuf_get_pixels(p_rgba);
-   gsize      u_len2  = (gsize)(i_h - 1) * (gsize)i_rowstride + (gsize)i_w * 4u;
-   GBytes    *p_bytes = g_bytes_new_with_free_func(
-      p_px, u_len2, (GDestroyNotify)g_object_unref, p_rgba);
-   GdkTexture *p_tex = gdk_memory_texture_new(i_w, i_h, GDK_MEMORY_R8G8B8A8,
-                                              p_bytes, (gsize)i_rowstride);
-   g_bytes_unref(p_bytes);
+   GdkTexture *p_tex = _jpeg_pixbuf_to_texture(p_use);
    g_object_unref(p_use);
    return (p_tex);
+}
+
+static GdkTexture *
+_jpeg_load_progressive(GFile *p_file, GCancellable *p_cancel,
+                       LoaderProgressCb p_progress, gpointer p_progress_data,
+                       GError **p_err) {
+   gchar *c_buf = NULL;
+   gsize  u_len = 0;
+   if (!g_file_load_contents(p_file, p_cancel, &c_buf, &u_len, NULL, p_err)) {
+      return (NULL);
+   }
+   /* Reject an oversized declared header before either phase below touches
+    * it: phase 1 already has its own libjpeg-driven bound (currently unable
+    * to trigger at 1/8 scale, see top-of-file comment) but phase 2's
+    * GdkPixbuf call has none of its own short of a ~28s internal stall. */
+   if (!_jpeg_reject_if_oversized((const guint8 *)c_buf, u_len, p_err)) {
+      g_free(c_buf);
+      return (NULL);
+   }
+   /* Phase 1: low-res (1/8 scale). Skip once the load was superseded so a
+    * stale partial cannot be emitted for a file that is no longer current. */
+   int     i_lw, i_lh;
+   guint8 *p_lp = NULL;
+   if (!g_cancellable_is_cancelled(p_cancel) &&
+       _decode_at_scale((const guint8 *)c_buf, u_len, GGAZE_JPEG_LORES_DENOM,
+                        &i_lw, &i_lh, &p_lp, NULL)) {
+      GdkTexture *p_partial = _make_texture(i_lw, i_lh, p_lp);
+      if (!g_cancellable_is_cancelled(p_cancel) && p_progress != NULL) {
+         p_progress(p_partial, p_progress_data);
+      }
+      g_object_unref(p_partial);
+   }
+   g_free(c_buf);
+   /* Bail before the expensive full decode if the load was cancelled (e.g. by
+    * a rapid navigation to a different file). The GTask reports the
+    * cancellation; _load_finish_cb treats G_IO_ERROR_CANCELLED as benign. */
+   if (g_cancellable_is_cancelled(p_cancel)) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                  "jpeg: progressive load cancelled");
+      return (NULL);
+   }
+   return (_jpeg_full_decode_via_pixbuf(p_file, p_err));
 }
 
 const GgazeLoaderBackend jpeg_backend = {

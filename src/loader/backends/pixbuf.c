@@ -8,6 +8,17 @@
  * GdkPixbuf try) and FALSE only for formats owned by the JXL/AVIF/HEIF
  * backends in M5.
  *
+ * JPEG-specific guard (mu0 review): this is the backend that actually
+ * decodes JPEG for loader_load() (sync: clipboard.c) and any async load
+ * without a progress callback (prefetch) -- jpeg_backend is never in
+ * BACKENDS[]. GdkPixbufLoader was found to pre-allocate a huge sparse memfd
+ * sized off a JPEG's declared-but-unvalidated SOF header dimensions and
+ * stall ~28s before its own internal cap rejects an oversized file (no
+ * crash, but an unbounded-latency DoS). _pixbuf_load() therefore peeks a
+ * JPEG's declared dimensions with detect_jpeg_peek_dims() (no decoder
+ * invoked) and rejects an oversized one up front, mirroring jpeg.c's
+ * _jpeg_reject_if_oversized() for its own GdkPixbuf call site.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -20,6 +31,34 @@
 #include "../loader.h"
 
 static GdkTexture *_texture_from_pixbuf(GdkPixbuf *p_pix);
+
+/* Reject p_buf/u_len (the full file, already read into memory) if it is a
+ * JPEG whose declared header dimensions exceed GGAZE_JPEG_MAX_SIDE/
+ * GGAZE_JPEG_MAX_PIXELS, before handing it to GdkPixbufLoader. Non-JPEG
+ * input and JPEGs with no parseable SOF marker pass through untouched (the
+ * real loader below produces whatever error is appropriate). See this
+ * file's top-of-file comment for why this check exists. */
+static gboolean
+_pixbuf_reject_if_oversized_jpeg(const guint8 *p_buf, gsize u_len,
+                                 GError **p_err) {
+   if (detect_format(p_buf, u_len) != GGAZE_FMT_JPEG) {
+      return (TRUE);
+   }
+   guint32 u_w, u_h;
+   if (!detect_jpeg_peek_dims(p_buf, u_len, &u_w, &u_h)) {
+      return (TRUE);
+   }
+   if (u_w > GGAZE_JPEG_MAX_SIDE || u_h > GGAZE_JPEG_MAX_SIDE ||
+       (guint64)u_w * u_h > GGAZE_JPEG_MAX_PIXELS) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "jpeg: image too large (%ux%u, max %d per side / %llu "
+                  "pixels)",
+                  u_w, u_h, GGAZE_JPEG_MAX_SIDE,
+                  (unsigned long long)GGAZE_JPEG_MAX_PIXELS);
+      return (FALSE);
+   }
+   return (TRUE);
+}
 
 static gboolean
 _pixbuf_can_load(const guint8 *p_head, gsize u_len) {
@@ -45,6 +84,10 @@ _pixbuf_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    gchar *c_buf = NULL;
    gsize  u_len = 0;
    if (!g_file_load_contents(p_file, p_cancel, &c_buf, &u_len, NULL, p_err)) {
+      return (NULL);
+   }
+   if (!_pixbuf_reject_if_oversized_jpeg((const guint8 *)c_buf, u_len, p_err)) {
+      g_free(c_buf);
       return (NULL);
    }
 
