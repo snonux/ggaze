@@ -12,7 +12,13 @@
  * the identical use-after-free class) rather than freeing the heif_image
  * while a non-owning GBytes still points at its memory. Declared width/
  * height/stride are also validated before any arithmetic on them, guarding
- * against a zero, negative, or internally-inconsistent decoder result.
+ * against a zero, negative, or internally-inconsistent decoder result, and
+ * the plane pointer itself is checked for NULL before it is read. Those
+ * validators (_heif_check_plane, _heif_check_plane_data) are pure functions
+ * of primitives with no heif_image dependency, so they are declared
+ * non-static in heif_internal.h purely as a unit-test seam — see
+ * tests/test_loader_heif.c for direct boundary-value coverage of every
+ * branch.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -20,6 +26,7 @@
 
 #include "../loader.h"
 #include "../detect.h"
+#include "heif_internal.h"
 
 #include <gdk/gdk.h>
 #include <gio/gio.h>
@@ -37,8 +44,14 @@ _heif_can_load(const guint8 *p_head, gsize u_len) {
  * recoverable GError and returns FALSE. Guards against a decoder returning
  * zero/negative dimensions, a zero/negative stride, or a stride too narrow
  * to hold one row of i_w RGBA pixels (any of which would make the plane-size
- * computation below read past the actual buffer). */
-static gboolean
+ * computation below read past the actual buffer).
+ *
+ * Not `static`: declared in heif_internal.h so tests/test_loader_heif.c can
+ * call it directly with crafted boundary values (see that file for why —
+ * these are decoder-metadata guards, not something a real HEIF bitstream can
+ * be crafted to trip, since libheif's own decode success already implies
+ * internally-consistent geometry). */
+gboolean
 _heif_check_plane(int i_w, int i_h, int i_stride, gsize *p_len,
                   GError **p_err) {
    if (i_w <= 0 || i_h <= 0) {
@@ -58,6 +71,15 @@ _heif_check_plane(int i_w, int i_h, int i_stride, gsize *p_len,
                   (unsigned long long)u_row_bytes);
       return (FALSE);
    }
+   /* i_h and i_stride are `int` (max G_MAXINT32 each), so u_len's maximum
+    * possible value is bounded well under 2^63 — smaller than G_MAXSIZE on
+    * every 64-bit build (gsize == 64-bit, same range as u_len's guint64).
+    * On such builds this comparison can never be true: it is unreachable,
+    * not merely untested, and no crafted int inputs (direct-call or via a
+    * real decode) can trip it. The guard is live only where gsize is
+    * 32-bit (e.g. certain 32-bit targets), where i_h * i_stride can exceed
+    * G_MAXSIZE; it is kept for that portability case. Verified by
+    * inspection, not by test, on the 64-bit lanes this project builds. */
    guint64 u_len = (guint64)(i_h - 1) * (guint64)i_stride + u_row_bytes;
    if (u_len > (guint64)G_MAXSIZE) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
@@ -66,6 +88,24 @@ _heif_check_plane(int i_w, int i_h, int i_stride, gsize *p_len,
       return (FALSE);
    }
    *p_len = (gsize)u_len;
+   return (TRUE);
+}
+
+/* Validate that the decoder returned a non-NULL plane pointer. Split out of
+ * _heif_build_texture() (rather than left inline) so it is a pure function
+ * with no heif_image dependency, callable directly from the unit test — see
+ * heif_internal.h. Whether a real successful decode with the interleaved
+ * RGBA chroma we request can ever yield a NULL plane is unclear (libheif
+ * does not document it as impossible), so unlike the overflow guard above,
+ * this one is kept as a live, if hard-to-trigger-for-real, defensive check
+ * rather than asserted unreachable. */
+gboolean
+_heif_check_plane_data(const uint8_t *p_data, GError **p_err) {
+   if (p_data == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "heif: decoder returned no pixel data");
+      return (FALSE);
+   }
    return (TRUE);
 }
 
@@ -130,10 +170,8 @@ _heif_build_texture(struct heif_context      *p_ctx,
 
    GdkTexture *p_tex = NULL;
    gsize       u_len = 0;
-   if (p_data == NULL) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                  "heif: decoder returned no pixel data");
-   } else if (_heif_check_plane(i_w, i_h, i_stride, &u_len, p_err)) {
+   if (_heif_check_plane_data(p_data, p_err) &&
+       _heif_check_plane(i_w, i_h, i_stride, &u_len, p_err)) {
       /* Copy before releasing p_img below: p_data points into memory owned
        * by p_img, so it must never be read (or referenced by a non-owning
        * GBytes) once p_img is released. */
