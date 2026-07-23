@@ -28,6 +28,7 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_G, 0, "win.last"},
    /* open / quit / back */
    {GDK_KEY_o, 0, "win.open"},
+   {GDK_KEY_e, 0, "win.open-external"},
    {GDK_KEY_q, 0, "win.quit"},
    {GDK_KEY_d, 0, "win.trash"},
    {GDK_KEY_D, GDK_SHIFT_MASK, "win.delete"},

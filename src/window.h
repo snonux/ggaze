@@ -36,6 +36,15 @@ void ggaze_window_open(GgazeWindow *p_win, GFile *p_arg);
  * gtk_window_get_child (which now returns the wrapping GtkOverlay). */
 GtkStack *ggaze_window_get_stack(GgazeWindow *p_win);
 
+/* Launch editor u_idx (0-based, in the configured editors list order) on the
+ * ORIGINAL current file (not an enhanced preview). The opener is detached
+ * (GSubprocess), so the UI stays responsive. Returns TRUE iff the program
+ * was started; FALSE (with a g_warning) on a parse/launch error, an out-of-
+ * range index, or when nothing is open / no editors are configured. This is
+ * the testable launch path the `e` open-external popup (and its hotkeys)
+ * invoke. */
+gboolean ggaze_window_open_external_index(GgazeWindow *p_win, guint u_idx);
+
 /* Navigation over the current folder (bound to h/l/Left/Right/g/G via
  * shortcuts.c). No-ops if nothing is open. */
 void ggaze_window_prev(GgazeWindow *p_win);

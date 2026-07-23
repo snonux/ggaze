@@ -12,3 +12,17 @@ leak:gegl_operation
 leak:gio_source_init
 leak:gegl_jpg_load
 leak:jpg-load
+# fontconfig / pango / GDK internals leak when a GtkPopover is first
+# presented (its labels are measured, triggering fontconfig lookups and a
+# popup-layout alloc). Third-party, not ggaze; only tests that present a
+# popover (open-external) hit it.
+leak:FcPatternObjectInsertElt
+leak:FcPatternObjectAddWithBinding
+leak:FcPatternObjectListAdd
+leak:FcFontRenderPrepare
+leak:FcFontSetMatch
+leak:FcFontSetList
+leak:FcConfigSubstituteWithPat
+leak:fc_thread_func
+leak:pango_fc_font_map_load_fontset
+leak:gdk_popup_layout_new

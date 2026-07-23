@@ -365,4 +365,24 @@ test_settings_ui = executable(
 test('settings_ui', test_settings_ui,
    suite : 'integration', env : fixtures_env, depends : ggaze_gschemas)
 
+test_open_external = executable(
+   'test_open_external', ['test_open_external.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib, install : false,
+)
+open_external_env = environment()
+open_external_env.set('GIO_USE_VFS', 'local')
+open_external_env.set('GGAZE_FIXTURES_DIR',
+   join_paths(meson.project_source_root(), 'tests', 'fixtures'))
+open_external_env.set('GGAZE_SAMPLE_DIR',
+   join_paths(meson.project_source_root(), 'sample-images'))
+open_external_env.set('GSETTINGS_BACKEND', 'memory')
+open_external_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
+open_external_env.set('LSAN_OPTIONS',
+   'suppressions=' + join_paths(meson.project_source_root(), 'tests',
+                               'lsan_suppressions.txt'))
+test('open_external', test_open_external,
+   suite : 'integration', env : open_external_env, depends : ggaze_gschemas)
+
 subdir('integration')

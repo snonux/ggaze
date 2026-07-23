@@ -51,15 +51,16 @@ struct _GgazeWindow {
    Thumbnail    *p_thumb;           /* TMS thumbnail cache */
    Trash        *p_trash;           /* ./Trash bin for the current folder */
    GtkWidget    *p_stack;           /* GtkStack: grid / large (viewer) */
-   GtkWidget    *p_viewer;          /* GgazeViewer — the large view */
-   GgazeGrid    *p_grid;      /* the thumbnail grid (the "grid" stack child) */
-   int           i_grid_size; /* current thumbnail size (64-512, decision T) */
-   GtkWidget    *p_overlay; /* GtkOverlay wrapping the stack (for info label) */
-   GtkWidget    *p_info_lbl;  /* info overlay label (auto-hides) */
-   guint         u_info_hide; /* info auto-hide timeout id (0=none) */
-   guint         u_slideshow; /* slideshow timeout id (0=off) */
-   gboolean      b_fullscreen;
-   guint         u_hdr_hide; /* fullscreen header auto-hide timeout */
+   GtkWidget *p_open_ext_pop; /* `e` open-external popover (NULL when none) */
+   GtkWidget *p_viewer;       /* GgazeViewer — the large view */
+   GgazeGrid *p_grid;         /* the thumbnail grid (the "grid" stack child) */
+   int        i_grid_size;    /* current thumbnail size (64-512, decision T) */
+   GtkWidget *p_overlay;   /* GtkOverlay wrapping the stack (for info label) */
+   GtkWidget *p_info_lbl;  /* info overlay label (auto-hides) */
+   guint      u_info_hide; /* info auto-hide timeout id (0=none) */
+   guint      u_slideshow; /* slideshow timeout id (0=off) */
+   gboolean   b_fullscreen;
+   guint      u_hdr_hide; /* fullscreen header auto-hide timeout */
 #if GGAZE_HAVE_GEGL
    guint8     u_enhance_mask;    /* bit i -> preset i enabled (layered) */
    Enhancer  *p_enhancer;        /* GEGL preset engine (NULL w/o GEGL) */
@@ -82,6 +83,7 @@ static void     _hide_info(GgazeWindow *p_win);
 static gboolean _slideshow_tick(gpointer p_data);
 static void     _apply_viewer_prefs(GgazeWindow *p_win);
 static void     _load_engine_lists(GgazeWindow *p_win);
+static void     _open_ext_destroy(GgazeWindow *p_win);
 static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
 #if GGAZE_HAVE_GEGL
 static void     _enhance_update_highlights(GgazeWindow *p_win);
@@ -705,6 +707,13 @@ static const char *SHORTCUTS_UI =
    "              <object class=\"GtkShortcutsShortcut\">\n"
    "                <property name=\"accelerator\">o</property>\n"
    "                <property name=\"title\">Open</property>\n"
+   "              </object>\n"
+   "            </child>\n"
+   "            <child>\n"
+   "              <object class=\"GtkShortcutsShortcut\">\n"
+   "                <property name=\"accelerator\">e</property>\n"
+   "                <property name=\"title\">Open in external "
+   "program</property>\n"
    "              </object>\n"
    "            </child>\n"
    "            <child>\n"
@@ -1352,12 +1361,241 @@ _action_preferences(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    prefs_show(p_win->p_settings, GTK_WIDGET(p_win));
 }
 
+/* --- M8: open in external program (`e`) --------------------------------
+ *
+ * `e` pops up a GtkPopover listing the configured editors, each with an
+ * auto-assigned hotkey in list order: 1..9, then 0, then a..z (cap 36,
+ * decision O). A hotkey or a row click launches opener_launch on the
+ * ORIGINAL current file (navigator_get_current, not an enhanced preview);
+ * Esc or an outside click cancels. The popover is its own GtkNative /
+ * GtkShortcutManager, so while it is open the parent window's GLOBAL-scope
+ * shortcuts (enhance-1..8, `a`, `s`, navigation, ...) do NOT fire for key
+ * events on the popover's surface — the popover's own key controller sees
+ * them exclusively (see gtkshortcutmanager.c: GtkPopover implements
+ * GtkShortcutManager and global/managed scopes are limited to the same
+ * native). opener_launch is detached (GSubprocess), so ggaze stays
+ * responsive. Parse/launch failures are g_warning'd (the project has no
+ * toast infra yet; see docs/ui-and-interactions.md "Opening in an external
+ * program").
+ */
+
+/* Auto-assigned hotkey character for editor index u_idx, in list order:
+ * 1..9, then 0, then a..z. Returns 0 for an index beyond the 36-hotkey
+ * range (such entries are shown without a hotkey and are click-only). */
+static char
+_open_ext_hotkey_char(guint u_idx) {
+   if (u_idx < 9) {
+      return ((char)('1' + u_idx));
+   }
+   if (u_idx == 9) {
+      return ('0');
+   }
+   if (u_idx < 36) {
+      return ((char)('a' + (u_idx - 10)));
+   }
+   return (0);
+}
+
+/* Map a keyval to an editor index (1-9 -> 0-8, 0 -> 9, a-z -> 10-35), or
+ * -1 for any other key. Used by the popover's key controller. */
+static gint
+_open_ext_key_to_index(guint u_keyval) {
+   if (u_keyval >= GDK_KEY_1 && u_keyval <= GDK_KEY_9) {
+      return ((gint)(u_keyval - GDK_KEY_1));
+   }
+   if (u_keyval == GDK_KEY_0) {
+      return (9);
+   }
+   if (u_keyval >= GDK_KEY_a && u_keyval <= GDK_KEY_z) {
+      return ((gint)(10 + (u_keyval - GDK_KEY_a)));
+   }
+   return (-1);
+}
+
+/* Synchronously tear down the current open-external popover (unparent +
+ * clear the field). Safe to call when none is open. The popover's "closed"
+ * handler (autohide / outside-click dismissal) also routes here. */
+static void
+_open_ext_destroy(GgazeWindow *p_win) {
+   if (p_win->p_open_ext_pop == NULL) {
+      return;
+   }
+   GtkWidget *p_pop = p_win->p_open_ext_pop;
+   p_win->p_open_ext_pop =
+      NULL; /* first, so a re-entrant "closed" is a no-op */
+   gtk_widget_unparent(p_pop);
+}
+
+/* "closed" (outside-click / autohide dismissal): tear down synchronously. */
+static void
+_open_ext_closed_cb(GtkPopover *p_pop, gpointer p_data) {
+   (void)p_pop;
+   _open_ext_destroy(GGAZE_WINDOW(p_data));
+}
+
+/* Row click (mouse): launch that editor on the original current file, then
+ * close the popover. */
+static void
+_open_ext_row_clicked_cb(GtkButton *p_btn, gpointer p_data) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   guint u_idx = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(p_btn), "idx"));
+   ggaze_window_open_external_index(p_win, u_idx);
+   _open_ext_destroy(p_win);
+}
+
+/* Popover key controller: Esc cancels; a bare digit/letter hotkey launches
+ * the matching editor on the original current file and closes the popover.
+ * Modified keys (Ctrl+a, Shift+...) are propagated so they are not swallowed.
+ */
+static gboolean
+_open_ext_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
+                         GdkModifierType e_state, gpointer p_data) {
+   (void)p_c;
+   (void)u_kc;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (u_keyval == GDK_KEY_Escape) {
+      _open_ext_destroy(p_win);
+      return (GDK_EVENT_STOP);
+   }
+   if (e_state != 0) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   gint i_idx = _open_ext_key_to_index(u_keyval);
+   if (i_idx < 0) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   const GPtrArray *p_progs = opener_get_progs(p_win->p_opener);
+   if (p_progs == NULL || (guint)i_idx >= p_progs->len) {
+      return (GDK_EVENT_PROPAGATE); /* no editor bound to that hotkey */
+   }
+   ggaze_window_open_external_index(p_win, (guint)i_idx);
+   _open_ext_destroy(p_win);
+   return (GDK_EVENT_STOP);
+}
+
+/* Build and pop up the open-external popover listing the configured editors.
+ * If no editors are configured, shows a single message row pointing at
+ * Preferences (`,`) instead. */
+static void
+_action_open_external(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL) {
+      return; /* nothing open */
+   }
+   /* Toggle: a second `e` while the popover is up just closes it. */
+   if (p_win->p_open_ext_pop != NULL) {
+      _open_ext_destroy(p_win);
+      return;
+   }
+
+   const GPtrArray *p_progs =
+      p_win->p_opener != NULL ? opener_get_progs(p_win->p_opener) : NULL;
+   GtkWidget *p_pop = gtk_popover_new();
+   gtk_popover_set_position(GTK_POPOVER(p_pop), GTK_POS_TOP);
+   gtk_popover_set_pointing_to(GTK_POPOVER(p_pop),
+                               &(const GdkRectangle){0, 0, 1, 1});
+   g_signal_connect(GTK_POPOVER(p_pop), "closed",
+                    G_CALLBACK(_open_ext_closed_cb), p_win);
+   /* Key controller on the popover (capture phase): the popover is its own
+    * native / shortcut scope, so this sees the hotkeys without the parent
+    * window's GLOBAL shortcuts intercepting them. */
+   GtkEventController *p_kc = gtk_event_controller_key_new();
+   gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
+   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_open_ext_key_pressed_cb),
+                    p_win);
+   gtk_widget_add_controller(p_pop, p_kc);
+
+   GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+   gtk_widget_set_margin_start(p_box, 8);
+   gtk_widget_set_margin_end(p_box, 8);
+   gtk_widget_set_margin_top(p_box, 8);
+   gtk_widget_set_margin_bottom(p_box, 8);
+   gtk_popover_set_child(GTK_POPOVER(p_pop), p_box);
+
+   if (p_progs == NULL || p_progs->len == 0) {
+      GtkWidget *p_lbl =
+         gtk_label_new("No editors configured. Press , to open Preferences.");
+      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
+      gtk_box_append(GTK_BOX(p_box), p_lbl);
+   } else {
+      char *c_title = NULL;
+      {
+         GFile *p_cur = navigator_get_current(p_win->p_nav);
+         if (p_cur != NULL) {
+            char *c_name = g_file_get_basename(p_cur);
+            c_title      = g_strdup_printf("Open %s in:", c_name);
+            g_free(c_name);
+         }
+      }
+      GtkWidget *p_lbl = gtk_label_new(c_title != NULL ? c_title : "Open in:");
+      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
+      gtk_box_append(GTK_BOX(p_box), p_lbl);
+      g_free(c_title);
+
+      guint u_n = p_progs->len;
+      if (u_n > 36) {
+         u_n = 36; /* cap hotkeys at 1-9,0,a-z (decision O) */
+      }
+      for (guint i = 0; i < u_n; i++) {
+         const OpenerProg *p_pr = g_ptr_array_index((GPtrArray *)p_progs, i);
+         char              c_hk = _open_ext_hotkey_char(i);
+         char             *c_lbl =
+            g_strdup_printf("%c  %s", c_hk != 0 ? c_hk : ' ',
+                            p_pr->c_name != NULL ? p_pr->c_name : "(unnamed)");
+         GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
+         gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
+         g_object_set_data(G_OBJECT(p_btn), "idx", GUINT_TO_POINTER(i));
+         g_signal_connect(p_btn, "clicked",
+                          G_CALLBACK(_open_ext_row_clicked_cb), p_win);
+         gtk_box_append(GTK_BOX(p_box), p_btn);
+         g_free(c_lbl);
+         if (i == 0) {
+            gtk_widget_grab_focus(p_btn); /* ensure the popover gets keys */
+         }
+      }
+   }
+
+   gtk_widget_set_parent(p_pop, p_win->p_stack);
+   p_win->p_open_ext_pop = p_pop;
+   gtk_popover_popup(GTK_POPOVER(p_pop));
+}
+
+/* Launch editor u_idx on the ORIGINAL current file. See window.h. */
+gboolean
+ggaze_window_open_external_index(GgazeWindow *p_win, guint u_idx) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   if (p_win->p_nav == NULL || p_win->p_opener == NULL) {
+      return (FALSE);
+   }
+   const GPtrArray *p_progs = opener_get_progs(p_win->p_opener);
+   if (p_progs == NULL || u_idx >= p_progs->len) {
+      return (FALSE);
+   }
+   GFile *p_cur = navigator_get_current(p_win->p_nav);
+   if (p_cur == NULL) {
+      return (FALSE);
+   }
+   const OpenerProg *p_prog = g_ptr_array_index((GPtrArray *)p_progs, u_idx);
+   GError           *p_err  = NULL;
+   gboolean b_ok = opener_launch(p_win->p_opener, p_cur, p_prog, &p_err);
+   if (!b_ok) {
+      g_warning("ggaze: open-external '%s' failed: %s",
+                p_prog->c_name != NULL ? p_prog->c_name : "(unnamed)",
+                p_err != NULL ? p_err->message : "(no detail)");
+      g_clear_error(&p_err);
+   }
+   return (b_ok);
+}
+
 static const GActionEntry ACTIONS[] = {
    {.name = "prev", .activate = _action_prev},
    {.name = "next", .activate = _action_next},
    {.name = "first", .activate = _action_first},
    {.name = "last", .activate = _action_last},
    {.name = "open", .activate = _action_open},
+   {.name = "open-external", .activate = _action_open_external},
    {.name = "quit", .activate = _action_quit},
    {.name = "trash", .activate = _action_trash},
    {.name = "delete", .activate = _action_delete},
@@ -1700,6 +1938,7 @@ ggaze_window_dispose(GObject *p_obj) {
    g_clear_object(&p_win->p_prefetch_cancel);
    g_cancellable_cancel(p_win->p_cancel);
    g_clear_object(&p_win->p_cancel);
+   _open_ext_destroy(p_win);
    if (p_win->u_slideshow != 0) {
       g_source_remove(p_win->u_slideshow);
       p_win->u_slideshow = 0;
