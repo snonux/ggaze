@@ -126,6 +126,82 @@ _read_sof_dims(const guint8 *p_buf, gsize u_i, guint32 *p_w, guint32 *p_h) {
    *p_w = ((guint32)p_buf[u_i + 7] << 8) | p_buf[u_i + 8];
 }
 
+/* If the marker at u_i is a bare fill byte (0xFF) or a segment-less marker
+ * (TEM 0x01, RSTn/SOI/EOI 0xD0-0xD9), advance *p_next_i past just the marker
+ * pair (or single fill byte) and return TRUE so _jpeg_peek_step() re-enters
+ * the loop without trying to read a length; otherwise leave *p_next_i
+ * untouched and return FALSE so the caller reads u_i as a length-bearing
+ * segment instead. Split out of _jpeg_peek_step() to keep it under ~30
+ * lines (mu0 review round 4). */
+static gboolean
+_jpeg_peek_skip_fill(guint8 u_marker, gsize u_i, gsize *p_next_i) {
+   if (u_marker == 0xFF) {
+      *p_next_i = u_i + 1;
+      return (TRUE);
+   }
+   if (u_marker == 0x01 || (u_marker >= 0xD0 && u_marker <= 0xD9)) {
+      *p_next_i = u_i + 2;
+      return (TRUE);
+   }
+   return (FALSE);
+}
+
+/* Handle a SOF marker segment already located at u_i (its marker byte
+ * offset): if its 9-byte payload fits within u_len, read the declared
+ * width/height and report OK; otherwise the payload is truncated, which is
+ * either a malformed file (b_capped == FALSE, u_len is the whole file) or an
+ * inconclusive split-across-the-prefix-boundary case (b_capped == TRUE).
+ * Split out of _jpeg_peek_step() to keep it under ~30 lines (mu0 review
+ * round 4). */
+static GgazeJpegPeekStatus
+_jpeg_peek_sof(const guint8 *p_buf, gsize u_len, gsize u_i, gboolean b_capped,
+               guint32 *p_w, guint32 *p_h) {
+   if (u_i + 9 > u_len) {
+      return (b_capped ? GGAZE_JPEG_PEEK_INCONCLUSIVE
+                       : GGAZE_JPEG_PEEK_NOT_JPEG);
+   }
+   _read_sof_dims(p_buf, u_i, p_w, p_h);
+   return (GGAZE_JPEG_PEEK_OK);
+}
+
+/* One iteration of the marker scan in _jpeg_peek_scan(): inspect the marker
+ * segment at *p_i. Returns TRUE and advances *p_i past it if the scan
+ * should keep going, or returns FALSE with a final status written to
+ * *p_status if this segment ends the scan (malformed length, SOF found,
+ * SOS with no SOF seen, or a truncated SOF payload -- see _jpeg_peek_sof()).
+ * Split out of _jpeg_peek_scan() to keep both functions under ~30 lines
+ * (mu0 review round 4). */
+static gboolean
+_jpeg_peek_step(const guint8 *p_buf, gsize u_len, gsize *p_i, gboolean b_capped,
+                guint32 *p_w, guint32 *p_h, GgazeJpegPeekStatus *p_status) {
+   gsize u_i = *p_i;
+   if (p_buf[u_i] != 0xFF) {
+      *p_i = u_i + 1; /* resync on a stray non-marker byte */
+      return (TRUE);
+   }
+   guint8 u_marker = p_buf[u_i + 1];
+   if (_jpeg_peek_skip_fill(u_marker, u_i, p_i)) {
+      return (TRUE);
+   }
+   guint32 u_seglen = ((guint32)p_buf[u_i + 2] << 8) | p_buf[u_i + 3];
+   if (u_seglen < 2) {
+      *p_status = GGAZE_JPEG_PEEK_NOT_JPEG; /* malformed: length must include
+                                             * itself */
+      return (FALSE);
+   }
+   if (_is_sof_marker(u_marker)) {
+      *p_status = _jpeg_peek_sof(p_buf, u_len, u_i, b_capped, p_w, p_h);
+      return (FALSE);
+   }
+   if (u_marker == GGAZE_JPEG_MARKER_SOS) {
+      *p_status = GGAZE_JPEG_PEEK_NOT_JPEG; /* scan data reached, no SOF seen
+                                             * first */
+      return (FALSE);
+   }
+   *p_i = u_i + 2 + (gsize)u_seglen;
+   return (TRUE);
+}
+
 /* Shared SOF-marker scan behind both detect_jpeg_peek_dims() and
  * detect_jpeg_peek_dims_from_path(). b_capped tells it whether p_buf/u_len is
  * known to hold the *entire* file (b_capped == FALSE: running out of bytes
@@ -135,57 +211,23 @@ _read_sof_dims(const guint8 *p_buf, gsize u_i, guint32 *p_w, guint32 *p_h) {
  * GGAZE_JPEG_PEEK_INCONCLUSIVE). Every other exit (bad SOI, malformed
  * segment length, SOS reached with no SOF) is a definitive answer regardless
  * of b_capped, since the scan is sequential from the SOI and those
- * conditions cannot hide a SOF that has not been seen yet. */
+ * conditions cannot hide a SOF that has not been seen yet. The per-segment
+ * work lives in _jpeg_peek_step(); this loop just drives it. */
 static GgazeJpegPeekStatus
 _jpeg_peek_scan(const guint8 *p_buf, gsize u_len, gboolean b_capped,
                 guint32 *p_w, guint32 *p_h) {
    if (p_buf == NULL || u_len < 4 || p_buf[0] != 0xFF || p_buf[1] != 0xD8) {
       return (GGAZE_JPEG_PEEK_NOT_JPEG);
    }
-   gsize u_i = 2;
+   gsize               u_i      = 2;
+   GgazeJpegPeekStatus e_status = GGAZE_JPEG_PEEK_NOT_JPEG;
    while (u_i + 4 <= u_len) {
-      if (p_buf[u_i] != 0xFF) {
-         u_i++; /* resync on a stray non-marker byte */
-         continue;
+      if (!_jpeg_peek_step(p_buf, u_len, &u_i, b_capped, p_w, p_h, &e_status)) {
+         return (e_status);
       }
-      guint8 u_marker = p_buf[u_i + 1];
-      /* 0xFF fill bytes may pad before the real marker code; TEM (0x01) and
-       * RSTn/SOI/EOI (0xD0-0xD9) carry no length segment and never precede
-       * the first SOF in a well-formed stream, so skip past just the marker
-       * pair rather than misreading the next two bytes as a length. */
-      if (u_marker == 0xFF) {
-         u_i++;
-         continue;
-      }
-      if (u_marker == 0x01 || (u_marker >= 0xD0 && u_marker <= 0xD9)) {
-         u_i += 2;
-         continue;
-      }
-      guint32 u_seglen = ((guint32)p_buf[u_i + 2] << 8) | p_buf[u_i + 3];
-      if (u_seglen < 2) {
-         return (GGAZE_JPEG_PEEK_NOT_JPEG); /* malformed: length must include
-                                             * itself */
-      }
-      if (_is_sof_marker(u_marker)) {
-         if (u_i + 9 > u_len) {
-            /* Truncated SOF payload: if u_len is the whole file, the file
-             * itself is malformed/truncated; if u_len is only a capped
-             * prefix, the real SOF may simply be split across the boundary
-             * and its dims are unknown, not absent. */
-            return (b_capped ? GGAZE_JPEG_PEEK_INCONCLUSIVE
-                             : GGAZE_JPEG_PEEK_NOT_JPEG);
-         }
-         _read_sof_dims(p_buf, u_i, p_w, p_h);
-         return (GGAZE_JPEG_PEEK_OK);
-      }
-      if (u_marker == GGAZE_JPEG_MARKER_SOS) {
-         return (GGAZE_JPEG_PEEK_NOT_JPEG); /* scan data reached, no SOF seen
-                                             * first */
-      }
-      u_i += 2 + (gsize)u_seglen;
    }
-   /* Ran off the end of p_buf without a terminal condition: same reasoning
-    * as the truncated-SOF case above. */
+   /* Ran off the end of p_buf without a terminal condition from
+    * _jpeg_peek_step(): same reasoning as its truncated-SOF case above. */
    return (b_capped ? GGAZE_JPEG_PEEK_INCONCLUSIVE : GGAZE_JPEG_PEEK_NOT_JPEG);
 }
 
