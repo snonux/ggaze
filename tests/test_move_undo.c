@@ -75,6 +75,27 @@ cleanup_temp_dir(char *c_dir) {
       GFileInfo *p_info;
       while ((p_info = g_file_enumerator_next_file(p_e, NULL, NULL)) != NULL) {
          GFile *p_child = g_file_get_child(p_dir, g_file_info_get_name(p_info));
+         if (g_file_info_get_file_type(p_info) == G_FILE_TYPE_DIRECTORY) {
+            /* recursively clean a subdir (.Trash) so a file trapped in it
+             * (e.g. by test_undo_folder_switch_does_not_undo_stale_move,
+             * which deliberately never restores it) doesn't leave the
+             * subdir -- and consequently this outer temp dir -- non-empty
+             * and undeletable. */
+            GFileEnumerator *p_e2 = g_file_enumerate_children(
+               p_child, "standard::name", G_FILE_QUERY_INFO_NONE, NULL, NULL);
+            if (p_e2 != NULL) {
+               GFileInfo *p_i2;
+               while ((p_i2 = g_file_enumerator_next_file(p_e2, NULL, NULL)) !=
+                      NULL) {
+                  GFile *p_c2 =
+                     g_file_get_child(p_child, g_file_info_get_name(p_i2));
+                  g_file_delete(p_c2, NULL, NULL);
+                  g_object_unref(p_c2);
+                  g_object_unref(p_i2);
+               }
+               g_object_unref(p_e2);
+            }
+         }
          g_file_delete(p_child, NULL, NULL);
          g_object_unref(p_child);
          g_object_unref(p_info);
