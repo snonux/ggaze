@@ -46,20 +46,33 @@ enhancer_delete(Enhancer *e) {
    g_free(e);
 }
 
-void
-enhancer_set_presets(Enhancer *e, const GPtrArray *p) {
-   g_return_if_fail(e);
-   g_ptr_array_set_size(e->p_presets, 0);
-   if (!p)
-      return;
-   for (guint i = 0; i < p->len; i++) {
-      const EnhancerPreset *s  = g_ptr_array_index((GPtrArray *)p, i);
+/* Deep-copy p_src into a new GPtrArray of EnhancerPreset* (NULL/empty ->
+ * empty array). Shared by enhancer_set_presets and the async apply path
+ * (which snapshots the preset list before handing it to a worker thread, so
+ * a concurrent enhancer_set_presets() cannot race it). */
+static GPtrArray *
+_presets_copy(const GPtrArray *p_src) {
+   GPtrArray *p_out = g_ptr_array_new_with_free_func(_preset_free);
+   if (p_src == NULL) {
+      return (p_out);
+   }
+   for (guint i = 0; i < p_src->len; i++) {
+      const EnhancerPreset *s  = g_ptr_array_index((GPtrArray *)p_src, i);
       EnhancerPreset       *np = g_new0(EnhancerPreset, 1);
       np->c_name               = g_strdup(s->c_name);
       np->c_graph              = g_strdup(s->c_graph);
       np->i_builtin            = s->i_builtin;
-      g_ptr_array_add(e->p_presets, np);
+      g_ptr_array_add(p_out, np);
    }
+   return (p_out);
+}
+
+void
+enhancer_set_presets(Enhancer *e, const GPtrArray *p) {
+   g_return_if_fail(e);
+   GPtrArray *p_copy = _presets_copy(p);
+   g_ptr_array_unref(e->p_presets);
+   e->p_presets = p_copy;
 }
 
 const GPtrArray *
@@ -373,6 +386,85 @@ enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err) {
       i_w, i_h, GDK_MEMORY_R8G8B8A8_PREMULTIPLIED, p_bytes, i_stride);
    g_bytes_unref(p_bytes);
    return p_tex;
+}
+
+/* --- async apply (tu0): off the caller's main thread ---------------------
+ *
+ * enhancer_load + enhancer_apply_chain + enhancer_buffer_to_texture are each
+ * synchronous and CPU/IO-heavy; a GTK caller must not run them on the main
+ * thread (AGENTS.md: "Decode runs in GTask threads"). This wraps all three
+ * in a single GTask worker, mirroring loader.c's async wrapper. p_presets is
+ * deep-copied into the task data before the worker starts so the caller's
+ * Enhancer (whose preset array a concurrent Preferences apply could replace
+ * via enhancer_set_presets) is never touched from the worker thread.
+ */
+
+typedef struct {
+   Enhancer  *p_e;       /* borrowed; not touched off the calling thread */
+   GFile     *p_file;    /* owned */
+   GPtrArray *p_presets; /* owned deep copy (thread-safe snapshot) */
+   guint8     u_mask;
+} _AsyncApplyReq;
+
+static void
+_async_apply_req_free(_AsyncApplyReq *p_req) {
+   if (p_req == NULL) {
+      return;
+   }
+   g_clear_object(&p_req->p_file);
+   g_clear_pointer(&p_req->p_presets, g_ptr_array_unref);
+   g_free(p_req);
+}
+
+static void
+_apply_chain_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
+                    GCancellable *p_cancel) {
+   (void)p_src;
+   _AsyncApplyReq *p_req = (_AsyncApplyReq *)p_task_data;
+   if (g_task_return_error_if_cancelled(p_task)) {
+      return; /* superseded before the worker even started */
+   }
+   GError     *p_err = NULL;
+   GeglBuffer *p_buf = enhancer_load(p_req->p_file, &p_err);
+   GdkTexture *p_tex = NULL;
+   if (p_buf != NULL) {
+      GeglBuffer *p_enh = enhancer_apply_chain(
+         p_req->p_e, p_buf, p_req->p_presets, p_req->u_mask, &p_err);
+      if (p_enh != NULL) {
+         p_tex = enhancer_buffer_to_texture(p_enh, &p_err);
+         g_object_unref(p_enh);
+      }
+      g_object_unref(p_buf);
+   }
+   (void)p_cancel;
+   if (p_tex == NULL) {
+      g_task_return_error(p_task, p_err);
+   } else {
+      g_task_return_pointer(p_task, p_tex, (GDestroyNotify)g_object_unref);
+   }
+}
+
+void
+enhancer_apply_chain_async(Enhancer *p_e, GFile *p_file,
+                           const GPtrArray *p_presets, guint8 u_mask,
+                           GCancellable *p_cancel, GAsyncReadyCallback p_cb,
+                           gpointer p_data) {
+   g_return_if_fail(p_file != NULL);
+   _AsyncApplyReq *p_req = g_new0(_AsyncApplyReq, 1);
+   p_req->p_e            = p_e;
+   p_req->p_file         = (GFile *)g_object_ref(p_file);
+   p_req->p_presets      = _presets_copy(p_presets);
+   p_req->u_mask         = u_mask;
+   GTask *p_task         = g_task_new(p_file, p_cancel, p_cb, p_data);
+   g_task_set_task_data(p_task, p_req, (GDestroyNotify)_async_apply_req_free);
+   g_task_run_in_thread(p_task, _apply_chain_thread);
+   g_object_unref(p_task);
+}
+
+GdkTexture *
+enhancer_apply_chain_finish(GAsyncResult *p_res, GError **p_err) {
+   g_return_val_if_fail(G_IS_TASK(p_res), NULL);
+   return ((GdkTexture *)g_task_propagate_pointer((GTask *)p_res, p_err));
 }
 
 #endif /* GGAZE_HAVE_GEGL */
