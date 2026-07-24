@@ -251,9 +251,11 @@ Loaded lazily; never blocks display of the pixels.
 
 ## Quick enhance (GEGL, optional)
 
-- **`a` → enhance popup**: same popover pattern as `m`/`e`/`!`. Lists
-  configurable presets, each with an auto-assigned hotkey (`1`, `2`, … then
-  `0`, `a`-`z`). Example:
+- **`a` → enhance popover**: same `GtkPopover` + hotkey-assignment pattern as
+  `m`/`e`/`!` (shared `_popup_hotkey_char`/`_popup_key_to_index` helpers).
+  Lists configurable presets, each with an auto-assigned hotkey (`1`, `2`, …
+  then `0`, `a`-`z`, capped at the mask's 8 slots) plus a `0  Original` reset
+  row. Example:
   ```
   Enhance IMG_0001.jpg:
    1  Auto-fix
@@ -262,29 +264,48 @@ Loaded lazily; never blocks display of the pixels.
    4  Saturation
    5  Sharpen
    6  Denoise
+   0  Original
   ```
-  Press `1` to apply "Auto-fix" as a **non-destructive live preview**; press
-  it again (or `Esc`) to turn the preview off.
+  Presets are **layered**: pressing `1` toggles "Auto-fix" on as a
+  **non-destructive live preview**, and `2` composes "Brightness" on top of
+  it — press either again to toggle it back off. Unlike the other popovers,
+  a hotkey/row click does **not** close the popover (toggling combinations
+  while comparing is the point); `Esc`, an outside click, or re-pressing `a`
+  closes the popover without touching the preview itself. `0` (or its row)
+  discards the whole preview outright.
 - Presets are GEGL op graphs (e.g. Auto-fix = `gegl:stretch-contrast` →
   `gegl:color-enhance`; Brightness = `gegl:exposure`; Contrast =
   `gegl:brightness-contrast`; Saturation = `gegl:saturation`; Sharpen =
   `gegl:sharpen`). Configurable in Preferences (`,`) as `enhance-presets`
   (`a(ss)` name → gegl-graph); the strength is just a number in the graph
   text — tune it there, no slider UI needed.
+- Applying the enabled preset chain runs off the GTK main thread (a GTask
+  worker); the UI stays responsive while GEGL processes, and a newer
+  toggle/navigation/discard supersedes a still-in-flight one (last-write-wins
+  — its result is dropped when it lands).
 - **`s`** (or menu *Save enhanced copy…*) writes the enhanced result to
-  `<name>-enhanced.<ext>` via a GEGL saver — the **original is never
-  touched**. ggaze **never auto-saves**: an enhance preview is a live overlay
-  only.
+  `<name>-enhanced.<ext>`, or `<name>-enhanced-1.<ext>`, `-2`, … if that name
+  is already taken (same collision convention as the move popup) — the
+  **original is never touched**. ggaze **never auto-saves**: an enhance
+  preview is a live overlay only, and pressing `s` again (still looking at
+  the same image) exports another, separately-numbered copy rather than
+  clearing the preview.
 - **Dirty state + prompt on navigate:** an active (un-exported) enhance
-  preview is "dirty". Navigating to another image (`h`/`l`/`g`/`G`/click) or
-  quitting with a dirty preview prompts **Save** (export the copy, then
-  proceed), **Discard** (drop the preview, proceed), or **Cancel** (stay).
-  `s` saves and clears dirty; toggling the preview off (`Esc`/re-press)
-  discards it directly (explicit, no prompt).
+  preview is "dirty". Navigating to another image (`h`/`l`/`g`/`G`/scroll),
+  trashing/deleting/moving the current file (`d`/`D`/`m`), opening a
+  different file/folder (`o`, drag-and-drop, File→Open), or quitting (`q`)
+  with a dirty preview prompts **Save** (export the copy, then proceed),
+  **Discard** (drop the preview, proceed), or **Cancel** (stay). `s` saves
+  without clearing dirty (see above); toggling every preset back off, `0`, or
+  `Esc` (when the popover is not open) discards it directly (explicit, no
+  prompt). Slideshow auto-advance is the one exception: it discards a dirty
+  preview silently rather than blocking on a prompt no one is there to
+  answer.
 - GEGL runs only when a preset is active or on export; the fast decode path
   is unchanged, and enhance is **not** applied during `h`/`l` scrubbing (only
-  when settled on an image). If the build has no GEGL, `a` shows a "GEGL not
-  built in" toast. See [gegl.md](gegl.md).
+  when settled on an image). If the build has no GEGL, `a` (and `s`) show a
+  "GEGL not built in" status message instead of opening anything. See
+  [gegl.md](gegl.md).
 
 ## Crop, straighten & rotate tools (GEGL)
 

@@ -19,16 +19,29 @@ editing remains a non-goal.
 
 ## The quick-enhance feature
 
-- `a` → **enhance popup** (same popover pattern as `m`/`e`/`!`): lists presets,
-  each with an auto-assigned hotkey (`1`, `2`, … then `0`, `a`-`z`).
-- Selecting a preset applies a **GEGL graph** to the current image and
-  re-renders the viewer through it — non-destructively. Press it again (or
-  `Esc`) to turn the preview off.
-- `s` (or menu *Save enhanced copy…*) writes the enhanced result to a
-  new file, e.g. `IMG_0001-enhanced.jpg`, via a GEGL saver. Original untouched.
-  ggaze **never auto-saves** — the preview is a live overlay only. Moving to
-  another image (or quitting) with an un-exported preview prompts
-  Save/Discard/Cancel; `s` saves and clears dirty, `Esc`/re-press discards.
+- `a` → **enhance popover** (same `GtkPopover` + hotkey-assignment pattern as
+  `m`/`e`/`!`): lists presets, each with an auto-assigned hotkey (`1`, `2`, …
+  then `0`, `a`-`z`), plus a `0 Original` reset row.
+- Selecting a preset toggles a **GEGL graph** on/off and re-renders the
+  viewer through the chain of every currently-enabled preset —
+  non-destructively, and **layered**: multiple presets compose (e.g.
+  Auto-fix + Sharpen at once). A hotkey/row click does not close the
+  popover, so combinations can be compared before dismissing it (`Esc`,
+  outside click, or re-press `a`); `0` (or `Esc` when the popover is closed)
+  discards the whole preview outright. Applying the chain runs off the GTK
+  main thread (a GTask worker; last-write-wins if superseded before it
+  finishes).
+- `s` (or menu *Save enhanced copy…*) writes the enhanced result to a new
+  file, e.g. `IMG_0001-enhanced.jpg`, or `-enhanced-1.jpg`, `-2`, … if that
+  name is taken (same collision suffixing as the move popup), via a GEGL
+  saver. Original untouched. ggaze **never auto-saves** — the preview is a
+  live overlay only, and `s` does not clear the dirty flag (pressing it again
+  just exports another numbered copy of the same preview). Moving to
+  another image, trashing/deleting/moving the current file, opening a
+  different file/folder, or quitting with an un-exported preview prompts
+  Save/Discard/Cancel; toggling every preset back off, `0`, or `Esc`
+  discards directly (no prompt). Slideshow auto-advance discards a dirty
+  preview silently instead of blocking on an unanswerable prompt.
 - Export format: defaults to the original extension (JPEG quality 95); a
   format/quality chooser and a lossless `jpegtran`/`exiftool` path are later.
 - Presets are configurable: `enhance-presets` GSettings `a(ss)` — ordered
@@ -97,19 +110,35 @@ copy), but interactive (crop/straighten) or one-shot (rotate):
 ## Module
 
 `enhancer.{c,h}` → `Enhancer` (+ `EnhancerPreset`). Plain-C, no GtkWidget,
-unit-testable. Runs GEGL in a `GTask` thread (off the UI thread).
+unit-testable. The synchronous API (`enhancer_load`/`enhancer_apply_chain`/
+`enhancer_buffer_to_texture`/`enhancer_export_chain`) is what the async
+wrapper below composes; `window.c` calls the async form so GEGL's CPU-heavy
+processing runs in a `GTask` worker, off the GTK main thread (tu0).
 
 ```c
-EnhancerPreset *enhancer_get_presets(void);            /* from GSettings */
-GeglBuffer     *enhancer_apply(GeglBuffer *p_in, EnhancerPreset *p, GError **);
-gboolean        enhancer_export(GeglBuffer *p_in, EnhancerPreset *p,
-                                GFile *p_out, GError **);
+const GPtrArray *enhancer_get_presets(Enhancer *p_e);
+GeglBuffer      *enhancer_apply_chain(Enhancer *p_e, GeglBuffer *p_in,
+                                      const GPtrArray *p_presets, guint8 u_mask,
+                                      GError **p_err);
+gboolean         enhancer_export_chain(Enhancer *p_e, GeglBuffer *p_in,
+                                       const GPtrArray *p_presets, guint8 u_mask,
+                                       GFile *p_out, GError **p_err);
+
+/* Async: load + apply_chain + buffer_to_texture in a GTask worker. */
+void       enhancer_apply_chain_async(Enhancer *p_e, GFile *p_file,
+                                      const GPtrArray *p_presets, guint8 u_mask,
+                                      GCancellable *p_cancel,
+                                      GAsyncReadyCallback p_cb, gpointer p_data);
+GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, GError **p_err);
 ```
 
 Viewer integration: when a preset is active, the decoded pixels are imported
 into a `GeglBuffer` (GEGL GdkPixbuf-source op / babl), the enhancer processes
 it, and the output buffer is rendered back to a `GdkTexture` for display.
-This path is heavier, so it is strictly on-demand.
+This path is heavier, so it is strictly on-demand and off the main thread;
+the window compares a generation counter on completion so a superseded
+request (a newer toggle, navigation, or discard) is dropped instead of
+overwriting whatever the user is now looking at (last-write-wins).
 
 ## What else GEGL gives ggaze
 

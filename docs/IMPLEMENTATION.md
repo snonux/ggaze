@@ -303,30 +303,64 @@ bounded memory.
 
 ## M9 — GEGL quick-enhance, crop/straighten/rotate, compare (optional)
 
+**Status (tu0):** the enhance popover, async apply, hold-`Space`, reset,
+`s` export-copy, and the dirty Save/Discard/Cancel gate are done and wired
+into the window (see below). Crop (`c`), straighten (`R`), rotate 90
+(`[`/`]`), ICC color management, and EXIF `Orientation=1`-on-export are
+**not yet built** — tracked as follow-up work, not part of tu0's scope.
+
 **Deliverables**
 - `meson` `gegl` feature; `src/enhancer.c/.h` plain-C.
 - `enhancer_get_presets` (built-in programmatic / user `gegl-graph` text,
-  decision #34); `enhancer_apply` in `GTask`; `enhancer_export` →
-  `<stem>-enhanced.<ext>` same dir, collision `-1`, EXIF Orientation=1 on
-  export (decision #26); defaults to the original format (JPEG quality 95);
-  a format/quality chooser and a lossless `jpegtran`/`exiftool` path are later.
-- Viewer: preset active → import → `GeglBuffer` → apply → `GdkTexture`; not
-  during scrub (decision #34); "enhanced" badge.
-- Compose order load→enhance→rotate→straighten→crop→export (decision #35).
-  Crop (`c`), straighten (`R`), rotate 90 (`[`/`]`) stack on the preview graph.
-- Dirty flag: navigate/`d`/`D`/`m`/quit with dirty → Save/Discard/Cancel
-  (decisions #34/#18); `s` clears; re-press/Esc discards directly.
-- Hold-`Space` compare (decision #23/#24).
-- ICC decode/export via GEGL/babl (closes open question G).
-- "GEGL not built in" toast when off.
+  decision #34); `enhancer_apply_chain_async` runs `enhancer_load` +
+  `enhancer_apply_chain` + `enhancer_buffer_to_texture` in a `GTask` worker
+  (off the GTK main thread); `enhancer_export_chain` → `<stem>-enhanced.<ext>`
+  same dir, collision-suffixed `-1`, `-2`, … (mirrors `mover.c`'s move
+  collision suffixing); defaults to the original format (JPEG quality 95).
+  A format/quality chooser, lossless `jpegtran`/`exiftool` path, and EXIF
+  `Orientation=1` normalization on export are later.
+- Window: `a` opens a `GtkPopover` (same pattern as `m`/`e`/`!`, sharing their
+  `_popup_hotkey_char`/`_popup_key_to_index` helpers) listing presets;
+  presets are **layered** (multiple toggle on/off independently, composing
+  in the preview graph) rather than single-select, and the popover does not
+  close on a row click/hotkey (only `Esc`/outside-click/re-press `a`) so
+  combinations can be compared. `0` (row or hotkey) resets to the original.
+- Viewer: preset chain active → `enhancer_apply_chain_async` → swap in the
+  resulting `GdkTexture`; last-write-wins via a generation counter (a newer
+  apply/discard/navigation supersedes a still-in-flight one). Not applied
+  during `h`/`l` scrubbing.
+- Crop/straighten/rotate 90° and their graph composition (decision #35) are
+  **not implemented** — future work; see the "Crop, straighten & rotate
+  tools" section above for the intended design.
+- Dirty flag: navigate (`h`/`l`/`g`/`G`/scroll)/`d`/`D`/`m`/`o`(open)/quit
+  with dirty → Save/Discard/Cancel (decisions #34/#18); `s` exports but does
+  **not** clear dirty (pressing it again exports another numbered copy of
+  the same still-active preview); toggling every preset off, `0`, or `Esc`
+  (popover closed) discards directly. Slideshow auto-advance discards
+  silently instead of blocking on an unanswerable prompt.
+- Hold-`Space` compare (decision #23/#24): swaps to the cached original
+  texture while held, restores the cached modified one on release — no GEGL
+  recompute either way.
+- ICC color management via GEGL/babl (open question G) is **not yet wired**.
+- "GEGL not built in" status message (not yet a toast — this project has no
+  toast infra; reuses the info-overlay label) for `a`/`s` when the build has
+  no GEGL; safe no-op for the numeric preset hotkeys.
 
 **Tests**
 - Unit: `test_enhancer.c` (gated): each preset dims + non-zero; export file
-  written + orientation=1 + original untouched; rotate-then-crop compose.
-- Integration: `test_enhance_flow.c`.
+  written + original untouched; format selection by extension; stale-dest
+  and unsupported-extension rejection.
+- Integration: `test_enhance_flow.c` (gated `if gegl_dep.found()`): async
+  apply swaps the texture without touching the original (byte-identical),
+  toggle-off resets to the original, hold-Space compares then restores,
+  `s` twice produces collision-suffixed copies, non-dirty navigation is
+  immediate. `test_window.c::test_enhance_a_is_safe_with_and_without_gegl`
+  (always built, both lanes) covers the GEGL-disabled safety message.
 
-**Acceptance:** `a` preview; `s` copy; `c`/`R`/`[`/`]`; hold-`Space`; dirty
-prompt; minimal build toasts cleanly.
+**Acceptance:** `a` popover (layered, async apply); `s` copy
+(collision-safe); hold-`Space`; dirty prompt across navigate/trash/delete/
+move/open/quit; minimal build reports "GEGL not built in" cleanly. `c`/`R`/
+`[`/`]` and ICC remain open for a follow-up task.
 
 ---
 
