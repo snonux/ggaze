@@ -26,6 +26,7 @@
 
 #include "window.h"
 
+#include "ggaze-config.h"
 #include "viewer.h"
 
 #include <gio/gio.h>
@@ -241,6 +242,48 @@ test_info_hides_on_reopen(void) {
    cleanup_temp_dir(c_dir2);
 }
 
+/* tu0 requirement 8: every new enhance UI entry point must stay safe when
+ * GEGL is not built in, and say so clearly rather than silently no-op'ing or
+ * crashing. Built (and run) in BOTH lanes (unlike tests/test_enhance_flow.c,
+ * which is gegl-only) so the disabled behavior is actually exercised by the
+ * minimal-lane CI run, not just asserted by inspection. */
+static void
+test_enhance_a_is_safe_with_and_without_gegl(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar       *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GgazeWindow *p_win  = new_window();
+   ggaze_window_open(p_win, p_file);
+   wait_for_load(p_win);
+
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+   fire(p_win, "win.enhance");
+#if GGAZE_HAVE_GEGL
+   /* GEGL built in: `a` opens the preset popover -- no crash, and nothing
+    * was toggled, so still not dirty. */
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+#else
+   /* GEGL not built in: `a` must be a safe no-op that clearly reports its
+    * unavailability (docs/gegl.md, AGENTS.md "Optional features") rather
+    * than silently doing nothing or crashing. */
+   GtkWidget *p_lbl = ggaze_window_get_info_label(p_win);
+   g_assert_true(gtk_widget_get_visible(p_lbl));
+   g_assert_nonnull(g_strstr_len(gtk_label_get_text(GTK_LABEL(p_lbl)), -1,
+                                 "GEGL not built in"));
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+#endif
+   /* Hold-Space and win.enhance-save must also be safe no-ops either way. */
+   ggaze_window_set_hold_original(p_win, TRUE);
+   ggaze_window_set_hold_original(p_win, FALSE);
+   fire(p_win, "win.enhance-save");
+
+   g_object_unref(p_file);
+   g_object_unref(p_win);
+   g_free(c_path);
+   drain_main(200);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -260,5 +303,7 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/window/info_hides_on_navigation",
                    test_info_hides_on_navigation);
    g_test_add_func("/window/info_hides_on_reopen", test_info_hides_on_reopen);
+   g_test_add_func("/window/enhance_a_is_safe_with_and_without_gegl",
+                   test_enhance_a_is_safe_with_and_without_gegl);
    return (g_test_run());
 }

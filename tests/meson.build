@@ -27,6 +27,16 @@ fixtures_env.set('GGAZE_SAMPLE_DIR',
 # test touches the user's dconf and the schema is found without installing.
 fixtures_env.set('GSETTINGS_BACKEND', 'memory')
 fixtures_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
+# tu0: test_window.c and test_enhance_flow.c (both built on fixtures_env) now
+# exercise real GtkPopovers (fontconfig/pango leak the first time a popover's
+# labels are measured) and, when GEGL is enabled, GEGL's own worker-thread
+# processing (gegl_jpg_load's gio_source_init leaks a small fixed buffer per
+# jpeg_read_header call) -- both third-party, both already enumerated in
+# lsan_suppressions.txt (the same file open_external_env/move_undo_env/
+# runner_rescan_env already point ASan at for their own popover tests).
+fixtures_env.set('LSAN_OPTIONS',
+   'suppressions=' + join_paths(meson.project_source_root(), 'tests',
+                               'lsan_suppressions.txt'))
 
 # GSettings test environment: memory backend (in-process, no dconf) + the
 # schema compiled into the build tree (data/gschemas.compiled). Used by the
@@ -454,5 +464,22 @@ runner_rescan_env.set('LSAN_OPTIONS',
                                'lsan_suppressions.txt'))
 test('runner_rescan', test_runner_rescan,
    suite : 'integration', env : runner_rescan_env, depends : ggaze_gschemas)
+
+# tu0: enhance-flow integration coverage, gated the same way as the
+# test_enhancer unit test above -- built (and run) only when GEGL is
+# actually enabled, so the minimal lane skips it cleanly by never building
+# it at all.
+if gegl_dep.found()
+   test_enhance_flow = executable(
+      'test_enhance_flow',
+      ['test_enhance_flow.c', ggaze_conf_h],
+      include_directories : [inc, src_inc],
+      dependencies : ggaze_deps + [gegl_dep],
+      link_with : ggaze_lib,
+      install : false,
+   )
+   test('enhance_flow', test_enhance_flow,
+      suite : 'integration', env : fixtures_env)
+endif
 
 subdir('integration')
