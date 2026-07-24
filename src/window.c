@@ -96,6 +96,7 @@ static void     _update_header(GgazeWindow *p_win);
 static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
 static void     _show_info(GgazeWindow *p_win);
 static void     _hide_info(GgazeWindow *p_win);
+static void     _dismiss_info_for_nav(GgazeWindow *p_win);
 static void     _show_status(GgazeWindow *p_win, const char *c_msg);
 static gboolean _slideshow_tick(gpointer p_data);
 static void     _apply_viewer_prefs(GgazeWindow *p_win);
@@ -1318,9 +1319,26 @@ _slideshow_tick(gpointer p_data) {
 static gboolean
 _info_hide_tick(gpointer p_data) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   _hide_info(p_win);
+   /* Just fired: don't call g_source_remove on our own (already-firing)
+    * source below, only zero the id so a future show/hide can tell no timer
+    * is pending. */
    p_win->u_info_hide = 0;
+   _hide_info(p_win);
    return (G_SOURCE_REMOVE);
+}
+
+/* Cancel the info-overlay auto-hide timer if one is pending. Every path that
+ * changes the overlay's state (a fresh show, a status message reusing the
+ * same label, or a navigation-triggered hide) must call this before touching
+ * u_info_hide again, so a stale timer can never fire after the state has
+ * already moved on and hide/re-hide something it no longer owns. Safe to
+ * call when none is pending (u_info_hide == 0 guard). */
+static void
+_info_cancel_timer(GgazeWindow *p_win) {
+   if (p_win->u_info_hide != 0) {
+      g_source_remove(p_win->u_info_hide);
+      p_win->u_info_hide = 0;
+   }
 }
 
 static void
@@ -1341,15 +1359,30 @@ _show_info(GgazeWindow *p_win) {
    g_free(c_text);
    info_delete(p_info);
    gtk_widget_set_visible(p_win->p_info_lbl, TRUE);
-   if (p_win->u_info_hide != 0) {
-      g_source_remove(p_win->u_info_hide);
-   }
+   _info_cancel_timer(p_win);
    p_win->u_info_hide = g_timeout_add_seconds(5, _info_hide_tick, p_win);
 }
 
 static void
 _hide_info(GgazeWindow *p_win) {
    gtk_widget_set_visible(p_win->p_info_lbl, FALSE);
+}
+
+/* Hide the info overlay in response to the current file changing (any
+ * navigation: prev/next/first/last, slideshow auto-advance, grid selection,
+ * trash/delete/move advancing past a target, rescan after undo, ...) -- see
+ * nav_changed_cb, the single choke point every one of those paths funnels
+ * through via Navigator's "changed" signal. The overlay must never keep
+ * showing a PREVIOUS file's EXIF/dimensions after a new one is displayed, so
+ * this cancels any pending auto-hide timer (there is nothing left for it to
+ * hide) and hides the label unconditionally; a subsequent _show_status call
+ * later in the same handler chain (e.g. move/undo's status line) re-shows it
+ * with its own fresh timer, so this never fights a legitimate immediate
+ * re-show. */
+static void
+_dismiss_info_for_nav(GgazeWindow *p_win) {
+   _info_cancel_timer(p_win);
+   _hide_info(p_win);
 }
 
 /* Show a brief transient status line in the info overlay label (the project
@@ -1361,9 +1394,7 @@ static void
 _show_status(GgazeWindow *p_win, const char *c_msg) {
    gtk_label_set_text(GTK_LABEL(p_win->p_info_lbl), c_msg);
    gtk_widget_set_visible(p_win->p_info_lbl, TRUE);
-   if (p_win->u_info_hide != 0) {
-      g_source_remove(p_win->u_info_hide);
-   }
+   _info_cancel_timer(p_win);
    p_win->u_info_hide = g_timeout_add_seconds(2, _info_hide_tick, p_win);
 }
 
@@ -2345,6 +2376,17 @@ nav_changed_cb(Navigator *p_nav, gpointer p_data) {
    p_win->u_enhance_mask = 0;
    _enhance_update_highlights(p_win);
 #endif
+   /* This signal is the single choke point every navigation path funnels
+    * through (prev/next/first/last, slideshow auto-advance, grid selection,
+    * trash/delete/move advancing past a target, rescan after undo, ...). The
+    * info overlay (`i`) shows the PREVIOUS current file's EXIF/dimensions
+    * until its 5s timer expires unless dismissed here, so a caller could
+    * navigate away and see stale metadata for whatever is newly displayed.
+    * Hiding unconditionally (rather than refreshing to the new file) is the
+    * simplest contract that can never show wrong-file data; any status
+    * message a caller shows immediately after this (e.g. move/undo) still
+    * wins because it re-shows the label with its own fresh timer afterward. */
+   _dismiss_info_for_nav(p_win);
    _load_current(p_win);
 }
 
@@ -2908,6 +2950,12 @@ GtkStack *
 ggaze_window_get_stack(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
    return (GTK_STACK(p_win->p_stack));
+}
+
+GtkWidget *
+ggaze_window_get_info_label(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
+   return (p_win->p_info_lbl);
 }
 
 /* The content provider win.copy would set on the clipboard, without touching

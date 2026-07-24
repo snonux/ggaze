@@ -36,6 +36,14 @@ void ggaze_window_open(GgazeWindow *p_win, GFile *p_arg);
  * gtk_window_get_child (which now returns the wrapping GtkOverlay). */
 GtkStack *ggaze_window_get_stack(GgazeWindow *p_win);
 
+/* The info-overlay label (`i`; also reused for transient status messages
+ * like "Copied image"). Exposed so tests can assert its visibility/text
+ * directly instead of reaching into private window state -- e.g. the gu0
+ * regression coverage that navigating away from a file while its info
+ * overlay is showing hides it rather than leaving stale EXIF/dimensions on
+ * screen for the newly-current file. */
+GtkWidget *ggaze_window_get_info_label(GgazeWindow *p_win);
+
 /* The GdkContentProvider win.copy (Ctrl+c) would set on the clipboard, built
  * from the current window state WITHOUT touching the (display-backend-
  * dependent) system clipboard, so the copy decision is testable offscreen.
