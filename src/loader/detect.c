@@ -6,11 +6,20 @@
  * already in memory. detect_jpeg_peek_dims_from_path() is the one exception:
  * it does a small bounded read (GGAZE_JPEG_PEEK_LEN) for call sites that
  * hand a path straight to a decoder rather than loading bytes themselves
- * (thumbnail.c, info.c). detect_jpeg_peek_dims()/_from_path() plus
- * detect_jpeg_dims_within_bounds() let every JPEG-decoding call site
- * (pixbuf.c, jpeg.c, thumbnail.c, info.c) reject an oversized declared
- * header before decoding, without duplicating the bound comparison or error
- * message (mu0).
+ * (thumbnail.c, info.c). Because that read is capped, "no SOF found" is
+ * ambiguous -- the real SOF may just be further in than the prefix reaches,
+ * since a chain of maximal-length marker segments can push it arbitrarily
+ * far -- so it returns a tri-state GgazeJpegPeekStatus rather than a plain
+ * bool, and callers must fail closed (reject) on the inconclusive case
+ * exactly like an oversized header; see detect.h. A prior version of this
+ * function collapsed that ambiguity into a single FALSE that its callers
+ * treated as "safe to proceed," which let a padded file bypass the size
+ * guard entirely and reintroduce the ~28-30s GdkPixbuf stall this module
+ * exists to prevent (mu0 review round 3). detect_jpeg_peek_dims()/
+ * _from_path() plus detect_jpeg_dims_within_bounds() let every JPEG-decoding
+ * call site (pixbuf.c, jpeg.c, thumbnail.c, info.c) reject an oversized
+ * declared header before decoding, without duplicating the bound comparison
+ * or error message (mu0).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -117,11 +126,21 @@ _read_sof_dims(const guint8 *p_buf, gsize u_i, guint32 *p_w, guint32 *p_h) {
    *p_w = ((guint32)p_buf[u_i + 7] << 8) | p_buf[u_i + 8];
 }
 
-gboolean
-detect_jpeg_peek_dims(const guint8 *p_buf, gsize u_len, guint32 *p_w,
-                      guint32 *p_h) {
+/* Shared SOF-marker scan behind both detect_jpeg_peek_dims() and
+ * detect_jpeg_peek_dims_from_path(). b_capped tells it whether p_buf/u_len is
+ * known to hold the *entire* file (b_capped == FALSE: running out of bytes
+ * means there is genuinely nothing more to find, i.e. GGAZE_JPEG_PEEK_NOT_
+ * JPEG) or only a possibly-truncated prefix of a larger file (b_capped ==
+ * TRUE: running out of bytes means the answer is simply unknown, i.e.
+ * GGAZE_JPEG_PEEK_INCONCLUSIVE). Every other exit (bad SOI, malformed
+ * segment length, SOS reached with no SOF) is a definitive answer regardless
+ * of b_capped, since the scan is sequential from the SOI and those
+ * conditions cannot hide a SOF that has not been seen yet. */
+static GgazeJpegPeekStatus
+_jpeg_peek_scan(const guint8 *p_buf, gsize u_len, gboolean b_capped,
+                guint32 *p_w, guint32 *p_h) {
    if (p_buf == NULL || u_len < 4 || p_buf[0] != 0xFF || p_buf[1] != 0xD8) {
-      return (FALSE);
+      return (GGAZE_JPEG_PEEK_NOT_JPEG);
    }
    gsize u_i = 2;
    while (u_i + 4 <= u_len) {
@@ -144,43 +163,68 @@ detect_jpeg_peek_dims(const guint8 *p_buf, gsize u_len, guint32 *p_w,
       }
       guint32 u_seglen = ((guint32)p_buf[u_i + 2] << 8) | p_buf[u_i + 3];
       if (u_seglen < 2) {
-         return (FALSE); /* malformed: length must include itself */
+         return (GGAZE_JPEG_PEEK_NOT_JPEG); /* malformed: length must include
+                                             * itself */
       }
       if (_is_sof_marker(u_marker)) {
          if (u_i + 9 > u_len) {
-            return (FALSE); /* truncated SOF segment */
+            /* Truncated SOF payload: if u_len is the whole file, the file
+             * itself is malformed/truncated; if u_len is only a capped
+             * prefix, the real SOF may simply be split across the boundary
+             * and its dims are unknown, not absent. */
+            return (b_capped ? GGAZE_JPEG_PEEK_INCONCLUSIVE
+                             : GGAZE_JPEG_PEEK_NOT_JPEG);
          }
          _read_sof_dims(p_buf, u_i, p_w, p_h);
-         return (TRUE);
+         return (GGAZE_JPEG_PEEK_OK);
       }
       if (u_marker == GGAZE_JPEG_MARKER_SOS) {
-         return (FALSE); /* scan data reached, no SOF seen first */
+         return (GGAZE_JPEG_PEEK_NOT_JPEG); /* scan data reached, no SOF seen
+                                             * first */
       }
       u_i += 2 + (gsize)u_seglen;
    }
-   return (FALSE);
+   /* Ran off the end of p_buf without a terminal condition: same reasoning
+    * as the truncated-SOF case above. */
+   return (b_capped ? GGAZE_JPEG_PEEK_INCONCLUSIVE : GGAZE_JPEG_PEEK_NOT_JPEG);
 }
 
 gboolean
+detect_jpeg_peek_dims(const guint8 *p_buf, gsize u_len, guint32 *p_w,
+                      guint32 *p_h) {
+   /* b_capped=FALSE: p_buf/u_len is the whole file, so _jpeg_peek_scan()
+    * never returns GGAZE_JPEG_PEEK_INCONCLUSIVE here -- only OK or NOT_JPEG,
+    * which map onto this function's plain TRUE/FALSE contract unchanged. */
+   return (_jpeg_peek_scan(p_buf, u_len, FALSE, p_w, p_h) ==
+           GGAZE_JPEG_PEEK_OK);
+}
+
+GgazeJpegPeekStatus
 detect_jpeg_peek_dims_from_path(const char *c_path, guint32 *p_w,
                                 guint32 *p_h) {
    if (c_path == NULL) {
-      return (FALSE);
+      return (GGAZE_JPEG_PEEK_NOT_JPEG);
    }
    GFile            *p_file = g_file_new_for_path(c_path);
    GFileInputStream *p_in   = g_file_read(p_file, NULL, NULL);
    g_object_unref(p_file);
    if (p_in == NULL) {
-      return (FALSE);
+      return (GGAZE_JPEG_PEEK_NOT_JPEG); /* unreadable: let the real decoder
+                                          * produce its own error */
    }
    guint8 buf[GGAZE_JPEG_PEEK_LEN];
    gssize n =
       g_input_stream_read(G_INPUT_STREAM(p_in), buf, sizeof(buf), NULL, NULL);
    g_object_unref(p_in);
    if (n <= 0) {
-      return (FALSE);
+      return (GGAZE_JPEG_PEEK_NOT_JPEG);
    }
-   return (detect_jpeg_peek_dims(buf, (gsize)n, p_w, p_h));
+   /* b_capped: TRUE iff we filled the whole read buffer, meaning the file may
+    * continue past it and a "no SOF found" verdict would be inconclusive,
+    * not definitive. A short read (n < sizeof(buf)) hit real EOF, so the
+    * whole file was seen. */
+   gboolean b_capped = ((gsize)n == sizeof(buf));
+   return (_jpeg_peek_scan(buf, (gsize)n, b_capped, p_w, p_h));
 }
 
 gboolean

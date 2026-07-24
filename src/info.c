@@ -98,15 +98,26 @@ _fill_file_info(GgazeInfo *p_info, GFile *p_file) {
  * _show_info, bound to the info keybinding), so gdk_pixbuf_new_from_file()
  * stalling ~28s there (mu0 review round 2: GdkPixbuf/glycin pre-allocating
  * off the declared size before its own internal cap rejects it) freezes the
- * whole UI, not just a background worker. Any other failure (missing/
- * corrupt file, non-JPEG) falls through to GdkPixbuf's own error, which is
- * discarded exactly as before this guard: info display simply omits
- * dimensions (fields stay at their g_new0 zero) rather than failing
- * info_new() outright. */
+ * whole UI, not just a background worker.
+ *
+ * detect_jpeg_peek_dims_from_path() only scans a bounded prefix of c_path, so
+ * GGAZE_JPEG_PEEK_INCONCLUSIVE (a filler marker segment pushed the real SOF
+ * past the prefix) is treated the same as an oversized header -- skip the
+ * GdkPixbuf call -- rather than as "safe to decode," or a padded file
+ * bypasses this guard and reintroduces the same stall (mu0 review round 3).
+ * Any other failure (missing/corrupt file, non-JPEG) falls through to
+ * GdkPixbuf's own error, which is discarded exactly as before this guard:
+ * info display simply omits dimensions (fields stay at their g_new0 zero)
+ * rather than failing info_new() outright. */
 static void
 _fill_dims(GgazeInfo *p_info, const char *c_path) {
-   guint32 u_w, u_h;
-   if (detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h) &&
+   guint32             u_w, u_h;
+   GgazeJpegPeekStatus e_status =
+      detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h);
+   if (e_status == GGAZE_JPEG_PEEK_INCONCLUSIVE) {
+      return;
+   }
+   if (e_status == GGAZE_JPEG_PEEK_OK &&
        !detect_jpeg_dims_within_bounds(u_w, u_h, NULL)) {
       return;
    }

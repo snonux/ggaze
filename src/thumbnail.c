@@ -129,12 +129,27 @@ _load_cached(const char *c_path, gint64 i_mtime) {
  * memfd off the declared size before its own internal cap rejects it).
  * Mirrors pixbuf.c's/jpeg.c's twin guards; on rejection sets *p_err exactly
  * as gdk_pixbuf_new_from_file_at_scale() itself would have on failure, so
- * _generate()'s caller needs no new failure-handling path. */
+ * _generate()'s caller needs no new failure-handling path.
+ *
+ * detect_jpeg_peek_dims_from_path() only scans a bounded prefix of c_path, so
+ * it can come back GGAZE_JPEG_PEEK_INCONCLUSIVE (a filler marker segment
+ * pushed the real SOF past the prefix) instead of a definite answer. That
+ * case is rejected the same as an oversized header, not treated as "safe to
+ * decode" -- otherwise a padded file bypasses this guard entirely and
+ * reintroduces the same stall (mu0 review round 3). */
 static gboolean
 _thumb_reject_if_oversized_jpeg(const char *c_path, GError **p_err) {
-   guint32 u_w, u_h;
-   if (!detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h)) {
+   guint32             u_w, u_h;
+   GgazeJpegPeekStatus e_status =
+      detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h);
+   if (e_status == GGAZE_JPEG_PEEK_NOT_JPEG) {
       return (TRUE);
+   }
+   if (e_status == GGAZE_JPEG_PEEK_INCONCLUSIVE) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "jpeg: could not determine declared dimensions within the "
+                  "scanned header prefix; refusing to decode");
+      return (FALSE);
    }
    return (detect_jpeg_dims_within_bounds(u_w, u_h, p_err));
 }

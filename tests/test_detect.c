@@ -219,7 +219,8 @@ test_jpeg_peek_dims_from_path_plain(void) {
    gchar *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
 
    guint32 u_w = 0, u_h = 0;
-   g_assert_true(detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h));
+   g_assert_cmpint(detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h), ==,
+                   GGAZE_JPEG_PEEK_OK);
    g_assert_cmpuint(u_w, ==, 6);
    g_assert_cmpuint(u_h, ==, 3);
    g_free(c_path);
@@ -239,7 +240,8 @@ test_jpeg_peek_dims_from_path_oversized(void) {
    g_free(p_buf);
 
    guint32 u_w = 0, u_h = 0;
-   g_assert_true(detect_jpeg_peek_dims_from_path(c_tmp, &u_w, &u_h));
+   g_assert_cmpint(detect_jpeg_peek_dims_from_path(c_tmp, &u_w, &u_h), ==,
+                   GGAZE_JPEG_PEEK_OK);
    g_assert_cmpuint(u_w, ==, 65500);
    g_assert_cmpuint(u_h, ==, 65500);
    g_assert_false(detect_jpeg_dims_within_bounds(u_w, u_h, NULL));
@@ -251,8 +253,59 @@ test_jpeg_peek_dims_from_path_oversized(void) {
 static void
 test_jpeg_peek_dims_from_path_missing(void) {
    guint32 u_w = 0xdeadbeef, u_h = 0xdeadbeef;
-   g_assert_false(detect_jpeg_peek_dims_from_path("/nonexistent/ggaze-mu0.jpg",
-                                                  &u_w, &u_h));
+   g_assert_cmpint(
+      detect_jpeg_peek_dims_from_path("/nonexistent/ggaze-mu0.jpg", &u_w, &u_h),
+      ==, GGAZE_JPEG_PEEK_NOT_JPEG);
+}
+
+/* mu0 review round 3: the CRITICAL bypass. A JPEG marker segment can legally
+ * declare a length up to 65533 bytes; prefixing the real (huge-patched) SOF0
+ * with one maximal-length filler APP0 segment pushes the SOF past
+ * GGAZE_JPEG_PEEK_LEN (64KB). The bounded scan must recognize it ran out of
+ * prefix mid-header and report GGAZE_JPEG_PEEK_INCONCLUSIVE, not silently
+ * come back as "no JPEG here" -- the latter is what let thumbnail.c/info.c
+ * proceed straight to the unguarded ~28-30s GdkPixbuf stall. */
+static void
+test_jpeg_peek_dims_from_path_padded_past_prefix_inconclusive(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar  *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   guint8 *p_buf  = NULL;
+   gsize   u_len  = 0;
+   g_assert_true(g_file_get_contents(c_path, (gchar **)&p_buf, &u_len, NULL));
+   g_free(c_path);
+   _patch_sof_dims_huge(p_buf, u_len);
+
+   /* Build SOI + one maximal-length APP0 filler segment (0xFFFD = 65533,
+    * including the 2-byte length field itself) + the rest of the original
+    * (SOI-prefixed, now huge-SOF0) file appended after it, minus its own
+    * leading SOI so the stream stays well-formed. Total filler pushes the
+    * original SOF far past GGAZE_JPEG_PEEK_LEN (64KB). */
+   const guint16 u_fill_seglen = 0xFFFD;
+   GByteArray   *p_out         = g_byte_array_new();
+   const guint8  soi[]         = {0xFF, 0xD8};
+   g_byte_array_append(p_out, soi, (guint)sizeof(soi));
+   const guint8 app0_hdr[] = {0xFF, 0xE0, (guint8)(u_fill_seglen >> 8),
+                              (guint8)(u_fill_seglen & 0xFF)};
+   g_byte_array_append(p_out, app0_hdr, (guint)sizeof(app0_hdr));
+   guint   u_fill_payload = (guint)u_fill_seglen - 2;
+   guint8 *p_zeros        = g_new0(guint8, u_fill_payload);
+   g_byte_array_append(p_out, p_zeros, u_fill_payload);
+   g_free(p_zeros);
+   /* Skip the original file's own 2-byte SOI before appending. */
+   g_byte_array_append(p_out, p_buf + 2, (guint)(u_len - 2));
+   g_free(p_buf);
+
+   g_assert_cmpuint(p_out->len, >, GGAZE_JPEG_PEEK_LEN);
+   gchar *c_tmp = _write_tmp(p_out->data, p_out->len);
+   g_byte_array_unref(p_out);
+
+   guint32 u_w = 0xdeadbeef, u_h = 0xdeadbeef;
+   g_assert_cmpint(detect_jpeg_peek_dims_from_path(c_tmp, &u_w, &u_h), ==,
+                   GGAZE_JPEG_PEEK_INCONCLUSIVE);
+
+   unlink(c_tmp);
+   g_free(c_tmp);
 }
 
 /* detect_jpeg_dims_within_bounds() (mu0 review round 2): the bound
@@ -312,6 +365,9 @@ main(int i_argc, char **c_argv) {
                    test_jpeg_peek_dims_from_path_oversized);
    g_test_add_func("/detect/jpeg_peek_dims_from_path/missing",
                    test_jpeg_peek_dims_from_path_missing);
+   g_test_add_func(
+      "/detect/jpeg_peek_dims_from_path/padded_past_prefix_inconclusive",
+      test_jpeg_peek_dims_from_path_padded_past_prefix_inconclusive);
    g_test_add_func("/detect/jpeg_dims_within_bounds/ok",
                    test_jpeg_dims_within_bounds);
    g_test_add_func("/detect/jpeg_dims_within_bounds/oversized_sets_error",

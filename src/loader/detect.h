@@ -68,18 +68,54 @@ GgazeFormat detect_format(const guint8 *p_head, gsize u_len);
 gboolean detect_jpeg_peek_dims(const guint8 *p_buf, gsize u_len, guint32 *p_w,
                                guint32 *p_h);
 
+/* Tri-state result of detect_jpeg_peek_dims_from_path() below. A plain
+ * gboolean cannot express this function's key distinction: unlike
+ * detect_jpeg_peek_dims() (which scans a buffer already known to hold the
+ * whole file, so "no SOF found" is a definitive answer), this function scans
+ * only a bounded prefix of a file it has not fully read -- so "no SOF found
+ * within the prefix" can mean either "this file has no SOF" (safe) or "the
+ * SOF is further in than we looked" (unsafe to assume small). Conflating
+ * those two would recreate the exact stall-DoS this API exists to close: a
+ * marker segment can legally declare a length up to 65533 bytes, and a chain
+ * of such segments ahead of the real SOF can push it arbitrarily far past
+ * any fixed-size prefix, so simply enlarging GGAZE_JPEG_PEEK_LEN cannot close
+ * this gap (mu0 review round 3). */
+typedef enum {
+   GGAZE_JPEG_PEEK_OK,       /* SOF marker found within the prefix; *p_w and
+                              * *p_h are the declared dimensions. */
+   GGAZE_JPEG_PEEK_NOT_JPEG, /* Definitive: the file could not be opened/read,
+                              * does not start with a JPEG SOI, or the marker
+                              * stream is provably malformed or reaches scan
+                              * data (SOS) with no SOF ever seen -- none of
+                              * these can hide a large declared size, so it is
+                              * safe to fall through to the real decoder,
+                              * which will fail at least as fast. */
+   GGAZE_JPEG_PEEK_INCONCLUSIVE /* The bounded prefix was exhausted (or a SOF
+                                 * segment's payload was cut off by it) before
+                                 * reaching a SOF, EOI, or other terminal
+                                 * condition. Dimensions are simply unknown --
+                                 * callers MUST treat this the same as an
+                                 * oversized header (reject/skip the fast
+                                 * decode), not the same as
+                                 * GGAZE_JPEG_PEEK_NOT_JPEG, or a padded file
+                                 * bypasses the size guard entirely. */
+} GgazeJpegPeekStatus;
+
 /* Same as detect_jpeg_peek_dims(), but for a file on disk that has not
  * already been read into memory: opens c_path and scans only a bounded
  * prefix (GGAZE_JPEG_PEEK_LEN), never the whole file. Used by call sites that
  * pass a path straight to a decoder (thumbnail.c, info.c) rather than
- * loading bytes themselves first (mu0 review round 2). Returns FALSE (dims
- * untouched) if the file cannot be opened, is shorter than a JPEG SOI, or no
- * SOF marker is found within the prefix -- callers should then let the real
- * decoder run as normal; a legitimate header that happens to exceed the
- * prefix is a missed optimization, not a security regression, since the real
- * decoder still enforces its own limits. */
-gboolean detect_jpeg_peek_dims_from_path(const char *c_path, guint32 *p_w,
-                                         guint32 *p_h);
+ * loading bytes themselves first (mu0 review round 2). See
+ * GgazeJpegPeekStatus above for what each return value means and,
+ * critically, that GGAZE_JPEG_PEEK_INCONCLUSIVE must be handled like an
+ * oversized header, not like GGAZE_JPEG_PEEK_NOT_JPEG (mu0 review round 3:
+ * a prior version of this function returned a plain FALSE for both cases,
+ * which let a crafted file with a large filler marker segment ahead of its
+ * real SOF push the SOF past the prefix and bypass the size guard
+ * entirely). *p_w and *p_h are only valid when the return is
+ * GGAZE_JPEG_PEEK_OK. */
+GgazeJpegPeekStatus detect_jpeg_peek_dims_from_path(const char *c_path,
+                                                    guint32 *p_w, guint32 *p_h);
 
 /* Compare a JPEG's declared u_w/u_h against GGAZE_JPEG_MAX_SIDE/MAX_PIXELS.
  * Returns TRUE if within bounds. On an oversized violation, returns FALSE
