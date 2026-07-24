@@ -91,7 +91,10 @@ gboolean ggaze_window_run_script_index(GgazeWindow *p_win, guint u_idx);
  * targets to move, or a mover_move failure (still leaves anything that DID
  * move flagged as removed — see window.c's collision-with-partial-failure
  * handling). This is the testable move path the `m` popup (and its hotkeys)
- * invoke. */
+ * invoke. Runs immediately, synchronously, with no Save/Discard/Cancel gate
+ * of its own (tu0): that gate lives one layer up, at the popup's row-click/
+ * hotkey handlers (window.c's `_move_go`), so this function's contract
+ * — and every existing test that calls it directly — stays unchanged. */
 gboolean ggaze_window_move_index(GgazeWindow *p_win, guint u_idx);
 
 /* Navigation over the current folder (bound to h/l/Left/Right/g/G via
@@ -100,6 +103,22 @@ void ggaze_window_prev(GgazeWindow *p_win);
 void ggaze_window_next(GgazeWindow *p_win);
 void ggaze_window_first(GgazeWindow *p_win);
 void ggaze_window_last(GgazeWindow *p_win);
+
+/* TRUE iff a GEGL enhance preview is active and unsaved (an "-enhanced" copy
+ * has not been exported for it yet). Always FALSE when GEGL is not built in.
+ * Used by tests and by the Save/Discard/Cancel gate (_maybe_save_then) that
+ * every navigation/trash/delete/move/quit/open path funnels through before
+ * discarding or overwriting the current preview. */
+gboolean ggaze_window_enhance_is_dirty(GgazeWindow *p_win);
+
+/* Hold-Space compare (docs/ui-and-interactions.md "Compare original vs
+ * modified"): b_hold TRUE shows the unmodified original in place of the
+ * active enhance preview; FALSE restores the preview. No-op if nothing is
+ * dirty, GEGL is not built in, or the requested state is already in effect.
+ * This is the testable entry point the window's own Space key controller
+ * (press/release, which shortcuts.c's action-trigger table cannot express)
+ * calls. */
+void ggaze_window_set_hold_original(GgazeWindow *p_win, gboolean b_hold);
 
 /* --- INTERNAL: bulk-delete safety (used by the confirm-dialog flow and the
  * delete-safety regression test) -------------------------------------------

@@ -78,12 +78,33 @@ struct _GgazeWindow {
    guint      u_hdr_hide; /* fullscreen header auto-hide timeout */
    gboolean   b_disposed; /* set in dispose; async callbacks check it */
 #if GGAZE_HAVE_GEGL
-   guint8     u_enhance_mask;    /* bit i -> preset i enabled (layered) */
-   Enhancer  *p_enhancer;        /* GEGL preset engine (NULL w/o GEGL) */
-   GtkWidget *p_enhance_panel;   /* GtkRevealer side panel (NULL w/o GEGL) */
-   GtkWidget *p_enhance_btns[8]; /* preset row buttons (for highlighting) */
+   guint8     u_enhance_mask;      /* bit i -> preset i enabled (layered) */
+   Enhancer  *p_enhancer;          /* GEGL preset engine (NULL w/o GEGL) */
+   GtkWidget *p_enhance_pop;       /* `a` preset popover (NULL when none) */
+   GtkWidget *p_enhance_btns[8];   /* popover preset rows, for highlighting;
+                                    * only valid while the popover is open,
+                                    * NULL'd out on close */
+   GdkTexture *p_enhance_tex;      /* last-applied modified texture, cached
+                                    * so hold-Space can restore it without a
+                                    * GEGL recompute */
+   GCancellable *p_enhance_cancel; /* in-flight enhance-apply GTask */
+   guint         u_enhance_gen;    /* bumped on every apply/discard; a
+                                    * completion whose request predates the
+                                    * current value is stale and dropped
+                                    * (last-write-wins -- GEGL processing
+                                    * cannot be aborted mid-flight once
+                                    * started) */
+   gboolean b_hold_original;       /* TRUE while Space is held (hold-compare) */
+   GFile   *p_enhance_file;        /* file the current mask/preview applies to
+                                    * (NULL = none); lets nav_changed_cb tell
+                                    * an actual navigation apart from a
+                                    * same-file rescan (e.g. the folder's
+                                    * GFileMonitor noticing the "-enhanced"
+                                    * copy win.enhance-save just wrote next
+                                    * to the original) so a save doesn't
+                                    * silently discard its own still-active
+                                    * preview */
 #endif
-   GtkWidget *p_content; /* horizontal box: [enhance panel] + image area */
 };
 
 G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
@@ -105,10 +126,23 @@ static void     _open_ext_destroy(GgazeWindow *p_win);
 static void     _run_script_destroy(GgazeWindow *p_win);
 static void     _move_destroy(GgazeWindow *p_win);
 static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
+/* Shared by the enhance/open-external/run-script/move popovers (decision O):
+ * auto-assigned hotkeys in list order (1-9, 0, a-z) and the keyval->index
+ * mapping. Defined once, below, near their first historical use. */
+static char _popup_hotkey_char(guint u_idx);
+static gint _popup_key_to_index(guint u_keyval);
 #if GGAZE_HAVE_GEGL
 static void     _enhance_update_highlights(GgazeWindow *p_win);
-static void     _enhance_panel_reparent(GgazeWindow *p_win, gboolean b_overlay);
+static void     _enhance_apply_async(GgazeWindow *p_win);
+static void     _enhance_discard(GgazeWindow *p_win);
 static gboolean _enhance_do_save(GgazeWindow *p_win);
+static void     _enhance_destroy(GgazeWindow *p_win);
+static gboolean _space_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval,
+                                  guint u_kc, GdkModifierType e_state,
+                                  gpointer p_data);
+static gboolean _space_released_cb(GtkEventControllerKey *p_c, guint u_keyval,
+                                   guint u_kc, GdkModifierType e_state,
+                                   gpointer p_data);
 #endif
 
 /* Navigation continuations used by _maybe_save_then after the (GEGL) save
@@ -137,8 +171,88 @@ _proceed_last(gpointer d) {
    return (G_SOURCE_REMOVE);
 }
 #if GGAZE_HAVE_GEGL
-/* Export the current image with the enabled-preset chain to
- * <stem>-enhanced.<ext>. Returns TRUE on success; prints the saved name. */
+/* Split p_base ("IMG_0001.jpg") into a stem ("IMG_0001") and a saver-
+ * supported extension (defaults to ".jpg" if p_base's own extension is not
+ * one _saver_for_ext's caller set supports, matching the "defaults to the
+ * original format" contract in docs/gegl.md). *pc_stem is caller-owned. */
+static void
+_enhance_split_name(const char *c_base, char **pc_stem, const char **pc_ext) {
+   const char *c_dot = strrchr(c_base, '.');
+   *pc_ext           = ".jpg";
+   if (c_dot != NULL && (g_ascii_strcasecmp(c_dot, ".jpg") == 0 ||
+                         g_ascii_strcasecmp(c_dot, ".jpeg") == 0 ||
+                         g_ascii_strcasecmp(c_dot, ".png") == 0 ||
+                         g_ascii_strcasecmp(c_dot, ".webp") == 0)) {
+      *pc_ext = c_dot;
+   }
+   *pc_stem = (c_dot != NULL && *pc_ext == c_dot)
+                 ? g_strndup(c_base, (gsize)(c_dot - c_base))
+                 : g_strdup(c_base);
+}
+
+/* Build a non-colliding export destination in p_dir: "<stem>-enhanced<ext>",
+ * or "<stem>-enhanced-<n><ext>" (n = 1, 2, ...) the first time that name is
+ * already taken -- mirroring mover.c's move-collision suffixing (mover_move,
+ * decision #26/docs/IMPLEMENTATION.md M9 "collision -1") so the two copy-
+ * style flows in this codebase behave the same way. Never overwrites an
+ * existing file. */
+static GFile *
+_enhance_unique_dest(GFile *p_dir, const char *c_stem, const char *c_ext) {
+   char  *c_name = g_strdup_printf("%s-enhanced%s", c_stem, c_ext);
+   GFile *p_out  = g_file_get_child(p_dir, c_name);
+   g_free(c_name);
+   for (guint n = 1; g_file_query_exists(p_out, NULL); n++) {
+      g_object_unref(p_out);
+      c_name = g_strdup_printf("%s-enhanced-%u%s", c_stem, n, c_ext);
+      p_out  = g_file_get_child(p_dir, c_name);
+      g_free(c_name);
+   }
+   return (p_out);
+}
+
+/* Report the outcome of an export via _show_status (+ g_warning on failure),
+ * mirroring _move_report's success/failure split. Frees p_out and p_err. */
+static void
+_enhance_save_report(GgazeWindow *p_win, GFile *p_out, gboolean b_ok,
+                     GError *p_err) {
+   char *c_saved = g_file_get_basename(p_out);
+   g_object_unref(p_out);
+   if (b_ok) {
+      char *c_msg = g_strdup_printf("Saved %s", c_saved);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
+   } else {
+      g_warning("ggaze: enhance-save failed: %s",
+                p_err != NULL ? p_err->message : "(no detail)");
+      char *c_msg = g_strdup_printf("Enhance-save failed: %s",
+                                    p_err != NULL ? p_err->message : "?");
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
+   }
+   g_free(c_saved);
+   g_clear_error(&p_err);
+}
+
+/* Compute the non-colliding "<stem>-enhanced[-<n>].<ext>" destination for
+ * p_file in its own folder. Caller unrefs. */
+static GFile *
+_enhance_dest_for(GFile *p_file) {
+   char       *c_base = g_file_get_basename(p_file);
+   char       *c_stem;
+   const char *c_ext;
+   _enhance_split_name(c_base, &c_stem, &c_ext);
+   GFile *p_dir = g_file_get_parent(p_file);
+   GFile *p_out = _enhance_unique_dest(p_dir, c_stem, c_ext);
+   g_free(c_stem);
+   g_free(c_base);
+   g_object_unref(p_dir);
+   return (p_out);
+}
+
+/* Export the current image with the enabled-preset chain to a non-colliding
+ * "<stem>-enhanced[-<n>].<ext>" in the same folder. Returns TRUE on success.
+ * The original file is never touched: enhancer_export_chain reads it
+ * (enhancer_load) and writes only to the freshly computed destination. */
 static gboolean
 _enhance_do_save(GgazeWindow *p_win) {
    if (p_win->p_nav == NULL || p_win->p_enhancer == NULL ||
@@ -149,29 +263,7 @@ _enhance_do_save(GgazeWindow *p_win) {
    if (p_file == NULL) {
       return (FALSE);
    }
-   char       *c_base = g_file_get_basename(p_file);
-   char       *c_dot  = strrchr(c_base, '.');
-   const char *c_ext  = ".jpg";
-   if (c_dot != NULL && (g_ascii_strcasecmp(c_dot, ".jpg") == 0 ||
-                         g_ascii_strcasecmp(c_dot, ".jpeg") == 0 ||
-                         g_ascii_strcasecmp(c_dot, ".png") == 0 ||
-                         g_ascii_strcasecmp(c_dot, ".webp") == 0)) {
-      c_ext = c_dot;
-   }
-   char *c_stem;
-   if (c_dot != NULL && c_ext == c_dot) {
-      c_stem = g_strndup(c_base, (gsize)(c_dot - c_base));
-   } else {
-      c_stem = g_strdup(c_base);
-   }
-   GFile *p_dir     = g_file_get_parent(p_file);
-   char  *c_outname = g_strdup_printf("%s-enhanced%s", c_stem, c_ext);
-   GFile *p_out     = g_file_get_child(p_dir, c_outname);
-   g_free(c_outname);
-   g_free(c_stem);
-   g_free(c_base);
-   g_object_unref(p_dir);
-
+   GFile      *p_out = _enhance_dest_for(p_file);
    GError     *p_err = NULL;
    GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
    gboolean    b_ok  = FALSE;
@@ -181,16 +273,7 @@ _enhance_do_save(GgazeWindow *p_win) {
                                    p_win->u_enhance_mask, p_out, &p_err);
       g_object_unref(p_buf);
    }
-   char *c_saved = b_ok ? g_file_get_basename(p_out) : NULL;
-   g_object_unref(p_out);
-   if (b_ok) {
-      g_printerr("ggaze: saved %s\n", c_saved);
-   } else {
-      g_warning("ggaze: enhance-save failed: %s",
-                p_err != NULL ? p_err->message : "(no detail)");
-   }
-   g_free(c_saved);
-   g_clear_error(&p_err);
+   _enhance_save_report(p_win, p_out, b_ok, p_err);
    return (b_ok);
 }
 
@@ -218,9 +301,7 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
       _enhance_do_save(p_win);
    }
    if (i_btn == 1 || i_btn == 2) { /* Discard or Save: clear + proceed */
-      p_win->u_enhance_mask = 0;
-      _enhance_update_highlights(p_win);
-      _update_header(p_win);
+      _enhance_discard(p_win);
       if (p_ctx->fn != NULL) {
          p_ctx->fn(p_ctx->data);
       }
@@ -293,11 +374,20 @@ _action_last(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_last, p_data);
 }
 
+static gboolean
+_proceed_quit(gpointer p_data) {
+   gtk_window_close(GTK_WINDOW(p_data));
+   return (G_SOURCE_REMOVE);
+}
+
+/* `q`: quit. If an unsaved (GEGL) enhance preview is active, prompts
+ * Save/Discard/Cancel first (docs/gegl.md, IMPLEMENTATION.md M9 "navigate/
+ * d/D/m/quit with dirty"); quits immediately if nothing is dirty. */
 static void
 _action_quit(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   gtk_window_close(GTK_WINDOW(p_data));
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_quit, p_data);
 }
 
 static void
@@ -333,10 +423,7 @@ _action_open(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 /* --- M7: trash / delete / undo / view toggle / resize ------------------- */
 
 static void
-_action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
-   (void)p_a;
-   (void)p_v;
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+_do_trash_now(GgazeWindow *p_win) {
    if (p_win->p_nav == NULL || p_win->p_trash == NULL) {
       return;
    }
@@ -353,6 +440,23 @@ _action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       g_warning("ggaze: trash failed: %s", p_err->message);
       g_clear_error(&p_err);
    }
+}
+
+static gboolean
+_proceed_trash(gpointer p_data) {
+   _do_trash_now(GGAZE_WINDOW(p_data));
+   return (G_SOURCE_REMOVE);
+}
+
+/* `d`: move the current file to ./Trash, then advance. If an unsaved (GEGL)
+ * enhance preview is active on the current file, prompts Save/Discard/Cancel
+ * first; trashing proceeds only after that resolves (immediately if nothing
+ * is dirty). */
+static void
+_action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_trash, p_data);
 }
 
 /* --- bulk-delete safety: captured, immutable target context -------------
@@ -453,10 +557,7 @@ _delete_confirm_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
 }
 
 static void
-_action_delete(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
-   (void)p_a;
-   (void)p_v;
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+_do_delete_now(GgazeWindow *p_win) {
    if (p_win->p_nav == NULL || p_win->p_trash == NULL) {
       return;
    }
@@ -496,6 +597,23 @@ _action_delete(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
    _do_delete_files(p_win, p_files);
    g_list_free_full(p_files, (GDestroyNotify)g_object_unref);
+}
+
+static gboolean
+_proceed_delete(gpointer p_data) {
+   _do_delete_now(GGAZE_WINDOW(p_data));
+   return (G_SOURCE_REMOVE);
+}
+
+/* `D`: permanently delete (no trash), then advance -- see _do_delete_now for
+ * the >1-mark confirm-dialog and capture-at-prompt-time safety. If an unsaved
+ * (GEGL) enhance preview is active on the current file, prompts Save/Discard/
+ * Cancel first; deletion proceeds only after that resolves. */
+static void
+_action_delete(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_delete, p_data);
 }
 
 /* Undo the last trash (restore from ./Trash to its original path). On
@@ -995,15 +1113,9 @@ _action_fullscreen(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (p_win->b_fullscreen) {
       gtk_window_unfullscreen(GTK_WINDOW(p_win));
       p_win->b_fullscreen = FALSE;
-#if GGAZE_HAVE_GEGL
-      _enhance_panel_reparent(p_win, FALSE); /* back to sidebar next to image */
-#endif
    } else {
       gtk_window_fullscreen(GTK_WINDOW(p_win));
       p_win->b_fullscreen = TRUE;
-#if GGAZE_HAVE_GEGL
-      _enhance_panel_reparent(p_win, TRUE); /* overlay over the image */
-#endif
    }
 }
 
@@ -1040,6 +1152,17 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+#if GGAZE_HAVE_GEGL
+   if (p_win->u_enhance_mask != 0 && p_win->p_enhancer != NULL) {
+      /* Esc's first job, ahead of every other contextual-back rung below: an
+       * active enhance preview is discarded outright, no Save/Discard/Cancel
+       * prompt (docs/ui-and-interactions.md "Quick enhance": Esc/re-press
+       * always discards directly). One contextual step per press, same as
+       * the mark-clear/fullscreen-exit rungs. */
+      _enhance_discard(p_win);
+      return;
+   }
+#endif
    if (p_win->b_fullscreen) {
       gtk_window_unfullscreen(GTK_WINDOW(p_win));
       p_win->b_fullscreen = FALSE;
@@ -1061,7 +1184,27 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 #if GGAZE_HAVE_GEGL
-/* Update each preset button's "ggaze-enhance-on" highlight from the mask. */
+/* Per-request context for _enhance_apply_async's async completion: the
+ * window (ref'd, so it outlives the worker even across a dispose) and the
+ * generation the request was launched at, for the last-write-wins check in
+ * _enhance_apply_done_cb. */
+typedef struct {
+   GgazeWindow *p_win;
+   guint        u_gen;
+} _EnhanceReq;
+
+static void
+_enhance_req_free(_EnhanceReq *p_req) {
+   if (p_req == NULL) {
+      return;
+   }
+   g_object_unref(p_req->p_win);
+   g_free(p_req);
+}
+
+/* Update each popover preset row's "ggaze-enhance-on" highlight from the
+ * mask. A no-op when the popover is closed (rows are NULL'd by
+ * _enhance_destroy), so callers never need to check p_enhance_pop first. */
 static void
 _enhance_update_highlights(GgazeWindow *p_win) {
    for (guint i = 0; i < G_N_ELEMENTS(p_win->p_enhance_btns); i++) {
@@ -1077,20 +1220,87 @@ _enhance_update_highlights(GgazeWindow *p_win) {
    }
 }
 
-/* Apply the enabled-preset chain (u_enhance_mask) to the current image as a
- * live preview. An empty mask restores the original. Switches to large view
- * so the result shows. Synchronous - may briefly block on large images. */
+/* Async apply completion (tu0): last-write-wins via u_enhance_gen -- a
+ * newer apply, a discard, or the window closing while this was still
+ * processing in its worker thread all bump the generation, so a stale
+ * result here is dropped instead of clobbering whatever is now current. */
 static void
-_apply_enhance_mask(GgazeWindow *p_win) {
-   if (p_win->p_nav == NULL || p_win->p_enhancer == NULL) {
+_enhance_apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   _EnhanceReq *p_req = (_EnhanceReq *)p_data;
+   GgazeWindow *p_win = p_req->p_win;
+   GError      *p_err = NULL;
+   GdkTexture  *p_tex = enhancer_apply_chain_finish(p_res, &p_err);
+   if (p_win->b_disposed || p_req->u_gen != p_win->u_enhance_gen) {
+      g_clear_object(&p_tex);
+      g_clear_error(&p_err);
+      _enhance_req_free(p_req);
       return;
    }
+   if (p_tex == NULL) {
+      g_warning("ggaze: enhance failed: %s",
+                p_err != NULL ? p_err->message : "(no detail)");
+      g_clear_error(&p_err);
+      _show_status(p_win, "Enhance failed");
+      _enhance_discard(p_win); /* back to the original; also bumps the gen */
+   } else {
+      g_set_object(&p_win->p_enhance_tex, p_tex);
+      _show_texture(p_win, p_tex);
+      g_object_unref(p_tex);
+      _update_header(p_win);
+   }
+   _enhance_req_free(p_req);
+}
+
+/* Switch to large view (if not already there) and start a fresh generation:
+ * bump u_enhance_gen and replace p_enhance_cancel, so a still-in-flight
+ * older apply's result is recognized as stale and dropped when it
+ * eventually completes (last-write-wins; GEGL processing itself cannot be
+ * aborted mid-flight once started). Split out of _enhance_apply_async to
+ * keep it under the ~30-line convention. */
+static void
+_enhance_apply_begin(GgazeWindow *p_win) {
    const char *c_cur =
       gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
    if (g_strcmp0(c_cur, "large") != 0) {
       gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
    }
+   p_win->u_enhance_gen++;
+   g_cancellable_cancel(p_win->p_enhance_cancel);
+   g_clear_object(&p_win->p_enhance_cancel);
+   p_win->p_enhance_cancel = g_cancellable_new();
+}
+
+/* Launch the async apply for the non-empty mask case: record which file the
+ * preview applies to (see _enhance_nav_changed's comment for why this is
+ * set here, not only in nav_changed_cb) and hand off to
+ * enhancer_apply_chain_async. Split out of _enhance_apply_async (30-line
+ * convention). */
+static void
+_enhance_launch(GgazeWindow *p_win, GFile *p_file) {
+   g_set_object(&p_win->p_enhance_file, p_file);
+   _EnhanceReq *p_req         = g_new(_EnhanceReq, 1);
+   p_req->p_win               = (GgazeWindow *)g_object_ref(p_win);
+   p_req->u_gen               = p_win->u_enhance_gen;
+   const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
+   enhancer_apply_chain_async(p_win->p_enhancer, p_file, p_presets,
+                              p_win->u_enhance_mask, p_win->p_enhance_cancel,
+                              _enhance_apply_done_cb, p_req);
+}
+
+/* Apply the enabled-preset chain (u_enhance_mask) to the current image as a
+ * live preview, off the GTK main thread (enhancer_apply_chain_async: GEGL
+ * processing is CPU-heavy, AGENTS.md "Decode runs in GTask threads"). An
+ * empty mask restores the original synchronously (texturecache is cheap, no
+ * GEGL involved). */
+static void
+_enhance_apply_async(GgazeWindow *p_win) {
+   if (p_win->p_nav == NULL || p_win->p_enhancer == NULL) {
+      return;
+   }
+   _enhance_apply_begin(p_win);
    if (p_win->u_enhance_mask == 0) {
+      g_clear_object(&p_win->p_enhance_tex);
       _load_current(p_win); /* restore original (texturecache is fast) */
       _update_header(p_win);
       return;
@@ -1102,152 +1312,216 @@ _apply_enhance_mask(GgazeWindow *p_win) {
       _update_header(p_win);
       return;
    }
-   const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
-   GError          *p_err     = NULL;
-   GeglBuffer      *p_buf     = enhancer_load(p_file, &p_err);
-   GdkTexture      *p_tex     = NULL;
-   if (p_buf != NULL) {
-      GeglBuffer *p_enh = enhancer_apply_chain(
-         p_win->p_enhancer, p_buf, p_presets, p_win->u_enhance_mask, &p_err);
-      if (p_enh != NULL) {
-         p_tex = enhancer_buffer_to_texture(p_enh, &p_err);
-         g_object_unref(p_enh);
-      }
-      g_object_unref(p_buf);
-   }
-   if (p_tex == NULL) {
-      g_warning("ggaze: enhance failed: %s",
-                p_err != NULL ? p_err->message : "(no detail)");
-      g_clear_error(&p_err);
-      p_win->u_enhance_mask = 0;
-      _enhance_update_highlights(p_win);
-      _load_current(p_win);
-   } else {
-      _show_texture(p_win, p_tex);
-      g_object_unref(p_tex);
-   }
-   _update_header(p_win);
+   _enhance_launch(p_win, p_file);
 }
 
-/* Clicked row: idx 0..7 toggles that preset's bit; idx -1 (Original) clears
- * the mask. Then refresh highlights + re-apply the (possibly empty) chain. */
+/* Drop the current enhance preview and go back to showing the unmodified
+ * original: clears the mask + cached texture and reloads the original
+ * (_enhance_apply_async's mask==0 path also invalidates any in-flight apply
+ * via u_enhance_gen). Used by Esc (explicit discard, no prompt), the
+ * popover's "0 Original" row/hotkey, and after Save/Discard in the
+ * navigate-away prompt. Never touches the file on disk -- discarding a
+ * preview only drops in-memory state. */
+static void
+_enhance_discard(GgazeWindow *p_win) {
+   p_win->u_enhance_mask = 0;
+   _enhance_update_highlights(p_win);
+   _enhance_apply_async(p_win);
+}
+
+/* Clicked row: idx 0..7 toggles that preset's bit; idx -1 (Original) discards
+ * the whole preview. Then refresh highlights + re-apply the (possibly empty)
+ * chain. Does NOT close the popover -- toggling presets while comparing is
+ * the point of the layered design (docs/gegl.md). */
 static void
 _enhance_row_toggle(GgazeWindow *p_win, GtkWidget *p_btn) {
    gint i_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(p_btn), "idx"));
    if (i_idx < 0) {
-      p_win->u_enhance_mask = 0; /* Original */
-   } else if (i_idx < (gint)G_N_ELEMENTS(p_win->p_enhance_btns)) {
+      _enhance_discard(p_win);
+      return;
+   }
+   if (i_idx < (gint)G_N_ELEMENTS(p_win->p_enhance_btns)) {
       p_win->u_enhance_mask ^= (guint8)(1u << i_idx);
    }
    _enhance_update_highlights(p_win);
-   _apply_enhance_mask(p_win);
+   _enhance_apply_async(p_win);
 }
 
-/* Build the enhance side panel: a GtkRevealer (slide right) holding one
- * button per preset plus an "Original" row, placed in the content box next to
- * the image (reparented to the overlay in fullscreen). Hidden until 'a'. */
+/* Synchronously tear down the current enhance popover (unparent + clear the
+ * field and its now-dangling row pointers). Safe to call when none is open.
+ * The popover's "closed" handler (autohide / outside-click / Esc) also
+ * routes here. Closing the popover never touches u_enhance_mask -- the
+ * preview persists until explicitly discarded (Esc when no popover is open,
+ * or the "0 Original" row/hotkey). */
 static void
-_build_enhance_panel(GgazeWindow *p_win) {
-   if (p_win->p_enhancer == NULL || p_win->p_content == NULL) {
+_enhance_destroy(GgazeWindow *p_win) {
+   if (p_win->p_enhance_pop == NULL) {
       return;
    }
-   const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
-   GtkWidget       *p_box     = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-   gtk_widget_set_margin_start(p_box, 8);
-   gtk_widget_set_margin_end(p_box, 8);
-   gtk_widget_set_margin_top(p_box, 8);
-   gtk_widget_set_margin_bottom(p_box, 8);
+   GtkWidget *p_pop     = p_win->p_enhance_pop;
+   p_win->p_enhance_pop = NULL;
    for (guint i = 0; i < G_N_ELEMENTS(p_win->p_enhance_btns); i++) {
-      const EnhancerPreset *p_pr =
-         (p_presets != NULL && i < p_presets->len)
-            ? g_ptr_array_index((GPtrArray *)p_presets, i)
-            : NULL;
-      char *c_lbl =
-         g_strdup_printf("%u  %s", i + 1, p_pr != NULL ? p_pr->c_name : "-");
+      p_win->p_enhance_btns[i] = NULL;
+   }
+   gtk_widget_unparent(p_pop);
+}
+
+static void
+_enhance_closed_cb(GtkPopover *p_pop, gpointer p_data) {
+   (void)p_pop;
+   _enhance_destroy(GGAZE_WINDOW(p_data));
+}
+
+/* Popover key controller: Esc closes the popover only (the preview, if any,
+ * stays -- Esc discards it via win.back's dedicated rung when the popover is
+ * NOT open, see _action_back); '0' discards the whole preview outright
+ * (the "0 Original" row's hotkey); any other bound digit/letter toggles that
+ * preset's bit without closing the popover. Modified keys are propagated. */
+static gboolean
+_enhance_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
+                        GdkModifierType e_state, gpointer p_data) {
+   (void)p_c;
+   (void)u_kc;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (u_keyval == GDK_KEY_Escape) {
+      _enhance_destroy(p_win);
+      return (GDK_EVENT_STOP);
+   }
+   if (e_state != 0) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   if (u_keyval == GDK_KEY_0) {
+      _enhance_discard(p_win);
+      return (GDK_EVENT_STOP);
+   }
+   gint i_idx = _popup_key_to_index(u_keyval);
+   if (i_idx < 0 || i_idx >= (gint)G_N_ELEMENTS(p_win->p_enhance_btns)) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   p_win->u_enhance_mask ^= (guint8)(1u << i_idx);
+   _enhance_update_highlights(p_win);
+   _enhance_apply_async(p_win);
+   return (GDK_EVENT_STOP);
+}
+
+/* Build the popover's title row: "Enhance <basename>:" (or a bare "Enhance:"
+ * if the current file can't be named). Split out of _enhance_build_box to
+ * keep it under the ~30-line convention. */
+static void
+_enhance_build_title(GgazeWindow *p_win, GtkWidget *p_box) {
+   char  *c_title = NULL;
+   GFile *p_cur   = navigator_get_current(p_win->p_nav);
+   if (p_cur != NULL) {
+      char *c_name = g_file_get_basename(p_cur);
+      c_title      = g_strdup_printf("Enhance %s:", c_name);
+      g_free(c_name);
+   }
+   GtkWidget *p_lbl = gtk_label_new(c_title != NULL ? c_title : "Enhance:");
+   gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
+   gtk_box_append(GTK_BOX(p_box), p_lbl);
+   g_free(c_title);
+}
+
+/* Append one toggle row per preset (capped at the 8-bit mask's width) plus
+ * the "0 Original" reset row and the "s" save hint, wiring each preset row's
+ * hotkey + current highlight. Split out of _enhance_build_box (30-line
+ * convention). */
+static void
+_enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
+                    const GPtrArray *p_presets) {
+   guint u_n = p_presets != NULL ? p_presets->len : 0;
+   if (u_n > G_N_ELEMENTS(p_win->p_enhance_btns)) {
+      u_n = G_N_ELEMENTS(p_win->p_enhance_btns); /* the mask is 8 bits wide */
+   }
+   for (guint i = 0; i < u_n; i++) {
+      const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_presets, i);
+      char                  c_hk = _popup_hotkey_char(i);
+      char                 *c_lbl =
+         g_strdup_printf("%c  %s", c_hk != 0 ? c_hk : ' ',
+                         p_pr->c_name != NULL ? p_pr->c_name : "(unnamed)");
       GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
-      gtk_widget_set_size_request(p_btn, 160, -1);
       gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
       g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER((gint)i));
       g_signal_connect_swapped(p_btn, "clicked",
                                G_CALLBACK(_enhance_row_toggle), p_win);
+      if ((p_win->u_enhance_mask & (guint8)(1u << i)) != 0) {
+         gtk_widget_add_css_class(p_btn, "ggaze-enhance-on");
+      }
       gtk_box_append(GTK_BOX(p_box), p_btn);
       p_win->p_enhance_btns[i] = p_btn;
       g_free(c_lbl);
+      if (i == 0) {
+         gtk_widget_grab_focus(p_btn); /* ensure the popover gets keys */
+      }
    }
    GtkWidget *p_btn0 = gtk_button_new_with_label("0  Original");
-   gtk_widget_set_size_request(p_btn0, 160, -1);
    gtk_widget_set_halign(p_btn0, GTK_ALIGN_START);
    g_object_set_data(G_OBJECT(p_btn0), "idx", GINT_TO_POINTER(-1));
    g_signal_connect_swapped(p_btn0, "clicked", G_CALLBACK(_enhance_row_toggle),
                             p_win);
    gtk_box_append(GTK_BOX(p_box), p_btn0);
 
-   /* A dim hint that 's' saves the enhanced copy. */
    GtkWidget *p_hint = gtk_label_new("s  Save enhanced copy");
    gtk_widget_set_halign(p_hint, GTK_ALIGN_START);
    gtk_widget_set_margin_top(p_hint, 8);
    gtk_widget_add_css_class(p_hint, "dim-label");
    gtk_box_append(GTK_BOX(p_box), p_hint);
-
-   GtkWidget *p_rev = gtk_revealer_new();
-   gtk_revealer_set_transition_type(GTK_REVEALER(p_rev),
-                                    GTK_REVEALER_TRANSITION_TYPE_SLIDE_RIGHT);
-   gtk_revealer_set_child(GTK_REVEALER(p_rev), p_box);
-   gtk_revealer_set_reveal_child(GTK_REVEALER(p_rev), FALSE);
-   /* Sidebar (normal mode): sits in the content box next to the image. */
-   gtk_widget_set_hexpand(p_rev, FALSE);
-   gtk_widget_set_vexpand(p_rev, TRUE);
-   gtk_box_prepend(GTK_BOX(p_win->p_content), p_rev);
-   p_win->p_enhance_panel = p_rev;
 }
 
-/* Move the enhance panel between the sidebar (next to the image) and an
- * overlay over the image (used in fullscreen, where there's no side room). */
-static void
-_enhance_panel_reparent(GgazeWindow *p_win, gboolean b_overlay) {
-   GtkWidget *p_rev = p_win->p_enhance_panel;
-   if (p_rev == NULL) {
-      return;
-   }
-   GtkWidget *p_parent = gtk_widget_get_parent(p_rev);
-   if (b_overlay && p_parent != p_win->p_overlay) {
-      g_object_ref(p_rev);
-      if (p_parent == p_win->p_content) {
-         gtk_box_remove(GTK_BOX(p_win->p_content), p_rev);
-      }
-      gtk_overlay_add_overlay(GTK_OVERLAY(p_win->p_overlay), p_rev);
-      gtk_widget_set_halign(p_rev, GTK_ALIGN_START);
-      gtk_widget_set_valign(p_rev, GTK_ALIGN_START);
-      gtk_widget_set_margin_top(p_rev, 48);
-      g_object_unref(p_rev);
-   } else if (!b_overlay && p_parent != p_win->p_content) {
-      g_object_ref(p_rev);
-      if (p_parent == p_win->p_overlay) {
-         gtk_overlay_remove_overlay(GTK_OVERLAY(p_win->p_overlay), p_rev);
-      }
-      gtk_widget_set_halign(p_rev, GTK_ALIGN_FILL);
-      gtk_widget_set_valign(p_rev, GTK_ALIGN_FILL);
-      gtk_widget_set_margin_top(p_rev, 0);
-      gtk_box_prepend(GTK_BOX(p_win->p_content), p_rev);
-      g_object_unref(p_rev);
-   }
+/* Build the popover's content box (title + preset rows). Split out of
+ * _action_enhance to keep that under ~30 lines, mirroring _move_build_box. */
+static GtkWidget *
+_enhance_build_box(GgazeWindow *p_win, const GPtrArray *p_presets) {
+   GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+   gtk_widget_set_margin_start(p_box, 8);
+   gtk_widget_set_margin_end(p_box, 8);
+   gtk_widget_set_margin_top(p_box, 8);
+   gtk_widget_set_margin_bottom(p_box, 8);
+   _enhance_build_title(p_win, p_box);
+   _enhance_build_rows(p_win, p_box, p_presets);
+   return (p_box);
 }
 
-/* win.enhance (key 'a'): toggle the enhance side panel on/off. */
+/* win.enhance (key 'a'): open the preset popover (same GtkPopover +
+ * hotkey-assignment pattern as `m`/`e`/`!`, docs/gegl.md). Toggles closed on
+ * a second press, same as the other popups. Unlike them, a row click/hotkey
+ * does NOT close the popover -- presets are layered toggles, and staying
+ * open lets you compare combinations before closing (Esc / outside click /
+ * re-press `a`). */
 static void
 _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (p_win->p_enhance_panel == NULL) {
+   if (p_win->p_nav == NULL || p_win->p_enhancer == NULL) {
       return;
    }
-   gboolean b_vis =
-      gtk_revealer_get_reveal_child(GTK_REVEALER(p_win->p_enhance_panel));
-   gtk_revealer_set_reveal_child(GTK_REVEALER(p_win->p_enhance_panel), !b_vis);
+   if (p_win->p_enhance_pop != NULL) {
+      _enhance_destroy(p_win);
+      return;
+   }
+   GtkWidget *p_pop = gtk_popover_new();
+   gtk_popover_set_position(GTK_POPOVER(p_pop), GTK_POS_TOP);
+   gtk_popover_set_pointing_to(GTK_POPOVER(p_pop),
+                               &(const GdkRectangle){0, 0, 1, 1});
+   g_signal_connect(GTK_POPOVER(p_pop), "closed",
+                    G_CALLBACK(_enhance_closed_cb), p_win);
+   GtkEventController *p_kc = gtk_event_controller_key_new();
+   gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
+   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_enhance_key_pressed_cb),
+                    p_win);
+   gtk_widget_add_controller(p_pop, p_kc);
+
+   const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
+   gtk_popover_set_child(GTK_POPOVER(p_pop),
+                         _enhance_build_box(p_win, p_presets));
+   gtk_widget_set_parent(p_pop, p_win->p_stack);
+   p_win->p_enhance_pop = p_pop;
+   gtk_popover_popup(GTK_POPOVER(p_pop));
 }
 
-/* win.enhance-N (keys 1-8): toggle preset N on/off (layered), then re-apply. */
+/* win.enhance-N (keys 1-8, always live -- not gated on the popover being
+ * open): toggle preset N on/off (layered), then re-apply asynchronously. */
 static void
 _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_v;
@@ -1264,12 +1538,13 @@ _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
    p_win->u_enhance_mask ^= (guint8)(1u << i_idx);
    _enhance_update_highlights(p_win);
-   _apply_enhance_mask(p_win);
+   _enhance_apply_async(p_win);
 }
 
 /* win.enhance-save (key 's'): export the current image with the enabled-preset
- * chain to <stem>-enhanced.<ext>. Never overwrites the original. No-op (with
- * a warning) when no preset is enabled. */
+ * chain to a non-colliding <stem>-enhanced[-<n>].<ext>. Never overwrites the
+ * original or an existing enhanced copy. No-op (with a status line) when no
+ * preset is enabled. */
 static void
 _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -1279,31 +1554,110 @@ _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       return;
    }
    if (p_win->u_enhance_mask == 0) {
-      g_warning("ggaze: nothing to save (no enhance preset enabled)");
+      _show_status(p_win, "Nothing to save (no enhance preset enabled)");
       return;
    }
    _enhance_do_save(p_win);
+}
+
+/* Hold-Space compare (see window.h ggaze_window_set_hold_original): TRUE
+ * shows the cached original from texturecache (cheap, no GEGL recompute);
+ * FALSE restores the cached modified texture. No-op if nothing is dirty, or
+ * the requested state is already in effect (GTK's key-repeat re-fires
+ * key-pressed while a key is held down without an intervening release). */
+void
+ggaze_window_set_hold_original(GgazeWindow *p_win, gboolean b_hold) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   if (p_win->p_nav == NULL || p_win->p_enhancer == NULL ||
+       p_win->u_enhance_mask == 0 || p_win->b_hold_original == b_hold) {
+      return;
+   }
+   p_win->b_hold_original = b_hold;
+   if (b_hold) {
+      GFile      *p_cur = navigator_get_current(p_win->p_nav);
+      GdkTexture *p_orig =
+         p_cur != NULL ? texturecache_get(p_win->p_cache, p_cur) : NULL;
+      /* p_orig should always be cached: it was shown before any preset was
+       * toggled on, and the LRU (cap 4) comfortably outlives an idle
+       * hold-Space session on the same image. If it was ever evicted, this
+       * is a silent no-op rather than a synchronous re-decode on the main
+       * thread. */
+      if (p_orig != NULL) {
+         _show_texture(p_win, p_orig);
+      }
+   } else if (p_win->p_enhance_tex != NULL) {
+      _show_texture(p_win, p_win->p_enhance_tex);
+   }
+}
+
+gboolean
+ggaze_window_enhance_is_dirty(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (p_win->p_enhancer != NULL && p_win->u_enhance_mask != 0);
+}
+
+/* Space key controller (window-level, see ggaze_window_init): press shows
+ * the original while held; release restores the modified preview. Always
+ * propagates -- nothing else in this codebase binds Space, and claiming it
+ * unconditionally would be surprising if that ever changes. */
+static gboolean
+_space_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
+                  GdkModifierType e_state, gpointer p_data) {
+   (void)p_c;
+   (void)u_kc;
+   (void)e_state;
+   if (u_keyval == GDK_KEY_space) {
+      ggaze_window_set_hold_original(GGAZE_WINDOW(p_data), TRUE);
+   }
+   return (GDK_EVENT_PROPAGATE);
+}
+
+static gboolean
+_space_released_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
+                   GdkModifierType e_state, gpointer p_data) {
+   (void)p_c;
+   (void)u_kc;
+   (void)e_state;
+   if (u_keyval == GDK_KEY_space) {
+      ggaze_window_set_hold_original(GGAZE_WINDOW(p_data), FALSE);
+   }
+   return (GDK_EVENT_PROPAGATE);
 }
 #else  /* !GGAZE_HAVE_GEGL */
 static void
 _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   (void)p_data;
-   g_warning("ggaze: GEGL not built in");
+   _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
 }
 static void
 _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   (void)p_data;
-   g_warning("ggaze: GEGL not built in");
+   _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
 }
 static void
 _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   /* Silent no-op: `a` above already reports "GEGL not built in", and 1-8
+    * are common keys that could be pressed incidentally -- there is no
+    * discoverable enhance UI in this build for them to react to, so
+    * repeating the message on every stray digit keypress would be noisy
+    * rather than helpful. */
    (void)p_a;
    (void)p_v;
    (void)p_data;
+}
+
+void
+ggaze_window_set_hold_original(GgazeWindow *p_win, gboolean b_hold) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   (void)b_hold; /* nothing dirty is ever possible without GEGL */
+}
+
+gboolean
+ggaze_window_enhance_is_dirty(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (FALSE);
 }
 #endif /* GGAZE_HAVE_GEGL */
 
@@ -1311,6 +1665,16 @@ static gboolean
 _slideshow_tick(gpointer p_data) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    if (p_win->p_nav != NULL) {
+#if GGAZE_HAVE_GEGL
+      /* Slideshow auto-advances unattended; a blocking Save/Discard/Cancel
+       * dialog would pause it indefinitely with no one to answer it, so a
+       * dirty preview is discarded outright here instead of prompted --
+       * a deliberate deviation from the interactive nav paths, which do
+       * prompt (h/l/g/G/scroll/quit/d/D/m). */
+      if (p_win->u_enhance_mask != 0 && p_win->p_enhancer != NULL) {
+         _enhance_discard(p_win);
+      }
+#endif
       navigator_next(p_win->p_nav);
    }
    return (G_SOURCE_CONTINUE);
@@ -1521,7 +1885,9 @@ _load_engine_lists(GgazeWindow *p_win) {
 #endif
 }
 
-/* Scroll-wheel navigate (GGAZE_SCROLL_NAVIGATE): advance the navigator. */
+/* Scroll-wheel navigate (GGAZE_SCROLL_NAVIGATE): advance the navigator,
+ * prompting Save/Discard/Cancel first if an unsaved (GEGL) enhance preview is
+ * active, same as the h/l/g/G actions (_action_prev/next/first/last). */
 static void
 _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data) {
    (void)p_v;
@@ -1530,9 +1896,9 @@ _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data) {
       return;
    }
    if (i_dir >= 0) {
-      navigator_next(p_win->p_nav);
+      _maybe_save_then(p_win, _proceed_next, p_win);
    } else {
-      navigator_prev(p_win->p_nav);
+      _maybe_save_then(p_win, _proceed_prev, p_win);
    }
 }
 
@@ -2177,13 +2543,44 @@ _move_closed_cb(GtkPopover *p_pop, gpointer p_data) {
    _move_destroy(GGAZE_WINDOW(p_data));
 }
 
+/* Captures the destination index for the Save/Discard/Cancel prompt's
+ * continuation (ggaze_window_move_index itself stays a plain, synchronous,
+ * directly-testable function -- see window.h -- so the dirty-preview gate
+ * lives here, at the two real UI entry points (row click / hotkey), rather
+ * than inside it. */
+typedef struct {
+   GgazeWindow *p_win; /* owned ref */
+   guint        u_idx;
+} _MoveIdxCtx;
+
+static gboolean
+_proceed_move_idx(gpointer p_data) {
+   _MoveIdxCtx *p_ctx = (_MoveIdxCtx *)p_data;
+   ggaze_window_move_index(p_ctx->p_win, p_ctx->u_idx);
+   g_object_unref(p_ctx->p_win);
+   g_free(p_ctx);
+   return (G_SOURCE_REMOVE);
+}
+
+/* Close the popover and move to destination u_idx, prompting Save/Discard/
+ * Cancel first if an unsaved (GEGL) enhance preview is active on the current
+ * file (docs/gegl.md, IMPLEMENTATION.md M9 "navigate/d/D/m/quit with
+ * dirty"). Shared by the row click and hotkey paths below. */
+static void
+_move_go(GgazeWindow *p_win, guint u_idx) {
+   _move_destroy(p_win);
+   _MoveIdxCtx *p_ctx = g_new(_MoveIdxCtx, 1);
+   p_ctx->p_win       = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->u_idx       = u_idx;
+   _maybe_save_then(p_win, _proceed_move_idx, p_ctx);
+}
+
 /* Row click (mouse): move to that destination, then close the popover. */
 static void
 _move_row_clicked_cb(GtkButton *p_btn, gpointer p_data) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    guint u_idx = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(p_btn), "idx"));
-   ggaze_window_move_index(p_win, u_idx);
-   _move_destroy(p_win);
+   _move_go(p_win, u_idx);
 }
 
 /* Popover key controller: Esc cancels; a bare digit/letter hotkey moves to
@@ -2210,8 +2607,7 @@ _move_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
    if (p_dests == NULL || (guint)i_idx >= p_dests->len) {
       return (GDK_EVENT_PROPAGATE); /* no destination bound to that hotkey */
    }
-   ggaze_window_move_index(p_win, (guint)i_idx);
-   _move_destroy(p_win);
+   _move_go(p_win, (guint)i_idx);
    return (GDK_EVENT_STOP);
 }
 
@@ -2369,15 +2765,41 @@ drop_cb(GtkDropTarget *p_t, const GValue *p_val, gdouble d_x, gdouble d_y,
 
 /* --- navigator changed -> reload ----------------------------------------- */
 
+#if GGAZE_HAVE_GEGL
+/* "changed" fires for every navigator rescan, not only an actual move to a
+ * different current file -- notably, win.enhance-save writes the
+ * "-enhanced" copy into the SAME live-monitored folder, whose GFileMonitor
+ * then schedules a debounced rescan that re-emits "changed" a few hundred ms
+ * later even though navigator.current never moved. Discovered by
+ * tests/test_enhance_flow.c's save-twice-in-a-row subtest: without this
+ * check, that incidental rescan silently zeroed u_enhance_mask right after a
+ * successful save, discarding the still-active preview the user was not
+ * done comparing/adjusting. Only reset when the current file's IDENTITY
+ * actually changed; p_enhance_file is updated unconditionally so the next
+ * call has an accurate baseline. */
+static void
+_enhance_nav_changed(GgazeWindow *p_win) {
+   GFile *p_cur =
+      p_win->p_nav != NULL ? navigator_get_current(p_win->p_nav) : NULL;
+   gboolean b_same = (p_cur != NULL && p_win->p_enhance_file != NULL &&
+                      g_file_equal(p_cur, p_win->p_enhance_file));
+   if (!b_same) {
+      p_win->u_enhance_mask = 0;
+      p_win->u_enhance_gen++;
+      g_cancellable_cancel(p_win->p_enhance_cancel);
+      g_clear_object(&p_win->p_enhance_tex);
+      _enhance_update_highlights(p_win);
+   }
+   g_set_object(&p_win->p_enhance_file, p_cur);
+}
+#endif
+
 static void
 nav_changed_cb(Navigator *p_nav, gpointer p_data) {
    (void)p_nav;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
 #if GGAZE_HAVE_GEGL
-   /* New image starts fresh: drop any enhanced preview so we don't show a
-    * stale enhanced texture for a different file, and clear the highlights. */
-   p_win->u_enhance_mask = 0;
-   _enhance_update_highlights(p_win);
+   _enhance_nav_changed(p_win);
 #endif
    /* This signal is the single choke point every navigation path funnels
     * through (prev/next/first/last, slideshow auto-advance, grid selection,
@@ -2674,6 +3096,13 @@ ggaze_window_dispose(GObject *p_obj) {
    _open_ext_destroy(p_win);
    _run_script_destroy(p_win);
    _move_destroy(p_win);
+#if GGAZE_HAVE_GEGL
+   _enhance_destroy(p_win);
+   g_cancellable_cancel(p_win->p_enhance_cancel);
+   g_clear_object(&p_win->p_enhance_cancel);
+   g_clear_object(&p_win->p_enhance_tex);
+   g_clear_object(&p_win->p_enhance_file);
+#endif
    if (p_win->u_slideshow != 0) {
       g_source_remove(p_win->u_slideshow);
       p_win->u_slideshow = 0;
@@ -2757,8 +3186,13 @@ ggaze_window_init(GgazeWindow *p_win) {
    }
 
 #if GGAZE_HAVE_GEGL
-   p_win->u_enhance_mask = 0; /* start on the original */
-   p_win->p_enhancer     = enhancer_new();
+   p_win->u_enhance_mask   = 0; /* start on the original */
+   p_win->p_enhancer       = enhancer_new();
+   p_win->p_enhance_tex    = NULL;
+   p_win->p_enhance_cancel = g_cancellable_new();
+   p_win->u_enhance_gen    = 0;
+   p_win->b_hold_original  = FALSE;
+   p_win->p_enhance_file   = NULL;
 #endif
    /* Feed the configured a(ss) lists into the engines now that all of them
     * (incl. the GEGL enhancer) exist. */
@@ -2782,17 +3216,9 @@ ggaze_window_init(GgazeWindow *p_win) {
    gtk_widget_set_margin_top(p_win->p_info_lbl, 12);
    gtk_widget_set_visible(p_win->p_info_lbl, FALSE);
    gtk_overlay_add_overlay(GTK_OVERLAY(p_win->p_overlay), p_win->p_info_lbl);
-   /* Layout: a horizontal box with the image area (overlay) taking the space,
-    * and the enhance panel slotted in next to it (or overlaid in fullscreen).
-    */
-   p_win->p_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
    gtk_widget_set_hexpand(p_win->p_overlay, TRUE);
    gtk_widget_set_vexpand(p_win->p_overlay, TRUE);
-   gtk_box_append(GTK_BOX(p_win->p_content), p_win->p_overlay);
-   gtk_window_set_child(GTK_WINDOW(p_win), p_win->p_content);
-#if GGAZE_HAVE_GEGL
-   _build_enhance_panel(p_win);
-#endif
+   gtk_window_set_child(GTK_WINDOW(p_win), p_win->p_overlay);
 
    GtkWidget *p_grid = gtk_label_new("grid");
    gtk_widget_add_css_class(p_grid, "dim-label");
@@ -2818,6 +3244,23 @@ ggaze_window_init(GgazeWindow *p_win) {
       gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
    g_signal_connect(p_drop, "drop", G_CALLBACK(drop_cb), p_win);
    gtk_widget_add_controller(GTK_WIDGET(p_win), GTK_EVENT_CONTROLLER(p_drop));
+
+#if GGAZE_HAVE_GEGL
+   /* Hold-Space compare (docs/ui-and-interactions.md "Compare original vs
+    * modified"): needs press AND release, which shortcuts.c's
+    * GtkShortcutController (action triggers fire on press only) cannot
+    * express, so this is a dedicated key controller straight on the window,
+    * capture phase like the popovers' own controllers. Space is not bound
+    * to anything else, so ordering relative to shortcuts_install's GLOBAL-
+    * scope controller does not matter here. */
+   GtkEventController *p_space_kc = gtk_event_controller_key_new();
+   gtk_event_controller_set_propagation_phase(p_space_kc, GTK_PHASE_CAPTURE);
+   g_signal_connect(p_space_kc, "key-pressed", G_CALLBACK(_space_pressed_cb),
+                    p_win);
+   g_signal_connect(p_space_kc, "key-released", G_CALLBACK(_space_released_cb),
+                    p_win);
+   gtk_widget_add_controller(GTK_WIDGET(p_win), p_space_kc);
+#endif
 }
 
 /* --- public -------------------------------------------------------------- */
@@ -2925,11 +3368,12 @@ _open_rebuild_grid(GgazeWindow *p_win, gboolean b_hide_trashed) {
                        "grid");
 }
 
-void
-ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
-   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
-   g_return_if_fail(G_IS_FILE(p_arg));
-
+/* The actual open logic (was ggaze_window_open's whole body before tu0 added
+ * the dirty-preview gate below). Kept as a separate static function so the
+ * public entry point can defer it behind a Save/Discard/Cancel prompt
+ * without duplicating any of it. */
+static void
+_open_now(GgazeWindow *p_win, GFile *p_arg) {
    GFile   *p_dir    = NULL;
    GFile   *p_start  = NULL;
    gboolean b_is_dir = _open_resolve_target(p_arg, &p_dir, &p_start);
@@ -2972,6 +3416,39 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack),
                                     b_is_dir ? "grid" : "large");
    _load_current(p_win);
+}
+
+typedef struct {
+   GgazeWindow *p_win; /* owned ref */
+   GFile       *p_arg; /* owned ref */
+} _OpenCtx;
+
+static gboolean
+_proceed_open(gpointer p_data) {
+   _OpenCtx *p_ctx = (_OpenCtx *)p_data;
+   _open_now(p_ctx->p_win, p_ctx->p_arg);
+   g_object_unref(p_ctx->p_win);
+   g_object_unref(p_ctx->p_arg);
+   g_free(p_ctx);
+   return (G_SOURCE_REMOVE);
+}
+
+/* Open p_arg (File->Open dialog, drag-and-drop, or single-instance
+ * re-activation onto an existing window) -- see window.h. If an unsaved
+ * (GEGL) enhance preview is active on the CURRENTLY displayed file, prompts
+ * Save/Discard/Cancel first (the gu0-class gap this task closes: a plain
+ * "changed" signal is not a reliable choke point for this path -- see
+ * _open_build_navigator's comment -- so the gate lives here, before any
+ * teardown/rebuild, not inside _open_now). Proceeds immediately if nothing
+ * is dirty. */
+void
+ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   g_return_if_fail(G_IS_FILE(p_arg));
+   _OpenCtx *p_ctx = g_new(_OpenCtx, 1);
+   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->p_arg    = (GFile *)g_object_ref(p_arg);
+   _maybe_save_then(p_win, _proceed_open, p_ctx);
 }
 
 void
