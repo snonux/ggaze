@@ -18,6 +18,7 @@
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <libexif/exif-data.h>
+#include <libexif/exif-format.h>
 #include <libexif/exif-tag.h>
 
 #include "loader/detect.h"
@@ -62,13 +63,28 @@ _get_orientation(ExifData *p_data) {
       return (0);
    }
    ExifEntry *p_entry = exif_data_get_entry(p_data, EXIF_TAG_ORIENTATION);
-   if (p_entry == NULL || p_entry->components == 0 || p_entry->data == NULL) {
+   if (p_entry == NULL || p_entry->data == NULL) {
       return (0);
    }
-   /* Orientation is a SHORT (2 bytes, big/little endian per the data's byte
-    * order). */
-   ExifByteOrder e_order = exif_data_get_byte_order(p_data);
-   return ((int)exif_get_short(p_entry->data, e_order));
+   /* Orientation must be exactly one SHORT (2-byte) component per the EXIF
+    * spec. exif_get_short() blindly reads 2 bytes from p_entry->data and
+    * trusts the caller to have validated format/size first -- a malformed
+    * file can declare a mismatched format (e.g. 1-byte BYTE) or a truncated
+    * component count while data's real allocation follows that declared
+    * size, so skipping this check is a heap out-of-bounds read on crafted
+    * EXIF. Reject anything that doesn't match, or that decodes outside the
+    * spec's 1-8 orientation range, as unknown rather than passing it through.
+    */
+   if (p_entry->format != EXIF_FORMAT_SHORT || p_entry->components != 1 ||
+       p_entry->size < exif_format_get_size(EXIF_FORMAT_SHORT)) {
+      return (0);
+   }
+   ExifByteOrder e_order  = exif_data_get_byte_order(p_data);
+   int           i_orient = (int)exif_get_short(p_entry->data, e_order);
+   if (i_orient < 1 || i_orient > 8) {
+      return (0);
+   }
+   return (i_orient);
 }
 
 /* File info: size + content type. Any failure (e.g. a race with deletion)
