@@ -7,7 +7,10 @@
  *
  * Also covers gu0: the info overlay (`i`) must never keep showing a
  * PREVIOUS file's EXIF/dimensions after navigation displays a new one. See
- * test_info_hides_on_navigation() below.
+ * test_info_hides_on_navigation() below, plus test_info_hides_on_reopen()
+ * for the ggaze_window_open() gap (File->Open / drag-and-drop / single-
+ * instance re-activation into a different folder) that the "changed" signal
+ * alone does not cover.
  *
  * The window is built with g_object_new() (no "application" property): the
  * stack/header are constructed in ggaze_window_init, independent of the app
@@ -186,6 +189,58 @@ test_info_hides_on_navigation(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* gu0 fresh-context review gap: ggaze_window_open() (File->Open dialog,
+ * drag-and-drop, single-instance re-activation onto an existing window)
+ * builds a brand-new Navigator and can change the displayed file WITHOUT
+ * Navigator's "changed" ever firing -- the signal nav_changed_cb (and hence
+ * the fix above) relies on. Here the second folder holds a single file, so
+ * navigator_new() already defaults i_current to 0 before
+ * navigator_set_current_file() resolves that same file to index 0 too;
+ * since i_current already equals the resolved index, navigator_set_current_
+ * file() returns early without emitting "changed" (see its early-return
+ * guard in navigator.c). This reproduces the reported case (b): a file that
+ * sorts first in its folder. ggaze_window_open() must dismiss the overlay
+ * unconditionally instead of relying on that signal. */
+static void
+test_info_hides_on_reopen(void) {
+   GError *p_err  = NULL;
+   char   *c_dir1 = g_dir_make_tmp("ggaze-info-open1-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir1, "plain.jpg"); /* A: 6x3 */
+
+   char *c_dir2 = g_dir_make_tmp("ggaze-info-open2-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir2, "rot6.jpg"); /* B: 8x4, sole file -> index 0 */
+
+   char        *c_p0  = g_build_filename(c_dir1, "plain.jpg", NULL);
+   GFile       *p_f0  = g_file_new_for_path(c_p0);
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_f0);
+   wait_for_load(p_win);
+
+   fire(p_win, "win.info");
+   GtkWidget *p_lbl = ggaze_window_get_info_label(p_win);
+   g_assert_true(gtk_widget_get_visible(p_lbl));
+
+   char  *c_p1 = g_build_filename(c_dir2, "rot6.jpg", NULL);
+   GFile *p_f1 = g_file_new_for_path(c_p1);
+   /* Simulates File->Open / drag-and-drop targeting a different folder on an
+    * already-open window. */
+   ggaze_window_open(p_win, p_f1);
+   g_assert_false(gtk_widget_get_visible(p_lbl));
+   wait_for_load(p_win);
+   g_assert_false(gtk_widget_get_visible(p_lbl)); /* still hidden after load */
+
+   g_object_unref(p_f1);
+   g_free(c_p1);
+   g_object_unref(p_f0);
+   g_free(c_p0);
+   g_object_unref(p_win);
+   drain_main(300);
+   cleanup_temp_dir(c_dir1);
+   cleanup_temp_dir(c_dir2);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -204,5 +259,6 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/window/open_titles_window", test_open_titles_window);
    g_test_add_func("/window/info_hides_on_navigation",
                    test_info_hides_on_navigation);
+   g_test_add_func("/window/info_hides_on_reopen", test_info_hides_on_reopen);
    return (g_test_run());
 }

@@ -2675,10 +2675,8 @@ ggaze_window_dispose(GObject *p_obj) {
       g_source_remove(p_win->u_slideshow);
       p_win->u_slideshow = 0;
    }
-   if (p_win->u_info_hide != 0) {
-      g_source_remove(p_win->u_info_hide);
-      p_win->u_info_hide = 0;
-   }
+   _info_cancel_timer(p_win); /* just cancels the pending timer, no widget
+                                  touch -- safe to call during dispose */
    if (p_win->u_hdr_hide != 0) {
       g_source_remove(p_win->u_hdr_hide);
       p_win->u_hdr_hide = 0;
@@ -2828,73 +2826,91 @@ ggaze_window_new(GgazeApp *p_app) {
                                      600, NULL)));
 }
 
-void
-ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
-   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
-   g_return_if_fail(G_IS_FILE(p_arg));
-
-   if (p_win->p_nav != NULL) {
-      g_signal_handlers_disconnect_by_data(p_win->p_nav, p_win);
-      if (p_win->p_grid != NULL) {
-         ggaze_grid_detach(p_win->p_grid);
-      }
-      g_clear_object(&p_win->p_nav);
+/* Drop the previous navigator (if any) before ggaze_window_open builds a
+ * fresh one: disconnect its signal handlers, detach the grid that was
+ * watching it, and release it. */
+static void
+_open_reset_existing_nav(GgazeWindow *p_win) {
+   if (p_win->p_nav == NULL) {
+      return;
    }
+   g_signal_handlers_disconnect_by_data(p_win->p_nav, p_win);
+   if (p_win->p_grid != NULL) {
+      ggaze_grid_detach(p_win->p_grid);
+   }
+   g_clear_object(&p_win->p_nav);
+}
 
-   GFile    *p_dir   = NULL;
-   GFile    *p_start = NULL;
+/* Resolve the open target: a directory arg lists itself with no initial
+ * current file; a file arg lists its parent with that file as the initial
+ * current file. *p_out_dir is NULL (nothing else touched) if the parent
+ * directory can't be determined. Returns TRUE if p_arg is itself a
+ * directory. */
+static gboolean
+_open_resolve_target(GFile *p_arg, GFile **p_out_dir, GFile **p_out_start) {
+   *p_out_start = NULL;
    GFileType e_type =
       g_file_query_file_type(p_arg, G_FILE_QUERY_INFO_NONE, NULL);
    gboolean b_is_dir = (e_type == G_FILE_TYPE_DIRECTORY);
    if (b_is_dir) {
-      p_dir = (GFile *)g_object_ref(p_arg);
+      *p_out_dir = (GFile *)g_object_ref(p_arg);
    } else {
-      p_dir   = g_file_get_parent(p_arg);
-      p_start = (GFile *)g_object_ref(p_arg);
+      *p_out_dir   = g_file_get_parent(p_arg);
+      *p_out_start = (GFile *)g_object_ref(p_arg);
    }
-   if (p_dir == NULL) {
-      g_clear_object(&p_start);
-      return;
-   }
+   return (b_is_dir);
+}
 
-   /* Apply the sort/wrap/hide-raw preferences from settings (defaults if the
-    * wrapper is absent). */
-   GgazeSort e_sort         = GGAZE_SORT_NAME;
-   gboolean  b_wrap         = TRUE;
-   gboolean  b_hide_raw     = TRUE;
-   gboolean  b_hide_trashed = FALSE;
-   if (p_win->p_settings != NULL) {
-      e_sort         = settings_get_sort(p_win->p_settings);
-      b_wrap         = settings_get_wrap(p_win->p_settings);
-      b_hide_raw     = settings_get_hide_raw(p_win->p_settings);
-      b_hide_trashed = settings_get_hide_trashed(p_win->p_settings);
-   }
+/* Build the new navigator for p_dir, wire it up, and point it at p_start (if
+ * any). Also resets the per-folder trash/undo state, since a move or trash
+ * undo recorded against the folder just left must not silently apply to the
+ * new one. NOTE: navigator_set_current_file() only emits "changed" when the
+ * resolved index differs from the navigator's default i_current == 0 (e.g. a
+ * file that happens to sort first in its folder never triggers it) -- do not
+ * rely on that signal to dismiss the info overlay; the caller handles that
+ * unconditionally instead (gu0). */
+static void
+_open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
+                      GgazeSort e_sort, gboolean b_wrap, gboolean b_hide_raw) {
    p_win->p_nav = navigator_new(p_dir, e_sort, b_wrap, b_hide_raw);
    g_clear_pointer(&p_win->p_trash, trash_delete);
-   /* A move recorded against the folder just left must not be undoable once
-    * we are looking at a different folder (it would silently move a file
-    * back into a folder no longer on screen) -- drop mover's undo state the
-    * same way p_trash gets a fresh one below, and clear the unified-undo
-    * preference so a stale enum value can't point at either. */
    mover_clear_last(p_win->p_mover);
    p_win->e_last_destructive = GGAZE_LAST_NONE;
-   g_clear_object(&p_dir);
    g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(nav_changed_cb), p_win);
    if (p_start != NULL) {
       navigator_set_current_file(p_win->p_nav, p_start);
-      g_clear_object(&p_start);
    }
+}
 
-   /* Build the grid (replaces the "grid" placeholder or the old grid). */
-   {
-      GtkWidget *p_old =
-         gtk_stack_get_child_by_name(GTK_STACK(p_win->p_stack), "grid");
-      if (p_old != NULL) {
-         if (GGAZE_IS_GRID(p_old)) {
-            ggaze_grid_detach(GGAZE_GRID(p_old));
-         }
-         gtk_stack_remove(GTK_STACK(p_win->p_stack), p_old);
+/* Read the sort/wrap/hide-raw/hide-trashed preferences from settings
+ * (defaults if the wrapper is absent) for ggaze_window_open() to apply to
+ * the freshly-built navigator and grid. */
+static void
+_open_read_prefs(GgazeWindow *p_win, GgazeSort *pe_sort, gboolean *pb_wrap,
+                 gboolean *pb_hide_raw, gboolean *pb_hide_trashed) {
+   *pe_sort         = GGAZE_SORT_NAME;
+   *pb_wrap         = TRUE;
+   *pb_hide_raw     = TRUE;
+   *pb_hide_trashed = FALSE;
+   if (p_win->p_settings != NULL) {
+      *pe_sort         = settings_get_sort(p_win->p_settings);
+      *pb_wrap         = settings_get_wrap(p_win->p_settings);
+      *pb_hide_raw     = settings_get_hide_raw(p_win->p_settings);
+      *pb_hide_trashed = settings_get_hide_trashed(p_win->p_settings);
+   }
+}
+
+/* Replace the "grid" stack page with a fresh GgazeGrid bound to the window's
+ * (already-built) navigator, and give the folder a fresh Trash instance. */
+static void
+_open_rebuild_grid(GgazeWindow *p_win, gboolean b_hide_trashed) {
+   GtkWidget *p_old =
+      gtk_stack_get_child_by_name(GTK_STACK(p_win->p_stack), "grid");
+   if (p_old != NULL) {
+      if (GGAZE_IS_GRID(p_old)) {
+         ggaze_grid_detach(GGAZE_GRID(p_old));
       }
+      gtk_stack_remove(GTK_STACK(p_win->p_stack), p_old);
    }
    GFile *p_navdir = navigator_get_dir(p_win->p_nav);
    p_win->p_trash  = trash_new(p_navdir);
@@ -2904,6 +2920,39 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
                     p_win);
    gtk_stack_add_named(GTK_STACK(p_win->p_stack), GTK_WIDGET(p_win->p_grid),
                        "grid");
+}
+
+void
+ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   g_return_if_fail(G_IS_FILE(p_arg));
+
+   /* Drop any stale info overlay unconditionally before displaying new
+    * content -- the "changed" signal wired in _open_build_navigator is NOT a
+    * reliable trigger here (see its doc comment), so this must not depend on
+    * whether it happens to fire (gu0 fresh-context review). */
+   _dismiss_info_for_nav(p_win);
+
+   _open_reset_existing_nav(p_win);
+
+   GFile   *p_dir    = NULL;
+   GFile   *p_start  = NULL;
+   gboolean b_is_dir = _open_resolve_target(p_arg, &p_dir, &p_start);
+   if (p_dir == NULL) {
+      g_clear_object(&p_start);
+      return;
+   }
+
+   GgazeSort e_sort;
+   gboolean  b_wrap;
+   gboolean  b_hide_raw;
+   gboolean  b_hide_trashed;
+   _open_read_prefs(p_win, &e_sort, &b_wrap, &b_hide_raw, &b_hide_trashed);
+   _open_build_navigator(p_win, p_dir, p_start, e_sort, b_wrap, b_hide_raw);
+   g_clear_object(&p_dir);
+   g_clear_object(&p_start);
+
+   _open_rebuild_grid(p_win, b_hide_trashed);
 
    /* Folder arg → start in the thumbnail grid (folder-to-grid behavior,
     * docs/ui-and-interactions.md 33-47); file arg → large view on that image.
