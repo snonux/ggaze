@@ -39,6 +39,16 @@
 #include "enhancer.h"
 #endif
 
+/* Which of trash/move most recently succeeded, so `u` (win.undo) knows which
+ * engine's undo to prefer when both could theoretically still undo (decision
+ * P: one unified undo, no explicit shared module — window.c already owns
+ * both Trash and Mover, so it is the natural place to track the ordering). */
+typedef enum {
+   GGAZE_LAST_NONE = 0,
+   GGAZE_LAST_TRASH,
+   GGAZE_LAST_MOVE
+} GgazeLastDestructive;
+
 struct _GgazeWindow {
    GtkApplicationWindow parent_instance;
    Navigator           *p_nav; /* current folder listing (NULL until open) */
@@ -54,7 +64,10 @@ struct _GgazeWindow {
    GtkWidget    *p_stack;           /* GtkStack: grid / large (viewer) */
    GtkWidget *p_open_ext_pop;   /* `e` open-external popover (NULL when none) */
    GtkWidget *p_run_script_pop; /* `!` run-script popover (NULL when none) */
-   GtkWidget *p_viewer;         /* GgazeViewer — the large view */
+   GtkWidget *p_move_pop;       /* `m` move-to-destination popover (NULL when
+                                 * none) */
+   GgazeLastDestructive e_last_destructive; /* trash vs move, for win.undo */
+   GtkWidget           *p_viewer;           /* GgazeViewer — the large view */
    GgazeGrid *p_grid;      /* the thumbnail grid (the "grid" stack child) */
    int        i_grid_size; /* current thumbnail size (64-512, decision T) */
    GtkWidget *p_overlay;   /* GtkOverlay wrapping the stack (for info label) */
@@ -89,6 +102,7 @@ static void     _apply_viewer_prefs(GgazeWindow *p_win);
 static void     _load_engine_lists(GgazeWindow *p_win);
 static void     _open_ext_destroy(GgazeWindow *p_win);
 static void     _run_script_destroy(GgazeWindow *p_win);
+static void     _move_destroy(GgazeWindow *p_win);
 static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
 #if GGAZE_HAVE_GEGL
 static void     _enhance_update_highlights(GgazeWindow *p_win);
@@ -331,8 +345,9 @@ _action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
    GError *p_err = NULL;
    if (trash_bin(p_win->p_trash, p_cur, &p_err)) {
-      navigator_mark_removed(p_win->p_nav, p_cur); /* dim; emits changed */
-      navigator_next(p_win->p_nav);                /* advance; emits changed */
+      navigator_mark_removed(p_win->p_nav, p_cur);  /* dim; emits changed */
+      navigator_next(p_win->p_nav);                 /* advance; emits changed */
+      p_win->e_last_destructive = GGAZE_LAST_TRASH; /* for unified win.undo */
    } else {
       g_warning("ggaze: trash failed: %s", p_err->message);
       g_clear_error(&p_err);
@@ -482,19 +497,70 @@ _action_delete(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    g_list_free_full(p_files, (GDestroyNotify)g_object_unref);
 }
 
+/* Undo the last trash (restore from ./Trash to its original path). On
+ * success the navigator is rescanned so the restored file is un-dimmed (its
+ * path reappears on disk, so _relist un-removes it) and the header/grid
+ * refresh via "changed". */
+static void
+_undo_trash(GgazeWindow *p_win) {
+   GError *p_err = NULL;
+   if (trash_restore_last(p_win->p_trash, &p_err)) {
+      navigator_rescan(p_win->p_nav); /* re-list; restored file un-removed */
+      _show_status(p_win, "Restored from Trash");
+      p_win->e_last_destructive = GGAZE_LAST_NONE;
+   } else {
+      g_clear_error(&p_err);
+   }
+}
+
+/* Undo the last move (move the recorded set back to their original paths).
+ * Same navigator-rescan approach as _undo_trash: the files reappear at their
+ * original path in the (possibly different) folder they came from, so a
+ * rescan of the CURRENTLY open folder only visibly restores them if that is
+ * where they were moved from; either way the move itself is undone on disk.
+ */
+static void
+_undo_move(GgazeWindow *p_win) {
+   GError *p_err = NULL;
+   if (mover_undo_last(p_win->p_mover, &p_err)) {
+      if (p_win->p_nav != NULL) {
+         navigator_rescan(p_win->p_nav);
+      }
+      _show_status(p_win, "Move undone");
+      p_win->e_last_destructive = GGAZE_LAST_NONE;
+   } else {
+      if (p_err != NULL) {
+         g_warning("ggaze: move undo failed: %s", p_err->message);
+      }
+      g_clear_error(&p_err);
+   }
+}
+
+/* `u`: undo the last destructive action, whichever of trash/move happened
+ * most recently (decision P: one unified undo). If the flagged action is no
+ * longer undoable (e.g. its folder was reopened, which recreates p_trash and
+ * drops its undo state) fall back to whichever engine still can, so `u`
+ * stays useful rather than silently doing nothing. */
 static void
 _action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (p_win->p_trash == NULL) {
+   if (p_win->p_nav == NULL) {
       return;
    }
-   GError *p_err = NULL;
-   if (trash_restore_last(p_win->p_trash, &p_err)) {
-      navigator_rescan(p_win->p_nav); /* re-list; restored file un-removed */
-   } else {
-      g_clear_error(&p_err);
+   gboolean b_trash_ok =
+      p_win->p_trash != NULL && trash_can_undo(p_win->p_trash);
+   gboolean b_move_ok =
+      p_win->p_mover != NULL && mover_can_undo(p_win->p_mover);
+   if (p_win->e_last_destructive == GGAZE_LAST_MOVE && b_move_ok) {
+      _undo_move(p_win);
+   } else if (p_win->e_last_destructive == GGAZE_LAST_TRASH && b_trash_ok) {
+      _undo_trash(p_win);
+   } else if (b_move_ok) {
+      _undo_move(p_win);
+   } else if (b_trash_ok) {
+      _undo_trash(p_win);
    }
 }
 
@@ -769,6 +835,13 @@ static const char *SHORTCUTS_UI =
    "            </child>\n"
    "            <child>\n"
    "              <object class=\"GtkShortcutsShortcut\">\n"
+   "                <property name=\"accelerator\">m</property>\n"
+   "                <property name=\"title\">Move marked/current to a "
+   "destination</property>\n"
+   "              </object>\n"
+   "            </child>\n"
+   "            <child>\n"
+   "              <object class=\"GtkShortcutsShortcut\">\n"
    "                <property name=\"accelerator\">d</property>\n"
    "                <property name=\"title\">Trash</property>\n"
    "              </object>\n"
@@ -782,7 +855,8 @@ static const char *SHORTCUTS_UI =
    "            <child>\n"
    "              <object class=\"GtkShortcutsShortcut\">\n"
    "                <property name=\"accelerator\">u</property>\n"
-   "                <property name=\"title\">Undo</property>\n"
+   "                <property name=\"title\">Undo last trash or "
+   "move</property>\n"
    "              </object>\n"
    "            </child>\n"
    "            <child>\n"
@@ -1946,6 +2020,254 @@ ggaze_window_run_script_index(GgazeWindow *p_win, guint u_idx) {
    return (TRUE);
 }
 
+/* --- M8: move-to-destination (marks-or-current, collision-aware, undoable)
+ * -------------------------------------------------------------------------
+ */
+
+/* The files a move should act on: every marked file if any are marked, else
+ * just the current file (docs/ui-and-interactions.md "Selection & moving").
+ * Transfer full: caller frees with g_list_free_full(..., g_object_unref). */
+static GList *
+_move_targets(GgazeWindow *p_win) {
+   if (p_win->p_nav == NULL) {
+      return (NULL);
+   }
+   if (navigator_get_mark_count(p_win->p_nav) > 0) {
+      return (navigator_get_marks(p_win->p_nav)); /* transfer full */
+   }
+   GFile *p_cur = navigator_get_current(p_win->p_nav);
+   if (p_cur == NULL) {
+      return (NULL);
+   }
+   return (g_list_prepend(NULL, g_object_ref(p_cur)));
+}
+
+/* After mover_move() returns (success or partial failure), mark every target
+ * that actually left its original path as removed (dimmed; mirrors trash) so
+ * the navigator/grid never show a file that is no longer where they think it
+ * is. Checking disk state rather than trusting the overall return value
+ * handles mover_move's partial-failure case (some files moved before an
+ * error hit a later one in the list) correctly. Returns the count removed. */
+static guint
+_move_mark_removed(GgazeWindow *p_win, GList *p_files) {
+   guint u_removed = 0;
+   for (GList *p_it = p_files; p_it != NULL; p_it = p_it->next) {
+      GFile *p_f = G_FILE(p_it->data);
+      if (!g_file_query_exists(p_f, NULL)) {
+         navigator_mark_removed(p_win->p_nav, p_f); /* dim; emits changed */
+         u_removed++;
+      }
+   }
+   return (u_removed);
+}
+
+/* Report the outcome of a mover_move() call via _show_status (+ g_warning on
+ * any failure): a clean success ("Moved N files to X"), a clean failure
+ * ("Move to X failed: ..."), or — mover_move's partial-failure case — a
+ * count of how many of the N requested actually moved before the error hit
+ * a later one in the list ("Moved M of N files to X; then failed: ..."). */
+static void
+_move_report(GgazeWindow *p_win, const MoverDest *p_dest, gboolean b_ok,
+             guint u_moved, guint u_n, GError *p_err) {
+   if (b_ok) {
+      char *c_msg = g_strdup_printf("Moved %u file%s to %s", u_n,
+                                    u_n == 1 ? "" : "s", p_dest->c_name);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
+      return;
+   }
+   g_warning("ggaze: move to '%s' failed: %s", p_dest->c_name,
+             p_err != NULL ? p_err->message : "(no detail)");
+   char *c_msg =
+      u_moved > 0
+         ? g_strdup_printf("Moved %u of %u files to %s; then failed: %s",
+                           u_moved, u_n, p_dest->c_name,
+                           p_err != NULL ? p_err->message : "(no detail)")
+         : g_strdup_printf("Move to %s failed: %s", p_dest->c_name,
+                           p_err != NULL ? p_err->message : "(no detail)");
+   _show_status(p_win, c_msg);
+   g_free(c_msg);
+}
+
+/* Move u_idx (0-based, in the configured destinations list order) — see
+ * window.h. */
+gboolean
+ggaze_window_move_index(GgazeWindow *p_win, guint u_idx) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   if (p_win->p_nav == NULL || p_win->p_mover == NULL) {
+      return (FALSE);
+   }
+   const GPtrArray *p_dests = mover_get_dests(p_win->p_mover);
+   if (p_dests == NULL || u_idx >= p_dests->len) {
+      return (FALSE);
+   }
+   GList *p_files = _move_targets(p_win);
+   if (p_files == NULL) {
+      return (FALSE);
+   }
+   const MoverDest *p_dest = g_ptr_array_index((GPtrArray *)p_dests, u_idx);
+   guint            u_n    = g_list_length(p_files);
+   GError          *p_err  = NULL;
+   gboolean         b_ok = mover_move(p_win->p_mover, p_files, p_dest, &p_err);
+   guint            u_moved = _move_mark_removed(p_win, p_files);
+   if (u_moved > 0) {
+      p_win->e_last_destructive = GGAZE_LAST_MOVE;
+      navigator_next(p_win->p_nav); /* advance past the moved set */
+   }
+   _move_report(p_win, p_dest, b_ok, u_moved, u_n, p_err);
+   g_clear_error(&p_err);
+   g_list_free_full(p_files, (GDestroyNotify)g_object_unref);
+   return (b_ok);
+}
+
+/* Synchronously tear down the current move popover (unparent + clear the
+ * field). Safe to call when none is open. */
+static void
+_move_destroy(GgazeWindow *p_win) {
+   if (p_win->p_move_pop == NULL) {
+      return;
+   }
+   GtkWidget *p_pop  = p_win->p_move_pop;
+   p_win->p_move_pop = NULL; /* first, so a re-entrant "closed" is a no-op */
+   gtk_widget_unparent(p_pop);
+}
+
+static void
+_move_closed_cb(GtkPopover *p_pop, gpointer p_data) {
+   (void)p_pop;
+   _move_destroy(GGAZE_WINDOW(p_data));
+}
+
+/* Row click (mouse): move to that destination, then close the popover. */
+static void
+_move_row_clicked_cb(GtkButton *p_btn, gpointer p_data) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   guint u_idx = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(p_btn), "idx"));
+   ggaze_window_move_index(p_win, u_idx);
+   _move_destroy(p_win);
+}
+
+/* Popover key controller: Esc cancels; a bare digit/letter hotkey moves to
+ * the matching destination and closes the popover. Modified keys are
+ * propagated so they are not swallowed. */
+static gboolean
+_move_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
+                     GdkModifierType e_state, gpointer p_data) {
+   (void)p_c;
+   (void)u_kc;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (u_keyval == GDK_KEY_Escape) {
+      _move_destroy(p_win);
+      return (GDK_EVENT_STOP);
+   }
+   if (e_state != 0) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   gint i_idx = _popup_key_to_index(u_keyval);
+   if (i_idx < 0) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   const GPtrArray *p_dests = mover_get_dests(p_win->p_mover);
+   if (p_dests == NULL || (guint)i_idx >= p_dests->len) {
+      return (GDK_EVENT_PROPAGATE); /* no destination bound to that hotkey */
+   }
+   ggaze_window_move_index(p_win, (guint)i_idx);
+   _move_destroy(p_win);
+   return (GDK_EVENT_STOP);
+}
+
+/* Build the popover's content box: a title label followed by one row per
+ * destination (hotkey + name), or a single message row when none are
+ * configured. Split out of _action_move to keep that under ~30 lines. */
+static GtkWidget *
+_move_build_box(GgazeWindow *p_win, const GPtrArray *p_dests, guint u_count) {
+   GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+   gtk_widget_set_margin_start(p_box, 8);
+   gtk_widget_set_margin_end(p_box, 8);
+   gtk_widget_set_margin_top(p_box, 8);
+   gtk_widget_set_margin_bottom(p_box, 8);
+
+   if (p_dests == NULL || p_dests->len == 0) {
+      GtkWidget *p_lbl = gtk_label_new(
+         "No destinations configured. Press , to open Preferences.");
+      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
+      gtk_box_append(GTK_BOX(p_box), p_lbl);
+      return (p_box);
+   }
+
+   char *c_title =
+      g_strdup_printf("Move %u image%s to:", u_count, u_count == 1 ? "" : "s");
+   GtkWidget *p_lbl = gtk_label_new(c_title);
+   gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
+   gtk_box_append(GTK_BOX(p_box), p_lbl);
+   g_free(c_title);
+
+   guint u_n = p_dests->len;
+   if (u_n > 36) {
+      u_n = 36; /* cap hotkeys at 1-9,0,a-z (decision O) */
+   }
+   for (guint i = 0; i < u_n; i++) {
+      const MoverDest *p_d  = g_ptr_array_index((GPtrArray *)p_dests, i);
+      char             c_hk = _popup_hotkey_char(i);
+      char            *c_lbl =
+         g_strdup_printf("%c  %s", c_hk != 0 ? c_hk : ' ',
+                         p_d->c_name != NULL ? p_d->c_name : "(unnamed)");
+      GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
+      gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
+      g_object_set_data(G_OBJECT(p_btn), "idx", GUINT_TO_POINTER(i));
+      g_signal_connect(p_btn, "clicked", G_CALLBACK(_move_row_clicked_cb),
+                       p_win);
+      gtk_box_append(GTK_BOX(p_box), p_btn);
+      g_free(c_lbl);
+      if (i == 0) {
+         gtk_widget_grab_focus(p_btn); /* ensure the popover gets keys */
+      }
+   }
+   return (p_box);
+}
+
+/* Build and pop up the move popover listing the configured destinations
+ * (`m`). Toggles closed on a second press, same as `e`/`!`. */
+static void
+_action_move(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL || p_win->p_mover == NULL) {
+      return;
+   }
+   if (p_win->p_move_pop != NULL) {
+      _move_destroy(p_win);
+      return;
+   }
+   GList *p_targets = _move_targets(p_win);
+   guint  u_count   = g_list_length(p_targets);
+   g_list_free_full(p_targets, (GDestroyNotify)g_object_unref);
+   if (u_count == 0) {
+      _show_status(p_win, "Nothing to move");
+      return;
+   }
+
+   const GPtrArray *p_dests = mover_get_dests(p_win->p_mover);
+   GtkWidget       *p_pop   = gtk_popover_new();
+   gtk_popover_set_position(GTK_POPOVER(p_pop), GTK_POS_TOP);
+   gtk_popover_set_pointing_to(GTK_POPOVER(p_pop),
+                               &(const GdkRectangle){0, 0, 1, 1});
+   g_signal_connect(GTK_POPOVER(p_pop), "closed", G_CALLBACK(_move_closed_cb),
+                    p_win);
+   GtkEventController *p_kc = gtk_event_controller_key_new();
+   gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
+   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_move_key_pressed_cb),
+                    p_win);
+   gtk_widget_add_controller(p_pop, p_kc);
+
+   gtk_popover_set_child(GTK_POPOVER(p_pop),
+                         _move_build_box(p_win, p_dests, u_count));
+   gtk_widget_set_parent(p_pop, p_win->p_stack);
+   p_win->p_move_pop = p_pop;
+   gtk_popover_popup(GTK_POPOVER(p_pop));
+}
+
 static const GActionEntry ACTIONS[] = {
    {.name = "prev", .activate = _action_prev},
    {.name = "next", .activate = _action_next},
@@ -1954,6 +2276,7 @@ static const GActionEntry ACTIONS[] = {
    {.name = "open", .activate = _action_open},
    {.name = "open-external", .activate = _action_open_external},
    {.name = "run-script", .activate = _action_run_script},
+   {.name = "move", .activate = _action_move},
    {.name = "quit", .activate = _action_quit},
    {.name = "trash", .activate = _action_trash},
    {.name = "delete", .activate = _action_delete},
@@ -2300,6 +2623,7 @@ ggaze_window_dispose(GObject *p_obj) {
    g_clear_object(&p_win->p_cancel);
    _open_ext_destroy(p_win);
    _run_script_destroy(p_win);
+   _move_destroy(p_win);
    if (p_win->u_slideshow != 0) {
       g_source_remove(p_win->u_slideshow);
       p_win->u_slideshow = 0;

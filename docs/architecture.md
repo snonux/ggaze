@@ -153,8 +153,9 @@ large Esc / Backspace     → window.set_view(GRID)
 ```
 key 'd' → trash.bin(path)   → mv path → <dir>/.Trash/<name>  (undoable)
 key 'D' → trash.delete(path) → unlink(path)                  (not undoable)
-       → navigator.remove(path) → emits 'changed'
-       → gridview drops cell / dims it; large view advances to next
+       → navigator_mark_removed(path) → dims the entry (stays listed) and
+         clears its mark → emits 'changed'
+       → gridview dims the cell; large view advances to next
 ```
 
 ## Data flow (move)
@@ -165,10 +166,14 @@ key 'm' → window shows move popup (GtkPopover)
         → popup assigns hotkeys 1..9,0,a.. by list order
 key '2' → mover_move(marked_paths, dests[1], &err)
         → g_file_move each (rename/copy+delete), collision-suffix
-        → navigator.remove(each) → emits 'changed'
-        → grid drops cells; large advances; counter updates
-        → mover records move for 'u' undo
+        → navigator_mark_removed(each) → dims the entries (mirrors trash;
+          stays listed) and clears their marks → emits 'changed'
+        → grid dims the cells; large advances; counter updates
+        → mover records the move for 'u' undo
 no marks? → move acts on navigator.current instead
+'u' undo → whichever of the last trash or the last move happened more
+           recently (falls back to the other if that one is no longer
+           undoable, e.g. its folder was reopened)
 ```
 
 ## Data flow (open in external program)

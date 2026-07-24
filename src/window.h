@@ -70,6 +70,22 @@ gboolean ggaze_window_open_external_index(GgazeWindow *p_win, guint u_idx);
  */
 gboolean ggaze_window_run_script_index(GgazeWindow *p_win, guint u_idx);
 
+/* Move to destination u_idx (0-based, in the configured destinations list
+ * order). Acts on every marked file if any are marked, else just the current
+ * file (docs/ui-and-interactions.md "Selection & moving"). Uses mover_move
+ * (rename or copy+delete, collision-suffixed) and, for every target that
+ * actually left its original path, dims it in the navigator/grid via
+ * navigator_mark_removed (mirroring trash) and advances past the moved set.
+ * Records the move so `u` (win.undo) can move the set back — win.undo
+ * prefers whichever of trash/move happened most recently. Reports a status
+ * line on success or failure. Returns TRUE iff mover_move reported overall
+ * success; FALSE on an out-of-range index, no destinations configured, no
+ * targets to move, or a mover_move failure (still leaves anything that DID
+ * move flagged as removed — see window.c's collision-with-partial-failure
+ * handling). This is the testable move path the `m` popup (and its hotkeys)
+ * invoke. */
+gboolean ggaze_window_move_index(GgazeWindow *p_win, guint u_idx);
+
 /* Navigation over the current folder (bound to h/l/Left/Right/g/G via
  * shortcuts.c). No-ops if nothing is open. */
 void ggaze_window_prev(GgazeWindow *p_win);

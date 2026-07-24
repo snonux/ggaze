@@ -415,6 +415,26 @@ open_external_env.set('LSAN_OPTIONS',
 test('open_external', test_open_external,
    suite : 'integration', env : open_external_env, depends : ggaze_gschemas)
 
+test_move_undo = executable(
+   'test_move_undo', ['test_move_undo.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib, install : false,
+)
+move_undo_env = environment()
+move_undo_env.set('GIO_USE_VFS', 'local')
+move_undo_env.set('GGAZE_FIXTURES_DIR',
+   join_paths(meson.project_source_root(), 'tests', 'fixtures'))
+move_undo_env.set('GGAZE_SAMPLE_DIR',
+   join_paths(meson.project_source_root(), 'sample-images'))
+move_undo_env.set('GSETTINGS_BACKEND', 'memory')
+move_undo_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
+move_undo_env.set('LSAN_OPTIONS',
+   'suppressions=' + join_paths(meson.project_source_root(), 'tests',
+                               'lsan_suppressions.txt'))
+test('move_undo', test_move_undo,
+   suite : 'integration', env : move_undo_env, depends : ggaze_gschemas)
+
 test_runner_rescan = executable(
    'test_runner_rescan', ['test_runner_rescan.c', ggaze_conf_h],
    include_directories : [inc, src_inc],

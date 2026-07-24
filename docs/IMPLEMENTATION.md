@@ -278,8 +278,14 @@ bounded memory.
   preview is active, else original) as `image/png` (decode in `GTask`) /
   marked files as `text/uri-list`; union provider for one file (decision V).
   `Ctrl+Shift+c` (later) copies the original/path.
-- Reusable popover (`ggaze_popup`) for move/open/scripts/(enhance later):
-  `(hotkey, label)` rows + key controller firing on digit/letter.
+- Popover pattern for move/open/scripts/(enhance later): `(hotkey, label)`
+  rows + a capture-phase key controller firing on digit/letter, Esc cancels.
+  In practice this landed as one popover built per action in `window.c`
+  (`_action_open_external`/`_action_run_script`/`_action_move`), sharing only
+  the two small hotkey-mapping helpers (`_popup_hotkey_char`,
+  `_popup_key_to_index`) rather than a separate reusable `ggaze_popup` widget
+  — simpler for four call sites and consistent with how `e`/`!` were already
+  built before `m` (move) landed.
 - Unified one-level undo `u` (decision P).
 - Mark UI: `v`/`V`/`Ctrl+a`/`Esc`; header subtitle shows `N marked`; grid
   check-badges + large-view indicator.
