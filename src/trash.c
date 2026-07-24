@@ -21,7 +21,39 @@ _trash_dir(Trash *p_t) {
    return (g_file_get_child(p_t->p_dir, ".Trash"));
 }
 
-/* Ensure .Trash exists (lazily). */
+/* Refuse a pre-existing .Trash that is not a real directory. Queried with
+ * G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS so a symlink is reported as a symlink
+ * (type G_FILE_TYPE_SYMBOLIC_LINK) instead of being resolved and stat'd
+ * through its target: if we followed it here, an attacker (or leftover
+ * corruption) that replaced <shoot>/.Trash with a symlink could redirect
+ * trash_bin()'s moves anywhere on disk, silently, and a later change/removal
+ * of that link would strand trash_restore_last()'s undo. The only safe
+ * response to a symlink or other non-directory (e.g. a plain file) is to
+ * fail with a clear GError -- not to delete/replace it ourselves, which
+ * would be its own TOCTOU hazard. */
+static gboolean
+_trash_dir_is_safe(GFile *p_td, GError **p_err) {
+   GFileInfo *p_info = g_file_query_info(
+      p_td, "standard::type", G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, p_err);
+   if (p_info == NULL) {
+      return (FALSE);
+   }
+   GFileType e_type = g_file_info_get_file_type(p_info);
+   g_object_unref(p_info);
+   if (e_type != G_FILE_TYPE_DIRECTORY) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_DIRECTORY,
+                  "refusing to use .Trash: existing path is not a real "
+                  "directory (found a symlink or other non-directory)");
+      return (FALSE);
+   }
+   return (TRUE);
+}
+
+/* Ensure .Trash exists (lazily). If g_file_make_directory_with_parents()
+ * reports G_IO_ERROR_EXISTS, something is already at that path -- verify via
+ * _trash_dir_is_safe() that it is a genuine directory before treating it as
+ * usable, rather than blindly assuming success as before (see that helper's
+ * comment for the symlink-following hazard this closes). */
 static gboolean
 _ensure_trash_dir(Trash *p_t, GError **p_err) {
    GFile   *p_td = _trash_dir(p_t);
@@ -30,7 +62,7 @@ _ensure_trash_dir(Trash *p_t, GError **p_err) {
       if (p_err != NULL &&
           g_error_matches(*p_err, G_IO_ERROR, G_IO_ERROR_EXISTS)) {
          g_clear_error(p_err);
-         b_ok = TRUE;
+         b_ok = _trash_dir_is_safe(p_td, p_err);
       }
    }
    g_object_unref(p_td);
