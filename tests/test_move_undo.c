@@ -9,8 +9,12 @@
  * controller (same pattern as `e`/`!`, see test_open_external.c). Also
  * exercises the unified `u` undo: it undoes whichever of the last trash or
  * the last move happened most recently (docs/ui-and-interactions.md
- * "Selection & moving"). Uses the memory GSettings backend + build-tree
- * schema (set in the meson env); display-gated, skipped without a display.
+ * "Selection & moving"), that folder switches reset BOTH engines' undo
+ * state so a stale record from a folder no longer open can never be
+ * (re)undone, and negative cases (nothing to undo, every target colliding,
+ * a destination that is really a regular file). Uses the memory GSettings
+ * backend + build-tree schema (set in the meson env); display-gated,
+ * skipped without a display.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -23,6 +27,7 @@
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <gtk/gtk.h>
 
 /* --- helpers ------------------------------------------------------------ */
@@ -393,6 +398,189 @@ test_undo_prefers_most_recent(void) {
    reset_destinations();
 }
 
+/* Regression test for the folder-switch unified-undo bug: move a file in
+ * folder A, trash a file in folder A (trash is now the preferred undo), then
+ * switch to folder B and press `u`. Before the fix, ggaze_window_open() left
+ * the mover's undo state (and e_last_destructive) untouched across the
+ * folder switch, so trash's fresh (post-switch) can_undo()==FALSE fell
+ * through to the STALE folder-A move and silently moved a file back into a
+ * folder no longer on screen. After the fix, ggaze_window_open() clears both
+ * engines' undo state (mover_clear_last + e_last_destructive reset), so `u`
+ * in folder B must be a no-op: the moved file stays at its destination, and
+ * nothing reappears in folder A. */
+static void
+test_undo_folder_switch_does_not_undo_stale_move(void) {
+   reset_destinations();
+   GFile  *p_plain = NULL;
+   char   *c_dir_a = setup_dir_with_three(&p_plain);
+   GError *p_err   = NULL;
+   char   *c_dest  = g_dir_make_tmp("ggaze-move-dest-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   const char *c_names[] = {"dest one"};
+   const char *c_paths[] = {c_dest};
+   set_destinations(c_names, c_paths, 1);
+
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_plain);
+   drain_main(200);
+
+   /* Move plain.jpg (current), then trash whatever is current next
+    * (rot6.jpg) -- trash becomes the preferred undo (most recent). */
+   g_assert_true(ggaze_window_move_index(p_win, 0));
+   drain_main(200);
+   fire(p_win, "win.trash");
+   drain_main(200);
+   g_assert_false(path_exists(c_dir_a, "plain.jpg"));
+   g_assert_true(path_exists(c_dest, "plain.jpg"));
+   g_assert_true(path_exists(c_dir_a, ".Trash"));
+
+   /* Switch to folder B. */
+   char *c_dir_b = g_dir_make_tmp("ggaze-move-other-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir_b, "small.png");
+   char  *c_path_b = g_build_filename(c_dir_b, "small.png", NULL);
+   GFile *p_file_b = g_file_new_for_path(c_path_b);
+   g_free(c_path_b);
+   ggaze_window_open(p_win, p_file_b);
+   drain_main(200);
+
+   /* `u` in folder B: must not reach back into folder A's stale move. */
+   fire(p_win, "win.undo");
+   drain_main(300);
+
+   g_assert_true(path_exists(c_dest, "plain.jpg"));   /* still moved-away */
+   g_assert_false(path_exists(c_dir_a, "plain.jpg")); /* did NOT come back */
+   g_assert_true(path_exists(c_dir_b, "small.png"));  /* folder B untouched */
+
+   g_object_unref(p_plain);
+   g_object_unref(p_file_b);
+   g_object_unref(p_win);
+   drain_main(300);
+   cleanup_temp_dir(c_dir_a);
+   cleanup_temp_dir(c_dest);
+   cleanup_temp_dir(c_dir_b);
+   reset_destinations();
+}
+
+/* `u` with nothing to undo (fresh window, nothing moved or trashed yet):
+ * a safe no-op, no crash, no state change on disk. */
+static void
+test_undo_nothing_to_undo(void) {
+   reset_destinations();
+   GFile *p_plain = NULL;
+   char  *c_dir   = setup_dir_with_three(&p_plain);
+
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_plain);
+   drain_main(200);
+
+   fire(p_win, "win.undo");
+   drain_main(200);
+
+   g_assert_true(path_exists(c_dir, "plain.jpg"));
+   g_assert_true(path_exists(c_dir, "rot6.jpg"));
+   g_assert_true(path_exists(c_dir, "small.png"));
+   g_assert_false(path_exists(c_dir, ".Trash"));
+
+   g_object_unref(p_plain);
+   g_object_unref(p_win);
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+   reset_destinations();
+}
+
+/* All marked targets collide with a pre-existing file at the destination:
+ * every one of them must land collision-suffixed, not just the first. */
+static void
+test_move_all_targets_collide(void) {
+   reset_destinations();
+   GFile  *p_plain = NULL;
+   char   *c_dir   = setup_dir_with_three(&p_plain);
+   GError *p_err   = NULL;
+   char   *c_dest  = g_dir_make_tmp("ggaze-move-dest-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   /* Pre-existing collision for every file about to be moved. */
+   copy_fixture(c_dest, "plain.jpg");
+   copy_fixture(c_dest, "rot6.jpg");
+   copy_fixture(c_dest, "small.png");
+   const char *c_names[] = {"dest one"};
+   const char *c_paths[] = {c_dest};
+   set_destinations(c_names, c_paths, 1);
+
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_plain);
+   drain_main(200);
+
+   fire(p_win, "win.mark-all"); /* mark all 3 */
+   drain_main(100);
+
+   g_assert_true(ggaze_window_move_index(p_win, 0));
+   drain_main(200);
+
+   g_assert_false(path_exists(c_dir, "plain.jpg"));
+   g_assert_false(path_exists(c_dir, "rot6.jpg"));
+   g_assert_false(path_exists(c_dir, "small.png"));
+
+   g_assert_true(path_exists(c_dest, "plain.jpg"));   /* pre-existing */
+   g_assert_true(path_exists(c_dest, "plain-1.jpg")); /* moved-in */
+   g_assert_true(path_exists(c_dest, "rot6.jpg"));    /* pre-existing */
+   g_assert_true(path_exists(c_dest, "rot6-1.jpg"));  /* moved-in */
+   g_assert_true(path_exists(c_dest, "small.png"));   /* pre-existing */
+   g_assert_true(path_exists(c_dest, "small-1.png")); /* moved-in */
+
+   g_object_unref(p_plain);
+   g_object_unref(p_win);
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+   cleanup_temp_dir(c_dest);
+   reset_destinations();
+}
+
+/* A configured destination that is actually a regular file (not a
+ * directory): mover_move's g_file_make_directory_with_parents() call sees
+ * G_IO_ERROR_EXISTS (something is already there) and proceeds, but the
+ * subsequent g_file_move() into a "directory" that is really a file fails
+ * cleanly -- no crash, nothing moved, a failure status is reported. */
+static void
+test_move_destination_not_a_directory(void) {
+   reset_destinations();
+   GFile  *p_plain = NULL;
+   char   *c_dir   = setup_dir_with_three(&p_plain);
+   GError *p_err   = NULL;
+   char   *c_tmp   = g_dir_make_tmp("ggaze-move-baddest-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   char *c_notdir = g_build_filename(c_tmp, "not-a-dir", NULL);
+   g_assert_true(g_file_set_contents(c_notdir, "x", 1, &p_err));
+   g_assert_no_error(p_err);
+   const char *c_names[] = {"bad dest"};
+   const char *c_paths[] = {c_notdir};
+   set_destinations(c_names, c_paths, 1);
+
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_plain);
+   drain_main(200);
+
+   g_assert_false(ggaze_window_move_index(p_win, 0));
+   drain_main(200);
+
+   /* Nothing moved; the bogus "destination" file is untouched. */
+   g_assert_true(path_exists(c_dir, "plain.jpg"));
+   GFile *p_notdir = g_file_new_for_path(c_notdir);
+   g_assert_cmpint(
+      g_file_query_file_type(p_notdir, G_FILE_QUERY_INFO_NONE, NULL), ==,
+      G_FILE_TYPE_REGULAR);
+   g_object_unref(p_notdir);
+
+   g_object_unref(p_plain);
+   g_object_unref(p_win);
+   drain_main(300);
+   g_unlink(c_notdir);
+   g_free(c_notdir);
+   cleanup_temp_dir(c_dir);
+   cleanup_temp_dir(c_tmp);
+   reset_destinations();
+}
+
 /* The popup: firing win.move pops up a GtkPopover listing the configured
  * destinations as clickable rows with auto-assigned hotkey labels and a key
  * controller; firing it again toggles it closed. */
@@ -479,6 +667,12 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/move/then_undo", test_move_then_undo);
    g_test_add_func("/move/undo_prefers_most_recent",
                    test_undo_prefers_most_recent);
+   g_test_add_func("/move/undo_folder_switch_does_not_undo_stale_move",
+                   test_undo_folder_switch_does_not_undo_stale_move);
+   g_test_add_func("/move/undo_nothing_to_undo", test_undo_nothing_to_undo);
+   g_test_add_func("/move/all_targets_collide", test_move_all_targets_collide);
+   g_test_add_func("/move/destination_not_a_directory",
+                   test_move_destination_not_a_directory);
    g_test_add_func("/move/popup_structure", test_move_popup_structure);
    g_test_add_func("/move/empty_no_destinations",
                    test_move_empty_no_destinations);

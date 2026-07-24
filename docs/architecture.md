@@ -172,8 +172,10 @@ key '2' → mover_move(marked_paths, dests[1], &err)
         → mover records the move for 'u' undo
 no marks? → move acts on navigator.current instead
 'u' undo → whichever of the last trash or the last move happened more
-           recently (falls back to the other if that one is no longer
-           undoable, e.g. its folder was reopened)
+           recently; falls back to whichever engine can still undo within
+           the SAME folder session (e.g. move, then trash, then undo twice)
+           → reopening a folder resets both engines' undo state together,
+           so a stale record from a folder no longer open is never reachable
 ```
 
 ## Data flow (open in external program)

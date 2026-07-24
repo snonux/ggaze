@@ -182,10 +182,15 @@ Loaded lazily; never blocks display of the pixels.
   are configured in Preferences (`,`) as an ordered list of name → path pairs.
 - **Move semantics**: `g_file_move` (rename on same filesystem, else copy +
   delete). On name collision in the destination, suffix `-1`, `-2`, …. After
-  a move, files leave the current folder: the navigator drops them, the grid
-  removes their cells, and the counter updates.
+  a move, moved files stay listed but **dimmed** (`navigator_mark_removed`),
+  mirroring trash — the navigator does not drop them and the grid does not
+  remove their cells; the large view just advances past them and the counter
+  updates.
 - **Undo**: `u` undoes the last `d` (restore from `./Trash`) **or** the last
-  `m` (move the set back to their original paths). One level of undo to start.
+  `m` (move the set back to their original paths), whichever happened more
+  recently. One level of undo per engine to start. Reopening a folder gives
+  both trash and move a fresh undo state for that folder, so `u` never reaches
+  back into a folder you've since navigated away from.
 
 ## Copy to clipboard
 

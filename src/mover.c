@@ -133,3 +133,10 @@ mover_can_undo(Mover *m) {
    g_return_val_if_fail(m != NULL, FALSE);
    return m->p_last_dst->len > 0;
 }
+
+void
+mover_clear_last(Mover *m) {
+   g_return_if_fail(m != NULL);
+   g_ptr_array_set_size(m->p_last_src, 0);
+   g_ptr_array_set_size(m->p_last_dst, 0);
+}

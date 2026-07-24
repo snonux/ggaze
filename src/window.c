@@ -537,10 +537,15 @@ _undo_move(GgazeWindow *p_win) {
 }
 
 /* `u`: undo the last destructive action, whichever of trash/move happened
- * most recently (decision P: one unified undo). If the flagged action is no
- * longer undoable (e.g. its folder was reopened, which recreates p_trash and
- * drops its undo state) fall back to whichever engine still can, so `u`
- * stays useful rather than silently doing nothing. */
+ * most recently (decision P: one unified undo). Reopening a folder resets
+ * BOTH engines' undo state and e_last_destructive together (ggaze_window_open
+ * clears p_trash and calls mover_clear_last), so a stale record from a folder
+ * the user is no longer looking at can never be the preferred branch below.
+ * The fallback branches below instead serve the legitimate WITHIN-session
+ * case: e.g. move a file, then trash a file (trash is now preferred), undo
+ * once (undoes the trash, resets e_last_destructive to NONE) -- the move is
+ * still undoable in the CURRENT folder, so a second `u` should undo that
+ * too rather than silently do nothing. */
 static void
 _action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -2824,6 +2829,13 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    }
    p_win->p_nav = navigator_new(p_dir, e_sort, b_wrap, b_hide_raw);
    g_clear_pointer(&p_win->p_trash, trash_delete);
+   /* A move recorded against the folder just left must not be undoable once
+    * we are looking at a different folder (it would silently move a file
+    * back into a folder no longer on screen) -- drop mover's undo state the
+    * same way p_trash gets a fresh one below, and clear the unified-undo
+    * preference so a stale enum value can't point at either. */
+   mover_clear_last(p_win->p_mover);
+   p_win->e_last_destructive = GGAZE_LAST_NONE;
    g_clear_object(&p_dir);
    g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(nav_changed_cb), p_win);
    if (p_start != NULL) {
