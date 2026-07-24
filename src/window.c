@@ -1368,17 +1368,20 @@ _hide_info(GgazeWindow *p_win) {
    gtk_widget_set_visible(p_win->p_info_lbl, FALSE);
 }
 
-/* Hide the info overlay in response to the current file changing (any
- * navigation: prev/next/first/last, slideshow auto-advance, grid selection,
- * trash/delete/move advancing past a target, rescan after undo, ...) -- see
- * nav_changed_cb, the single choke point every one of those paths funnels
- * through via Navigator's "changed" signal. The overlay must never keep
- * showing a PREVIOUS file's EXIF/dimensions after a new one is displayed, so
- * this cancels any pending auto-hide timer (there is nothing left for it to
- * hide) and hides the label unconditionally; a subsequent _show_status call
- * later in the same handler chain (e.g. move/undo's status line) re-shows it
- * with its own fresh timer, so this never fights a legitimate immediate
- * re-show. */
+/* Hide the info overlay in response to the current file changing. Reached
+ * from two call sites: (1) nav_changed_cb, the choke point that prev/next/
+ * first/last, slideshow auto-advance, grid selection, trash/delete/move
+ * advancing past a target, and rescan-after-undo all funnel through via
+ * Navigator's "changed" signal; and (2) ggaze_window_open(), called directly
+ * (not via that signal) because opening a new folder/file into an existing
+ * window doesn't reliably emit "changed" -- see the comment on
+ * _open_build_navigator() for why. The overlay must never keep showing a
+ * PREVIOUS file's EXIF/dimensions after a new one is displayed, so this
+ * cancels any pending auto-hide timer (there is nothing left for it to hide)
+ * and hides the label unconditionally; a subsequent _show_status call later
+ * in the same handler chain (e.g. move/undo's status line) re-shows it with
+ * its own fresh timer, so this never fights a legitimate immediate re-show.
+ */
 static void
 _dismiss_info_for_nav(GgazeWindow *p_win) {
    _info_cancel_timer(p_win);
@@ -2927,21 +2930,29 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));
    g_return_if_fail(G_IS_FILE(p_arg));
 
-   /* Drop any stale info overlay unconditionally before displaying new
-    * content -- the "changed" signal wired in _open_build_navigator is NOT a
-    * reliable trigger here (see its doc comment), so this must not depend on
-    * whether it happens to fire (gu0 fresh-context review). */
-   _dismiss_info_for_nav(p_win);
-
-   _open_reset_existing_nav(p_win);
-
    GFile   *p_dir    = NULL;
    GFile   *p_start  = NULL;
    gboolean b_is_dir = _open_resolve_target(p_arg, &p_dir, &p_start);
    if (p_dir == NULL) {
+      /* Resolve failed (e.g. a non-directory GFile whose g_file_get_parent()
+       * returns NULL) -- bail out before touching anything so the window
+       * keeps showing exactly what it showed before this call, info overlay
+       * included (gu0 round-2 review: dismissing here would hide a still-
+       * valid overlay for an open that never happened). */
       g_clear_object(&p_start);
       return;
    }
+
+   /* Only now that the open is confirmed to proceed: drop any stale info
+    * overlay unconditionally before tearing down/rebuilding the navigator --
+    * the "changed" signal wired in _open_build_navigator is NOT a reliable
+    * trigger here (see its doc comment), so this must not depend on whether
+    * it happens to fire (gu0 fresh-context review). Firing before the
+    * teardown/rebuild below avoids a window where new content is already
+    * showing but the old overlay is still up. */
+   _dismiss_info_for_nav(p_win);
+
+   _open_reset_existing_nav(p_win);
 
    GgazeSort e_sort;
    gboolean  b_wrap;
