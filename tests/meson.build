@@ -396,6 +396,17 @@ test_grid_cancel = executable(
 test('grid_cancel', test_grid_cancel,
    suite : 'integration', env : fixtures_env)
 
+test_grid_select_gate = executable(
+   'test_grid_select_gate',
+   ['test_grid_select_gate.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib,
+   install : false,
+)
+test('grid_select_gate', test_grid_select_gate,
+   suite : 'integration', env : fixtures_env)
+
 test_settings_ui = executable(
    'test_settings_ui', ['test_settings_ui.c', ggaze_conf_h],
    include_directories : [inc, src_inc],
