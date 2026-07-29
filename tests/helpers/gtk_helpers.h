@@ -73,10 +73,12 @@ void ggtest_click_button(GtkWidget *p_btn);
 gboolean ggtest_is_open_toplevel(GtkWindow *p_win);
 
 /* Press the button labelled c_label on the first such dialog, driving
- * gtk_alert_dialog_choose()'s async callback to completion (the dialog is an
- * ordinary GtkWindow, so gtk_widget_activate() on its button is enough --
- * no response-injection API is needed). Returns FALSE if no dialog with that
- * button is up. Does NOT iterate the main context; the caller drains. */
+ * gtk_alert_dialog_choose()'s async callback to completion. No response-
+ * injection API is needed: the dialog is an ordinary GtkWindow, so finding its
+ * button and driving it through ggtest_click_button above (which emits
+ * "clicked" -- see there for why gtk_widget_activate() silently does nothing)
+ * is enough. Returns FALSE if no dialog with that button is up. Does NOT
+ * iterate the main context; the caller drains. */
 gboolean ggtest_click_dialog_button(GtkWindow *p_skip, const char *c_label);
 
 #endif /* GTK_HELPERS_H */

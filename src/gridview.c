@@ -297,8 +297,15 @@ _select_current(GgazeGrid *p_grid) {
 /* Sync navigator.current to the flowbox's currently-selected child, so that
  * leaving the grid (Enter or toggle-to-large) opens the highlighted cell,
  * not a stale current left over from when the grid was entered. Mirrors the
- * sync _on_child_activated does for a double-click. Returns TRUE if a
- * selection was found and current was (or already was) that file. */
+ * sync _on_child_activated does for a double-click.
+ *
+ * Returns whatever the select gate returns, i.e. navigator_set_current_file's
+ * own contract: TRUE ONLY when current actually MOVED. FALSE covers all three
+ * of "no selection", "the highlighted cell already IS current" (navigator.c's
+ * i_current == i early return) and "a dirty enhance preview deferred the
+ * change behind the Save/Discard/Cancel prompt". window.c's _action_toggle_view
+ * relies on exactly this: TRUE means nav_changed_cb has already reloaded, so
+ * only the FALSE cases still need a _load_current of their own. */
 gboolean
 ggaze_grid_sync_current(GgazeGrid *p_grid) {
    g_return_val_if_fail(GGAZE_IS_GRID(p_grid), FALSE);
