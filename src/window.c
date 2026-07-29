@@ -49,6 +49,19 @@ typedef enum {
    GGAZE_LAST_MOVE
 } GgazeLastDestructive;
 
+/* One request handed to _maybe_save_then: the continuation to run once the
+ * (possible) Save/Discard/Cancel prompt resolves, the data it acts on, and the
+ * notify that releases that data. _maybe_save_then OWNS data for the whole
+ * flow and releases it through fn_free on EVERY exit path -- including the
+ * ones that never run fn (Cancel, dialog dismissal, a failed Save, a parked
+ * request dropped because the prompt was cancelled). fn_free is NULL when data
+ * is not owned by the request (e.g. the window itself). */
+typedef struct {
+   GSourceFunc    fn;
+   gpointer       data;
+   GDestroyNotify fn_free;
+} _Request;
+
 struct _GgazeWindow {
    GtkApplicationWindow parent_instance;
    Navigator           *p_nav; /* current folder listing (NULL until open) */
@@ -99,8 +112,19 @@ struct _GgazeWindow {
                                     * prompt is outstanding, so a trigger the
                                     * modal grab cannot swallow (Alt+F4 / the
                                     * WM close button reach "close-request"
-                                    * without being input events) cannot stack
-                                    * a second dialog on top of it */
+                                    * without being input events, and a
+                                    * single-instance open arrives over D-Bus)
+                                    * cannot stack a second dialog on top of
+                                    * it, nor slip its continuation past the
+                                    * gate while that dialog is still up */
+   _Request *p_pending;            /* the ONE request parked while the prompt
+                                    * above is outstanding (newest wins), so a
+                                    * second, different request is not silently
+                                    * swallowed: it is retried through the same
+                                    * gate once the prompt resolves in favour
+                                    * of proceeding, and dropped with a status
+                                    * line when it resolves to Cancel (round 3,
+                                    * finding i). NULL when nothing is parked */
    GFile *p_enhance_file;          /* file the current mask/preview applies to
                                     * (NULL = none); lets nav_changed_cb tell
                                     * an actual navigation apart from a
@@ -152,25 +176,23 @@ static gboolean _space_released_cb(GtkEventControllerKey *p_c, guint u_keyval,
 #endif
 
 /* Ask (if needed) before running fn(data), see the two _maybe_save_then
- * definitions below. _maybe_save_then OWNS data for the whole flow and
- * releases it through fn_free_data on every exit path -- including the ones
- * that never run fn (Cancel, dialog dismissal, a failed Save). Pass NULL for
- * fn_free_data when data is not owned (e.g. the window itself). */
+ * definitions below. See _Request for the ownership rules. */
 static void _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
                              GDestroyNotify fn_free_data);
 
-/* Run the continuation, then release its data. The single place that decides
- * "fn has had its chance, the ctx is done" -- so no exit path can forget one
- * of the two halves (tu0 review round 2, finding b: Cancel and the dismiss
- * path used to return early and leak the heap ctx, each of which holds an
- * owned window ref and therefore pinned an entire GgazeWindow). */
+/* Give p_req its one chance (run the continuation iff b_proceed), then release
+ * its data. The single place that decides "this request is done" -- so no exit
+ * path can forget one of the two halves (tu0 review round 2, finding b: Cancel
+ * and the dismiss path used to return early and leak the heap ctx, each of
+ * which holds an owned window ref and therefore pinned an entire
+ * GgazeWindow). */
 static void
-_run_then_free(GSourceFunc fn, gpointer data, GDestroyNotify fn_free_data) {
-   if (fn != NULL) {
-      fn(data);
+_request_finish(const _Request *p_req, gboolean b_proceed) {
+   if (b_proceed && p_req->fn != NULL) {
+      p_req->fn(p_req->data);
    }
-   if (fn_free_data != NULL) {
-      fn_free_data(data);
+   if (p_req->fn_free != NULL) {
+      p_req->fn_free(p_req->data);
    }
 }
 
@@ -202,31 +224,72 @@ _proceed_last(gpointer d) {
    return (G_SOURCE_REMOVE);
 }
 
-/* Continuation for _grid_select_gate (below): applies the deferred
- * navigator.current change once Save/Discard/Cancel resolves. The ctx is
- * freed by _maybe_save_then via _grid_select_ctx_free, never by the
+/* --- capture-at-request-time contexts ------------------------------------
+ *
+ * A window + ONE GFile captured when the user asked for something, which is
+ * the shape every deferred continuation that acts on a single specific file
+ * needs. The rule it exists to enforce is the one _DeleteCtx (further down)
+ * already documents for the bulk-delete confirm dialog: a callback that runs
+ * after an async dialog must act on the target the prompt was RAISED FOR, and
+ * must never re-read navigator.current at answer time.
+ *
+ * That matters because GTK4 modality is INPUT-only. The slideshow timer is a
+ * plain g_timeout_add and the folder's GFileMonitor is a plain GSource, so
+ * both keep firing behind a modal prompt and can move navigator.current out
+ * from under it. Re-reading the navigator in the continuation then acted on a
+ * file the user never selected -- for `d`/`D` that meant trashing/deleting the
+ * wrong image (tu0 review round 3, finding h).
+ *
+ * The ctx is freed by _maybe_save_then via _file_ctx_free, never by the
  * continuation itself, so the paths that never reach the continuation
- * (Cancel/dismiss/failed Save) release it too. */
+ * (Cancel/dismiss/failed Save/a dropped parked request) release it too. */
 typedef struct {
    GgazeWindow *p_win;  /* owned ref */
-   GFile       *p_file; /* owned ref: file to select once resolved */
-} _GridSelectCtx;
+   GFile       *p_file; /* owned ref, NULL when nothing was current */
+} _FileCtx;
 
+static _FileCtx *
+_file_ctx_new(GgazeWindow *p_win, GFile *p_file) {
+   _FileCtx *p_ctx = g_new(_FileCtx, 1);
+   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->p_file   = p_file != NULL ? (GFile *)g_object_ref(p_file) : NULL;
+   return (p_ctx);
+}
+
+static void
+_file_ctx_free(gpointer p_data) {
+   _FileCtx *p_ctx = (_FileCtx *)p_data;
+   g_object_unref(p_ctx->p_win);
+   g_clear_object(&p_ctx->p_file);
+   g_free(p_ctx);
+}
+
+/* Continuation for _grid_select_gate (below): applies the deferred
+ * navigator.current change once Save/Discard/Cancel resolves. */
 static gboolean
 _proceed_grid_select(gpointer p_data) {
-   _GridSelectCtx *p_ctx = (_GridSelectCtx *)p_data;
-   if (p_ctx->p_win->p_nav != NULL) {
+   _FileCtx *p_ctx = (_FileCtx *)p_data;
+   if (p_ctx->p_win->p_nav != NULL && p_ctx->p_file != NULL) {
       navigator_set_current_file(p_ctx->p_win->p_nav, p_ctx->p_file);
    }
    return (G_SOURCE_REMOVE);
 }
 
-static void
-_grid_select_ctx_free(gpointer p_data) {
-   _GridSelectCtx *p_ctx = (_GridSelectCtx *)p_data;
-   g_object_unref(p_ctx->p_win);
-   g_object_unref(p_ctx->p_file);
-   g_free(p_ctx);
+/* TRUE iff p_file still lives in the folder p_win navigates right now. The
+ * single-file counterpart of ggaze_window_delete_targets_still_current: a
+ * captured target must not be acted on after a single-instance open / drop
+ * replaced the folder while the prompt was pending. */
+static gboolean
+_target_still_in_folder(GgazeWindow *p_win, GFile *p_file) {
+   if (p_win->p_nav == NULL || p_file == NULL) {
+      return (FALSE);
+   }
+   GFile   *p_dir    = navigator_get_dir(p_win->p_nav);
+   GFile   *p_parent = g_file_get_parent(p_file);
+   gboolean b_ok =
+      (p_dir != NULL && p_parent != NULL && g_file_equal(p_dir, p_parent));
+   g_clear_object(&p_parent);
+   return (b_ok);
 }
 #if GGAZE_HAVE_GEGL
 /* Split p_base ("IMG_0001.jpg") into a stem ("IMG_0001") and a saver-
@@ -307,24 +370,32 @@ _enhance_dest_for(GFile *p_file) {
    return (p_out);
 }
 
+/* TRUE iff there is actually an enhance preview to export right now. Split out
+ * of _enhance_do_save so its callers can tell "nothing to save" apart from
+ * "the export failed": _enhance_do_save returns FALSE for both, and treating
+ * the first as a failure made the Save button silently do nothing AND cancel
+ * the user's action (tu0 review round 3, finding k). */
+static gboolean
+_enhance_can_save(GgazeWindow *p_win) {
+   return (p_win->p_nav != NULL && p_win->p_enhancer != NULL &&
+           p_win->u_enhance_mask != 0 &&
+           navigator_get_current(p_win->p_nav) != NULL);
+}
+
 /* Export the current image with the enabled-preset chain to a non-colliding
  * "<stem>-enhanced[-<n>].<ext>" in the same folder. Returns TRUE on success.
  * The original file is never touched: enhancer_export_chain reads it
  * (enhancer_load) and writes only to the freshly computed destination. */
 static gboolean
 _enhance_do_save(GgazeWindow *p_win) {
-   if (p_win->p_nav == NULL || p_win->p_enhancer == NULL ||
-       p_win->u_enhance_mask == 0) {
+   if (!_enhance_can_save(p_win)) {
       return (FALSE);
    }
-   GFile *p_file = navigator_get_current(p_win->p_nav);
-   if (p_file == NULL) {
-      return (FALSE);
-   }
-   GFile      *p_out = _enhance_dest_for(p_file);
-   GError     *p_err = NULL;
-   GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
-   gboolean    b_ok  = FALSE;
+   GFile      *p_file = navigator_get_current(p_win->p_nav);
+   GFile      *p_out  = _enhance_dest_for(p_file);
+   GError     *p_err  = NULL;
+   GeglBuffer *p_buf  = enhancer_load(p_file, &p_err);
+   gboolean    b_ok   = FALSE;
    if (p_buf != NULL) {
       const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
       b_ok = enhancer_export_chain(p_win->p_enhancer, p_buf, p_presets,
@@ -338,21 +409,74 @@ _enhance_do_save(GgazeWindow *p_win) {
 typedef struct {
    GgazeWindow *p_win; /* owned ref: outlives the async dialog (mirrors
                         * _MoveIdxCtx/_OpenCtx/_DeleteCtx's own convention) */
-   GSourceFunc    fn;
-   gpointer       data;
-   GDestroyNotify fn_free_data; /* releases data on EVERY exit path */
+   _Request t_req;     /* the gated request; see _Request for ownership */
 } _SaveCtx;
 
+/* Hand the parked request (if any) back to the gate now that the prompt is
+ * gone. b_proceed carries the answer: Save or Discard RESOLVED the preview, so
+ * the parked request is simply retried through _maybe_save_then and -- the
+ * mask now being clear -- runs straight away. Cancel (and a failed Save) means
+ * "stay on this image, keep the preview"; running the parked request anyway
+ * would do precisely what the user just refused, so it is dropped instead, with
+ * a status line so the intent does not vanish unsignalled.
+ *
+ * Retrying through the gate rather than calling the continuation directly is
+ * what keeps this loop-free: the retry either runs immediately (mask clear) or
+ * opens ONE fresh prompt that now owns the request as its own continuation, so
+ * nothing can be parked twice. */
+static void
+_save_prompt_flush(GgazeWindow *p_win, gboolean b_proceed) {
+   _Request *p_req = p_win->p_pending;
+   p_win->p_pending =
+      NULL; /* clear first: the retry below may park a new one */
+   if (p_req == NULL) {
+      return;
+   }
+   if (b_proceed) {
+      _maybe_save_then(p_win, p_req->fn, p_req->data, p_req->fn_free);
+   } else {
+      _request_finish(p_req, FALSE);
+      _show_status(p_win, "Queued request dropped");
+   }
+   g_free(p_req);
+}
+
 /* Single exit point for the dialog callback: optionally run the continuation
- * (b_proceed), then release the continuation's data and the window ref this
- * ctx holds. Ordering matters -- fn still needs data and the window, so both
- * are released only afterwards. */
+ * (b_proceed), release the continuation's data, then let whatever was parked
+ * behind this prompt have its turn. Ordering matters -- fn still needs data
+ * and the window, and the flush needs the window too, so the ctx's window ref
+ * is dropped last. */
 static void
 _save_ctx_finish(_SaveCtx *p_ctx, gboolean b_proceed) {
-   _run_then_free(b_proceed ? p_ctx->fn : NULL, p_ctx->data,
-                  p_ctx->fn_free_data);
-   g_object_unref(p_ctx->p_win);
+   GgazeWindow *p_win = p_ctx->p_win; /* borrowed until the unref below */
+   _request_finish(&p_ctx->t_req, b_proceed);
    g_free(p_ctx);
+   _save_prompt_flush(p_win, b_proceed);
+   g_object_unref(p_win);
+}
+
+/* The Save button. Returns TRUE iff the user's original action may proceed.
+ *
+ * "Nothing to save" is NOT a failure: the preview can legitimately be gone by
+ * the time the prompt is answered (the slideshow timer and the folder's
+ * GFileMonitor both run behind a modal dialog, and either can clear the mask),
+ * and there is then nothing left to protect. Reporting it and proceeding is
+ * the honest outcome; the old code returned FALSE here, which silently wrote
+ * nothing, showed nothing, and cancelled the user's action as well (tu0 review
+ * round 3, finding k).
+ *
+ * A real export failure (read-only folder, full disk, unreadable original)
+ * does return FALSE: it must not be silently downgraded to Discard -- the mask
+ * and preview stay so the user can retry, and the window stays alive so
+ * _enhance_save_report's error message is readable rather than painted onto a
+ * window the continuation was about to close (round 2, finding a). */
+static gboolean
+_save_dialog_save(GgazeWindow *p_win) {
+   if (!_enhance_can_save(p_win)) {
+      _show_status(p_win, "Nothing to save \u2014 the preview is gone");
+      return (TRUE);
+   }
+   return (_enhance_do_save(p_win));
 }
 
 /* Alert-dialog response: 0=Cancel, 1=Discard, 2=Save. */
@@ -371,17 +495,11 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
       _save_ctx_finish(p_ctx, FALSE);
       return;
    }
-   /* Save: proceed ONLY if the export actually succeeded. A failed export
-    * (read-only folder, full disk, unreadable original, ...) must not be
-    * silently downgraded to Discard -- keep the mask and the preview so the
-    * user can retry or pick another destination, and keep the window alive so
-    * _enhance_save_report's error message is readable rather than painted
-    * onto a window the continuation is about to close (round 2, finding a). */
-   if (i_btn == 2 && !_enhance_do_save(p_win)) {
+   if (i_btn == 2 && !_save_dialog_save(p_win)) { /* Save, but it failed */
       _save_ctx_finish(p_ctx, FALSE);
       return;
    }
-   if (i_btn == 1 || i_btn == 2) { /* Discard, or a successful Save */
+   if (i_btn == 1 || i_btn == 2) { /* Discard, or a Save that may proceed */
       _enhance_discard(p_win);
       _save_ctx_finish(p_ctx, TRUE);
       return;
@@ -391,11 +509,10 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
 }
 
 /* Build and show the modal Save/Discard/Cancel prompt for p_win, handing the
- * continuation over to _save_dialog_cb. Split out of _maybe_save_then to keep
- * both under the ~30-line convention. */
+ * request over to _save_dialog_cb. Split out of _maybe_save_then to keep both
+ * under the ~30-line convention. */
 static void
-_save_prompt_show(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
-                  GDestroyNotify fn_free_data) {
+_save_prompt_show(GgazeWindow *p_win, const _Request *p_req) {
    GtkAlertDialog *p_dlg =
       gtk_alert_dialog_new("Save the enhanced copy before leaving this image?");
    static const char *const c_btns[] = {"Cancel", "Discard", "Save", NULL};
@@ -405,12 +522,34 @@ _save_prompt_show(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
    gtk_alert_dialog_set_modal(p_dlg, TRUE);
    _SaveCtx *p_ctx      = g_new(_SaveCtx, 1);
    p_ctx->p_win         = (GgazeWindow *)g_object_ref(p_win);
-   p_ctx->fn            = fn;
-   p_ctx->data          = data;
-   p_ctx->fn_free_data  = fn_free_data;
+   p_ctx->t_req         = *p_req;
    p_win->b_save_prompt = TRUE;
    gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), NULL, _save_dialog_cb,
                            p_ctx);
+}
+
+/* Park p_req until the outstanding prompt is answered. Exactly one slot, and
+ * the newest request wins: a user who hits Alt+F4 five times is asking for one
+ * quit, not five, and the alternative (an unbounded queue) would replay a
+ * backlog of actions the user can no longer see the reason for. The request it
+ * replaces is released, never run.
+ *
+ * The status line matters as much as the parking: the requests that get here
+ * are exactly the ones the modal grab does NOT swallow -- a single-instance
+ * `ggaze other.jpg` arriving over D-Bus, Alt+F4, a compositor close -- so
+ * without it the user's second request would appear to have been ignored
+ * (round 3, finding i). p_req->data needs no ref of its own: the window is
+ * kept alive by the outstanding prompt's _SaveCtx, and _save_ctx_finish
+ * flushes this slot before releasing that ref. */
+static void
+_save_prompt_queue(GgazeWindow *p_win, const _Request *p_req) {
+   if (p_win->p_pending != NULL) {
+      _request_finish(p_win->p_pending, FALSE);
+      g_free(p_win->p_pending);
+   }
+   p_win->p_pending  = g_new(_Request, 1);
+   *p_win->p_pending = *p_req;
+   _show_status(p_win, "Answer the Save/Discard/Cancel prompt first");
 }
 
 /* If an enhance preview is active (unsaved), ask Save / Discard / Cancel
@@ -418,26 +557,29 @@ _save_prompt_show(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
  *
  * At most ONE prompt is ever outstanding per window. The modal grab swallows
  * further input-driven triggers, but a native close (Alt+F4 / the WM close
- * button) is not an input event and reaches "close-request" regardless: three
- * of those used to stack three live dialogs, and answering Save on each wrote
- * three separate "-enhanced" copies and fired the continuation three times
- * (round 2, finding d). While a prompt is up, a new request is dropped (its
- * data still released) -- the pending prompt's own answer decides for all of
- * them, which is what the user sees on screen. */
+ * button) is not an input event, and a single-instance re-activation arrives
+ * over D-Bus: three Alt+F4s used to stack three live dialogs, and answering
+ * Save on each wrote three separate "-enhanced" copies and fired the
+ * continuation three times (round 2, finding d).
+ *
+ * The one-prompt guard is therefore checked FIRST, ahead of the "nothing is
+ * dirty" fast path. Checking it second let a request slip straight through to
+ * its continuation the moment something cleared the mask under a live dialog
+ * -- two actions out of one visible prompt, which is the very thing the guard
+ * exists to prevent (round 3, finding j). */
 static void
 _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
                  GDestroyNotify fn_free_data) {
-   if (p_win->u_enhance_mask == 0 || p_win->p_enhancer == NULL) {
-      _run_then_free(fn, data, fn_free_data);
-      return;
-   }
+   _Request t_req = {fn, data, fn_free_data};
    if (p_win->b_save_prompt) {
-      if (fn_free_data != NULL) {
-         fn_free_data(data);
-      }
+      _save_prompt_queue(p_win, &t_req);
       return;
    }
-   _save_prompt_show(p_win, fn, data, fn_free_data);
+   if (p_win->u_enhance_mask == 0 || p_win->p_enhancer == NULL) {
+      _request_finish(&t_req, TRUE);
+      return;
+   }
+   _save_prompt_show(p_win, &t_req);
 }
 
 #else /* !GGAZE_HAVE_GEGL */
@@ -445,7 +587,8 @@ static void
 _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
                  GDestroyNotify fn_free_data) {
    (void)p_win;
-   _run_then_free(fn, data, fn_free_data);
+   _Request t_req = {fn, data, fn_free_data};
+   _request_finish(&t_req, TRUE);
 }
 #endif
 
@@ -478,10 +621,8 @@ _grid_select_gate(GgazeGrid *p_grid, GFile *p_file, gpointer p_data) {
    if (p_cur != NULL && g_file_equal(p_cur, p_file)) {
       return (FALSE); /* already current: nothing to gate */
    }
-   _GridSelectCtx *p_ctx = g_new(_GridSelectCtx, 1);
-   p_ctx->p_win          = (GgazeWindow *)g_object_ref(p_win);
-   p_ctx->p_file         = (GFile *)g_object_ref(p_file);
-   _maybe_save_then(p_win, _proceed_grid_select, p_ctx, _grid_select_ctx_free);
+   _maybe_save_then(p_win, _proceed_grid_select, _file_ctx_new(p_win, p_file),
+                    _file_ctx_free);
    return (FALSE);
 }
 
@@ -589,19 +730,29 @@ _action_open(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 
 /* --- M7: trash / delete / undo / view toggle / resize ------------------- */
 
+/* Bin p_target (the file `d` was pressed on, captured then -- NOT a fresh read
+ * of navigator.current, see _FileCtx) and advance past it. The cursor is only
+ * advanced when the binned file really was the current one: after a prompt,
+ * current may already have moved on by itself, and advancing again would skip
+ * an image the user never looked at. */
 static void
-_do_trash_now(GgazeWindow *p_win) {
-   if (p_win->p_nav == NULL || p_win->p_trash == NULL) {
+_do_trash_now(GgazeWindow *p_win, GFile *p_target) {
+   if (p_win->p_nav == NULL || p_win->p_trash == NULL || p_target == NULL) {
       return;
    }
-   GFile *p_cur = navigator_get_current(p_win->p_nav);
-   if (p_cur == NULL) {
+   if (!_target_still_in_folder(p_win, p_target)) {
+      g_warning("ggaze: trash refused \u2014 the folder was replaced while the "
+                "Save/Discard/Cancel prompt was pending; nothing trashed.");
       return;
    }
-   GError *p_err = NULL;
-   if (trash_bin(p_win->p_trash, p_cur, &p_err)) {
-      navigator_mark_removed(p_win->p_nav, p_cur);  /* dim; emits changed */
-      navigator_next(p_win->p_nav);                 /* advance; emits changed */
+   GFile   *p_cur         = navigator_get_current(p_win->p_nav);
+   gboolean b_was_current = (p_cur != NULL && g_file_equal(p_cur, p_target));
+   GError  *p_err         = NULL;
+   if (trash_bin(p_win->p_trash, p_target, &p_err)) {
+      navigator_mark_removed(p_win->p_nav, p_target); /* dim; emits changed */
+      if (b_was_current) {
+         navigator_next(p_win->p_nav); /* advance; emits changed */
+      }
       p_win->e_last_destructive = GGAZE_LAST_TRASH; /* for unified win.undo */
    } else {
       g_warning("ggaze: trash failed: %s", p_err->message);
@@ -611,19 +762,26 @@ _do_trash_now(GgazeWindow *p_win) {
 
 static gboolean
 _proceed_trash(gpointer p_data) {
-   _do_trash_now(GGAZE_WINDOW(p_data));
+   _FileCtx *p_ctx = (_FileCtx *)p_data;
+   _do_trash_now(p_ctx->p_win, p_ctx->p_file);
    return (G_SOURCE_REMOVE);
 }
 
 /* `d`: move the current file to ./Trash, then advance. If an unsaved (GEGL)
  * enhance preview is active on the current file, prompts Save/Discard/Cancel
  * first; trashing proceeds only after that resolves (immediately if nothing
- * is dirty). */
+ * is dirty). The victim is captured HERE, at key-press time, so answering the
+ * prompt can never bin whatever happens to be current by then (round 3,
+ * finding h). */
 static void
 _action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_trash, p_data, NULL);
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   GFile       *p_cur =
+      p_win->p_nav != NULL ? navigator_get_current(p_win->p_nav) : NULL;
+   _maybe_save_then(p_win, _proceed_trash, _file_ctx_new(p_win, p_cur),
+                    _file_ctx_free);
 }
 
 /* --- bulk-delete safety: captured, immutable target context -------------
@@ -669,9 +827,14 @@ ggaze_window_delete_targets_still_current(GgazeWindow *p_win, GFile *p_dir) {
    return (g_file_equal(p_now, p_dir));
 }
 
-/* Permanently delete each file in p_files (the captured or current set). */
+/* Permanently delete each file in p_files (the captured or marked set). A NULL
+ * list is a no-op rather than a bare cursor advance -- there is nothing to
+ * skip past when nothing was deleted. */
 static void
 _do_delete_files(GgazeWindow *p_win, GList *p_files) {
+   if (p_files == NULL) {
+      return;
+   }
    for (GList *p_it = p_files; p_it != NULL; p_it = p_it->next) {
       GFile  *p_f   = G_FILE(p_it->data);
       GError *p_err = NULL;
@@ -723,8 +886,13 @@ _delete_confirm_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    _delete_ctx_free(p_ctx);
 }
 
+/* p_target is the file `D` was pressed on, captured then (see _FileCtx); it is
+ * only consulted on the unmarked leg, where it replaces what used to be a
+ * fresh read of navigator.current at answer time (round 3, finding h). The
+ * marked legs already work off the navigator's mark set, which nothing but
+ * user input -- swallowed by the modal grab -- can change. */
 static void
-_do_delete_now(GgazeWindow *p_win) {
+_do_delete_now(GgazeWindow *p_win, GFile *p_target) {
    if (p_win->p_nav == NULL || p_win->p_trash == NULL) {
       return;
    }
@@ -756,11 +924,8 @@ _do_delete_now(GgazeWindow *p_win) {
    GList *p_files = NULL;
    if (u_marks == 1) {
       p_files = navigator_get_marks(p_win->p_nav);
-   } else {
-      GFile *p_cur = navigator_get_current(p_win->p_nav);
-      if (p_cur != NULL) {
-         p_files = g_list_prepend(NULL, g_object_ref(p_cur));
-      }
+   } else if (_target_still_in_folder(p_win, p_target)) {
+      p_files = g_list_prepend(NULL, g_object_ref(p_target));
    }
    _do_delete_files(p_win, p_files);
    g_list_free_full(p_files, (GDestroyNotify)g_object_unref);
@@ -768,19 +933,25 @@ _do_delete_now(GgazeWindow *p_win) {
 
 static gboolean
 _proceed_delete(gpointer p_data) {
-   _do_delete_now(GGAZE_WINDOW(p_data));
+   _FileCtx *p_ctx = (_FileCtx *)p_data;
+   _do_delete_now(p_ctx->p_win, p_ctx->p_file);
    return (G_SOURCE_REMOVE);
 }
 
 /* `D`: permanently delete (no trash), then advance -- see _do_delete_now for
  * the >1-mark confirm-dialog and capture-at-prompt-time safety. If an unsaved
  * (GEGL) enhance preview is active on the current file, prompts Save/Discard/
- * Cancel first; deletion proceeds only after that resolves. */
+ * Cancel first; deletion proceeds only after that resolves. Like `d`, the
+ * unmarked victim is captured HERE, at key-press time (round 3, finding h). */
 static void
 _action_delete(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_delete, p_data, NULL);
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   GFile       *p_cur =
+      p_win->p_nav != NULL ? navigator_get_current(p_win->p_nav) : NULL;
+   _maybe_save_then(p_win, _proceed_delete, _file_ctx_new(p_win, p_cur),
+                    _file_ctx_free);
 }
 
 /* Undo the last trash (restore from ./Trash to its original path). On
@@ -2683,20 +2854,19 @@ _move_report(GgazeWindow *p_win, const MoverDest *p_dest, gboolean b_ok,
    g_free(c_msg);
 }
 
-/* Move u_idx (0-based, in the configured destinations list order) — see
- * window.h. */
-gboolean
-ggaze_window_move_index(GgazeWindow *p_win, guint u_idx) {
-   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
-   if (p_win->p_nav == NULL || p_win->p_mover == NULL) {
+/* Move the target set p_files (borrowed; the caller frees) to destination
+ * u_idx. Split out of ggaze_window_move_index so the `m` popup can CAPTURE its
+ * targets when the row is clicked and still move exactly those once the
+ * Save/Discard/Cancel prompt resolves -- re-deriving them at answer time would
+ * move whatever the slideshow/GFileMonitor made current in the meantime
+ * (round 3, finding h; the same discipline as _FileCtx and _DeleteCtx). */
+static gboolean
+_move_captured(GgazeWindow *p_win, guint u_idx, GList *p_files) {
+   if (p_win->p_nav == NULL || p_win->p_mover == NULL || p_files == NULL) {
       return (FALSE);
    }
    const GPtrArray *p_dests = mover_get_dests(p_win->p_mover);
    if (p_dests == NULL || u_idx >= p_dests->len) {
-      return (FALSE);
-   }
-   GList *p_files = _move_targets(p_win);
-   if (p_files == NULL) {
       return (FALSE);
    }
    const MoverDest *p_dest = g_ptr_array_index((GPtrArray *)p_dests, u_idx);
@@ -2710,6 +2880,23 @@ ggaze_window_move_index(GgazeWindow *p_win, guint u_idx) {
    }
    _move_report(p_win, p_dest, b_ok, u_moved, u_n, p_err);
    g_clear_error(&p_err);
+   return (b_ok);
+}
+
+/* Move u_idx (0-based, in the configured destinations list order) — see
+ * window.h. Derives its targets right now (marks, else the current file),
+ * which is exactly right for a direct, synchronous call. */
+gboolean
+ggaze_window_move_index(GgazeWindow *p_win, guint u_idx) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   if (p_win->p_nav == NULL || p_win->p_mover == NULL) {
+      return (FALSE);
+   }
+   GList *p_files = _move_targets(p_win);
+   if (p_files == NULL) {
+      return (FALSE);
+   }
+   gboolean b_ok = _move_captured(p_win, u_idx, p_files);
    g_list_free_full(p_files, (GDestroyNotify)g_object_unref);
    return (b_ok);
 }
@@ -2732,20 +2919,21 @@ _move_closed_cb(GtkPopover *p_pop, gpointer p_data) {
    _move_destroy(GGAZE_WINDOW(p_data));
 }
 
-/* Captures the destination index for the Save/Discard/Cancel prompt's
- * continuation (ggaze_window_move_index itself stays a plain, synchronous,
- * directly-testable function -- see window.h -- so the dirty-preview gate
- * lives here, at the two real UI entry points (row click / hotkey), rather
- * than inside it. */
+/* Captures the destination index AND the target set for the Save/Discard/
+ * Cancel prompt's continuation (ggaze_window_move_index itself stays a plain,
+ * synchronous, directly-testable function -- see window.h -- so the
+ * dirty-preview gate lives here, at the two real UI entry points (row click /
+ * hotkey), rather than inside it. */
 typedef struct {
-   GgazeWindow *p_win; /* owned ref */
-   guint        u_idx;
+   GgazeWindow *p_win;   /* owned ref */
+   guint        u_idx;   /* destination index */
+   GList       *p_files; /* captured targets (owned, transfer full) */
 } _MoveIdxCtx;
 
 static gboolean
 _proceed_move_idx(gpointer p_data) {
    _MoveIdxCtx *p_ctx = (_MoveIdxCtx *)p_data;
-   ggaze_window_move_index(p_ctx->p_win, p_ctx->u_idx);
+   _move_captured(p_ctx->p_win, p_ctx->u_idx, p_ctx->p_files);
    return (G_SOURCE_REMOVE);
 }
 
@@ -2755,6 +2943,7 @@ _proceed_move_idx(gpointer p_data) {
 static void
 _move_idx_ctx_free(gpointer p_data) {
    _MoveIdxCtx *p_ctx = (_MoveIdxCtx *)p_data;
+   g_list_free_full(p_ctx->p_files, (GDestroyNotify)g_object_unref);
    g_object_unref(p_ctx->p_win);
    g_free(p_ctx);
 }
@@ -2762,13 +2951,16 @@ _move_idx_ctx_free(gpointer p_data) {
 /* Close the popover and move to destination u_idx, prompting Save/Discard/
  * Cancel first if an unsaved (GEGL) enhance preview is active on the current
  * file (docs/gegl.md, IMPLEMENTATION.md M9 "navigate/d/D/m/quit with
- * dirty"). Shared by the row click and hotkey paths below. */
+ * dirty"). Shared by the row click and hotkey paths below. The targets are
+ * captured here, when the row is clicked, not re-derived when the prompt is
+ * answered (round 3, finding h). */
 static void
 _move_go(GgazeWindow *p_win, guint u_idx) {
    _move_destroy(p_win);
    _MoveIdxCtx *p_ctx = g_new(_MoveIdxCtx, 1);
    p_ctx->p_win       = (GgazeWindow *)g_object_ref(p_win);
    p_ctx->u_idx       = u_idx;
+   p_ctx->p_files     = _move_targets(p_win);
    _maybe_save_then(p_win, _proceed_move_idx, p_ctx, _move_idx_ctx_free);
 }
 
@@ -3317,6 +3509,28 @@ _update_header(GgazeWindow *p_win) {
 
 /* --- GObject ------------------------------------------------------------- */
 
+#if GGAZE_HAVE_GEGL
+/* Tear down every piece of enhance state the window owns, so
+ * ggaze_window_dispose itself stays a flat list of one-liners (and under the
+ * 50-line convention). The enhancer engine itself is released later in
+ * dispose, after the widgets, because _enhance_destroy only unparents the
+ * popover. */
+static void
+_enhance_dispose(GgazeWindow *p_win) {
+   _enhance_destroy(p_win);
+   g_cancellable_cancel(p_win->p_enhance_cancel);
+   g_clear_object(&p_win->p_enhance_cancel);
+   g_clear_object(&p_win->p_enhance_tex);
+   g_clear_object(&p_win->p_enhance_file);
+   if (p_win->p_pending != NULL) {
+      /* A request parked behind a prompt that will now never be answered
+       * (the window is going away): release its data, never run it. */
+      _request_finish(p_win->p_pending, FALSE);
+      g_clear_pointer(&p_win->p_pending, g_free);
+   }
+}
+#endif
+
 static void
 ggaze_window_dispose(GObject *p_obj) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_obj);
@@ -3336,11 +3550,7 @@ ggaze_window_dispose(GObject *p_obj) {
    _run_script_destroy(p_win);
    _move_destroy(p_win);
 #if GGAZE_HAVE_GEGL
-   _enhance_destroy(p_win);
-   g_cancellable_cancel(p_win->p_enhance_cancel);
-   g_clear_object(&p_win->p_enhance_cancel);
-   g_clear_object(&p_win->p_enhance_tex);
-   g_clear_object(&p_win->p_enhance_file);
+   _enhance_dispose(p_win);
 #endif
    if (p_win->u_slideshow != 0) {
       g_source_remove(p_win->u_slideshow);
@@ -3424,6 +3634,7 @@ _init_enhance_state(GgazeWindow *p_win) {
    p_win->u_enhance_gen    = 0;
    p_win->b_hold_original  = FALSE;
    p_win->b_save_prompt    = FALSE;
+   p_win->p_pending        = NULL;
    p_win->p_enhance_file   = NULL;
 
    GtkEventController *p_space_kc = gtk_event_controller_key_new();
@@ -3773,6 +3984,14 @@ GtkStack *
 ggaze_window_get_stack(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
    return (GTK_STACK(p_win->p_stack));
+}
+
+void
+ggaze_window_clear_texture_cache(GgazeWindow *p_win) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   if (p_win->p_cache != NULL) {
+      texturecache_clear(p_win->p_cache);
+   }
 }
 
 GtkWidget *

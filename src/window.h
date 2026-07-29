@@ -36,6 +36,18 @@ void ggaze_window_open(GgazeWindow *p_win, GFile *p_arg);
  * gtk_window_get_child (which now returns the wrapping GtkOverlay). */
 GtkStack *ggaze_window_get_stack(GgazeWindow *p_win);
 
+/* --- INTERNAL: test hook --------------------------------------------------
+ *
+ * Drop every decoded texture from this window's bounded LRU, so the next load
+ * of the current file cannot be served synchronously from the cache and has to
+ * take the async (GTask) path instead. Nothing in the UI calls this; it exists
+ * because the cache-HIT and cache-MISS legs of the enhance-preview override
+ * reach the viewer through different callbacks, and the MISS leg (where the
+ * async result used to win a race against the preview) is otherwise
+ * unreachable from a test — the LRU holds 4 entries and evicting on demand is
+ * not something the window exposes any other way. */
+void ggaze_window_clear_texture_cache(GgazeWindow *p_win);
+
 /* The info-overlay label (`i`; also reused for transient status messages
  * like "Copied image"). Exposed so tests can assert its visibility/text
  * directly instead of reaching into private window state -- e.g. the gu0
