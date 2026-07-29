@@ -50,6 +50,18 @@ gsettings_env.set('GGAZE_SAMPLE_DIR',
 gsettings_env.set('GSETTINGS_BACKEND', 'memory')
 gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 
+# Shared test helpers (AGENTS.md: "Shared helpers go in tests/helpers/").
+# Grid-cell activation and alert-dialog driving are used by more than one
+# suite, so they live here instead of being copy-pasted per binary.
+test_helpers_inc = include_directories('helpers')
+test_helpers_lib = static_library(
+   'ggaze_test_helpers',
+   ['helpers/gtk_helpers.c', ggaze_conf_h],
+   include_directories : [inc, src_inc, test_helpers_inc],
+   dependencies : ggaze_deps,
+   install : false,
+)
+
 # --- unit track ---
 test_bootstrap = executable(
    'test_bootstrap',
@@ -399,9 +411,9 @@ test('grid_cancel', test_grid_cancel,
 test_grid_select_gate = executable(
    'test_grid_select_gate',
    ['test_grid_select_gate.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
-   link_with : ggaze_lib,
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
 test('grid_select_gate', test_grid_select_gate,
@@ -484,13 +496,16 @@ if gegl_dep.found()
    test_enhance_flow = executable(
       'test_enhance_flow',
       ['test_enhance_flow.c', ggaze_conf_h],
-      include_directories : [inc, src_inc],
+      include_directories : [inc, src_inc, test_helpers_inc],
       dependencies : ggaze_deps + [gegl_dep],
-      link_with : ggaze_lib,
+      link_with : [ggaze_lib, test_helpers_lib],
       install : false,
    )
+   # Drives the real Save/Discard/Cancel prompt, and its move-continuation
+   # subtest configures move destinations through GSettings, so it needs the
+   # compiled schema like test_move_undo/test_settings_ui do.
    test('enhance_flow', test_enhance_flow,
-      suite : 'integration', env : fixtures_env)
+      suite : 'integration', env : fixtures_env, depends : ggaze_gschemas)
 endif
 
 subdir('integration')
