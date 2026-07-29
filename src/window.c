@@ -95,7 +95,13 @@ struct _GgazeWindow {
                                     * cannot be aborted mid-flight once
                                     * started) */
    gboolean b_hold_original;       /* TRUE while Space is held (hold-compare) */
-   GFile   *p_enhance_file;        /* file the current mask/preview applies to
+   gboolean b_save_prompt;         /* TRUE while the modal Save/Discard/Cancel
+                                    * prompt is outstanding, so a trigger the
+                                    * modal grab cannot swallow (Alt+F4 / the
+                                    * WM close button reach "close-request"
+                                    * without being input events) cannot stack
+                                    * a second dialog on top of it */
+   GFile *p_enhance_file;          /* file the current mask/preview applies to
                                     * (NULL = none); lets nav_changed_cb tell
                                     * an actual navigation apart from a
                                     * same-file rescan (e.g. the folder's
@@ -145,11 +151,36 @@ static gboolean _space_released_cb(GtkEventControllerKey *p_c, guint u_keyval,
                                    gpointer p_data);
 #endif
 
+/* Ask (if needed) before running fn(data), see the two _maybe_save_then
+ * definitions below. _maybe_save_then OWNS data for the whole flow and
+ * releases it through fn_free_data on every exit path -- including the ones
+ * that never run fn (Cancel, dialog dismissal, a failed Save). Pass NULL for
+ * fn_free_data when data is not owned (e.g. the window itself). */
+static void _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
+                             GDestroyNotify fn_free_data);
+
+/* Run the continuation, then release its data. The single place that decides
+ * "fn has had its chance, the ctx is done" -- so no exit path can forget one
+ * of the two halves (tu0 review round 2, finding b: Cancel and the dismiss
+ * path used to return early and leak the heap ctx, each of which holds an
+ * owned window ref and therefore pinned an entire GgazeWindow). */
+static void
+_run_then_free(GSourceFunc fn, gpointer data, GDestroyNotify fn_free_data) {
+   if (fn != NULL) {
+      fn(data);
+   }
+   if (fn_free_data != NULL) {
+      fn_free_data(data);
+   }
+}
+
 /* Navigation continuations used by _maybe_save_then after the (GEGL) save
  * /discard dialog resolves. They are trivial wrappers over the public
  * navigation API and do not depend on GEGL, so they are always compiled
  * (the _action_prev/next/first/last handlers reference them regardless of
- * the GEGL build configuration). */
+ * the GEGL build configuration). Their data is the GgazeWindow itself (not
+ * owned by the continuation -- _SaveCtx holds its own ref for the dialog's
+ * lifetime), so they are registered with a NULL fn_free_data. */
 static gboolean
 _proceed_prev(gpointer d) {
    ggaze_window_prev(GGAZE_WINDOW(d));
@@ -172,7 +203,10 @@ _proceed_last(gpointer d) {
 }
 
 /* Continuation for _grid_select_gate (below): applies the deferred
- * navigator.current change once Save/Discard/Cancel resolves. */
+ * navigator.current change once Save/Discard/Cancel resolves. The ctx is
+ * freed by _maybe_save_then via _grid_select_ctx_free, never by the
+ * continuation itself, so the paths that never reach the continuation
+ * (Cancel/dismiss/failed Save) release it too. */
 typedef struct {
    GgazeWindow *p_win;  /* owned ref */
    GFile       *p_file; /* owned ref: file to select once resolved */
@@ -184,10 +218,15 @@ _proceed_grid_select(gpointer p_data) {
    if (p_ctx->p_win->p_nav != NULL) {
       navigator_set_current_file(p_ctx->p_win->p_nav, p_ctx->p_file);
    }
+   return (G_SOURCE_REMOVE);
+}
+
+static void
+_grid_select_ctx_free(gpointer p_data) {
+   _GridSelectCtx *p_ctx = (_GridSelectCtx *)p_data;
    g_object_unref(p_ctx->p_win);
    g_object_unref(p_ctx->p_file);
    g_free(p_ctx);
-   return (G_SOURCE_REMOVE);
 }
 #if GGAZE_HAVE_GEGL
 /* Split p_base ("IMG_0001.jpg") into a stem ("IMG_0001") and a saver-
@@ -299,9 +338,22 @@ _enhance_do_save(GgazeWindow *p_win) {
 typedef struct {
    GgazeWindow *p_win; /* owned ref: outlives the async dialog (mirrors
                         * _MoveIdxCtx/_OpenCtx/_DeleteCtx's own convention) */
-   GSourceFunc fn;
-   gpointer    data;
+   GSourceFunc    fn;
+   gpointer       data;
+   GDestroyNotify fn_free_data; /* releases data on EVERY exit path */
 } _SaveCtx;
+
+/* Single exit point for the dialog callback: optionally run the continuation
+ * (b_proceed), then release the continuation's data and the window ref this
+ * ctx holds. Ordering matters -- fn still needs data and the window, so both
+ * are released only afterwards. */
+static void
+_save_ctx_finish(_SaveCtx *p_ctx, gboolean b_proceed) {
+   _run_then_free(b_proceed ? p_ctx->fn : NULL, p_ctx->data,
+                  p_ctx->fn_free_data);
+   g_object_unref(p_ctx->p_win);
+   g_free(p_ctx);
+}
 
 /* Alert-dialog response: 0=Cancel, 1=Discard, 2=Save. */
 static void
@@ -312,35 +364,38 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
    gint         i_btn =
       gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(p_dlg), p_res, &p_err);
    g_object_unref(GTK_ALERT_DIALOG(p_dlg));
-   if (p_err != NULL) { /* dismissed / error -> treat as Cancel */
+   p_win->b_save_prompt = FALSE; /* this prompt is gone; a later trigger may
+                                  * open a fresh one (see _maybe_save_then) */
+   if (p_err != NULL) {          /* dismissed / error -> treat as Cancel */
       g_clear_error(&p_err);
-      g_object_unref(p_win);
-      g_free(p_ctx);
+      _save_ctx_finish(p_ctx, FALSE);
       return;
    }
-   if (i_btn == 2) { /* Save */
-      _enhance_do_save(p_win);
+   /* Save: proceed ONLY if the export actually succeeded. A failed export
+    * (read-only folder, full disk, unreadable original, ...) must not be
+    * silently downgraded to Discard -- keep the mask and the preview so the
+    * user can retry or pick another destination, and keep the window alive so
+    * _enhance_save_report's error message is readable rather than painted
+    * onto a window the continuation is about to close (round 2, finding a). */
+   if (i_btn == 2 && !_enhance_do_save(p_win)) {
+      _save_ctx_finish(p_ctx, FALSE);
+      return;
    }
-   if (i_btn == 1 || i_btn == 2) { /* Discard or Save: clear + proceed */
+   if (i_btn == 1 || i_btn == 2) { /* Discard, or a successful Save */
       _enhance_discard(p_win);
-      if (p_ctx->fn != NULL) {
-         p_ctx->fn(p_ctx->data);
-      }
-   } /* Cancel: keep the preview, do not navigate. */
-   g_object_unref(p_win);
-   g_free(p_ctx);
+      _save_ctx_finish(p_ctx, TRUE);
+      return;
+   }
+   _save_ctx_finish(p_ctx, FALSE); /* Cancel: keep the preview, do not
+                                    * proceed -- but still free the ctx */
 }
 
-/* If an enhance preview is active (unsaved), ask Save / Discard / Cancel
- * before proceeding with fn. If no preview, just run fn. */
+/* Build and show the modal Save/Discard/Cancel prompt for p_win, handing the
+ * continuation over to _save_dialog_cb. Split out of _maybe_save_then to keep
+ * both under the ~30-line convention. */
 static void
-_maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data) {
-   if (p_win->u_enhance_mask == 0 || p_win->p_enhancer == NULL) {
-      if (fn != NULL) {
-         fn(data);
-      }
-      return;
-   }
+_save_prompt_show(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
+                  GDestroyNotify fn_free_data) {
    GtkAlertDialog *p_dlg =
       gtk_alert_dialog_new("Save the enhanced copy before leaving this image?");
    static const char *const c_btns[] = {"Cancel", "Discard", "Save", NULL};
@@ -348,21 +403,49 @@ _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data) {
    gtk_alert_dialog_set_default_button(p_dlg, 2);
    gtk_alert_dialog_set_cancel_button(p_dlg, 0);
    gtk_alert_dialog_set_modal(p_dlg, TRUE);
-   _SaveCtx *p_ctx = g_new(_SaveCtx, 1);
-   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
-   p_ctx->fn       = fn;
-   p_ctx->data     = data;
+   _SaveCtx *p_ctx      = g_new(_SaveCtx, 1);
+   p_ctx->p_win         = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->fn            = fn;
+   p_ctx->data          = data;
+   p_ctx->fn_free_data  = fn_free_data;
+   p_win->b_save_prompt = TRUE;
    gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), NULL, _save_dialog_cb,
                            p_ctx);
 }
 
+/* If an enhance preview is active (unsaved), ask Save / Discard / Cancel
+ * before proceeding with fn. If no preview, just run fn.
+ *
+ * At most ONE prompt is ever outstanding per window. The modal grab swallows
+ * further input-driven triggers, but a native close (Alt+F4 / the WM close
+ * button) is not an input event and reaches "close-request" regardless: three
+ * of those used to stack three live dialogs, and answering Save on each wrote
+ * three separate "-enhanced" copies and fired the continuation three times
+ * (round 2, finding d). While a prompt is up, a new request is dropped (its
+ * data still released) -- the pending prompt's own answer decides for all of
+ * them, which is what the user sees on screen. */
+static void
+_maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
+                 GDestroyNotify fn_free_data) {
+   if (p_win->u_enhance_mask == 0 || p_win->p_enhancer == NULL) {
+      _run_then_free(fn, data, fn_free_data);
+      return;
+   }
+   if (p_win->b_save_prompt) {
+      if (fn_free_data != NULL) {
+         fn_free_data(data);
+      }
+      return;
+   }
+   _save_prompt_show(p_win, fn, data, fn_free_data);
+}
+
 #else /* !GGAZE_HAVE_GEGL */
 static void
-_maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data) {
+_maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
+                 GDestroyNotify fn_free_data) {
    (void)p_win;
-   if (fn != NULL) {
-      fn(data);
-   }
+   _run_then_free(fn, data, fn_free_data);
 }
 #endif
 
@@ -398,7 +481,7 @@ _grid_select_gate(GgazeGrid *p_grid, GFile *p_file, gpointer p_data) {
    _GridSelectCtx *p_ctx = g_new(_GridSelectCtx, 1);
    p_ctx->p_win          = (GgazeWindow *)g_object_ref(p_win);
    p_ctx->p_file         = (GFile *)g_object_ref(p_file);
-   _maybe_save_then(p_win, _proceed_grid_select, p_ctx);
+   _maybe_save_then(p_win, _proceed_grid_select, p_ctx, _grid_select_ctx_free);
    return (FALSE);
 }
 
@@ -408,28 +491,28 @@ static void
 _action_prev(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_prev, p_data);
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_prev, p_data, NULL);
 }
 
 static void
 _action_next(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_next, p_data);
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_next, p_data, NULL);
 }
 
 static void
 _action_first(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_first, p_data);
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_first, p_data, NULL);
 }
 
 static void
 _action_last(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_last, p_data);
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_last, p_data, NULL);
 }
 
 static gboolean
@@ -445,7 +528,7 @@ static void
 _action_quit(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_quit, p_data);
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_quit, p_data, NULL);
 }
 
 /* Native window close (WM "X" button, Alt+F4, etc.) -- GTK4 never routes
@@ -457,7 +540,12 @@ _action_quit(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * let _maybe_save_then's Save/Discard/Cancel prompt decide -- once it
  * resolves (Save or Discard clears the mask first), _proceed_quit's
  * gtk_window_close() re-emits "close-request", which this handler now sees
- * as clean and lets through. */
+ * as clean and lets through.
+ *
+ * Repeated closes while the prompt is up (Alt+F4 three times: not input
+ * events, so the modal grab does not swallow them) keep returning STOP but
+ * do NOT open further dialogs -- _maybe_save_then drops a request while one
+ * is outstanding (round 2, finding d). */
 static gboolean
 _on_close_request(GtkWindow *p_gtk_win, gpointer p_data) {
    (void)p_gtk_win;
@@ -465,7 +553,7 @@ _on_close_request(GtkWindow *p_gtk_win, gpointer p_data) {
    if (!ggaze_window_enhance_is_dirty(p_win)) {
       return (GDK_EVENT_PROPAGATE); /* nothing dirty: allow the close */
    }
-   _maybe_save_then(p_win, _proceed_quit, p_win);
+   _maybe_save_then(p_win, _proceed_quit, p_win, NULL);
    return (GDK_EVENT_STOP); /* block until the prompt resolves */
 }
 
@@ -535,7 +623,7 @@ static void
 _action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_trash, p_data);
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_trash, p_data, NULL);
 }
 
 /* --- bulk-delete safety: captured, immutable target context -------------
@@ -692,7 +780,7 @@ static void
 _action_delete(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_delete, p_data);
+   _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_delete, p_data, NULL);
 }
 
 /* Undo the last trash (restore from ./Trash to its original path). On
@@ -776,13 +864,21 @@ _action_toggle_view(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
    if (g_strcmp0(c_cur, "large") == 0) {
       gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "grid");
-   } else {
-      /* Leaving the grid: sync navigator.current to the highlighted cell so
-       * the large view opens the selected image, then load it. */
-      if (p_win->p_grid != NULL) {
-         ggaze_grid_sync_current(p_win->p_grid);
-      }
-      gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+      return;
+   }
+   /* Leaving the grid: sync navigator.current to the highlighted cell so the
+    * large view opens the selected image. Since tu0 that sync goes through
+    * _grid_select_gate, and its return value is meaningful (round 2, finding
+    * c): TRUE means current really moved, in which case nav_changed_cb has
+    * ALREADY run _load_current and repeating it here would only be a
+    * redundant second paint. FALSE means either a no-op (the highlighted cell
+    * is already current) or that a dirty enhance preview deferred the change
+    * behind the Save/Discard/Cancel prompt -- then nothing loaded it, so load
+    * it here; _show_texture keeps an unanswered preview on screen. */
+   gboolean b_moved =
+      p_win->p_grid != NULL && ggaze_grid_sync_current(p_win->p_grid);
+   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+   if (!b_moved) {
       _load_current(p_win);
    }
 }
@@ -1989,9 +2085,9 @@ _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data) {
       return;
    }
    if (i_dir >= 0) {
-      _maybe_save_then(p_win, _proceed_next, p_win);
+      _maybe_save_then(p_win, _proceed_next, p_win, NULL);
    } else {
-      _maybe_save_then(p_win, _proceed_prev, p_win);
+      _maybe_save_then(p_win, _proceed_prev, p_win, NULL);
    }
 }
 
@@ -2650,9 +2746,17 @@ static gboolean
 _proceed_move_idx(gpointer p_data) {
    _MoveIdxCtx *p_ctx = (_MoveIdxCtx *)p_data;
    ggaze_window_move_index(p_ctx->p_win, p_ctx->u_idx);
+   return (G_SOURCE_REMOVE);
+}
+
+/* _maybe_save_then owns the ctx and frees it through this on every exit path,
+ * so Cancel/dismiss/failed-Save no longer leak the window ref it holds
+ * (round 2, finding b). */
+static void
+_move_idx_ctx_free(gpointer p_data) {
+   _MoveIdxCtx *p_ctx = (_MoveIdxCtx *)p_data;
    g_object_unref(p_ctx->p_win);
    g_free(p_ctx);
-   return (G_SOURCE_REMOVE);
 }
 
 /* Close the popover and move to destination u_idx, prompting Save/Discard/
@@ -2665,7 +2769,7 @@ _move_go(GgazeWindow *p_win, guint u_idx) {
    _MoveIdxCtx *p_ctx = g_new(_MoveIdxCtx, 1);
    p_ctx->p_win       = (GgazeWindow *)g_object_ref(p_win);
    p_ctx->u_idx       = u_idx;
-   _maybe_save_then(p_win, _proceed_move_idx, p_ctx);
+   _maybe_save_then(p_win, _proceed_move_idx, p_ctx, _move_idx_ctx_free);
 }
 
 /* Row click (mouse): move to that destination, then close the popover. */
@@ -2915,26 +3019,37 @@ nav_changed_cb(Navigator *p_nav, gpointer p_data) {
  * navigator.current now is. The cell's own selection was already routed
  * through _grid_select_gate before this runs, so current may deliberately
  * NOT have moved (a dirty enhance preview put the change behind the
- * Save/Discard/Cancel prompt). In that case _load_current would repaint the
- * unmodified original even though the preview is still active and `s` would
- * still export it -- so put the cached preview texture back on screen and
- * keep what the user sees consistent with the dirty state until they answer
- * the prompt. */
+ * Save/Discard/Cancel prompt) -- keeping the still-active preview on screen
+ * in that case is _show_texture's job, not this one's (see there). */
 static void
 _on_grid_activate(GgazeGrid *p_grid, gpointer p_data) {
    (void)p_grid;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
    _load_current(p_win);
-#if GGAZE_HAVE_GEGL
-   if (p_win->u_enhance_mask != 0 && p_win->p_enhance_tex != NULL &&
-       !p_win->b_hold_original) {
-      _show_texture(p_win, p_win->p_enhance_tex);
-   }
-#endif
 }
 
 /* --- load current into the viewer ---------------------------------------- */
+
+#if GGAZE_HAVE_GEGL
+/* Which texture must actually be on screen, given p_tex as the "natural"
+ * candidate the caller computed. An active, unanswered enhance preview wins
+ * over any original-image texture: while the mask is set, the preview IS what
+ * `s` would export, so showing the plain original underneath it would lie
+ * about the window's state.
+ *
+ * hold-Space deliberately bypasses this (b_hold_original) -- that flag is
+ * exactly the user asking to see the original -- and so does an empty
+ * mask/absent preview texture, which is the overwhelmingly common case. */
+static GdkTexture *
+_preview_override(GgazeWindow *p_win, GdkTexture *p_tex) {
+   if (p_win->u_enhance_mask == 0 || p_win->p_enhance_tex == NULL ||
+       p_win->b_hold_original) {
+      return (p_tex);
+   }
+   return (p_win->p_enhance_tex);
+}
+#endif
 
 static void
 _show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
@@ -2942,7 +3057,19 @@ _show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
     * The stack is owned by the caller: file-open / toggle / grid-activate set
     * "large" themselves before loading, and directory-open sets "grid".
     * Forcing large here would yank a just-opened folder back out of the grid
-    * view the moment its first image finishes loading. */
+    * view the moment its first image finishes loading.
+    *
+    * Every path that puts an image on screen funnels through here -- cache
+    * hit, progressive partial, full async result, hold-Space, the finished
+    * enhance itself -- which is why the enhance-preview override lives here
+    * rather than at any single call site (tu0 review round 2, findings c/e).
+    * Point-patching _on_grid_activate was not enough: _load_current only
+    * paints synchronously on a texturecache HIT, so on a miss the async
+    * _load_finish_cb landed after the restore and the plain original won the
+    * race; and the view toggle (`t`, `t`) never had the patch at all. */
+#if GGAZE_HAVE_GEGL
+   p_tex = _preview_override(p_win, p_tex);
+#endif
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
 }
 
@@ -3002,8 +3129,9 @@ _on_progress_main(gpointer p_data) {
     * current; the full result replaces it in _load_finish_cb. */
    GFile *p_cur = navigator_get_current(p_pi->p_win->p_nav);
    if (p_cur != NULL && g_file_equal(p_cur, p_pi->p_file)) {
-      ggaze_viewer_set_texture(GGAZE_VIEWER(p_pi->p_win->p_viewer),
-                               p_pi->p_tex);
+      /* Through _show_texture, not straight to the viewer, so a partial of
+       * the original cannot flash over an active enhance preview either. */
+      _show_texture(p_pi->p_win, p_pi->p_tex);
    }
    g_object_unref(p_pi->p_tex);
    g_object_unref(p_pi->p_file);
@@ -3295,6 +3423,7 @@ _init_enhance_state(GgazeWindow *p_win) {
    p_win->p_enhance_cancel = g_cancellable_new();
    p_win->u_enhance_gen    = 0;
    p_win->b_hold_original  = FALSE;
+   p_win->b_save_prompt    = FALSE;
    p_win->p_enhance_file   = NULL;
 
    GtkEventController *p_space_kc = gtk_event_controller_key_new();
@@ -3578,10 +3707,16 @@ static gboolean
 _proceed_open(gpointer p_data) {
    _OpenCtx *p_ctx = (_OpenCtx *)p_data;
    _open_now(p_ctx->p_win, p_ctx->p_arg);
+   return (G_SOURCE_REMOVE);
+}
+
+/* See _move_idx_ctx_free: _maybe_save_then owns the ctx on every exit path. */
+static void
+_open_ctx_free(gpointer p_data) {
+   _OpenCtx *p_ctx = (_OpenCtx *)p_data;
    g_object_unref(p_ctx->p_win);
    g_object_unref(p_ctx->p_arg);
    g_free(p_ctx);
-   return (G_SOURCE_REMOVE);
 }
 
 /* Open p_arg (File->Open dialog, drag-and-drop, or single-instance
@@ -3599,7 +3734,7 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    _OpenCtx *p_ctx = g_new(_OpenCtx, 1);
    p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
    p_ctx->p_arg    = (GFile *)g_object_ref(p_arg);
-   _maybe_save_then(p_win, _proceed_open, p_ctx);
+   _maybe_save_then(p_win, _proceed_open, p_ctx, _open_ctx_free);
 }
 
 void
