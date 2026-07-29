@@ -26,3 +26,12 @@ leak:FcConfigSubstituteWithPat
 leak:fc_thread_func
 leak:pango_fc_font_map_load_fontset
 leak:gdk_popup_layout_new
+# GTK4's Wayland backend leaks one wl_proxy (96 bytes) per surface it creates:
+# gdk_wayland_surface_constructed -> wl_proxy_marshal_flags -> proxy_create.
+# It only becomes visible once a presented toplevel is actually DESTROYED --
+# which is new with tu0's round-2 tests: before them this suite never answered
+# its Save/Discard/Cancel dialogs, so the proxies stayed reachable and LSan
+# said nothing. Third-party (libwayland-client via GTK); the CI lane runs
+# under xvfb, i.e. the X11 backend, where this allocation does not exist.
+leak:proxy_create
+leak:gdk_wayland_surface_constructed

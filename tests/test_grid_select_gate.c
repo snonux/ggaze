@@ -39,6 +39,7 @@
  *:*/
 
 #include "gridview.h"
+#include "gtk_helpers.h"
 #include "navigator.h"
 #include "thumbnail.h"
 
@@ -87,14 +88,6 @@ cleanup_temp_dir(char *c_dir) {
    g_free(c_dir);
 }
 
-static void
-drain_main(guint u_ms) {
-   for (guint u = 0; u < u_ms; u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-}
-
 static char *
 make_folder(void) {
    GError *p_err = NULL;
@@ -135,7 +128,7 @@ fake_gate(GgazeGrid *p_grid, GFile *p_file, gpointer p_data) {
  * The window is deliberately NEVER presented: cells exist as soon as the
  * grid syncs from the navigator (same assumption tests/test_grid_cull.c
  * relies on), and realizing a toplevel here would only buy geometry we do
- * not need -- see activate_cell below. */
+ * not need -- see ggtest_activate_cell (tests/helpers/gtk_helpers.h). */
 static void
 build_grid(char *c_dir, GtkWindow **pp_win, Navigator **pp_nav,
            Thumbnail **pp_thumb, GgazeGrid **pp_grid) {
@@ -147,41 +140,8 @@ build_grid(char *c_dir, GtkWindow **pp_win, Navigator **pp_nav,
 
    *pp_win = GTK_WINDOW(gtk_window_new());
    gtk_window_set_child(*pp_win, GTK_WIDGET(*pp_grid));
-   drain_main(100);
+   ggtest_drain_main(100);
    g_assert_cmpuint(ggaze_grid_get_count(*pp_grid), ==, 3);
-}
-
-/* Depth-first search for the GtkFlowBox GgazeGrid keeps inside its
- * GtkScrolledWindow. The grid does not expose it, and these tests need it in
- * order to emit "child-activated" (gridview.c's double-click/Enter selection
- * path -- exactly the "click a different thumbnail" repro from the review)
- * directly. That path needs no laid-out geometry, unlike
- * ggaze_grid_move_cursor, so nothing here has to present a real toplevel. */
-static GtkFlowBox *
-find_flow_box(GtkWidget *p_w) {
-   if (GTK_IS_FLOW_BOX(p_w)) {
-      return (GTK_FLOW_BOX(p_w));
-   }
-   for (GtkWidget *p_c = gtk_widget_get_first_child(p_w); p_c != NULL;
-        p_c            = gtk_widget_get_next_sibling(p_c)) {
-      GtkFlowBox *p_f = find_flow_box(p_c);
-      if (p_f != NULL) {
-         return (p_f);
-      }
-   }
-   return (NULL);
-}
-
-/* Activate cell i_idx exactly as a double-click / Enter on it would: the
- * flowbox emits "child-activated", which gridview.c's _on_child_activated
- * handles by routing the cell's file through the installed select gate. */
-static void
-activate_cell(GgazeGrid *p_grid, gint i_idx) {
-   GtkFlowBox *p_flow = find_flow_box(GTK_WIDGET(p_grid));
-   g_assert_nonnull(p_flow);
-   GtkFlowBoxChild *p_child = gtk_flow_box_get_child_at_index(p_flow, i_idx);
-   g_assert_nonnull(p_child);
-   g_signal_emit_by_name(p_flow, "child-activated", p_child);
 }
 
 /* --- subtests --------------------------------------------------------------
@@ -212,8 +172,8 @@ test_activate_respects_refusing_gate(void) {
    fg.b_allow  = FALSE;
    ggaze_grid_set_select_func(p_grid, fake_gate, &fg);
 
-   activate_cell(p_grid, 2); /* last cell: never the current one */
-   drain_main(50);
+   ggtest_activate_cell(p_grid, 2); /* last cell: never the current one */
+   ggtest_drain_main(50);
 
    g_assert_cmpuint(fg.u_calls, >, 0); /* the gate WAS asked ... */
    g_assert_nonnull(fg.p_last);
@@ -229,7 +189,7 @@ test_activate_respects_refusing_gate(void) {
    gtk_window_destroy(p_win);
    thumbnail_delete(p_thumb);
    navigator_delete(p_nav);
-   drain_main(100);
+   ggtest_drain_main(100);
    cleanup_temp_dir(c_dir);
 }
 
@@ -253,8 +213,8 @@ test_activate_allows_when_gate_allows(void) {
    fg.b_allow  = TRUE;
    ggaze_grid_set_select_func(p_grid, fake_gate, &fg);
 
-   activate_cell(p_grid, 2);
-   drain_main(50);
+   ggtest_activate_cell(p_grid, 2);
+   ggtest_drain_main(50);
 
    g_assert_cmpuint(fg.u_calls, >, 0);
    GFile *p_after = navigator_get_current(p_nav);
@@ -267,7 +227,77 @@ test_activate_allows_when_gate_allows(void) {
    gtk_window_destroy(p_win);
    thumbnail_delete(p_thumb);
    navigator_delete(p_nav);
-   drain_main(100);
+   ggtest_drain_main(100);
+   cleanup_temp_dir(c_dir);
+}
+
+/* No gate installed at all (the default, and what every non-GgazeWindow
+ * embedder gets): _grid_select() must fall back to calling
+ * navigator_set_current_file() itself. Untested until now (round 2's test-
+ * quality section), and the fallback is what keeps gridview.c usable
+ * standalone -- a typo there would silently make the grid inert rather than
+ * fail loudly. */
+static void
+test_activate_without_gate_moves_current(void) {
+   char      *c_dir = make_folder();
+   GtkWindow *p_win;
+   Navigator *p_nav;
+   Thumbnail *p_thumb;
+   GgazeGrid *p_grid;
+   build_grid(c_dir, &p_win, &p_nav, &p_thumb, &p_grid);
+
+   char *c_before = g_file_get_basename(navigator_get_current(p_nav));
+
+   ggtest_activate_cell(p_grid, 2); /* no ggaze_grid_set_select_func call */
+   ggtest_drain_main(50);
+
+   char *c_after = g_file_get_basename(navigator_get_current(p_nav));
+   g_assert_cmpstr(c_before, !=, c_after);
+   g_assert_cmpstr(c_after, ==, "small.png"); /* the cell actually asked for */
+
+   g_free(c_before);
+   g_free(c_after);
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   ggtest_drain_main(100);
+   cleanup_temp_dir(c_dir);
+}
+
+/* Clearing the gate again (fn == NULL) must restore that fallback rather than
+ * leave the grid pointing at a stale callback -- the shape window.c relies on
+ * when a grid outlives the window that installed a gate on it. */
+static void
+test_clearing_gate_restores_fallback(void) {
+   char      *c_dir = make_folder();
+   GtkWindow *p_win;
+   Navigator *p_nav;
+   Thumbnail *p_thumb;
+   GgazeGrid *p_grid;
+   build_grid(c_dir, &p_win, &p_nav, &p_thumb, &p_grid);
+
+   FakeGate fg = {0};
+   fg.p_nav    = p_nav;
+   fg.b_allow  = FALSE;
+   ggaze_grid_set_select_func(p_grid, fake_gate, &fg);
+   ggaze_grid_set_select_func(p_grid, NULL, NULL); /* uninstall again */
+
+   char *c_before = g_file_get_basename(navigator_get_current(p_nav));
+   ggtest_activate_cell(p_grid, 2);
+   ggtest_drain_main(50);
+   char *c_after = g_file_get_basename(navigator_get_current(p_nav));
+
+   g_assert_cmpuint(fg.u_calls, ==, 0);    /* the removed gate stayed quiet */
+   g_assert_cmpstr(c_before, !=, c_after); /* ... and current moved anyway */
+
+   g_free(c_before);
+   g_free(c_after);
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   ggtest_drain_main(100);
    cleanup_temp_dir(c_dir);
 }
 
@@ -285,5 +315,9 @@ main(int i_argc, char **c_argv) {
                    test_activate_respects_refusing_gate);
    g_test_add_func("/grid_select_gate/activate_allows_when_gate_allows",
                    test_activate_allows_when_gate_allows);
+   g_test_add_func("/grid_select_gate/activate_without_gate_moves_current",
+                   test_activate_without_gate_moves_current);
+   g_test_add_func("/grid_select_gate/clearing_gate_restores_fallback",
+                   test_clearing_gate_restores_fallback);
    return (g_test_run());
 }
