@@ -28,6 +28,28 @@ G_DECLARE_FINAL_TYPE(GgazeGrid, ggaze_grid, GGAZE, GRID, GtkWidget)
 GtkWidget *ggaze_grid_new(Navigator *p_nav, Thumbnail *p_thumb, int i_size,
                           gboolean b_hide_trashed);
 
+/* Callback the grid calls instead of navigator_set_current_file() directly
+ * for every selection path (double-click/Enter, middle-click mark, j/k
+ * cursor move, toggle-to-large sync) -- see ggaze_grid_set_select_func. This
+ * lets a window-level gate (Save/Discard/Cancel over an unsaved GEGL
+ * enhance preview) run BEFORE the navigator's "changed" signal actually
+ * fires, instead of the window finding out only after the fact and having
+ * nothing left to prompt for (tu0 review round 2, issue 1). Must return TRUE
+ * iff navigator.current changed SYNCHRONOUSLY as a result, mirroring
+ * navigator_set_current_file's own contract; FALSE covers both "no-op" and
+ * "deferred behind an async prompt" (the change still applies once the
+ * prompt resolves). */
+typedef gboolean (*GgazeGridSelectFunc)(GgazeGrid *p_grid, GFile *p_file,
+                                        gpointer p_user_data);
+
+/* Install the select gate (call once, right after ggaze_grid_new). Every
+ * grid selection call site routes through fn when one is installed; falls
+ * back to calling navigator_set_current_file() directly when none is (so a
+ * grid built without a gate-aware owner still works, e.g. a future
+ * standalone test). */
+void ggaze_grid_set_select_func(GgazeGrid *p_grid, GgazeGridSelectFunc fn,
+                                gpointer p_user_data);
+
 void ggaze_grid_set_thumbnail_size(GgazeGrid *p_grid, int i_size);
 int  ggaze_grid_get_thumbnail_size(GgazeGrid *p_grid);
 void ggaze_grid_set_hide_trashed(GgazeGrid *p_grid, gboolean b_hide);

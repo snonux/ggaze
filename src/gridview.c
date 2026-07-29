@@ -24,16 +24,18 @@ typedef struct {
 static const char *CELL_DATA_KEY = "ggaze-cell-data";
 
 struct _GgazeGrid {
-   GtkWidget     parent_instance;
-   Navigator    *p_nav;
-   Thumbnail    *p_thumb;
-   GtkWidget    *p_flow;     /* GtkFlowBox */
-   GtkWidget    *p_scrolled; /* GtkScrolledWindow */
-   int           i_size;
-   gboolean      b_hide_trashed;
-   guint         u_nav_handler;
-   guint         u_last_count; /* navigator count at last full refresh */
-   GCancellable *p_cancel;     /* cancels pending thumbnails on dispose */
+   GtkWidget           parent_instance;
+   Navigator          *p_nav;
+   Thumbnail          *p_thumb;
+   GtkWidget          *p_flow;     /* GtkFlowBox */
+   GtkWidget          *p_scrolled; /* GtkScrolledWindow */
+   int                 i_size;
+   gboolean            b_hide_trashed;
+   guint               u_nav_handler;
+   guint               u_last_count; /* navigator count at last full refresh */
+   GCancellable       *p_cancel;     /* cancels pending thumbnails on dispose */
+   GgazeGridSelectFunc fn_select;    /* selection gate hook, or NULL */
+   gpointer            p_select_data; /* fn_select's user data */
 };
 
 G_DEFINE_TYPE(GgazeGrid, ggaze_grid, GTK_TYPE_WIDGET)
@@ -51,6 +53,20 @@ _cell_data_free(gpointer p_void) {
 static CellData *
 _cell_data(GtkWidget *p_pic) {
    return ((CellData *)g_object_get_data(G_OBJECT(p_pic), CELL_DATA_KEY));
+}
+
+/* Route a navigator.current change request through the installed select gate
+ * (see gridview.h GgazeGridSelectFunc), so a window-level dirty-preview
+ * prompt can run before the navigator's "changed" signal actually fires.
+ * Falls back to calling navigator_set_current_file() directly when no gate
+ * is installed. Every call site that used to call
+ * navigator_set_current_file() straight now goes through this instead. */
+static gboolean
+_grid_select(GgazeGrid *p_grid, GFile *p_file) {
+   if (p_grid->fn_select != NULL) {
+      return (p_grid->fn_select(p_grid, p_file, p_grid->p_select_data));
+   }
+   return (navigator_set_current_file(p_grid->p_nav, p_file));
 }
 
 /* --- thumbnail request --------------------------------------------------- */
@@ -170,7 +186,7 @@ _on_child_activated(GtkFlowBox *p_flow, GtkFlowBoxChild *p_child,
    GgazeGrid *p_grid = GGAZE_GRID(p_data);
    GFile     *p_file = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
    if (p_file != NULL) {
-      navigator_set_current_file(p_grid->p_nav, p_file);
+      _grid_select(p_grid, p_file);
    }
    g_signal_emit(p_grid, u_activate_signal, 0);
 }
@@ -233,7 +249,7 @@ _on_flow_middle_pressed(GtkGesture *p_g, gint i_n_press, gdouble d_x,
    gtk_flow_box_select_child(GTK_FLOW_BOX(p_grid->p_flow), p_child);
    GFile *p_file = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
    if (p_file != NULL) {
-      navigator_set_current_file(p_grid->p_nav, p_file);
+      _grid_select(p_grid, p_file);
    }
    gtk_widget_activate_action(GTK_WIDGET(p_grid), "win.mark", NULL);
 }
@@ -290,7 +306,7 @@ ggaze_grid_sync_current(GgazeGrid *p_grid) {
    if (p_file == NULL) {
       return (FALSE);
    }
-   return (navigator_set_current_file(p_grid->p_nav, p_file));
+   return (_grid_select(p_grid, p_file));
 }
 
 /* Move the grid cursor one row down (i_dy = +1) or up (i_dy = -1), selecting
@@ -342,7 +358,7 @@ ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy) {
    if (p_best != NULL) {
       GFile *p_f = (GFile *)g_object_get_data(G_OBJECT(p_best), "file");
       if (p_f != NULL) {
-         navigator_set_current_file(p_grid->p_nav, p_f);
+         _grid_select(p_grid, p_f);
       }
    }
 }
@@ -556,6 +572,14 @@ ggaze_grid_new(Navigator *p_nav, Thumbnail *p_thumb, int i_size,
       g_signal_connect(p_nav, "changed", G_CALLBACK(_on_nav_changed), p_grid);
    ggaze_grid_refresh(p_grid);
    return (GTK_WIDGET(p_grid));
+}
+
+void
+ggaze_grid_set_select_func(GgazeGrid *p_grid, GgazeGridSelectFunc fn,
+                           gpointer p_user_data) {
+   g_return_if_fail(GGAZE_IS_GRID(p_grid));
+   p_grid->fn_select     = fn;
+   p_grid->p_select_data = p_user_data;
 }
 
 void
