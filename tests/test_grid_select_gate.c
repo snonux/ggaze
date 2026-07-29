@@ -27,12 +27,21 @@
  * grid_select_gates_dirty_enhance, gated on GEGL being built in.
  *
  * Needs a display (GgazeGrid is a GtkWidget); CI runs this under xvfb, and
- * it skips cleanly when no display is available. No toplevel is ever
- * *presented*, though: selection is driven through the flowbox's
- * "child-activated" signal, which needs no laid-out geometry. That keeps
- * the test off GTK's realize path entirely -- realizing a toplevel here
- * pulled in the AT-SPI bridge and a Wayland surface, both of which leak /
- * dangle under ASan for reasons that have nothing to do with ggaze.
+ * it skips cleanly when no display is available. All but one subtest avoid
+ * *presenting* a toplevel: selection is driven through the flowbox's
+ * "child-activated" signal, which needs no laid-out geometry, which keeps
+ * them off GTK's realize path entirely -- realizing a toplevel here pulled in
+ * the AT-SPI bridge and a Wayland surface, both of which leak / dangle under
+ * ASan for reasons that have nothing to do with ggaze. The exception is
+ * move_cursor_respects_refusing_gate: ggaze_grid_move_cursor compares laid-out
+ * cell bounds, so it cannot work on an unrealized grid, and that call site
+ * would otherwise stay untested.
+ *
+ * The fourth gated call site, the middle-click mark (_on_flow_middle_pressed),
+ * is still not driven here: it hangs off an internal GtkGestureClick and needs
+ * a synthesized pointer press at real coordinates, which GTK4 exposes no
+ * supported API for. It shares the same one-line _grid_select() helper as the
+ * three sites that ARE covered.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -152,8 +161,8 @@ build_grid(char *c_dir, GtkWindow **pp_win, Navigator **pp_nav,
  * instead of calling navigator_set_current_file() on its own (the exact bug
  * this fixes: before it, there was no gate to ask). The other three call
  * sites -- middle-click mark, j/k cursor move, toggle-to-large sync -- share
- * the same one-line _grid_select() helper, so covering one covers the
- * mechanism; the geometry-driven ones would need a realized toplevel. */
+ * the same one-line _grid_select() helper; j/k gets its own subtest below,
+ * toggle-to-large is covered end to end by tests/test_enhance_flow.c. */
 static void
 test_activate_respects_refusing_gate(void) {
    char      *c_dir = make_folder();
@@ -301,6 +310,72 @@ test_clearing_gate_restores_fallback(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* Lay the grid out for real so the geometry-driven call sites work: j/k
+ * (ggaze_grid_move_cursor) compares laid-out cell bounds and gives up while
+ * they are all zero-sized. Deliberately narrow so the three cells wrap into
+ * three rows and "one row down" has somewhere to go. Returns once the
+ * flowbox has a non-degenerate allocation. */
+static void
+present_and_lay_out(GtkWindow *p_win) {
+   gtk_window_set_default_size(p_win, 200, 600);
+   gtk_window_present(p_win);
+   for (guint u = 0; u < 2000; u++) {
+      GtkWidget *p_child = gtk_window_get_child(p_win);
+      if (p_child != NULL && gtk_widget_get_width(p_child) > 0) {
+         return;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_not_reached();
+}
+
+/* j/k cursor movement is one of the four gated call sites, and the only one
+ * this suite could not reach before (round 3's "still untested" list): it
+ * needs a laid-out grid, so this subtest is the one that presents. A refusing
+ * gate must block it exactly like it blocks a double-click. */
+static void
+test_move_cursor_respects_refusing_gate(void) {
+   char      *c_dir = make_folder();
+   GtkWindow *p_win;
+   Navigator *p_nav;
+   Thumbnail *p_thumb;
+   GgazeGrid *p_grid;
+   build_grid(c_dir, &p_win, &p_nav, &p_thumb, &p_grid);
+   present_and_lay_out(p_win);
+
+   char    *c_before = g_file_get_basename(navigator_get_current(p_nav));
+   FakeGate fg       = {0};
+   fg.p_nav          = p_nav;
+   fg.b_allow        = FALSE;
+   ggaze_grid_set_select_func(p_grid, fake_gate, &fg);
+
+   ggaze_grid_move_cursor(p_grid, +1); /* `j` */
+   ggtest_drain_main(50);
+
+   g_assert_cmpuint(fg.u_calls, >, 0); /* the gate WAS asked ... */
+   char *c_after = g_file_get_basename(navigator_get_current(p_nav));
+   g_assert_cmpstr(c_before, ==, c_after); /* ... and current did not move */
+
+   /* Control, so the assertion above cannot pass merely because the cursor
+    * had nowhere to go: the very same move, allowed, does move current. */
+   fg.b_allow = TRUE;
+   ggaze_grid_move_cursor(p_grid, +1);
+   ggtest_drain_main(50);
+   char *c_moved = g_file_get_basename(navigator_get_current(p_nav));
+   g_assert_cmpstr(c_before, !=, c_moved);
+
+   g_free(c_before);
+   g_free(c_after);
+   g_free(c_moved);
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   ggtest_drain_main(100);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -319,5 +394,7 @@ main(int i_argc, char **c_argv) {
                    test_activate_without_gate_moves_current);
    g_test_add_func("/grid_select_gate/clearing_gate_restores_fallback",
                    test_clearing_gate_restores_fallback);
+   g_test_add_func("/grid_select_gate/move_cursor_respects_refusing_gate",
+                   test_move_cursor_respects_refusing_gate);
    return (g_test_run());
 }

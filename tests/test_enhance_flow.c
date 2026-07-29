@@ -64,6 +64,7 @@
 #include <glib/gstdio.h>
 #include <gtk/gtk.h>
 #include <string.h>
+#include <unistd.h>
 
 /* --- helpers -------------------------------------------------------------
  */
@@ -91,21 +92,32 @@ copy_fixture(const char *c_dir, const char *c_name) {
    g_free(c_dst);
 }
 
+/* Recursive: the trash subtests leave a "./Trash" folder inside the temp dir,
+ * and a non-empty directory cannot be g_file_delete()d. */
 static void
-cleanup_temp_dir(char *c_dir) {
-   GFile           *p_dir = g_file_new_for_path(c_dir);
-   GFileEnumerator *p_e   = g_file_enumerate_children(
-      p_dir, "standard::name", G_FILE_QUERY_INFO_NONE, NULL, NULL);
+remove_tree(GFile *p_dir) {
+   GFileEnumerator *p_e =
+      g_file_enumerate_children(p_dir, "standard::name,standard::type",
+                                G_FILE_QUERY_INFO_NONE, NULL, NULL);
    if (p_e != NULL) {
       GFileInfo *p_info;
       while ((p_info = g_file_enumerator_next_file(p_e, NULL, NULL)) != NULL) {
          GFile *p_child = g_file_get_child(p_dir, g_file_info_get_name(p_info));
+         if (g_file_info_get_file_type(p_info) == G_FILE_TYPE_DIRECTORY) {
+            remove_tree(p_child);
+         }
          g_file_delete(p_child, NULL, NULL);
          g_object_unref(p_child);
          g_object_unref(p_info);
       }
       g_object_unref(p_e);
    }
+}
+
+static void
+cleanup_temp_dir(char *c_dir) {
+   GFile *p_dir = g_file_new_for_path(c_dir);
+   remove_tree(p_dir);
    g_file_delete(p_dir, NULL, NULL);
    g_object_unref(p_dir);
    g_free(c_dir);
@@ -783,6 +795,14 @@ test_save_exports_then_applies_deferred_select(void) {
  * afterwards and reports failure. */
 static void
 test_failed_save_keeps_preview_and_aborts(void) {
+   if (geteuid() == 0) {
+      /* root ignores the folder's write bit, so the export SUCCEEDS and the
+       * "nothing was written" assertion below fails with a confusing error
+       * instead of the intended skip -- which made the whole suite unrunnable
+       * in a root container (round 3, finding o). */
+      g_test_skip("running as root: a read-only folder cannot be provoked");
+      return;
+   }
    DirtyFixture fx;
    fixture_open(&fx, "ggaze-enhance-failsave-XXXXXX");
 
@@ -981,6 +1001,302 @@ test_move_while_dirty_cancel_then_discard(void) {
    reset_destinations();
 }
 
+/* --- round 3: what happens BEHIND an outstanding prompt ------------------
+ *
+ * GTK4 modality is INPUT-only. The slideshow timer is a plain g_timeout_add
+ * and the folder's GFileMonitor is a plain GSource, so both keep firing while
+ * a modal GtkAlertDialog is on screen and can move navigator.current (and
+ * therefore clear the enhance mask) out from under a prompt that is still
+ * worded for the old image. So can a single-instance `ggaze other.jpg`, which
+ * arrives over D-Bus rather than as an input event.
+ *
+ * The subtests below drive that with ggaze_window_next() and
+ * ggaze_window_open() -- exactly what _slideshow_tick and ggaze_app_open call,
+ * and, like them, not input, so the modal grab does not stop them.
+ */
+
+/* Round 3, finding (h) -- the data-loss regression. The deferred continuation
+ * used to re-read navigator_get_current() when the user finally answered, so
+ * Discard binned a file the user never selected: prompt raised for plain.jpg,
+ * current moved on to rot6.jpg behind it, click Discard -> rot6.jpg went to
+ * ./Trash and plain.jpg survived. window.c now captures the victim at
+ * key-press time (_FileCtx), the same discipline _DeleteCtx already had. */
+static void
+test_prompt_acts_on_the_file_it_was_raised_for(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-captured-XXXXXX");
+   char *c_other = g_build_filename(fx.c_dir, "rot6.jpg", NULL);
+
+   fire(fx.p_win, "win.trash"); /* `d`, pressed on plain.jpg */
+   ggtest_drain_main(150);
+   g_assert_nonnull(
+      ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel", 2000));
+
+   ggaze_window_next(fx.p_win); /* what the slideshow tick does */
+   ggtest_drain_main(300);
+   assert_showing(fx.p_win, "rot6.jpg");                    /* really moved */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win)); /* mask cleared */
+
+   answer_prompt(&fx, "Discard");
+
+   g_assert_false(g_file_test(fx.c_path, G_FILE_TEST_EXISTS)); /* binned ... */
+   g_assert_true(g_file_test(c_other, G_FILE_TEST_EXISTS));    /* ... only it */
+
+   g_free(c_other);
+   fixture_teardown(&fx);
+}
+
+/* Round 3, finding (j): the one-prompt guard used to be checked AFTER the
+ * "nothing is dirty" fast path, so the moment something cleared the mask under
+ * a live dialog a new request ran its continuation immediately -- two actions
+ * out of one visible prompt. The guard is now checked first, so the second
+ * request is parked instead. */
+static void
+test_request_behind_stale_prompt_is_not_run(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-stale-XXXXXX");
+   GError *p_err   = NULL;
+   char   *c_other = g_dir_make_tmp("ggaze-enhance-stale2-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_other, "small.png");
+   char  *c_target = g_build_filename(c_other, "small.png", NULL);
+   GFile *p_target = g_file_new_for_path(c_target);
+
+   fire(fx.p_win, "win.trash"); /* prompt, raised for plain.jpg */
+   ggtest_drain_main(150);
+   g_assert_nonnull(
+      ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel", 2000));
+   ggaze_window_next(fx.p_win); /* clears the mask under the live dialog */
+   ggtest_drain_main(200);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+
+   ggaze_window_open(fx.p_win, p_target); /* the second, different request */
+   ggtest_drain_main(300);
+   assert_showing(fx.p_win, "rot6.jpg"); /* did NOT run behind the dialog */
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    1); /* and did not stack a second one either */
+
+   answer_prompt(&fx, "Cancel"); /* Cancel: neither action happens */
+   g_assert_true(g_file_test(fx.c_path, G_FILE_TEST_EXISTS));
+   assert_showing(fx.p_win, "rot6.jpg");
+
+   g_object_unref(p_target);
+   g_free(c_target);
+   fixture_teardown(&fx);
+   cleanup_temp_dir(c_other);
+}
+
+/* Round 3, finding (k): answering Save on a prompt whose preview has since
+ * vanished must not be a silent no-op that ALSO cancels the user's action.
+ * _enhance_do_save returns FALSE both for "nothing to save" and "the export
+ * failed", and _save_dialog_cb used to treat both as a failure -- so with the
+ * mask cleared under the dialog, clicking Save wrote nothing, showed nothing,
+ * and aborted the trash the user had asked for. */
+static void
+test_save_with_no_preview_left_reports_and_proceeds(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-nosave-XXXXXX");
+
+   fire(fx.p_win, "win.trash"); /* `d`, pressed on plain.jpg */
+   ggtest_drain_main(150);
+   g_assert_nonnull(
+      ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel", 2000));
+   ggaze_window_next(fx.p_win); /* clears the mask under the live dialog */
+   ggtest_drain_main(200);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+
+   answer_prompt(&fx, "Save");
+
+   char *c_out = g_build_filename(fx.c_dir, "plain-enhanced.jpg", NULL);
+   g_assert_false(
+      g_file_test(c_out, G_FILE_TEST_EXISTS)); /* nothing to write */
+   g_free(c_out);
+   g_assert_false(g_file_test(fx.c_path, G_FILE_TEST_EXISTS)); /* still
+                                                                * trashed it */
+   g_assert_cmpstr(
+      gtk_label_get_text(GTK_LABEL(ggaze_window_get_info_label(fx.p_win))), ==,
+      "Nothing to save \u2014 the preview is gone"); /* ... and said why */
+
+   fixture_teardown(&fx);
+}
+
+/* Round 3, finding (i), the proceed half: a second, DIFFERENT request while
+ * the prompt is up used to be dropped on the floor with no status, no
+ * re-prompt and no re-queue -- `ggaze other.jpg` against a live instance
+ * exited successfully having done nothing at all, not even after the prompt
+ * was answered. It is now parked (one slot, newest wins) and retried through
+ * the same gate once the prompt resolves in favour of proceeding. */
+static void
+test_second_request_is_queued_then_retried(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-queue-XXXXXX");
+   GError *p_err   = NULL;
+   char   *c_other = g_dir_make_tmp("ggaze-enhance-queue2-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_other, "small.png");
+   char  *c_target = g_build_filename(c_other, "small.png", NULL);
+   GFile *p_target = g_file_new_for_path(c_target);
+
+   activate_other_cell(&fx);              /* request 1: grid select rot6.jpg */
+   ggaze_window_open(fx.p_win, p_target); /* request 2: D-Bus-style open */
+   ggtest_drain_main(200);
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    1);
+   assert_showing(fx.p_win, "plain.jpg"); /* neither has run yet */
+
+   answer_prompt(&fx, "Discard");
+   ggtest_drain_main(400);
+   /* Request 1 ran (the deferred select), then request 2 was retried through
+    * the gate and ran too -- so the window ends up on the queued file. */
+   assert_showing(fx.p_win, "small.png");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+
+   g_object_unref(p_target);
+   g_free(c_target);
+   fixture_teardown(&fx);
+   cleanup_temp_dir(c_other);
+}
+
+/* Round 3, finding (i), the drop half. Cancel means "stay on this image, keep
+ * the preview", so running the parked request anyway would do exactly what the
+ * user just refused: it is dropped instead -- but visibly, via the status
+ * label, not silently. This is also the only test that exercises the drop path
+ * with fn_free_data != NULL: the parked _OpenCtx holds an owned window ref, so
+ * assert_ref_settled is what proves it was actually released. */
+static void
+test_queued_request_is_dropped_on_cancel(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-drop-XXXXXX");
+   GError *p_err   = NULL;
+   char   *c_other = g_dir_make_tmp("ggaze-enhance-drop2-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_other, "small.png");
+   char  *c_target = g_build_filename(c_other, "small.png", NULL);
+   GFile *p_target = g_file_new_for_path(c_target);
+
+   activate_other_cell(&fx);
+   ggaze_window_open(fx.p_win, p_target);
+   ggtest_drain_main(200);
+
+   answer_prompt(&fx, "Cancel");
+   ggtest_drain_main(200);
+   assert_showing(fx.p_win, "plain.jpg"); /* neither request happened */
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    0); /* dropped, not re-prompted */
+   g_assert_cmpstr(
+      gtk_label_get_text(GTK_LABEL(ggaze_window_get_info_label(fx.p_win))), ==,
+      "Queued request dropped"); /* and the user is told */
+   assert_ref_settled(&fx);
+
+   g_object_unref(p_target);
+   g_free(c_target);
+   fixture_teardown(&fx);
+   cleanup_temp_dir(c_other);
+}
+
+/* Save on close-request, the success half: the export lands AND the window
+ * really closes. Only the Discard half of this was covered (round 3's
+ * "still untested" list). See test_close_request_discard_closes_window for
+ * why the window has to be presented and why "closed" is asked as "no longer
+ * a live toplevel". */
+static void
+test_close_request_save_closes_window(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-closesave-XXXXXX");
+   gtk_window_present(GTK_WINDOW(fx.p_win));
+   ggtest_drain_main(300);
+
+   gboolean b_stop = FALSE;
+   g_signal_emit_by_name(fx.p_win, "close-request", &b_stop);
+   g_assert_true(b_stop);
+   answer_prompt(&fx, "Save");
+
+   char *c_out = g_build_filename(fx.c_dir, "plain-enhanced.jpg", NULL);
+   g_assert_true(g_file_test(c_out, G_FILE_TEST_EXISTS));
+   g_free(c_out);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_false(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));
+
+   fixture_teardown(&fx);
+}
+
+/* Save on close-request, the failure half: a failed export must leave the
+ * window OPEN, still dirty, and still blocked -- i.e. a further close-request
+ * is stopped again and raises a fresh prompt rather than letting the
+ * enhancement escape unnoticed. */
+static void
+test_close_request_failed_save_keeps_window(void) {
+   if (geteuid() == 0) {
+      g_test_skip("running as root: a read-only folder cannot be provoked");
+      return;
+   }
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-closefail-XXXXXX");
+   gtk_window_present(GTK_WINDOW(fx.p_win));
+   ggtest_drain_main(300);
+   g_assert_cmpint(g_chmod(fx.c_dir, 0500), ==, 0); /* r-x: no new files */
+
+   gboolean b_stop = FALSE;
+   g_signal_emit_by_name(fx.p_win, "close-request", &b_stop);
+   g_assert_true(b_stop);
+   answer_prompt(&fx, "Save");
+   g_assert_cmpint(g_chmod(fx.c_dir, 0700), ==, 0); /* restore for cleanup */
+
+   g_assert_true(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);
+
+   b_stop = FALSE; /* still blocked, and re-asks rather than going quiet */
+   g_signal_emit_by_name(fx.p_win, "close-request", &b_stop);
+   g_assert_true(b_stop);
+   answer_prompt(&fx, "Cancel");
+   g_assert_true(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));
+
+   fixture_teardown(&fx);
+}
+
+/* The cache-MISS leg of the enhance-preview override. Round 2 claimed this was
+ * untestable; it is not -- ggaze_window_clear_texture_cache (window.h, an
+ * explicit test hook) empties the LRU, so the next _load_current has to take
+ * the async GTask path, where _load_finish_cb used to repaint the plain
+ * original over an unanswered preview. The JPEG backend also emits a
+ * phase-1 low-res partial for every load, so _on_progress_main -- the other
+ * changed-but-untested leg -- runs here too; both reach the viewer only
+ * through _show_texture, which is where the override lives. */
+static void
+test_cache_miss_reload_keeps_dirty_preview(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-miss-XXXXXX");
+
+   ggaze_window_clear_texture_cache(fx.p_win);
+   fire(fx.p_win, "win.toggle-view"); /* -> grid */
+   ggtest_drain_main(100);
+   fire(fx.p_win, "win.toggle-view"); /* -> large; _load_current MISSES */
+   ggtest_drain_main(700);
+
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    0);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);
+
+   /* Proof the async load really landed (rather than the assertion above
+    * passing because nothing ever repainted): hold-Space reads the ORIGINAL
+    * straight out of the texture cache, which was emptied above, so a
+    * non-NULL, brand-new texture there can only have come from the reload.
+    * This is also _preview_override's hold-original short-circuit under the
+    * miss path. */
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   GdkTexture *p_reloaded = viewer_texture(fx.p_win);
+   g_assert_nonnull(p_reloaded);
+   g_assert_true(p_reloaded != fx.p_mod);
+   g_assert_true(p_reloaded != fx.p_orig);
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);
+
+   fixture_teardown(&fx);
+}
+
 /* Registration split in two so neither function runs past the ~30-line
  * convention: the original feature coverage, and the round-2 subtests that
  * answer the real Save/Discard/Cancel prompt (see the file header). */
@@ -1028,6 +1344,29 @@ add_prompt_outcome_tests(void) {
                    test_move_while_dirty_cancel_then_discard);
 }
 
+/* Round 3: everything that happens BEHIND an outstanding prompt (see the
+ * section comment above test_prompt_acts_on_the_file_it_was_raised_for), plus
+ * the two legs the earlier rounds left uncovered. */
+static void
+add_behind_the_prompt_tests(void) {
+   g_test_add_func("/enhance_flow/prompt_acts_on_the_file_it_was_raised_for",
+                   test_prompt_acts_on_the_file_it_was_raised_for);
+   g_test_add_func("/enhance_flow/request_behind_stale_prompt_is_not_run",
+                   test_request_behind_stale_prompt_is_not_run);
+   g_test_add_func("/enhance_flow/save_with_no_preview_left_proceeds",
+                   test_save_with_no_preview_left_reports_and_proceeds);
+   g_test_add_func("/enhance_flow/second_request_is_queued_then_retried",
+                   test_second_request_is_queued_then_retried);
+   g_test_add_func("/enhance_flow/queued_request_is_dropped_on_cancel",
+                   test_queued_request_is_dropped_on_cancel);
+   g_test_add_func("/enhance_flow/close_request_save_closes_window",
+                   test_close_request_save_closes_window);
+   g_test_add_func("/enhance_flow/close_request_failed_save_keeps_window",
+                   test_close_request_failed_save_keeps_window);
+   g_test_add_func("/enhance_flow/cache_miss_reload_keeps_dirty_preview",
+                   test_cache_miss_reload_keeps_dirty_preview);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -1047,5 +1386,6 @@ main(int i_argc, char **c_argv) {
 
    add_feature_tests();
    add_prompt_outcome_tests();
+   add_behind_the_prompt_tests();
    return (g_test_run());
 }

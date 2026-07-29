@@ -503,9 +503,14 @@ if gegl_dep.found()
    )
    # Drives the real Save/Discard/Cancel prompt, and its move-continuation
    # subtest configures move destinations through GSettings, so it needs the
-   # compiled schema like test_move_undo/test_settings_ui do.
+   # compiled schema like test_move_undo/test_settings_ui do. Each subtest
+   # opens a window, decodes an image, runs a GEGL chain and then drains the
+   # main loop for the async dialog, so ~1.5 s apiece is the floor; the
+   # default 30 s budget stopped being enough at ~20 subtests, and the ASan
+   # lane is several times slower again.
    test('enhance_flow', test_enhance_flow,
-      suite : 'integration', env : fixtures_env, depends : ggaze_gschemas)
+      suite : 'integration', env : fixtures_env, depends : ggaze_gschemas,
+      timeout : 300)
 endif
 
 subdir('integration')
