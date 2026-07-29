@@ -223,10 +223,18 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
    return (FALSE);
 }
 
-/* Middle-click on a grid cell toggles its mark (pointer-accessible
- * marks): select the cell, sync navigator.current to it, then dispatch the
- * shared "win.mark" action (the window updates the header + badge exactly
- * as `v` does). */
+/* Middle-click on a grid cell toggles its mark (pointer-accessible marks):
+ * select the cell in the flowbox, then dispatch the shared "win.mark" action
+ * (the window updates the header + badge exactly as `v` does).
+ *
+ * win.mark targets the FLOWBOX SELECTION, not navigator.current --
+ * window.c's _action_mark prefers ggaze_grid_get_selected_file() while the
+ * grid is the visible stack child -- so gtk_flow_box_select_child() below is
+ * what makes the mark land on this cell. The _grid_select() call next to it
+ * is a separate concern: it keeps navigator.current (header, large view,
+ * prefetch) in step with the cell the user just pointed at, and since tu0 may
+ * legitimately be refused or deferred by the installed select gate when an
+ * unsaved enhance preview is active. The mark applies either way. */
 static void
 _on_flow_middle_pressed(GtkGesture *p_g, gint i_n_press, gdouble d_x,
                         gdouble d_y, gpointer p_data) {
@@ -244,8 +252,9 @@ _on_flow_middle_pressed(GtkGesture *p_g, gint i_n_press, gdouble d_x,
    if (p_child == NULL) {
       return;
    }
-   /* Select + sync navigator.current so win.mark targets this cell, then
-    * dispatch the shared toggle action (handles badge + header update). */
+   /* Select the cell (this is what win.mark acts on), keep navigator.current
+    * in step with it through the gate, then dispatch the shared toggle
+    * action (handles badge + header update). */
    gtk_flow_box_select_child(GTK_FLOW_BOX(p_grid->p_flow), p_child);
    GFile *p_file = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
    if (p_file != NULL) {
