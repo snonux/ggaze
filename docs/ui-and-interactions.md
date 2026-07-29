@@ -301,13 +301,30 @@ Loaded lazily; never blocks display of the pixels.
   **Discard** (drop the preview, proceed), or **Cancel** (stay). If the
   export **fails** (read-only folder, full disk, ...), Save behaves like
   Cancel plus an error message: the preview is kept and nothing proceeds, so
-  an unwritable destination can never cost the enhancement. Only one prompt
-  is ever up at a time — repeated Alt+F4 presses do not stack dialogs. `s` saves
+  an unwritable destination can never cost the enhancement. `s` saves
   without clearing dirty (see above); toggling every preset back off, `0`, or
   `Esc` (when the popover is not open) discards it directly (explicit, no
   prompt). Slideshow auto-advance is the one exception: it discards a dirty
   preview silently rather than blocking on a prompt no one is there to
   answer.
+- **One prompt at a time, and it decides for the image it named.** Only one
+  Save/Discard/Cancel dialog is ever up per window. Most triggers are input
+  and the modal grab swallows them anyway, but three are not: Alt+F4 / the WM
+  close button, a single-instance `ggaze <file>` arriving over D-Bus, and a
+  drag-and-drop. Those are **queued**, not stacked and not dropped — one slot,
+  newest wins, with a status line saying so. Answering **Save** or **Discard**
+  performs the original action and then retries the queued one through the same
+  gate; **Cancel** means "stay here, keep the preview", so the queued request is
+  discarded too (again with a status line). Repeated Alt+F4 therefore still
+  produces exactly one dialog and one quit.
+- The action is bound to the image the prompt was **raised for**, not to
+  whatever is current when it is answered. That distinction is real: GTK4
+  modality is input-only, so the slideshow timer and the folder's file monitor
+  keep running behind the dialog and can move to the next image. `d`/`D`/`m`
+  capture their targets at key-press time, so answering Discard can never
+  trash, delete or move a file the user did not pick. If the preview itself is
+  gone by the time Save is pressed, ggaze reports "nothing to save" and still
+  performs the action rather than silently doing neither.
 - GEGL runs only when a preset is active or on export; the fast decode path
   is unchanged, and enhance is **not** applied during `h`/`l` scrubbing (only
   when settled on an image). If the build has no GEGL, `a` (and `s`) show a

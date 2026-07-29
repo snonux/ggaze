@@ -42,8 +42,16 @@ editing remains a non-goal.
   different file/folder, or quitting (`q` **or** the window manager's close
   button / Alt+F4) with an un-exported preview prompts
   Save/Discard/Cancel; a Save whose export fails keeps the preview and does
-  not proceed (it is not silently downgraded to Discard), and at most one
-  prompt is outstanding per window. Toggling every preset back off, `0`, or
+  not proceed (it is not silently downgraded to Discard). At most one prompt is
+  outstanding per window: a second request that the modal grab cannot swallow
+  (Alt+F4, a single-instance D-Bus open, a drop) is queued in a single slot and
+  retried through the same gate once the prompt is answered in favour of
+  proceeding, or discarded with a status line on Cancel. The prompt's answer
+  always applies to the image it was raised for — `d`/`D`/`m` capture their
+  targets at key-press time, because the slideshow timer and the folder's
+  GFileMonitor keep running behind an input-only modal grab and can move
+  navigator.current out from under the dialog. Toggling every preset back off,
+  `0`, or
   `Esc` discards directly (no prompt). Slideshow auto-advance discards a dirty
   preview silently instead of blocking on an unanswerable prompt.
 - Export format: defaults to the original extension (JPEG quality 95); a
