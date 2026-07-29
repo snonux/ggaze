@@ -292,8 +292,11 @@ Loaded lazily; never blocks display of the pixels.
   clearing the preview.
 - **Dirty state + prompt on navigate:** an active (un-exported) enhance
   preview is "dirty". Navigating to another image (`h`/`l`/`g`/`G`/scroll),
+  picking a different image in the grid (double-click/Enter, middle-click
+  mark, `j`/`k` cursor move, or toggling back to large on another cell),
   trashing/deleting/moving the current file (`d`/`D`/`m`), opening a
-  different file/folder (`o`, drag-and-drop, File→Open), or quitting (`q`)
+  different file/folder (`o`, drag-and-drop, File→Open), or quitting —
+  either via `q` **or** the window manager's close button / Alt+F4 —
   with a dirty preview prompts **Save** (export the copy, then proceed),
   **Discard** (drop the preview, proceed), or **Cancel** (stay). `s` saves
   without clearing dirty (see above); toggling every preset back off, `0`, or

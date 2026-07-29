@@ -37,8 +37,10 @@ editing remains a non-goal.
   saver. Original untouched. ggaze **never auto-saves** — the preview is a
   live overlay only, and `s` does not clear the dirty flag (pressing it again
   just exports another numbered copy of the same preview). Moving to
-  another image, trashing/deleting/moving the current file, opening a
-  different file/folder, or quitting with an un-exported preview prompts
+  another image (large-view keys/scroll **or** any grid/thumbnail
+  selection), trashing/deleting/moving the current file, opening a
+  different file/folder, or quitting (`q` **or** the window manager's close
+  button / Alt+F4) with an un-exported preview prompts
   Save/Discard/Cancel; toggling every preset back off, `0`, or `Esc`
   discards directly (no prompt). Slideshow auto-advance discards a dirty
   preview silently instead of blocking on an unanswerable prompt.

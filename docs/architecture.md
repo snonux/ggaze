@@ -222,8 +222,10 @@ key '1' → import decoded image → GeglBuffer
         → toggle off on second press / Esc
 key 's' → enhancer_export(buf, presets[0], out_file, &err)
         → writes IMG_0001-enhanced.<ext> via GEGL saver; original untouched
-        → clears the dirty flag for this image
+        → does NOT clear the dirty flag (press again → another numbered copy)
 navigate with dirty preview → prompt: Save (export) / Discard / Cancel
+        (all nav paths incl. grid/thumbnail selection, plus quit via 'q' or
+         the WM close button; slideshow auto-advance discards silently)
 GEGL disabled? → 'a' shows "GEGL not built in" toast
 ```
 

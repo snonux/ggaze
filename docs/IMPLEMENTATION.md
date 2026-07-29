@@ -54,7 +54,8 @@ ggaze has **two complementary test tracks**. Both run under `meson test`.
 | `test_grid_cull.c` | M7 | Grid view shows N cells; `d` bins one into `./Trash`, cell dims; `u` restores; counter reflects remaining; `Enter`→large on the right cell. |
 | `test_move_undo.c` | M8 | Mark 3 → `m`→dest2 → files gone from folder, present in dest; `u` moves back; collision suffixing. |
 | `test_runner_rescan.c` | M8 | `!` runs a script that writes a file into the dir; on exit the navigator rescans and the new file appears; injection-guard filename is single-quoted. |
-| `test_enhance_flow.c` | M9 (gated) | `a`→preset applies a preview (texture differs from raw); `s` writes `-enhanced.<ext>` with EXIF Orientation=1 and original byte-identical; navigate-away dirty prompt Save/Discard/Cancel. |
+| `test_enhance_flow.c` | M9 (gated on `gegl`) | `a`→preset applies a preview off-thread (texture differs from raw); toggle-off restores the original; hold-`Space` compares and restores (incl. the flag not sticking when the mask is cleared mid-hold); `s` writes a collision-safe `-enhanced[-n].<ext>` with the original byte-identical (EXIF `Orientation=1` normalization is not implemented yet, so not asserted); a dirty preview blocks grid selection and native window close behind the Save/Discard/Cancel prompt. |
+| `test_grid_select_gate.c` | M9 | `gridview.c` routes every selection through the installed `GgazeGridSelectFunc` instead of `navigator_set_current_file` — a refusing gate blocks the change, an allowing one lets it through. No GEGL/window/dialog involved, so it runs in the minimal lane too. |
 | `test_clipboard_copy.c` | M8 | `Ctrl+c` with no marks → `image/png` on `GdkClipboard`; with marks → `text/uri-list`; paste back into a fake target. |
 | `test_full_lifecycle.c` | M10 | The elevator-pitch session scripted: open → walk → `i` → `d` ×k → mark → `m`→dest → `e`→program (use `true`) → `!`→script → quit. End-to-end smoke. |
 
@@ -332,8 +333,13 @@ into the window (see below). Crop (`c`), straighten (`R`), rotate 90
 - Crop/straighten/rotate 90° and their graph composition (decision #35) are
   **not implemented** — future work; see the "Crop, straighten & rotate
   tools" section above for the intended design.
-- Dirty flag: navigate (`h`/`l`/`g`/`G`/scroll)/`d`/`D`/`m`/`o`(open)/quit
-  with dirty → Save/Discard/Cancel (decisions #34/#18); `s` exports but does
+- Dirty flag: navigate (`h`/`l`/`g`/`G`/scroll), any grid/thumbnail
+  selection (double-click/`Enter`, middle-click mark, `j`/`k` cursor move,
+  toggle-to-large sync — routed through `ggaze_grid_set_select_func`'s gate
+  rather than `gridview.c` calling `navigator_set_current_file` directly),
+  `d`/`D`/`m`/`o`(open), and quit — both the `q` action **and** the native
+  `close-request` (WM close button / Alt+F4) — with dirty →
+  Save/Discard/Cancel (decisions #34/#18); `s` exports but does
   **not** clear dirty (pressing it again exports another numbered copy of
   the same still-active preview); toggling every preset off, `0`, or `Esc`
   (popover closed) discards directly. Slideshow auto-advance discards
