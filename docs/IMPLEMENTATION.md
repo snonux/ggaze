@@ -54,8 +54,8 @@ ggaze has **two complementary test tracks**. Both run under `meson test`.
 | `test_grid_cull.c` | M7 | Grid view shows N cells; `d` bins one into `./Trash`, cell dims; `u` restores; counter reflects remaining; `Enter`→large on the right cell. |
 | `test_move_undo.c` | M8 | Mark 3 → `m`→dest2 → files gone from folder, present in dest; `u` moves back; collision suffixing. |
 | `test_runner_rescan.c` | M8 | `!` runs a script that writes a file into the dir; on exit the navigator rescans and the new file appears; injection-guard filename is single-quoted. |
-| `test_enhance_flow.c` | M9 (gated on `gegl`) | `a`→preset applies a preview off-thread (texture differs from raw); toggle-off restores the original; hold-`Space` compares and restores (incl. the flag not sticking when the mask is cleared mid-hold); `s` writes a collision-safe `-enhanced[-n].<ext>` with the original byte-identical (EXIF `Orientation=1` normalization is not implemented yet, so not asserted); a dirty preview blocks grid selection and native window close behind the Save/Discard/Cancel prompt. |
-| `test_grid_select_gate.c` | M9 | `gridview.c` routes every selection through the installed `GgazeGridSelectFunc` instead of `navigator_set_current_file` — a refusing gate blocks the change, an allowing one lets it through. No GEGL/window/dialog involved, so it runs in the minimal lane too. |
+| `test_enhance_flow.c` | M9 (gated on `gegl`) | `a`→preset applies a preview off-thread (texture differs from raw); toggle-off restores the original; hold-`Space` compares and restores (incl. the flag not sticking when the mask is cleared mid-hold); `s` writes a collision-safe `-enhanced[-n].<ext>` with the original byte-identical (EXIF `Orientation=1` normalization is not implemented yet, so not asserted); a dirty preview blocks grid selection and native window close behind the Save/Discard/Cancel prompt — and the prompt itself is **answered** (`tests/helpers/gtk_helpers.h`): Cancel keeps the preview and releases the continuation, Discard/Save apply the deferred grid select / open / move, a **failed** Save (read-only folder) keeps the preview and aborts the continuation, repeated close-requests do not stack dialogs, and `t` `t` keeps a dirty preview on screen. |
+| `test_grid_select_gate.c` | M9 | `gridview.c` routes every selection through the installed `GgazeGridSelectFunc` instead of `navigator_set_current_file` — a refusing gate blocks the change, an allowing one lets it through, and with **no** gate (or after uninstalling one) it falls back to `navigator_set_current_file` itself. No GEGL/window/dialog involved, so it runs in the minimal lane too. |
 | `test_clipboard_copy.c` | M8 | `Ctrl+c` with no marks → `image/png` on `GdkClipboard`; with marks → `text/uri-list`; paste back into a fake target. |
 | `test_full_lifecycle.c` | M10 | The elevator-pitch session scripted: open → walk → `i` → `d` ×k → mark → `m`→dest → `e`→program (use `true`) → `!`→script → quit. End-to-end smoke. |
 
@@ -64,9 +64,13 @@ ggaze has **two complementary test tracks**. Both run under `meson test`.
 - `tests/meson.build` wires `unit` and `integration` subdirs as separate
   `meson test` suites (`-t suite:unit`, `-t suite:integration`) so they can be
   run selectively in CI.
-- `tests/helpers/` — shared helpers: temp-dir factory, fixture locator,
-  offscreen-window builder, fake `GdkClipboard` target, main-loop drain with
-  timeout (prevents a hung test from blocking CI).
+- `tests/helpers/` — shared helpers, built as the `ggaze_test_helpers` static
+  library and linked by the suites that need it. `gtk_helpers.{c,h}` (M9):
+  grid-cell activation via the flowbox's `child-activated` (needs no laid-out
+  geometry, so no toplevel has to be presented) and driving
+  `gtk_alert_dialog_choose()`'s dialog — it is an ordinary `GtkWindow` in
+  `gtk_window_list_toplevels()`, so its buttons can be found by label and
+  clicked, which is how the dirty-preview prompt is answered in tests.
 - `tests/fixtures/` — curated images per format + a rotated-EXIF JPEG +
   progressive JPEG + RAW+JPEG pair + an injection-hostile filename (`;rm -rf /`).
 - CI runs: unit always; integration on the minimal lane; the `gegl` lane adds
@@ -360,7 +364,10 @@ into the window (see below). Crop (`c`), straighten (`R`), rotate 90
   apply swaps the texture without touching the original (byte-identical),
   toggle-off resets to the original, hold-Space compares then restores,
   `s` twice produces collision-suffixed copies, non-dirty navigation is
-  immediate. `test_window.c::test_enhance_a_is_safe_with_and_without_gegl`
+  immediate — plus the Save/Discard/Cancel prompt driven to each outcome
+  (see the suite table above). `test_grid_select_gate.c` covers `gridview.c`'s
+  side of the gate with no GEGL involved.
+  `test_window.c::test_enhance_a_is_safe_with_and_without_gegl`
   (always built, both lanes) covers the GEGL-disabled safety message.
 
 **Acceptance:** `a` popover (layered, async apply); `s` copy

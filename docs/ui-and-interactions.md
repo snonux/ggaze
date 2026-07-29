@@ -298,7 +298,11 @@ Loaded lazily; never blocks display of the pixels.
   different file/folder (`o`, drag-and-drop, File→Open), or quitting —
   either via `q` **or** the window manager's close button / Alt+F4 —
   with a dirty preview prompts **Save** (export the copy, then proceed),
-  **Discard** (drop the preview, proceed), or **Cancel** (stay). `s` saves
+  **Discard** (drop the preview, proceed), or **Cancel** (stay). If the
+  export **fails** (read-only folder, full disk, ...), Save behaves like
+  Cancel plus an error message: the preview is kept and nothing proceeds, so
+  an unwritable destination can never cost the enhancement. Only one prompt
+  is ever up at a time — repeated Alt+F4 presses do not stack dialogs. `s` saves
   without clearing dirty (see above); toggling every preset back off, `0`, or
   `Esc` (when the popover is not open) discards it directly (explicit, no
   prompt). Slideshow auto-advance is the one exception: it discards a dirty

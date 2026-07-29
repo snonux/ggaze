@@ -41,8 +41,10 @@ editing remains a non-goal.
   selection), trashing/deleting/moving the current file, opening a
   different file/folder, or quitting (`q` **or** the window manager's close
   button / Alt+F4) with an un-exported preview prompts
-  Save/Discard/Cancel; toggling every preset back off, `0`, or `Esc`
-  discards directly (no prompt). Slideshow auto-advance discards a dirty
+  Save/Discard/Cancel; a Save whose export fails keeps the preview and does
+  not proceed (it is not silently downgraded to Discard), and at most one
+  prompt is outstanding per window. Toggling every preset back off, `0`, or
+  `Esc` discards directly (no prompt). Slideshow auto-advance discards a dirty
   preview silently instead of blocking on an unanswerable prompt.
 - Export format: defaults to the original extension (JPEG quality 95); a
   format/quality chooser and a lossless `jpegtran`/`exiftool` path are later.
