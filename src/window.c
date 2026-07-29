@@ -170,6 +170,25 @@ _proceed_last(gpointer d) {
    ggaze_window_last(GGAZE_WINDOW(d));
    return (G_SOURCE_REMOVE);
 }
+
+/* Continuation for _grid_select_gate (below): applies the deferred
+ * navigator.current change once Save/Discard/Cancel resolves. */
+typedef struct {
+   GgazeWindow *p_win;  /* owned ref */
+   GFile       *p_file; /* owned ref: file to select once resolved */
+} _GridSelectCtx;
+
+static gboolean
+_proceed_grid_select(gpointer p_data) {
+   _GridSelectCtx *p_ctx = (_GridSelectCtx *)p_data;
+   if (p_ctx->p_win->p_nav != NULL) {
+      navigator_set_current_file(p_ctx->p_win->p_nav, p_ctx->p_file);
+   }
+   g_object_unref(p_ctx->p_win);
+   g_object_unref(p_ctx->p_file);
+   g_free(p_ctx);
+   return (G_SOURCE_REMOVE);
+}
 #if GGAZE_HAVE_GEGL
 /* Split p_base ("IMG_0001.jpg") into a stem ("IMG_0001") and a saver-
  * supported extension (defaults to ".jpg" if p_base's own extension is not
@@ -278,9 +297,10 @@ _enhance_do_save(GgazeWindow *p_win) {
 }
 
 typedef struct {
-   GgazeWindow *p_win;
-   GSourceFunc  fn;
-   gpointer     data;
+   GgazeWindow *p_win; /* owned ref: outlives the async dialog (mirrors
+                        * _MoveIdxCtx/_OpenCtx/_DeleteCtx's own convention) */
+   GSourceFunc fn;
+   gpointer    data;
 } _SaveCtx;
 
 /* Alert-dialog response: 0=Cancel, 1=Discard, 2=Save. */
@@ -294,6 +314,7 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
    g_object_unref(GTK_ALERT_DIALOG(p_dlg));
    if (p_err != NULL) { /* dismissed / error -> treat as Cancel */
       g_clear_error(&p_err);
+      g_object_unref(p_win);
       g_free(p_ctx);
       return;
    }
@@ -306,6 +327,7 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
          p_ctx->fn(p_ctx->data);
       }
    } /* Cancel: keep the preview, do not navigate. */
+   g_object_unref(p_win);
    g_free(p_ctx);
 }
 
@@ -327,7 +349,7 @@ _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data) {
    gtk_alert_dialog_set_cancel_button(p_dlg, 0);
    gtk_alert_dialog_set_modal(p_dlg, TRUE);
    _SaveCtx *p_ctx = g_new(_SaveCtx, 1);
-   p_ctx->p_win    = p_win;
+   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
    p_ctx->fn       = fn;
    p_ctx->data     = data;
    gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), NULL, _save_dialog_cb,
@@ -343,6 +365,42 @@ _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data) {
    }
 }
 #endif
+
+/* Select gate installed on every grid (ggaze_grid_set_select_func, wired in
+ * _open_rebuild_grid): gridview.c calls this instead of
+ * navigator_set_current_file() directly for every grid/thumbnail selection
+ * path (double-click/Enter, middle-click mark, j/k cursor move, toggle-to-
+ * large sync), so an active unsaved GEGL enhance preview gets the same
+ * Save/Discard/Cancel prompt as h/l/g/G/scroll/quit/d/D/m instead of being
+ * silently discarded by nav_changed_cb before the window ever sees the click
+ * (tu0 review round 2, issue 1). Mirrors navigator_set_current_file's own
+ * contract (TRUE iff current changed synchronously); returns FALSE both for
+ * a true no-op and when the change is deferred behind the dialog -- it
+ * still applies once the user resolves it (Save or Discard), exactly like
+ * _move_go/ggaze_window_open's own deferred continuations. Written without
+ * any #if GGAZE_HAVE_GEGL guard: ggaze_window_enhance_is_dirty and
+ * _maybe_save_then are both defined (as no-ops) in the GEGL-disabled build
+ * too, so this gate works unmodified in either configuration. */
+static gboolean
+_grid_select_gate(GgazeGrid *p_grid, GFile *p_file, gpointer p_data) {
+   (void)p_grid;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL || p_file == NULL) {
+      return (FALSE);
+   }
+   if (!ggaze_window_enhance_is_dirty(p_win)) {
+      return (navigator_set_current_file(p_win->p_nav, p_file));
+   }
+   GFile *p_cur = navigator_get_current(p_win->p_nav);
+   if (p_cur != NULL && g_file_equal(p_cur, p_file)) {
+      return (FALSE); /* already current: nothing to gate */
+   }
+   _GridSelectCtx *p_ctx = g_new(_GridSelectCtx, 1);
+   p_ctx->p_win          = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->p_file         = (GFile *)g_object_ref(p_file);
+   _maybe_save_then(p_win, _proceed_grid_select, p_ctx);
+   return (FALSE);
+}
 
 /* --- actions ------------------------------------------------------------- */
 
@@ -388,6 +446,27 @@ _action_quit(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    _maybe_save_then(GGAZE_WINDOW(p_data), _proceed_quit, p_data);
+}
+
+/* Native window close (WM "X" button, Alt+F4, etc.) -- GTK4 never routes
+ * this through win.quit/_action_quit, so without this handler it bypassed
+ * the dirty-preview gate entirely (tu0 review round 2, issue 2). Reuses
+ * _action_quit's own continuation (_proceed_quit just calls
+ * gtk_window_close again): if nothing is dirty, propagate so the default
+ * close-request handling proceeds immediately; if dirty, stop this close and
+ * let _maybe_save_then's Save/Discard/Cancel prompt decide -- once it
+ * resolves (Save or Discard clears the mask first), _proceed_quit's
+ * gtk_window_close() re-emits "close-request", which this handler now sees
+ * as clean and lets through. */
+static gboolean
+_on_close_request(GtkWindow *p_gtk_win, gpointer p_data) {
+   (void)p_gtk_win;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (!ggaze_window_enhance_is_dirty(p_win)) {
+      return (GDK_EVENT_PROPAGATE); /* nothing dirty: allow the close */
+   }
+   _maybe_save_then(p_win, _proceed_quit, p_win);
+   return (GDK_EVENT_STOP); /* block until the prompt resolves */
 }
 
 static void
@@ -1300,6 +1379,15 @@ _enhance_apply_async(GgazeWindow *p_win) {
    }
    _enhance_apply_begin(p_win);
    if (p_win->u_enhance_mask == 0) {
+      /* Canonical "mask went empty" site -- every path that clears it
+       * (Esc/discard, the popover's "0 Original" row, and the easy-to-miss
+       * one: toggling the LAST enabled preset back off via win.enhance-N or
+       * a popover row) funnels through here. Force the hold-compare flag
+       * off: ggaze_window_set_hold_original no-ops once nothing is dirty, so
+       * a Space RELEASE arriving after the mask was cleared out from under a
+       * still-held key would otherwise leave the flag stuck TRUE and swallow
+       * the next press (tu0 review round 2, issue 4). */
+      p_win->b_hold_original = FALSE;
       g_clear_object(&p_win->p_enhance_tex);
       _load_current(p_win); /* restore original (texturecache is fast) */
       _update_header(p_win);
@@ -1307,7 +1395,8 @@ _enhance_apply_async(GgazeWindow *p_win) {
    }
    GFile *p_file = navigator_get_current(p_win->p_nav);
    if (p_file == NULL) {
-      p_win->u_enhance_mask = 0;
+      p_win->u_enhance_mask  = 0;
+      p_win->b_hold_original = FALSE; /* see the mask==0 branch above */
       _enhance_update_highlights(p_win);
       _update_header(p_win);
       return;
@@ -1324,7 +1413,11 @@ _enhance_apply_async(GgazeWindow *p_win) {
  * preview only drops in-memory state. */
 static void
 _enhance_discard(GgazeWindow *p_win) {
-   p_win->u_enhance_mask = 0;
+   p_win->u_enhance_mask  = 0;
+   p_win->b_hold_original = FALSE; /* belt-and-braces: _enhance_apply_async's
+                                    * mask==0 branch below also does this,
+                                    * but it early-returns without a
+                                    * navigator/enhancer (issue 4) */
    _enhance_update_highlights(p_win);
    _enhance_apply_async(p_win);
 }
@@ -2784,7 +2877,10 @@ _enhance_nav_changed(GgazeWindow *p_win) {
    gboolean b_same = (p_cur != NULL && p_win->p_enhance_file != NULL &&
                       g_file_equal(p_cur, p_win->p_enhance_file));
    if (!b_same) {
-      p_win->u_enhance_mask = 0;
+      p_win->u_enhance_mask  = 0;
+      p_win->b_hold_original = FALSE; /* mask cleared without going through
+                                       * _enhance_apply_async, so reset the
+                                       * hold flag here too (issue 4) */
       p_win->u_enhance_gen++;
       g_cancellable_cancel(p_win->p_enhance_cancel);
       g_clear_object(&p_win->p_enhance_tex);
@@ -2815,12 +2911,27 @@ nav_changed_cb(Navigator *p_nav, gpointer p_data) {
    _load_current(p_win);
 }
 
+/* Enter/double-click on a cell: switch to large view and show whatever
+ * navigator.current now is. The cell's own selection was already routed
+ * through _grid_select_gate before this runs, so current may deliberately
+ * NOT have moved (a dirty enhance preview put the change behind the
+ * Save/Discard/Cancel prompt). In that case _load_current would repaint the
+ * unmodified original even though the preview is still active and `s` would
+ * still export it -- so put the cached preview texture back on screen and
+ * keep what the user sees consistent with the dirty state until they answer
+ * the prompt. */
 static void
 _on_grid_activate(GgazeGrid *p_grid, gpointer p_data) {
    (void)p_grid;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
    _load_current(p_win);
+#if GGAZE_HAVE_GEGL
+   if (p_win->u_enhance_mask != 0 && p_win->p_enhance_tex != NULL &&
+       !p_win->b_hold_original) {
+      _show_texture(p_win, p_win->p_enhance_tex);
+   }
+#endif
 }
 
 /* --- load current into the viewer ---------------------------------------- */
@@ -3166,9 +3277,42 @@ _ensure_css(void) {
    g_object_unref(p_css);
 }
 
+#if GGAZE_HAVE_GEGL
+/* Enhance-related field init + the hold-Space compare key controller,
+ * extracted out of ggaze_window_init to keep it under CLAUDE.md's 50-line
+ * hard limit (tu0 review round 2, issue 5). Hold-Space (docs/ui-and-
+ * interactions.md "Compare original vs modified") needs press AND release,
+ * which shortcuts.c's GtkShortcutController (action triggers fire on press
+ * only) cannot express, so this is a dedicated key controller straight on
+ * the window, capture phase like the popovers' own controllers. Space is
+ * not bound to anything else, so ordering relative to shortcuts_install's
+ * GLOBAL-scope controller does not matter here. */
 static void
-ggaze_window_init(GgazeWindow *p_win) {
-   _ensure_css();
+_init_enhance_state(GgazeWindow *p_win) {
+   p_win->u_enhance_mask   = 0; /* start on the original */
+   p_win->p_enhancer       = enhancer_new();
+   p_win->p_enhance_tex    = NULL;
+   p_win->p_enhance_cancel = g_cancellable_new();
+   p_win->u_enhance_gen    = 0;
+   p_win->b_hold_original  = FALSE;
+   p_win->p_enhance_file   = NULL;
+
+   GtkEventController *p_space_kc = gtk_event_controller_key_new();
+   gtk_event_controller_set_propagation_phase(p_space_kc, GTK_PHASE_CAPTURE);
+   g_signal_connect(p_space_kc, "key-pressed", G_CALLBACK(_space_pressed_cb),
+                    p_win);
+   g_signal_connect(p_space_kc, "key-released", G_CALLBACK(_space_released_cb),
+                    p_win);
+   gtk_widget_add_controller(GTK_WIDGET(p_win), p_space_kc);
+}
+#endif
+
+/* Cancellables, texture/thumbnail caches, per-folder trash/grid placeholders,
+ * and the configured engines (mover/opener/runner, plus the GEGL enhancer
+ * when built in) fed from GSettings. Split out of ggaze_window_init to keep
+ * it under CLAUDE.md's 50-line hard limit (tu0 review round 2, issue 5). */
+static void
+_init_engines_and_settings(GgazeWindow *p_win) {
    p_win->p_cancel          = g_cancellable_new();
    p_win->p_prefetch_cancel = g_cancellable_new();
    p_win->p_cache           = texturecache_new(4);
@@ -3184,30 +3328,21 @@ ggaze_window_init(GgazeWindow *p_win) {
       p_win->i_grid_size =
          CLAMP(settings_get_thumbnail_size(p_win->p_settings), 64, 512);
    }
-
 #if GGAZE_HAVE_GEGL
-   p_win->u_enhance_mask   = 0; /* start on the original */
-   p_win->p_enhancer       = enhancer_new();
-   p_win->p_enhance_tex    = NULL;
-   p_win->p_enhance_cancel = g_cancellable_new();
-   p_win->u_enhance_gen    = 0;
-   p_win->b_hold_original  = FALSE;
-   p_win->p_enhance_file   = NULL;
+   _init_enhance_state(p_win); /* must run before _load_engine_lists below,
+                                * which feeds settings into p_win->p_enhancer
+                                * once it exists */
 #endif
    /* Feed the configured a(ss) lists into the engines now that all of them
     * (incl. the GEGL enhancer) exist. */
    _load_engine_lists(p_win);
+}
 
-   /* Header bar (libadwaita, decision #29). */
-   GtkWidget *p_header = adw_header_bar_new();
-   gtk_window_set_titlebar(GTK_WINDOW(p_win), p_header);
-
-   /* Two-view stack: "grid" is created on open; placeholder until then. */
-   p_win->p_stack = gtk_stack_new();
-   gtk_stack_set_transition_type(GTK_STACK(p_win->p_stack),
-                                 GTK_STACK_TRANSITION_TYPE_CROSSFADE);
-
-   /* Wrap the stack in a GtkOverlay so the info label can float on top. */
+/* Wrap p_win->p_stack (built already) in a GtkOverlay with the auto-hiding
+ * info label floating on top, and make it the window's child. Split out of
+ * _init_stack_and_viewer to keep it under the ~30-line convention. */
+static void
+_init_info_overlay(GgazeWindow *p_win) {
    p_win->p_overlay = gtk_overlay_new();
    gtk_overlay_set_child(GTK_OVERLAY(p_win->p_overlay), p_win->p_stack);
    p_win->p_info_lbl = gtk_label_new("");
@@ -3219,6 +3354,22 @@ ggaze_window_init(GgazeWindow *p_win) {
    gtk_widget_set_hexpand(p_win->p_overlay, TRUE);
    gtk_widget_set_vexpand(p_win->p_overlay, TRUE);
    gtk_window_set_child(GTK_WINDOW(p_win), p_win->p_overlay);
+}
+
+/* Header bar, the grid/large GtkStack (+ its info overlay), and the viewer
+ * widget. Split out of ggaze_window_init to keep it under CLAUDE.md's
+ * 50-line hard limit (tu0 review round 2, issue 5). */
+static void
+_init_stack_and_viewer(GgazeWindow *p_win) {
+   /* Header bar (libadwaita, decision #29). */
+   GtkWidget *p_header = adw_header_bar_new();
+   gtk_window_set_titlebar(GTK_WINDOW(p_win), p_header);
+
+   /* Two-view stack: "grid" is created on open; placeholder until then. */
+   p_win->p_stack = gtk_stack_new();
+   gtk_stack_set_transition_type(GTK_STACK(p_win->p_stack),
+                                 GTK_STACK_TRANSITION_TYPE_CROSSFADE);
+   _init_info_overlay(p_win);
 
    GtkWidget *p_grid = gtk_label_new("grid");
    gtk_widget_add_css_class(p_grid, "dim-label");
@@ -3233,6 +3384,13 @@ ggaze_window_init(GgazeWindow *p_win) {
    _apply_viewer_prefs(p_win);
 
    gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "grid");
+}
+
+static void
+ggaze_window_init(GgazeWindow *p_win) {
+   _ensure_css();
+   _init_engines_and_settings(p_win);
+   _init_stack_and_viewer(p_win);
 
    /* Actions + keybindings (decision #10/#12). */
    g_action_map_add_action_entries(G_ACTION_MAP(p_win), ACTIONS,
@@ -3245,22 +3403,11 @@ ggaze_window_init(GgazeWindow *p_win) {
    g_signal_connect(p_drop, "drop", G_CALLBACK(drop_cb), p_win);
    gtk_widget_add_controller(GTK_WIDGET(p_win), GTK_EVENT_CONTROLLER(p_drop));
 
-#if GGAZE_HAVE_GEGL
-   /* Hold-Space compare (docs/ui-and-interactions.md "Compare original vs
-    * modified"): needs press AND release, which shortcuts.c's
-    * GtkShortcutController (action triggers fire on press only) cannot
-    * express, so this is a dedicated key controller straight on the window,
-    * capture phase like the popovers' own controllers. Space is not bound
-    * to anything else, so ordering relative to shortcuts_install's GLOBAL-
-    * scope controller does not matter here. */
-   GtkEventController *p_space_kc = gtk_event_controller_key_new();
-   gtk_event_controller_set_propagation_phase(p_space_kc, GTK_PHASE_CAPTURE);
-   g_signal_connect(p_space_kc, "key-pressed", G_CALLBACK(_space_pressed_cb),
+   /* Native window close (WM "X"/Alt+F4): gate it through the same
+    * Save/Discard/Cancel prompt win.quit uses (tu0 review round 2, issue
+    * 2) -- see _on_close_request. */
+   g_signal_connect(p_win, "close-request", G_CALLBACK(_on_close_request),
                     p_win);
-   g_signal_connect(p_space_kc, "key-released", G_CALLBACK(_space_released_cb),
-                    p_win);
-   gtk_widget_add_controller(GTK_WIDGET(p_win), p_space_kc);
-#endif
 }
 
 /* --- public -------------------------------------------------------------- */
@@ -3364,6 +3511,10 @@ _open_rebuild_grid(GgazeWindow *p_win, gboolean b_hide_trashed) {
       p_win->p_nav, p_win->p_thumb, p_win->i_grid_size, b_hide_trashed));
    g_signal_connect(p_win->p_grid, "activate", G_CALLBACK(_on_grid_activate),
                     p_win);
+   /* Route every grid/thumbnail selection through the dirty-preview gate
+    * (tu0 review round 2, issue 1) instead of letting gridview.c call
+    * navigator_set_current_file() directly. */
+   ggaze_grid_set_select_func(p_win->p_grid, _grid_select_gate, p_win);
    gtk_stack_add_named(GTK_STACK(p_win->p_stack), GTK_WIDGET(p_win->p_grid),
                        "grid");
 }

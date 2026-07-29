@@ -117,7 +117,11 @@ gboolean ggaze_window_enhance_is_dirty(GgazeWindow *p_win);
  * dirty, GEGL is not built in, or the requested state is already in effect.
  * This is the testable entry point the window's own Space key controller
  * (press/release, which shortcuts.c's action-trigger table cannot express)
- * calls. */
+ * calls. Every place that clears the enhance mask (discard, a real
+ * navigation away, etc.) also force-resets the internal hold flag to FALSE,
+ * so a release that arrives after the mask was cleared out from under a
+ * still-held Space key can never leave it stuck TRUE (tu0 review round 2,
+ * issue 4). */
 void ggaze_window_set_hold_original(GgazeWindow *p_win, gboolean b_hold);
 
 /* --- INTERNAL: bulk-delete safety (used by the confirm-dialog flow and the
