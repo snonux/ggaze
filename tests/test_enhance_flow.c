@@ -182,8 +182,11 @@ typedef struct {
    guint        u_ref;  /* p_win's refcount once dirty and settled */
 } DirtyFixture;
 
-/* Open a window on a fresh 2-image folder and apply preset 1, so the window
- * ends up dirty with a live preview.
+/* Open a window on a fresh folder holding c_names (NULL-terminated), on the
+ * FIRST of them, and leave it clean. Split out of fixture_open so a subtest
+ * can do setup that must happen while nothing is dirty yet -- marking files
+ * means navigating to them, and navigating with a live preview would raise
+ * the very prompt the subtest is about to raise itself.
  *
  * The extra g_object_ref is deliberate: some subtests here let the window
  * actually close (Discard on a close-request runs _proceed_quit), and GTK4
@@ -191,19 +194,27 @@ typedef struct {
  * drops it on destroy -- without a ref of our own the fixture pointer would
  * dangle the moment the close goes through. */
 static void
-fixture_open(DirtyFixture *p_fx, const char *c_tmpl) {
+fixture_open_clean(DirtyFixture *p_fx, const char *c_tmpl,
+                   const char *const *c_names) {
    GError *p_err = NULL;
    p_fx->c_dir   = g_dir_make_tmp(c_tmpl, &p_err);
    g_assert_no_error(p_err);
-   copy_fixture(p_fx->c_dir, "plain.jpg");
-   copy_fixture(p_fx->c_dir, "rot6.jpg");
-   p_fx->c_path = g_build_filename(p_fx->c_dir, "plain.jpg", NULL);
+   for (guint u = 0; c_names[u] != NULL; u++) {
+      copy_fixture(p_fx->c_dir, c_names[u]);
+   }
+   p_fx->c_path = g_build_filename(p_fx->c_dir, c_names[0], NULL);
    p_fx->p_file = g_file_new_for_path(p_fx->c_path);
    p_fx->p_win  = new_window();
    g_object_ref(p_fx->p_win);
    ggaze_window_open(p_fx->p_win, p_fx->p_file);
    wait_for_load(p_fx->p_win);
+   g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
+}
 
+/* Apply preset 1, so the window ends up dirty with a live preview, and record
+ * the reference count every assert_ref_settled() call compares against. */
+static void
+fixture_make_dirty(DirtyFixture *p_fx) {
    p_fx->p_orig = viewer_texture(p_fx->p_win);
    fire(p_fx->p_win, "win.enhance-1");
    wait_for_texture_change(p_fx->p_win, p_fx->p_orig);
@@ -211,6 +222,14 @@ fixture_open(DirtyFixture *p_fx, const char *c_tmpl) {
    g_assert_true(p_fx->p_mod != p_fx->p_orig);
    g_assert_true(ggaze_window_enhance_is_dirty(p_fx->p_win));
    p_fx->u_ref = ((GObject *)p_fx->p_win)->ref_count;
+}
+
+/* The common case: a 2-image folder, opened on plain.jpg, already dirty. */
+static void
+fixture_open(DirtyFixture *p_fx, const char *c_tmpl) {
+   static const char *const c_two[] = {"plain.jpg", "rot6.jpg", NULL};
+   fixture_open_clean(p_fx, c_tmpl, c_two);
+   fixture_make_dirty(p_fx);
 }
 
 static void
@@ -252,6 +271,55 @@ window_title(GgazeWindow *p_win) {
 static void
 assert_showing(GgazeWindow *p_win, const char *c_name) {
    g_assert_nonnull(g_strstr_len(window_title(p_win), -1, c_name));
+}
+
+/* Mark c_name, then return to the file the fixture opened on. Must run while
+ * the window is still CLEAN (between fixture_open_clean and
+ * fixture_make_dirty): win.mark acts on navigator.current in the large view,
+ * so marking means navigating there, and navigating with a live preview would
+ * raise the very prompt the caller is about to raise deliberately. */
+static void
+mark_file_and_return(DirtyFixture *p_fx, const char *c_name) {
+   for (guint u = 0; u < 8; u++) {
+      if (g_strstr_len(window_title(p_fx->p_win), -1, c_name) != NULL) {
+         break;
+      }
+      ggaze_window_next(p_fx->p_win);
+      ggtest_drain_main(120);
+   }
+   assert_showing(p_fx->p_win, c_name);
+   fire(p_fx->p_win, "win.mark");
+   ggtest_drain_main(120);
+   ggaze_window_first(p_fx->p_win);
+   ggtest_drain_main(150);
+}
+
+/* Assert the header's "· N marked" suffix, i.e. the navigator's LIVE mark
+ * count -- the state the delete path must NOT consult once a prompt is up. */
+static void
+assert_marked_count(GgazeWindow *p_win, guint u_n) {
+   if (u_n == 0) {
+      g_assert_null(g_strstr_len(window_title(p_win), -1, "marked"));
+      return;
+   }
+   char *c_want = g_strdup_printf("%u marked", u_n);
+   g_assert_nonnull(g_strstr_len(window_title(p_win), -1, c_want));
+   g_free(c_want);
+}
+
+/* Delete c_name from the fixture folder the way an external process would,
+ * behind whatever modal prompt is currently up, and wait for the folder's
+ * GFileMonitor (250 ms debounce, navigator.c) to notice and _relist().
+ *
+ * That relist is the mechanism the capture rules exist for: GTK4 modality is
+ * INPUT-only, the monitor is a plain GSource, and _relist() prunes marks
+ * whose file has left the listing. */
+static void
+remove_behind_the_prompt(DirtyFixture *p_fx, const char *c_name) {
+   char *c_path = g_build_filename(p_fx->c_dir, c_name, NULL);
+   g_assert_cmpint(g_unlink(c_path), ==, 0);
+   g_free(c_path);
+   ggtest_drain_main(1500);
 }
 
 /* Switch to the grid and double-click the OTHER thumbnail, i.e. the exact
@@ -1297,6 +1365,300 @@ test_cache_miss_reload_keeps_dirty_preview(void) {
    fixture_teardown(&fx);
 }
 
+/* --- round 4: the MARKED delete legs behind the prompt --------------------
+ *
+ * `D` deletes PERMANENTLY -- no trash, no undo -- so it is the one action
+ * where re-deriving anything at answer time is unrecoverable. Round 3
+ * captured only navigator.current and left the marks-vs-current DECISION to
+ * be re-made in the continuation, on the grounds that "nothing but user input
+ * can change the mark set". navigator.c's _relist() prunes marks whose file
+ * left the listing, and the folder GFileMonitor driving it keeps firing
+ * behind the input-only modal grab, so that was simply untrue (round 4,
+ * finding p). The three subtests below pin the whole leg down: the control
+ * (nothing external happens), the 1-mark-pruned data-loss repro, and the
+ * 3-marks-pruned-to-1 confirm-dialog repro. */
+
+/* Control: `D` with exactly one file marked deletes THAT file when the prompt
+ * is answered -- not the current one, and not nothing at all. Without this,
+ * the repro below could pass simply because delete had stopped working. */
+static void
+test_delete_behind_prompt_deletes_the_marked_file(void) {
+   DirtyFixture             fx;
+   static const char *const c_two[] = {"plain.jpg", "rot6.jpg", NULL};
+   fixture_open_clean(&fx, "ggaze-enhance-delctl-XXXXXX", c_two);
+   mark_file_and_return(&fx, "rot6.jpg");
+   fixture_make_dirty(&fx);
+   assert_showing(fx.p_win, "plain.jpg");
+   assert_marked_count(fx.p_win, 1);
+
+   fire(fx.p_win, "win.delete"); /* `D`: delete the MARKED set */
+   ggtest_drain_main(150);
+   ggtest_drain_main(1500); /* same wait as the repro, nothing removed */
+   answer_prompt(&fx, "Discard");
+   ggtest_drain_main(200);
+
+   g_assert_false(file_exists_in(fx.c_dir, "rot6.jpg")); /* the marked one */
+   g_assert_true(file_exists_in(fx.c_dir, "plain.jpg")); /* and only it */
+   assert_ref_settled(&fx);
+
+   fixture_teardown(&fx);
+}
+
+/* The finding (p) repro. One file marked, `D` pressed, then an external
+ * process removes that file while the prompt is up: the monitor relists, the
+ * dangling mark is pruned, and the live count goes 1 -> 0. Re-reading it in
+ * the continuation therefore took the "no marks" leg and PERMANENTLY deleted
+ * plain.jpg -- never marked, never chosen, and the file the prompt existed to
+ * protect. The captured set still says "rot6.jpg", which is gone, so the
+ * honest outcome is: delete nothing, say so, leave plain.jpg alone. */
+static void
+test_delete_ignores_marks_pruned_behind_the_prompt(void) {
+   DirtyFixture             fx;
+   static const char *const c_two[] = {"plain.jpg", "rot6.jpg", NULL};
+   fixture_open_clean(&fx, "ggaze-enhance-delprune-XXXXXX", c_two);
+   mark_file_and_return(&fx, "rot6.jpg");
+   fixture_make_dirty(&fx);
+
+   fire(fx.p_win, "win.delete");
+   ggtest_drain_main(150);
+   g_assert_nonnull(
+      ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel", 2000));
+
+   remove_behind_the_prompt(&fx, "rot6.jpg");
+   assert_marked_count(fx.p_win, 0); /* the mark really WAS pruned */
+
+   answer_prompt(&fx, "Discard");
+   ggtest_drain_main(200);
+
+   /* The whole point: the unmarked file the user was looking at survives. */
+   g_assert_true(file_exists_in(fx.c_dir, "plain.jpg"));
+   g_assert_cmpstr(
+      gtk_label_get_text(GTK_LABEL(ggaze_window_get_info_label(fx.p_win))), ==,
+      "Nothing deleted — the file is gone");
+   assert_ref_settled(&fx);
+
+   fixture_teardown(&fx);
+}
+
+/* The milder variant, and the one decision #38 cares about: three files
+ * marked, `D` pressed, two of them removed behind the prompt. Re-reading the
+ * marks gave a count of 1, which took the single-file leg and deleted the
+ * survivor with NO confirm dialog at all. With the set captured at press time
+ * it is still three targets, so the ">1 marked" confirmation is still
+ * required -- and answering Cancel there leaves everything on disk. */
+static void
+test_delete_confirm_uses_the_captured_count(void) {
+   DirtyFixture             fx;
+   static const char *const c_four[] = {"plain.jpg", "rgba.png", "rot6.jpg",
+                                        "small.png", NULL};
+   fixture_open_clean(&fx, "ggaze-enhance-delthree-XXXXXX", c_four);
+   mark_file_and_return(&fx, "rgba.png");
+   mark_file_and_return(&fx, "rot6.jpg");
+   mark_file_and_return(&fx, "small.png");
+   fixture_make_dirty(&fx);
+   assert_showing(fx.p_win, "plain.jpg");
+   assert_marked_count(fx.p_win, 3);
+
+   fire(fx.p_win, "win.delete");
+   ggtest_drain_main(150);
+   g_assert_nonnull(
+      ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel", 2000));
+   remove_behind_the_prompt(&fx, "rgba.png");
+   remove_behind_the_prompt(&fx, "rot6.jpg");
+   assert_marked_count(fx.p_win, 1); /* pruned 3 -> 1 */
+
+   /* Answered by hand rather than through answer_prompt(): the confirm
+    * dialog this must raise has a "Cancel" button of its own, so the
+    * "no dialog remains" assertion there would fire on the very thing this
+    * subtest is looking for. */
+   g_assert_true(ggtest_click_dialog_button(GTK_WINDOW(fx.p_win), "Discard"));
+   ggtest_drain_main(400);
+
+   /* The >1-mark confirm must still be raised, for the captured three. */
+   g_assert_nonnull(
+      ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Delete", 2000));
+   g_assert_true(ggtest_click_dialog_button(GTK_WINDOW(fx.p_win), "Cancel"));
+   ggtest_drain_main(300);
+   g_assert_true(file_exists_in(fx.c_dir, "small.png")); /* Cancel: intact */
+   g_assert_true(file_exists_in(fx.c_dir, "plain.jpg"));
+
+   fixture_teardown(&fx);
+}
+
+/* Round 4, finding (q): _do_delete_files advanced the cursor unconditionally,
+ * so deleting a captured target that is no longer current skipped an image
+ * the user never saw. `D` on plain.jpg, current moves on to rgba.png behind
+ * the prompt, Discard -> plain.jpg is deleted and the window must STAY on
+ * rgba.png (it used to jump on to rot6.jpg). */
+static void
+test_delete_does_not_advance_past_an_unseen_image(void) {
+   DirtyFixture             fx;
+   static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
+                                         NULL};
+   fixture_open_clean(&fx, "ggaze-enhance-delnav-XXXXXX", c_three);
+   fixture_make_dirty(&fx);
+
+   fire(fx.p_win, "win.delete"); /* `D` on plain.jpg, nothing marked */
+   ggtest_drain_main(150);
+   g_assert_nonnull(
+      ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel", 2000));
+   ggaze_window_next(fx.p_win); /* what the slideshow tick does */
+   ggtest_drain_main(300);
+   assert_showing(fx.p_win, "rgba.png");
+
+   answer_prompt(&fx, "Discard");
+   ggtest_drain_main(300);
+
+   g_assert_false(file_exists_in(fx.c_dir, "plain.jpg")); /* the captured one */
+   assert_showing(fx.p_win, "rgba.png"); /* and rgba.png was NOT skipped */
+
+   fixture_teardown(&fx);
+}
+
+/* Round 4, finding (u): a captured target removed externally used to sail
+ * past _target_still_in_folder (a pure path comparison) and fail inside
+ * trash_bin, with a bare g_warning and nothing on screen. `d` this time, so
+ * both the trash and the delete side of the guard are covered. */
+static void
+test_trash_refuses_a_target_that_vanished(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-gonetrash-XXXXXX");
+
+   fire(fx.p_win, "win.trash"); /* `d`, captured on plain.jpg */
+   ggtest_drain_main(150);
+   g_assert_nonnull(
+      ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel", 2000));
+   remove_behind_the_prompt(&fx, "plain.jpg");
+
+   answer_prompt(&fx, "Discard");
+   ggtest_drain_main(200);
+
+   g_assert_cmpstr(
+      gtk_label_get_text(GTK_LABEL(ggaze_window_get_info_label(fx.p_win))), ==,
+      "Nothing trashed — the file is gone");
+   /* Nothing was binned, so no ./Trash bin was ever created. */
+   g_assert_false(file_exists_in(fx.c_dir, "Trash"));
+   g_assert_true(file_exists_in(fx.c_dir, "rot6.jpg"));
+   assert_ref_settled(&fx);
+
+   fixture_teardown(&fx);
+}
+
+/* Round 4: the queue's DISPLACE branch (window.c _save_prompt_queue), which
+ * every earlier test missed because they all park exactly one request -- so
+ * the classic double-free/leak site had zero coverage. Park two DIFFERENT
+ * requests behind one prompt: the first must be released without ever
+ * running (newest wins), the second must be the one retried. */
+static void
+test_second_queued_request_displaces_the_first(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-displace-XXXXXX");
+   GError *p_err = NULL;
+   char   *c_a   = g_dir_make_tmp("ggaze-enhance-dispA-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   char *c_b = g_dir_make_tmp("ggaze-enhance-dispB-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_a, "small.png");
+   copy_fixture(c_b, "rgba.png");
+   char  *c_pa = g_build_filename(c_a, "small.png", NULL);
+   char  *c_pb = g_build_filename(c_b, "rgba.png", NULL);
+   GFile *p_a  = g_file_new_for_path(c_pa);
+   GFile *p_b  = g_file_new_for_path(c_pb);
+
+   activate_other_cell(&fx);         /* request 1: raises the prompt */
+   ggaze_window_open(fx.p_win, p_a); /* request 2: parked */
+   ggaze_window_open(fx.p_win, p_b); /* request 3: DISPLACES request 2 */
+   ggtest_drain_main(200);
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    1);
+
+   answer_prompt(&fx, "Discard");
+   ggtest_drain_main(500);
+   assert_showing(fx.p_win, "rgba.png"); /* the newest won ... */
+   g_assert_null(
+      g_strstr_len(window_title(fx.p_win), -1, "small.png")); /* ... only it */
+   assert_ref_settled(&fx); /* the displaced _OpenCtx released its window ref */
+
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+   g_free(c_pa);
+   g_free(c_pb);
+   fixture_teardown(&fx);
+   cleanup_temp_dir(c_a);
+   cleanup_temp_dir(c_b);
+}
+
+/* Round 4, finding (r): when the answered prompt's OWN continuation is the
+ * quit, the flushed request used to run against a window gtk_window_close()
+ * had already taken down -- _open_now building a fresh Navigator,
+ * GFileMonitor and texture load inside it. A closing window can honour no
+ * request, so the queue is dropped instead. */
+static void
+test_quit_continuation_drops_the_queued_request(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-quitdrop-XXXXXX");
+   gtk_window_present(GTK_WINDOW(fx.p_win));
+   ggtest_drain_main(300);
+   GError *p_err   = NULL;
+   char   *c_other = g_dir_make_tmp("ggaze-enhance-quitdrop2-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_other, "small.png");
+   char  *c_target = g_build_filename(c_other, "small.png", NULL);
+   GFile *p_target = g_file_new_for_path(c_target);
+
+   gboolean b_stop = FALSE;
+   g_signal_emit_by_name(fx.p_win, "close-request", &b_stop); /* Alt+F4 */
+   ggtest_drain_main(200);
+   g_assert_true(b_stop);                 /* blocked pending the prompt */
+   ggaze_window_open(fx.p_win, p_target); /* D-Bus open, parked */
+   ggtest_drain_main(200);
+
+   answer_prompt(&fx, "Discard");
+   ggtest_drain_main(600);
+
+   g_assert_false(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win))); /* closed */
+   /* And the queued open never ran: no fresh navigator was built into the
+    * dying window, so its title still names the file it was opened on. */
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "small.png"));
+
+   g_object_unref(p_target);
+   g_free(c_target);
+   fixture_teardown(&fx);
+   cleanup_temp_dir(c_other);
+}
+
+/* Round 4: _move_go's capture behind a prompt -- the move twin of
+ * test_prompt_acts_on_the_file_it_was_raised_for, listed as untested in both
+ * of the last two review rounds. The row click captures plain.jpg; current
+ * moves on to rot6.jpg behind the dialog; Discard must move plain.jpg. */
+static void
+test_move_acts_on_the_targets_captured_at_click(void) {
+   GError *p_err = NULL;
+   char   *c_dst = g_dir_make_tmp("ggaze-enhance-movecap-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   set_one_destination("dest one", c_dst);
+
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-movecapsrc-XXXXXX");
+   click_move_row(&fx); /* captures plain.jpg, raises the prompt */
+   g_assert_nonnull(
+      ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel", 2000));
+   ggaze_window_next(fx.p_win); /* what the slideshow tick does */
+   ggtest_drain_main(300);
+   assert_showing(fx.p_win, "rot6.jpg");
+
+   answer_prompt(&fx, "Discard");
+   ggtest_drain_main(300);
+
+   g_assert_true(file_exists_in(c_dst, "plain.jpg"));   /* the captured one */
+   g_assert_false(file_exists_in(c_dst, "rot6.jpg"));   /* not the current */
+   g_assert_true(file_exists_in(fx.c_dir, "rot6.jpg")); /* still at home */
+
+   fixture_teardown(&fx);
+   reset_destinations();
+   cleanup_temp_dir(c_dst);
+}
+
 /* Registration split in two so neither function runs past the ~30-line
  * convention: the original feature coverage, and the round-2 subtests that
  * answer the real Save/Discard/Cancel prompt (see the file header). */
@@ -1367,6 +1729,31 @@ add_behind_the_prompt_tests(void) {
                    test_cache_miss_reload_keeps_dirty_preview);
 }
 
+/* Round 4: the permanent-delete legs behind the prompt (finding p and its
+ * confirm-dialog variant), the cursor-advance twin (q), the quit/queue
+ * interaction (r), the vanished-target guard (u), and the two structural
+ * paths no earlier subtest reached -- the queue's displace branch and dispose
+ * with a request still parked. */
+static void
+add_round4_tests(void) {
+   g_test_add_func("/enhance_flow/delete_behind_prompt_deletes_marked_file",
+                   test_delete_behind_prompt_deletes_the_marked_file);
+   g_test_add_func("/enhance_flow/delete_ignores_marks_pruned_behind_prompt",
+                   test_delete_ignores_marks_pruned_behind_the_prompt);
+   g_test_add_func("/enhance_flow/delete_confirm_uses_the_captured_count",
+                   test_delete_confirm_uses_the_captured_count);
+   g_test_add_func("/enhance_flow/delete_does_not_advance_past_unseen_image",
+                   test_delete_does_not_advance_past_an_unseen_image);
+   g_test_add_func("/enhance_flow/trash_refuses_a_target_that_vanished",
+                   test_trash_refuses_a_target_that_vanished);
+   g_test_add_func("/enhance_flow/second_queued_request_displaces_the_first",
+                   test_second_queued_request_displaces_the_first);
+   g_test_add_func("/enhance_flow/quit_continuation_drops_queued_request",
+                   test_quit_continuation_drops_the_queued_request);
+   g_test_add_func("/enhance_flow/move_acts_on_targets_captured_at_click",
+                   test_move_acts_on_the_targets_captured_at_click);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -1387,5 +1774,6 @@ main(int i_argc, char **c_argv) {
    add_feature_tests();
    add_prompt_outcome_tests();
    add_behind_the_prompt_tests();
+   add_round4_tests();
    return (g_test_run());
 }

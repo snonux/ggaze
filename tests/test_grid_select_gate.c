@@ -37,11 +37,14 @@
  * cell bounds, so it cannot work on an unrealized grid, and that call site
  * would otherwise stay untested.
  *
- * The fourth gated call site, the middle-click mark (_on_flow_middle_pressed),
- * is still not driven here: it hangs off an internal GtkGestureClick and needs
- * a synthesized pointer press at real coordinates, which GTK4 exposes no
- * supported API for. It shares the same one-line _grid_select() helper as the
- * three sites that ARE covered.
+ * The fourth gated call site, the middle-click mark, is now driven too --
+ * through ggaze_grid_mark_at_pos(), the seam gridview.c grew for exactly this
+ * (round 4). The GtkGestureClick "pressed" handler itself really is out of
+ * reach: GTK4 dropped gtk_test_widget_click and the public GdkEvent
+ * constructors GTK3 tests used to synthesize a pointer press. What it does is
+ * filter the button and forward the coordinates, and everything after that
+ * lives in the seam, where mark_at_pos_respects_refusing_gate exercises it at
+ * real laid-out coordinates.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -376,6 +379,98 @@ test_move_cursor_respects_refusing_gate(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* Find the GtkFlowBox inside the grid widget (grid -> scrolled window ->
+ * viewport -> flowbox). ggaze_grid_mark_at_pos() takes coordinates in the
+ * flowbox's own space, and the test has to compute them from the real layout
+ * rather than guess: cell size and wrapping are GtkFlowBox's business. */
+static GtkWidget *
+find_flowbox(GtkWidget *p_root) {
+   if (GTK_IS_FLOW_BOX(p_root)) {
+      return (p_root);
+   }
+   for (GtkWidget *p_c = gtk_widget_get_first_child(p_root); p_c != NULL;
+        p_c            = gtk_widget_get_next_sibling(p_c)) {
+      GtkWidget *p_hit = find_flowbox(p_c);
+      if (p_hit != NULL) {
+         return (p_hit);
+      }
+   }
+   return (NULL);
+}
+
+/* Centre of the u_idx'th cell, in flowbox coordinates. */
+static void
+cell_centre(GtkWidget *p_flow, guint u_idx, gint *pi_x, gint *pi_y) {
+   GtkWidget *p_child = gtk_widget_get_first_child(p_flow);
+   for (guint u = 0; u < u_idx && p_child != NULL; u++) {
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   g_assert_nonnull(p_child);
+   graphene_rect_t t_r;
+   g_assert_true(gtk_widget_compute_bounds(p_child, p_flow, &t_r));
+   g_assert_cmpfloat(t_r.size.width, >, 0.0f);
+   *pi_x = (gint)(t_r.origin.x + t_r.size.width / 2.0f);
+   *pi_y = (gint)(t_r.origin.y + t_r.size.height / 2.0f);
+}
+
+/* The middle-click mark, the last of the four gated call sites and the one
+ * named as untested in every review round so far. Driven through the seam
+ * gridview.c exposes for it (ggaze_grid_mark_at_pos), at the real laid-out
+ * coordinates of a cell -- so the flowbox hit-test is exercised too, not just
+ * the gate call. A refusing gate must block the navigator.current sync exactly
+ * as it blocks a double-click; the mark itself is a separate concern (a
+ * "win.mark" action this standalone grid has no window to handle). */
+static void
+test_mark_at_pos_respects_refusing_gate(void) {
+   char      *c_dir = make_folder();
+   GtkWindow *p_win;
+   Navigator *p_nav;
+   Thumbnail *p_thumb;
+   GgazeGrid *p_grid;
+   build_grid(c_dir, &p_win, &p_nav, &p_thumb, &p_grid);
+   present_and_lay_out(p_win);
+
+   GtkWidget *p_flow = find_flowbox(GTK_WIDGET(p_grid));
+   g_assert_nonnull(p_flow);
+   gint i_x, i_y;
+   cell_centre(p_flow, 2, &i_x, &i_y); /* last cell: never the current one */
+
+   char    *c_before = g_file_get_basename(navigator_get_current(p_nav));
+   FakeGate fg       = {0};
+   fg.p_nav          = p_nav;
+   fg.b_allow        = FALSE;
+   ggaze_grid_set_select_func(p_grid, fake_gate, &fg);
+
+   g_assert_true(ggaze_grid_mark_at_pos(p_grid, i_x, i_y)); /* a cell WAS hit */
+   ggtest_drain_main(50);
+
+   g_assert_cmpuint(fg.u_calls, >, 0); /* the gate WAS asked ... */
+   g_assert_nonnull(fg.p_last);
+   char *c_asked = g_file_get_basename(fg.p_last);
+   g_assert_cmpstr(c_asked, ==, "small.png"); /* ... about that very cell */
+   char *c_after = g_file_get_basename(navigator_get_current(p_nav));
+   g_assert_cmpstr(c_before, ==, c_after); /* and current did not move */
+
+   /* Control: the same position, allowed, does move current -- so the
+    * assertion above cannot pass merely because the hit-test missed. */
+   fg.b_allow = TRUE;
+   g_assert_true(ggaze_grid_mark_at_pos(p_grid, i_x, i_y));
+   ggtest_drain_main(50);
+   char *c_moved = g_file_get_basename(navigator_get_current(p_nav));
+   g_assert_cmpstr(c_moved, ==, "small.png");
+
+   g_free(c_before);
+   g_free(c_after);
+   g_free(c_asked);
+   g_free(c_moved);
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   ggtest_drain_main(100);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -396,5 +491,7 @@ main(int i_argc, char **c_argv) {
                    test_clearing_gate_restores_fallback);
    g_test_add_func("/grid_select_gate/move_cursor_respects_refusing_gate",
                    test_move_cursor_respects_refusing_gate);
+   g_test_add_func("/grid_select_gate/mark_at_pos_respects_refusing_gate",
+                   test_mark_at_pos_respects_refusing_gate);
    return (g_test_run());
 }
