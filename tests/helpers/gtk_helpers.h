@@ -40,12 +40,15 @@ void ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx);
  * suites are otherwise independent binaries: a GtkWindow a test built is torn
  * down with gtk_window_destroy(), never with a plain g_object_unref().
  *
- * gtk_window_constructed() hands the caller's initial reference over to GTK's
- * internal toplevel list, which holds the window as a raw pointer. Only
- * gtk_window_destroy() takes the entry back out of that list -- and it drops
- * that same reference while doing so, so a window a test alone owns still
- * finalizes exactly as the old unref made it finalize. Unreffing *instead*
- * finalizes the window but leaves the list pointing at freed memory.
+ * gtk_window_constructed() appends the window to GTK's internal toplevel list,
+ * which takes a reference of its own, and then drops the caller's initial one
+ * -- so the list holds the window's only counted reference and a freshly built
+ * window sits at refcount 1, properly referenced. Only gtk_window_destroy()
+ * takes the entry back out of that list -- and it drops that reference while
+ * doing so, so a window a test alone owns still finalizes exactly as the old
+ * unref made it finalize. Unreffing *instead* steals the list's reference: the
+ * window finalizes, the entry stays behind, and only then is the list left
+ * pointing at freed memory.
  *
  * That stays invisible for as long as nothing walks the list. The list is a
  * GListModel, though, and every walk of it goes through
