@@ -33,6 +33,11 @@
 
 /* --- helpers ------------------------------------------------------------ */
 
+/* Windows built here are torn down with gtk_window_destroy(), never a plain
+ * g_object_unref(): GTK4 hands the caller's reference to its internal
+ * toplevel list and only destroy() takes the entry back out (it drops that
+ * reference too, so the window still finalizes). Full rationale in
+ * tests/helpers/gtk_helpers.h, "window teardown". */
 static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
@@ -276,7 +281,7 @@ test_runner_rescan_creates_file(void) {
    g_free(c_new);
 
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    g_free(c_path);
    cleanup_temp_dir(c_dir);
@@ -307,7 +312,7 @@ test_runner_failure_no_crash(void) {
    g_assert_cmpint(ggaze_grid_get_count(window_grid(p_win)), ==, 1);
 
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    g_free(c_path);
    cleanup_temp_dir(c_dir);
@@ -350,7 +355,7 @@ test_runner_popup_structure(void) {
    g_assert_null(find_run_script_popover(p_win));
 
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    g_free(c_path);
    cleanup_temp_dir(c_dir);
@@ -379,7 +384,7 @@ test_runner_popup_empty_message(void) {
    g_assert_cmpint(popover_button_count(p_pop), ==, 0); /* message, no rows */
 
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    g_free(c_path);
    cleanup_temp_dir(c_dir);
@@ -405,7 +410,7 @@ test_runner_empty_no_scripts(void) {
    g_assert_false(ggaze_window_run_script_index(p_win, 99));
 
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    g_free(c_path);
    cleanup_temp_dir(c_dir);
@@ -463,7 +468,7 @@ test_runner_rescan_refused_after_folder_replaced(void) {
 
    g_object_unref(p_a0);
    g_object_unref(p_b0);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    g_free(c_a0);
    g_free(c_b0);

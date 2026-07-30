@@ -33,6 +33,11 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+/* Windows built here are torn down with gtk_window_destroy(), never a plain
+ * g_object_unref(): GTK4 hands the caller's reference to its internal
+ * toplevel list and only destroy() takes the entry back out (it drops that
+ * reference too, so the window still finalizes). Full rationale in
+ * tests/helpers/gtk_helpers.h, "window teardown". */
 static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
@@ -127,7 +132,7 @@ test_stack_has_two_views(void) {
    g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
    g_object_unref(p_pages);
 
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
 }
 
 static void
@@ -145,7 +150,7 @@ test_open_titles_window(void) {
    g_assert_nonnull(g_strstr_len(c_title, -1, "plain.jpg"));
    g_assert_nonnull(g_strstr_len(c_title, -1, "/"));
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
 }
 
@@ -185,7 +190,7 @@ test_info_hides_on_navigation(void) {
 
    g_object_unref(p_f0);
    g_free(c_p0);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
 }
@@ -236,7 +241,7 @@ test_info_hides_on_reopen(void) {
    g_free(c_p1);
    g_object_unref(p_f0);
    g_free(c_p0);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir1);
    cleanup_temp_dir(c_dir2);
@@ -279,7 +284,7 @@ test_enhance_a_is_safe_with_and_without_gegl(void) {
    fire(p_win, "win.enhance-save");
 
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
    drain_main(200);
 }

@@ -33,6 +33,11 @@
 
 /* --- helpers ------------------------------------------------------------ */
 
+/* Windows built here are torn down with gtk_window_destroy(), never a plain
+ * g_object_unref(): GTK4 hands the caller's reference to its internal
+ * toplevel list and only destroy() takes the entry back out (it drops that
+ * reference too, so the window still finalizes). Full rationale in
+ * tests/helpers/gtk_helpers.h, "window teardown". */
 static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
@@ -212,7 +217,7 @@ test_shortcut_controller_scope(void) {
                    GTK_SHORTCUT_SCOPE_GLOBAL);
    g_object_unref(p_sc);
 
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(200);
 }
 
@@ -311,7 +316,7 @@ test_shortcut_keypath_toggle_and_back(void) {
 
    g_object_unref(p_sc);
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(500);
    cleanup_temp_dir(c_dir);
 }
@@ -354,7 +359,7 @@ test_shortcut_full_table_registered(void) {
     * -> win.move). */
    g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 39);
    g_object_unref(p_sc);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(200);
 }
 

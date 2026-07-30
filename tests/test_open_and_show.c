@@ -32,6 +32,11 @@ fixture_file(const gchar *c_name) {
    return (p_file);
 }
 
+/* Windows built here are torn down with gtk_window_destroy(), never a plain
+ * g_object_unref(): GTK4 hands the caller's reference to its internal
+ * toplevel list and only destroy() takes the entry back out (it drops that
+ * reference too, so the window still finalizes). Full rationale in
+ * tests/helpers/gtk_helpers.h, "window teardown". */
 static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
@@ -78,7 +83,7 @@ test_open_fixture_shows_large(void) {
    ggaze_window_open(p_win, p_file);
    assert_shown_large_with_dims(p_win, 6, 3);
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(500);
 }
 
@@ -89,7 +94,7 @@ test_open_rotated_fixture(void) {
    ggaze_window_open(p_win, p_file);
    assert_shown_large_with_dims(p_win, 4, 8);
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(500);
 }
 
@@ -145,7 +150,7 @@ test_open_sample_image(void) {
    g_assert_nonnull(p_tex); /* loaded, whatever its dims */
 
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(500);
    g_free(c_path);
 }

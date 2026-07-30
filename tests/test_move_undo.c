@@ -32,6 +32,11 @@
 
 /* --- helpers ------------------------------------------------------------ */
 
+/* Windows built here are torn down with gtk_window_destroy(), never a plain
+ * g_object_unref(): GTK4 hands the caller's reference to its internal
+ * toplevel list and only destroy() takes the entry back out (it drops that
+ * reference too, so the window still finalizes). Full rationale in
+ * tests/helpers/gtk_helpers.h, "window teardown". */
 static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
@@ -246,7 +251,7 @@ test_move_current_no_marks(void) {
    g_assert_true(path_exists(c_dest, "plain.jpg"));
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
    cleanup_temp_dir(c_dest);
@@ -291,7 +296,7 @@ test_move_multiple_marks(void) {
    g_assert_null(g_strstr_len(c_title, -1, " marked"));
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
    cleanup_temp_dir(c_dest);
@@ -325,7 +330,7 @@ test_move_collision_suffix(void) {
    g_assert_true(path_exists(c_dest, "plain-1.jpg")); /* the moved-in one */
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
    cleanup_temp_dir(c_dest);
@@ -359,7 +364,7 @@ test_move_then_undo(void) {
    g_assert_false(path_exists(c_dest, "plain.jpg"));
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
    cleanup_temp_dir(c_dest);
@@ -412,7 +417,7 @@ test_undo_prefers_most_recent(void) {
    g_assert_true(path_exists(c_dir, "plain.jpg"));
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
    cleanup_temp_dir(c_dest);
@@ -475,7 +480,7 @@ test_undo_folder_switch_does_not_undo_stale_move(void) {
 
    g_object_unref(p_plain);
    g_object_unref(p_file_b);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir_a);
    cleanup_temp_dir(c_dest);
@@ -504,7 +509,7 @@ test_undo_nothing_to_undo(void) {
    g_assert_false(path_exists(c_dir, ".Trash"));
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
    reset_destinations();
@@ -550,7 +555,7 @@ test_move_all_targets_collide(void) {
    g_assert_true(path_exists(c_dest, "small-1.png")); /* moved-in */
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
    cleanup_temp_dir(c_dest);
@@ -593,7 +598,7 @@ test_move_destination_not_a_directory(void) {
    g_object_unref(p_notdir);
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    g_unlink(c_notdir);
    g_free(c_notdir);
@@ -639,7 +644,7 @@ test_move_popup_structure(void) {
    g_assert_null(find_move_popover(p_win));
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
    cleanup_temp_dir(c_dest_a);
@@ -668,7 +673,7 @@ test_move_empty_no_destinations(void) {
    g_assert_cmpint(popover_button_count(p_pop), ==, 0); /* message, no rows */
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
    reset_destinations();

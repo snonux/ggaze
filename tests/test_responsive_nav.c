@@ -58,6 +58,11 @@ cleanup_temp_dir(char *c_dir) {
    g_free(c_dir);
 }
 
+/* Windows built here are torn down with gtk_window_destroy(), never a plain
+ * g_object_unref(): GTK4 hands the caller's reference to its internal
+ * toplevel list and only destroy() takes the entry back out (it drops that
+ * reference too, so the window still finalizes). Full rationale in
+ * tests/helpers/gtk_helpers.h, "window teardown". */
 static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
@@ -137,7 +142,7 @@ test_rapid_next_last_write_wins(void) {
    g_object_set_data(G_OBJECT(p_win), "h", GINT_TO_POINTER(8));
    g_assert_true(pump_until(_dims_are, p_win, 3000));
 
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(500);
    g_object_unref(p_plain);
    cleanup_temp_dir(c_dir);

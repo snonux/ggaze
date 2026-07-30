@@ -23,6 +23,11 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+/* Windows built here are torn down with gtk_window_destroy(), never a plain
+ * g_object_unref(): GTK4 hands the caller's reference to its internal
+ * toplevel list and only destroy() takes the entry back out (it drops that
+ * reference too, so the window still finalizes). Full rationale in
+ * tests/helpers/gtk_helpers.h, "window teardown". */
 static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
@@ -51,7 +56,7 @@ test_window_uses_thumbnail_size(void) {
    g_assert_true(GGAZE_IS_GRID(p_grid));
    g_assert_cmpint(ggaze_grid_get_thumbnail_size(GGAZE_GRID(p_grid)), ==, 192);
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
 }
 
@@ -60,7 +65,7 @@ test_preferences_action_present(void) {
    GgazeWindow *p_win = new_window();
    GActionMap  *p_map = G_ACTION_MAP(p_win);
    g_assert_nonnull(g_action_map_lookup_action(p_map, "preferences"));
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
 }
 
 static void
@@ -82,7 +87,7 @@ test_open_applies_sort_setting(void) {
    const gchar *c_title = gtk_window_get_title(GTK_WINDOW(p_win));
    g_assert_nonnull(c_title);
    g_object_unref(p_file);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
 }
 

@@ -23,6 +23,11 @@
 
 /* --- helpers ------------------------------------------------------------ */
 
+/* Windows built here are torn down with gtk_window_destroy(), never a plain
+ * g_object_unref(): GTK4 hands the caller's reference to its internal
+ * toplevel list and only destroy() takes the entry back out (it drops that
+ * reference too, so the window still finalizes). Full rationale in
+ * tests/helpers/gtk_helpers.h, "window teardown". */
 static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
@@ -227,7 +232,7 @@ test_mark_toggle(void) {
    assert_marks(p_win, 0);
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
 }
@@ -256,7 +261,7 @@ test_mark_all_and_clear(void) {
    g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "large");
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
 }
@@ -290,7 +295,7 @@ test_mark_range(void) {
    assert_marks(p_win, 3);
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
 }
@@ -327,7 +332,7 @@ test_marks_persist_across_view_switch(void) {
    assert_marks(p_win, 2);
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
 }
@@ -360,7 +365,7 @@ test_marks_clear_on_trash(void) {
    g_free(c_trashpath);
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
 }
@@ -399,7 +404,7 @@ test_pointer_middle_click_wired(void) {
    g_assert_true(b_found);
 
    g_object_unref(p_plain);
-   g_object_unref(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    cleanup_temp_dir(c_dir);
 }

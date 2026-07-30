@@ -34,6 +34,31 @@ GtkFlowBox *ggtest_find_flow_box(GtkWidget *p_w);
  * flowbox and the cell exist. */
 void ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx);
 
+/* --- window teardown ------------------------------------------------------
+ *
+ * THE rule for every test in this suite (1w0), stated once here because the
+ * suites are otherwise independent binaries: a GtkWindow a test built is torn
+ * down with gtk_window_destroy(), never with a plain g_object_unref().
+ *
+ * gtk_window_constructed() hands the caller's initial reference over to GTK's
+ * internal toplevel list, which holds the window as a raw pointer. Only
+ * gtk_window_destroy() takes the entry back out of that list -- and it drops
+ * that same reference while doing so, so a window a test alone owns still
+ * finalizes exactly as the old unref made it finalize. Unreffing *instead*
+ * finalizes the window but leaves the list pointing at freed memory.
+ *
+ * That stayed invisible for as long as nothing walked the list, but
+ * gtk_window_list_toplevels() refs every entry it returns: after one leaked
+ * window, the next call logs G_IS_OBJECT assertion failures (fatal under
+ * g_test) and hands back a NULL entry, and a real modal GtkAlertDialog or
+ * grab -- which walks and refs the same list -- touches the freed window and
+ * aborts under ASan. Measured on gtk4-4.22.4.
+ *
+ * Where a test needs the destroy to settle (pending idles, in-flight loads),
+ * it iterates the main context afterwards -- ggtest_drain_main() below, or
+ * the suite's own local drain.
+ */
+
 /* --- alert dialogs -------------------------------------------------------- */
 
 /* Iterate the main context for roughly u_ms milliseconds. */
