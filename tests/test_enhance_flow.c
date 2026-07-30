@@ -1659,6 +1659,67 @@ test_move_acts_on_the_targets_captured_at_click(void) {
    cleanup_temp_dir(c_dst);
 }
 
+/* Round 5, finding (x): _move_captured advanced the cursor whenever ANY file
+ * moved, so moving a marked set that does not contain the current image took
+ * the user off the image they were looking at and skipped the next one
+ * unseen -- the surviving twin of (q) and of the round-3 trash fix. No
+ * prompt is needed to show it: mark rot6.jpg only, stand on plain.jpg, move.
+ * rot6.jpg must land in the destination and the window must STAY on
+ * plain.jpg (it used to jump to rgba.png, skipping it). */
+static void
+test_move_does_not_advance_past_an_unseen_image(void) {
+   GError *p_err = NULL;
+   char   *c_dst = g_dir_make_tmp("ggaze-enhance-movenav-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   set_one_destination("dest one", c_dst);
+
+   DirtyFixture             fx;
+   static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
+                                         NULL};
+   fixture_open_clean(&fx, "ggaze-enhance-movenavsrc-XXXXXX", c_three);
+   mark_file_and_return(&fx, "rot6.jpg"); /* back on plain.jpg, 1 marked */
+   assert_showing(fx.p_win, "plain.jpg");
+
+   g_assert_true(ggaze_window_move_index(fx.p_win, 0));
+   ggtest_drain_main(300);
+
+   g_assert_true(file_exists_in(c_dst, "rot6.jpg"));    /* the marked one */
+   g_assert_true(file_exists_in(fx.c_dir, "rgba.png")); /* untouched */
+   assert_showing(fx.p_win, "plain.jpg"); /* and rgba.png was NOT skipped */
+
+   fixture_teardown(&fx);
+   reset_destinations();
+   cleanup_temp_dir(c_dst);
+}
+
+/* The other direction of the same gate: when the moved set DOES contain the
+ * current image, the cursor must still advance -- otherwise the fix for (x)
+ * would leave `m` parked on a file that is no longer there. Nothing marked,
+ * so the target is plain.jpg itself. */
+static void
+test_move_advances_when_the_current_image_moves(void) {
+   GError *p_err = NULL;
+   char   *c_dst = g_dir_make_tmp("ggaze-enhance-movecur-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   set_one_destination("dest one", c_dst);
+
+   DirtyFixture             fx;
+   static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
+                                         NULL};
+   fixture_open_clean(&fx, "ggaze-enhance-movecursrc-XXXXXX", c_three);
+   assert_showing(fx.p_win, "plain.jpg");
+
+   g_assert_true(ggaze_window_move_index(fx.p_win, 0));
+   ggtest_drain_main(300);
+
+   g_assert_true(file_exists_in(c_dst, "plain.jpg")); /* the current one */
+   assert_showing(fx.p_win, "rgba.png");              /* advanced past it */
+
+   fixture_teardown(&fx);
+   reset_destinations();
+   cleanup_temp_dir(c_dst);
+}
+
 /* Registration split in two so neither function runs past the ~30-line
  * convention: the original feature coverage, and the round-2 subtests that
  * answer the real Save/Discard/Cancel prompt (see the file header). */
@@ -1731,9 +1792,15 @@ add_behind_the_prompt_tests(void) {
 
 /* Round 4: the permanent-delete legs behind the prompt (finding p and its
  * confirm-dialog variant), the cursor-advance twin (q), the quit/queue
- * interaction (r), the vanished-target guard (u), and the two structural
- * paths no earlier subtest reached -- the queue's displace branch and dispose
- * with a request still parked. */
+ * interaction (r), the vanished-target guard (u), and the queue's displace
+ * branch, which no earlier subtest reached.
+ *
+ * NOT covered here: _enhance_dispose's "a request is still parked" branch.
+ * Driving it needs g_object_run_dispose() on a window with a live
+ * GtkAlertDialog, which leaves the dialog's GTask unfinished and leaks its
+ * _SaveCtx (474 B measured under ASan) -- a real ggaze-side leak on any
+ * teardown under a live prompt, filed as task 2w0. The subtest was dropped
+ * rather than shipped leaking; it comes back with 2w0's fix. */
 static void
 add_round4_tests(void) {
    g_test_add_func("/enhance_flow/delete_behind_prompt_deletes_marked_file",
@@ -1752,6 +1819,17 @@ add_round4_tests(void) {
                    test_quit_continuation_drops_the_queued_request);
    g_test_add_func("/enhance_flow/move_acts_on_targets_captured_at_click",
                    test_move_acts_on_the_targets_captured_at_click);
+}
+
+/* Round 5: both directions of `m`'s cursor advance (finding x), the gap that
+ * let (q)'s twin survive five review rounds -- the round-4 move subtest
+ * checks WHICH files moved, never where the cursor ended up. */
+static void
+add_round5_tests(void) {
+   g_test_add_func("/enhance_flow/move_does_not_advance_past_unseen_image",
+                   test_move_does_not_advance_past_an_unseen_image);
+   g_test_add_func("/enhance_flow/move_advances_when_current_image_moves",
+                   test_move_advances_when_the_current_image_moves);
 }
 
 int
@@ -1775,5 +1853,6 @@ main(int i_argc, char **c_argv) {
    add_prompt_outcome_tests();
    add_behind_the_prompt_tests();
    add_round4_tests();
+   add_round5_tests();
    return (g_test_run());
 }

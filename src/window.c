@@ -978,11 +978,12 @@ _action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * single-instance open / drop can replace the folder (ggaze_window_open swaps
  * p_nav). The dialog callback must therefore NOT re-read the navigator's
  * marks; it deletes the targets captured here at prompt time, and only if the
- * folder is still the same one (ggaze_window_delete_targets_still_current).
+ * window still navigates the folder those targets came from
+ * (ggaze_window_delete_targets_still_current).
  */
 typedef struct {
    GgazeWindow *p_win; /* owned ref: outlives the async dialog */
-   GFile       *p_dir; /* owning directory at prompt time (owned) */
+   GFile       *p_dir; /* the captured targets' own parent folder (owned) */
    GList *p_files;     /* captured target GFile* list (owned, transfer full) */
 } _DeleteCtx;
 
@@ -1103,8 +1104,18 @@ _delete_confirm_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
  * hold the exact file set the prompt counted, long after that ctx is gone. */
 static void
 _delete_confirm_ask(GgazeWindow *p_win, GList *p_files) {
-   GFile *p_dir = navigator_get_dir(p_win->p_nav);
+   /* The guard folder comes from the CAPTURED targets, not from the live
+    * navigator: the question _delete_confirm_cb has to answer is "do these
+    * targets still belong to the folder they came from", and deriving it
+    * from navigator_get_dir would only answer "did the folder change since
+    * this dialog opened" -- true today merely because of call ordering
+    * elsewhere, not by construction (round 5, finding y2). */
+   GFile *p_dir = g_file_get_parent(G_FILE(p_files->data)); /* owned */
    if (p_dir == NULL) {
+      /* A target with no parent (a filesystem root) cannot be guarded, so
+       * refuse out loud rather than silently, like every other refusal leg
+       * (round 4, finding u). */
+      _show_status(p_win, "Nothing deleted — the folder is gone");
       return;
    }
    GtkAlertDialog *p_dlg = gtk_alert_dialog_new(
@@ -1113,7 +1124,7 @@ _delete_confirm_ask(GgazeWindow *p_win, GList *p_files) {
                                 (const char *[]){"Cancel", "Delete", NULL});
    _DeleteCtx *p_ctx = g_new(_DeleteCtx, 1);
    p_ctx->p_win      = (GgazeWindow *)g_object_ref(p_win);
-   p_ctx->p_dir      = (GFile *)g_object_ref(p_dir);
+   p_ctx->p_dir      = p_dir; /* transfer full from g_file_get_parent */
    p_ctx->p_files    = _files_copy(p_files); /* owned by the context now */
    gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), NULL, _delete_confirm_cb,
                            p_ctx);
@@ -3084,11 +3095,25 @@ _move_captured(GgazeWindow *p_win, guint u_idx, GList *p_files) {
    }
    const MoverDest *p_dest = g_ptr_array_index((GPtrArray *)p_dests, u_idx);
    guint            u_n    = g_list_length(p_files);
-   GError          *p_err  = NULL;
-   gboolean         b_ok = mover_move(p_win->p_mover, p_files, p_dest, &p_err);
-   guint            u_moved = _move_mark_removed(p_win, p_files);
+   /* Asked BEFORE mover_move/_move_mark_removed run: navigator_mark_removed
+    * emits "changed" and can move current (and invalidate the borrowed
+    * pointer) as a side effect, so afterwards the answer is no longer the
+    * one the user's key press was about. */
+   gboolean b_was_current = _files_include_current(p_win, p_files);
+   GError  *p_err         = NULL;
+   gboolean b_ok          = mover_move(p_win->p_mover, p_files, p_dest, &p_err);
+   guint    u_moved       = _move_mark_removed(p_win, p_files);
    if (u_moved > 0) {
       p_win->e_last_destructive = GGAZE_LAST_MOVE;
+   }
+   /* Advance only when one of the moved files really was the current one,
+    * exactly as _do_trash_now and _do_delete_files do: the targets are
+    * captured at click time, so by the time a Save/Discard/Cancel prompt is
+    * answered current may have moved on by itself, and advancing anyway
+    * would take the user off the image they were looking at and skip the
+    * next one unseen (round 5, finding x -- the last member of the trio
+    * still carrying the bug the other two already fixed). */
+   if (u_moved > 0 && b_was_current) {
       navigator_next(p_win->p_nav); /* advance past the moved set */
    }
    _move_report(p_win, p_dest, b_ok, u_moved, u_n, p_err);
