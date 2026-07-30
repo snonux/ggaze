@@ -47,12 +47,20 @@ void ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx);
  * finalizes exactly as the old unref made it finalize. Unreffing *instead*
  * finalizes the window but leaves the list pointing at freed memory.
  *
- * That stayed invisible for as long as nothing walked the list, but
- * gtk_window_list_toplevels() refs every entry it returns: after one leaked
- * window, the next call logs G_IS_OBJECT assertion failures (fatal under
- * g_test) and hands back a NULL entry, and a real modal GtkAlertDialog or
- * grab -- which walks and refs the same list -- touches the freed window and
- * aborts under ASan. Measured on gtk4-4.22.4.
+ * That stays invisible for as long as nothing walks the list. The list is a
+ * GListModel, though, and every walk of it goes through
+ * g_list_model_get_item(), which takes a TRANSIENT reference on each entry --
+ * and that is the reference a freed window cannot survive. So after one
+ * leaked window the next walk logs g_object_ref/g_object_unref G_IS_OBJECT
+ * assertion failures (fatal under g_test) and yields a NULL entry, and a real
+ * modal GtkAlertDialog, an adw_dialog_present() or a grab -- each of which
+ * walks that same model -- touches the freed window and aborts under ASan.
+ *
+ * The GList that gtk_window_list_toplevels() returns is only transfer-
+ * container ("The widgets in the list are not individually referenced" --
+ * GTK4 docs): it drops each transient reference again before returning, so
+ * callers free the list and must NOT unref the entries. Measured on
+ * gtk4-4.22.4.
  *
  * Where a test needs the destroy to settle (pending idles, in-flight loads),
  * it iterates the main context afterwards -- ggtest_drain_main() below, or

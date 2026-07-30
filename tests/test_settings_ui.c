@@ -118,9 +118,11 @@ note_finalized(gpointer p_flag, GObject *p_where) {
  * Presenting used to be skipped here, blamed on "a GTK-internal stale-toplevel
  * critical unrelated to this code". It was this suite's own bug: the earlier
  * subtests released their windows with g_object_unref(), which finalizes the
- * window but leaves it in gtk_window_list_toplevels(), and presenting walks
- * that list and refs every entry -- so it tripped over a freed window. With
- * the teardown corrected (1w0) presenting is clean, so the coverage is back. */
+ * window but leaves it in GTK's toplevel list, and presenting walks that list
+ * -- every walk transiently refs each entry via g_list_model_get_item() -- so
+ * it tripped over a freed window. With the teardown corrected (1w0)
+ * presenting is clean, so the coverage is back. Full rationale in
+ * tests/helpers/gtk_helpers.h, "window teardown". */
 static void
 test_prefs_dialog_constructs(void) {
    Settings             *p_cfg = settings_new();
@@ -135,7 +137,15 @@ test_prefs_dialog_constructs(void) {
    g_object_weak_ref(G_OBJECT(p_dlg), note_finalized, &b_finalized);
    adw_dialog_present(ADW_DIALOG(p_dlg), GTK_WIDGET(p_win));
    drain_main(200);
-   g_assert_true(gtk_widget_get_visible(GTK_WIDGET(p_dlg)));
+   /* Presenting really happened. NOT :visible -- an AdwDialog is already
+    * visible=TRUE at construction (measured), so asserting that can never
+    * fail and would still pass if present() silently did nothing. These two
+    * are both false beforehand (measured: mapped=0, root=NULL) and only
+    * present() flips them: it puts the dialog into a host -- here the
+    * fallback GtkWindow libadwaita creates because p_win is not itself an
+    * AdwDialog host -- and maps it. */
+   g_assert_nonnull(gtk_widget_get_root(GTK_WIDGET(p_dlg)));
+   g_assert_true(gtk_widget_get_mapped(GTK_WIDGET(p_dlg)));
 
    /* Closing must actually destroy the dialog -- that is what releases the
     * g_settings bindings and the row closures (each freed via its destroy
