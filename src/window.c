@@ -508,24 +508,33 @@ _enhance_dest_for(GFile *p_file) {
  * of _enhance_do_save so its callers can tell "nothing to save" apart from
  * "the export failed": _enhance_do_save returns FALSE for both, and treating
  * the first as a failure made the Save button silently do nothing AND cancel
- * the user's action (tu0 review round 3, finding k). */
+ * the user's action (tu0 review round 3, finding k).
+ *
+ * The subject is p_enhance_file -- the file the mask/preview was computed FOR
+ * (_enhance_launch sets it) -- not a fresh navigator_get_current(). Save runs
+ * from a dialog callback, so it is one of the deferred paths that must not
+ * re-derive its target: _enhance_nav_changed does clear the mask whenever
+ * current's identity changes, which makes the two equal today, but that is an
+ * invariant holding a permanent write together rather than a reason to depend
+ * on it. Asking the preview which file it belongs to needs no invariant. */
 static gboolean
 _enhance_can_save(GgazeWindow *p_win) {
    return (p_win->p_nav != NULL && p_win->p_enhancer != NULL &&
-           p_win->u_enhance_mask != 0 &&
-           navigator_get_current(p_win->p_nav) != NULL);
+           p_win->u_enhance_mask != 0 && p_win->p_enhance_file != NULL);
 }
 
-/* Export the current image with the enabled-preset chain to a non-colliding
+/* Export the previewed image with the enabled-preset chain to a non-colliding
  * "<stem>-enhanced[-<n>].<ext>" in the same folder. Returns TRUE on success.
  * The original file is never touched: enhancer_export_chain reads it
- * (enhancer_load) and writes only to the freshly computed destination. */
+ * (enhancer_load) and writes only to the freshly computed destination. The
+ * subject is p_enhance_file, the file the preview belongs to -- see
+ * _enhance_can_save. */
 static gboolean
 _enhance_do_save(GgazeWindow *p_win) {
    if (!_enhance_can_save(p_win)) {
       return (FALSE);
    }
-   GFile      *p_file = navigator_get_current(p_win->p_nav);
+   GFile      *p_file = p_win->p_enhance_file;
    GFile      *p_out  = _enhance_dest_for(p_file);
    GError     *p_err  = NULL;
    GeglBuffer *p_buf  = enhancer_load(p_file, &p_err);
