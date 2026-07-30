@@ -91,8 +91,13 @@ main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
    g_log_set_always_fatal(G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL);
    if (!gtk_init_check()) {
-      g_test_skip("no display available (run under xvfb)");
-      return (g_test_run());
+      /* Exit 77 is meson's "skipped". Returning g_test_run() here
+       * instead exits 0 after a "1..0" plan -- a lane that reports OK
+       * while running nothing, which is how displayless runs used to
+       * hide the GDK backend leaks. See tests/meson.build "Lane
+       * determinism" (1w0). */
+      g_print("1..0 # SKIP no display available (run under xvfb)\n");
+      return (77);
    }
    g_test_add_func("/progressive/sample", test_progressive_sample);
    return (g_test_run());

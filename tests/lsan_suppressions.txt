@@ -26,3 +26,76 @@ leak:FcConfigSubstituteWithPat
 leak:fc_thread_func
 leak:pango_fc_font_map_load_fontset
 leak:gdk_popup_layout_new
+#
+# ---------------------------------------------------------------------------
+# GDK display backends (1w0). READ THIS BEFORE DELETING ANY ENTRY BELOW.
+# ---------------------------------------------------------------------------
+#
+# TRAP 1 -- "the whole block is dead". Delete it and the suite still goes
+# fully green, and no pattern shows up in LSan's "Suppressions used" table --
+# *if* your shell has no reachable display. Without one, gtk_init_check()
+# fails, all 21 display-gated suites skip (they exit 77, so `meson test`
+# prints SKIP rather than OK -- see the gate in each tests/test_*.c main()),
+# and not one line of GDK backend code ever runs. This block was added by tu0,
+# deleted again by tu0's own review on exactly that evidence, and had to be
+# restored by 1w0 once the suite was re-run on a machine with a live session.
+# An entry here is only unnecessary if it stays unused WITH a display.
+#
+# Note that unsetting WAYLAND_DISPLAY and DISPLAY is NOT enough to reproduce
+# the displayless case: libwayland still connects to $XDG_RUNTIME_DIR/
+# wayland-0 by default. Point XDG_RUNTIME_DIR at an empty directory too.
+#
+# TRAP 2 -- "this individual entry is dead". LSan charges each leak to a
+# single suppression: the FIRST pattern that matches while walking the stack
+# from the allocation outwards. The entries below are deliberately layered at
+# different depths on the same stacks, so on any given host only the deepest
+# one appears in the table and the outer ones read as unused. They are not.
+# Measured on an X11 run of test_grid_select_gate: with all entries present
+# the 725 allocations are charged to gdk_display_init_egl; drop that line and
+# the same 725 are charged to gdk_x11_display_init_gl; drop that one too and
+# they land on gdk_x11_display_open. Each is a real net for a host whose
+# driver stack does not produce the frame above it -- a GL-less xvfb box takes
+# a different path through display open than this DRI/Mesa one.
+#
+# WHAT LEAKS: GTK's GDK backends allocate per-display and per-toplevel state
+# that is never torn down, because a GTK program has no "close the display and
+# unwind" path -- the connection lives until _exit(). Anything a test presents
+# for real therefore leaves backend state behind at LSan's exit check. Which
+# allocations you see depends on the backend, and both are covered here:
+#
+#   Wayland  a 96-byte struct wl_proxy per toplevel surface, allocated by
+#            libwayland-client's proxy_create() under
+#            gdk_wayland_surface_constructed() <- gtk_window_realize().
+#            RACY: it survives only when the process exits before the
+#            compositor has acked the surface teardown, so the same binary
+#            leaks it on some runs and not others.
+#   X11      Mesa/EGL/DRI screen setup, via gdk_x11_display_init_gl() <-
+#            gdk_display_prepare_gl() <- gdk_x11_display_open(), all at
+#            gtk_init_check() time. Deterministic, far bigger than the Wayland
+#            one, and it fires for EVERY suite that opens a display, whether
+#            or not that suite presents anything. Measured on
+#            test_grid_select_gate: 92417 bytes in 725 allocations on
+#            XWayland, 75535 in 595 under xvfb-run -- so this is the one CI
+#            hits, on every integration suite it runs.
+#
+# WHY THIS IS THIRD-PARTY, VERIFIED, NOT ASSUMED: a standalone probe that
+# links only GTK -- no ggaze code, no ggaze headers, just gtk_window_new() +
+# gtk_window_present() + gtk_window_destroy() -- reproduces both. Under X11 it
+# leaks byte-for-byte what test_grid_select_gate leaks (92417 bytes in 725
+# allocations, identical); under Wayland it leaks the same 96-byte wl_proxy on
+# roughly 4 runs in 10. In every report the allocating frames are libwayland /
+# Mesa / GDK and the first ggaze frame is a *caller* far up the stack (e.g.
+# present_and_lay_out at tests/test_grid_select_gate.c:324), never an owner.
+#
+# WHY THE PATTERNS ARE SAFE: each one names a frame inside GTK or below it, on
+# a path that runs before or underneath any ggaze allocation -- surface
+# construction and display/EGL setup. No ggaze-owned memory can be born under
+# these frames, so no ggaze leak can hide behind them. Do NOT widen this to
+# e.g. gtk_window_realize or gtk_init_check: those DO have ggaze allocations
+# beneath them and would mask real defects.
+leak:proxy_create
+leak:gdk_wayland_surface_constructed
+leak:gdk_x11_display_open
+leak:gdk_x11_display_init_gl
+leak:gdk_display_prepare_gl
+leak:gdk_display_init_egl

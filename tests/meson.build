@@ -258,6 +258,42 @@ test_texturecache = executable(
 test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 
 # --- integration track (needs a display; CI uses xvfb-run) ---
+#
+# Lane determinism (1w0) -- why these tests are NOT pinned to a backend.
+#
+# The integration suites used to pass or fail depending on whether a display
+# happened to be reachable, which made every "all four lanes green" claim
+# unfalsifiable. Two separate causes, both fixed, neither by pinning a
+# backend:
+#
+#  1. Displayless runs reported OK while running nothing. gtk_init_check()
+#     failed, the suite exited 0 with an empty "1..0" TAP plan, and meson
+#     counted it as a pass. Each main() now returns 77 instead, so meson
+#     prints SKIP and the lane numbers say what actually executed. A lane
+#     with 21 SKIPs is not the same result as a lane with 21 OKs, and it no
+#     longer looks like one.
+#
+#  2. With a display, GTK's GDK backend leaked third-party memory that no
+#     suppression covered, so the ASan lanes aborted. tests/lsan_suppressions
+#     .txt now covers both the Wayland and the X11/EGL paths; its "GDK display
+#     backends" block is the canonical write-up, including the two ways those
+#     entries can look dead when they are not. Read it before editing it.
+#
+# Pinning GDK_BACKEND was considered and rejected. This GTK build offers
+# broadway, wayland and x11 (`pkg-config --variable=targets gtk4`) and none of
+# them is headless: broadway needs a broadwayd daemon and x11 needs an X
+# server, so forcing one cannot make behaviour identical everywhere -- on a
+# host without that server it would turn every integration suite into a silent
+# skip, trading a red lane for lost coverage. It would not even remove the
+# need for the suppressions: X11 leaks ~92 KB of Mesa/EGL state deterministically
+# at display-open time, and the Wayland wl_proxy leak is racy *within* a single
+# backend (a GTK-only probe with no ggaze code leaks it on ~4 runs in 10), so
+# no choice of backend is leak-free. Suppressions are load-bearing either way.
+#
+# The presenting suites are left presenting for real. test_grid_select_gate's
+# present_and_lay_out() exists to get true laid-out coordinates out of
+# gtk_widget_compute_bounds(), and test_settings_ui asserts on the root window
+# adw_dialog_present() creates; a backend that never lays out would gut both.
 test_window = executable(
    'test_window',
    ['test_window.c', ggaze_conf_h],
