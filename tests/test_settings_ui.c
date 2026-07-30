@@ -4,7 +4,8 @@
  * Verifies that scalar settings read through the Settings wrapper flow into a
  * constructed GgazeWindow: changing thumbnail-size before opening a folder
  * changes the grid size the window builds with, and changing sort changes the
- * navigator sort. Also exercises construction of the AdwPreferencesDialog.
+ * navigator sort. Also exercises the AdwPreferencesDialog end to end: build,
+ * present on a window, close, and check it is really destroyed.
  * Uses the memory GSettings backend + build-tree schema (set in the meson
  * env), so no dconf is touched. Display-gated; skipped cleanly without a
  * display.
@@ -31,6 +32,16 @@
 static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
+}
+
+/* Iterate the main context for roughly u_ms milliseconds, so presenting and
+ * closing a dialog (both driven by idles/frame clock) can settle. */
+static void
+drain_main(guint u_ms) {
+   for (guint u = 0; u < u_ms; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
 }
 
 static void
@@ -91,21 +102,50 @@ test_open_applies_sort_setting(void) {
    g_free(c_path);
 }
 
+/* g_object_weak_notify: flips the gboolean the caller passed once the watched
+ * object is finalized. */
+static void
+note_finalized(gpointer p_flag, GObject *p_where) {
+   (void)p_where;
+   *(gboolean *)p_flag = TRUE;
+}
+
+/* Build a real preferences dialog bound to a fresh Settings, present it on a
+ * window the way the "preferences" action does, then close it. Any critical
+ * from construction (bad binding / missing row API) or from presenting aborts
+ * the test (main() makes criticals fatal).
+ *
+ * Presenting used to be skipped here, blamed on "a GTK-internal stale-toplevel
+ * critical unrelated to this code". It was this suite's own bug: the earlier
+ * subtests released their windows with g_object_unref(), which finalizes the
+ * window but leaves it in gtk_window_list_toplevels(), and presenting walks
+ * that list and refs every entry -- so it tripped over a freed window. With
+ * the teardown corrected (1w0) presenting is clean, so the coverage is back. */
 static void
 test_prefs_dialog_constructs(void) {
-   /* Build a real preferences dialog bound to a fresh Settings and tear it
-    * down. Any construction critical (bad binding / missing row API) aborts
-    * the test. The dialog is built but not presented: presenting under ASan
-    * trips a GTK-internal stale-toplevel critical unrelated to this code. */
    Settings             *p_cfg = settings_new();
    AdwPreferencesDialog *p_dlg = prefs_build_dialog(p_cfg);
    g_assert_nonnull(p_dlg);
    g_assert_true(ADW_IS_PREFERENCES_DIALOG(p_dlg));
-   /* Destroying the dialog releases the g_settings bindings and the row
-    * closures (each freed via its destroy notify). Sink the initial floating
-    * reference first (adw_preferences_dialog_new returns a floating widget). */
-   g_object_ref_sink(p_dlg);
-   g_object_unref(p_dlg);
+
+   /* adw_dialog_present() sinks the floating reference the builder returned
+    * and makes the presenting widget the dialog's owner. */
+   gboolean     b_finalized = FALSE;
+   GgazeWindow *p_win       = new_window();
+   g_object_weak_ref(G_OBJECT(p_dlg), note_finalized, &b_finalized);
+   adw_dialog_present(ADW_DIALOG(p_dlg), GTK_WIDGET(p_win));
+   drain_main(200);
+   g_assert_true(gtk_widget_get_visible(GTK_WIDGET(p_dlg)));
+
+   /* Closing must actually destroy the dialog -- that is what releases the
+    * g_settings bindings and the row closures (each freed via its destroy
+    * notify), so the weak notify above is the check that it happened. */
+   adw_dialog_close(ADW_DIALOG(p_dlg));
+   drain_main(200);
+   g_assert_true(b_finalized);
+
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(100);
    settings_delete(p_cfg);
 }
 
