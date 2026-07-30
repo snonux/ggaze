@@ -1710,10 +1710,16 @@ test_move_advances_when_the_current_image_moves(void) {
    assert_showing(fx.p_win, "plain.jpg");
 
    g_assert_true(ggaze_window_move_index(fx.p_win, 0));
+   /* Checked BEFORE the main loop gets a turn: once the folder monitor's
+    * relist runs it clamps the cursor onto rgba.png by index anyway (the
+    * successor slides into the vacated slot), so only the state the
+    * synchronous move leaves behind can tell a real advance apart from a
+    * cursor left parked on the file that just left. */
+   assert_showing(fx.p_win, "rgba.png"); /* advanced past it at once */
    ggtest_drain_main(300);
 
    g_assert_true(file_exists_in(c_dst, "plain.jpg")); /* the current one */
-   assert_showing(fx.p_win, "rgba.png");              /* advanced past it */
+   assert_showing(fx.p_win, "rgba.png");              /* and stayed there */
 
    fixture_teardown(&fx);
    reset_destinations();
