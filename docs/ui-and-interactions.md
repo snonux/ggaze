@@ -316,13 +316,25 @@ Loaded lazily; never blocks display of the pixels.
   performs the original action and then retries the queued one through the same
   gate; **Cancel** means "stay here, keep the preview", so the queued request is
   discarded too (again with a status line). Repeated Alt+F4 therefore still
-  produces exactly one dialog and one quit.
+  produces exactly one dialog and one quit. The one answer that proceeds and
+  still drops the queue is a **quit**: by the time the queued request would
+  run, the window is already closing, and a closing window can honour no
+  request — so it is discarded (and logged) rather than half-run against a
+  dead window.
 - The action is bound to the image the prompt was **raised for**, not to
   whatever is current when it is answered. That distinction is real: GTK4
   modality is input-only, so the slideshow timer and the folder's file monitor
-  keep running behind the dialog and can move to the next image. `d`/`D`/`m`
-  capture their targets at key-press time, so answering Discard can never
-  trash, delete or move a file the user did not pick. If the preview itself is
+  keep running behind the dialog. They can move to the next image, and — via
+  the rescan the monitor triggers — **prune marks** whose file has left the
+  folder. `d`/`D`/`m` therefore capture their whole target set at key-press
+  time, the marks-vs-current decision included: `D` with one file marked
+  deletes that file or nothing, never "whatever is current now because the
+  mark disappeared", and three marks still ask the >1-mark confirmation even
+  if two of them vanish while the prompt is up. Answering Discard can never
+  trash, delete or move a file the user did not pick, and a captured target
+  that no longer exists is refused with a status line instead of failing
+  silently. Deleting a target that is no longer the current image does not
+  advance the cursor, so nothing is skipped unseen. If the preview itself is
   gone by the time Save is pressed, ggaze reports "nothing to save" and still
   performs the action rather than silently doing neither.
 - GEGL runs only when a preset is active or on export; the fast decode path

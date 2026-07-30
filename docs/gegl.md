@@ -46,14 +46,18 @@ editing remains a non-goal.
   outstanding per window: a second request that the modal grab cannot swallow
   (Alt+F4, a single-instance D-Bus open, a drop) is queued in a single slot and
   retried through the same gate once the prompt is answered in favour of
-  proceeding, or discarded with a status line on Cancel. The prompt's answer
-  always applies to the image it was raised for — `d`/`D`/`m` capture their
-  targets at key-press time, because the slideshow timer and the folder's
-  GFileMonitor keep running behind an input-only modal grab and can move
-  navigator.current out from under the dialog. Toggling every preset back off,
-  `0`, or
-  `Esc` discards directly (no prompt). Slideshow auto-advance discards a dirty
-  preview silently instead of blocking on an unanswerable prompt.
+  proceeding, or discarded with a status line on Cancel — except when the
+  prompt's own answer closes the window (a quit), where the queued request is
+  discarded instead of being run against a window that is going away. The
+  prompt's answer always applies to the image it was raised for: `d`/`D`/`m`
+  capture their whole target set — including the marks-vs-current decision —
+  at key-press time, because the slideshow timer and the folder's
+  GFileMonitor keep running behind an input-only modal grab and can both move
+  navigator.current and prune marks out from under the dialog. A captured
+  target that has since been removed is refused with a status line rather than
+  acted on. Toggling every preset back off, `0`, or `Esc` discards directly
+  (no prompt). Slideshow auto-advance discards a dirty preview silently
+  instead of blocking on an unanswerable prompt.
 - Export format: defaults to the original extension (JPEG quality 95); a
   format/quality chooser and a lossless `jpegtran`/`exiftool` path are later.
 - Presets are configurable: `enhance-presets` GSettings `a(ss)` — ordered
