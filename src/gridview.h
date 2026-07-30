@@ -79,6 +79,18 @@ void ggaze_grid_update_mark_badge(GgazeGrid *p_grid, GFile *p_file);
 /* Number of cells currently in the grid. */
 guint ggaze_grid_get_count(GgazeGrid *p_grid);
 
+/* Toggle the mark on the cell at (i_x, i_y) in the grid's flowbox
+ * coordinates, exactly as a middle-click does: select the cell, sync
+ * navigator.current to it THROUGH the select gate above, then dispatch the
+ * shared "win.mark" action. Returns TRUE iff a cell was found there.
+ *
+ * Public because that is the only way the middle-click path can be tested:
+ * the gesture itself would need a synthesized pointer press at real
+ * coordinates, and GTK4 removed both gtk_test_widget_click and the public
+ * GdkEvent constructors that GTK3 tests used for it. The gesture callback is
+ * a two-line wrapper around this. */
+gboolean ggaze_grid_mark_at_pos(GgazeGrid *p_grid, gint i_x, gint i_y);
+
 /* Disconnect from the navigator (call before the navigator is freed). */
 void ggaze_grid_detach(GgazeGrid *p_grid);
 

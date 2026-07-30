@@ -223,9 +223,7 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
    return (FALSE);
 }
 
-/* Middle-click on a grid cell toggles its mark (pointer-accessible marks):
- * select the cell in the flowbox, then dispatch the shared "win.mark" action
- * (the window updates the header + badge exactly as `v` does).
+/* Toggle the mark on the cell at (i_x, i_y) — see gridview.h.
  *
  * win.mark targets the FLOWBOX SELECTION, not navigator.current --
  * window.c's _action_mark prefers ggaze_grid_get_selected_file() while the
@@ -235,22 +233,16 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
  * prefetch) in step with the cell the user just pointed at, and since tu0 may
  * legitimately be refused or deferred by the installed select gate when an
  * unsaved enhance preview is active. The mark applies either way. */
-static void
-_on_flow_middle_pressed(GtkGesture *p_g, gint i_n_press, gdouble d_x,
-                        gdouble d_y, gpointer p_data) {
-   (void)i_n_press;
-   if (gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(p_g)) !=
-       GDK_BUTTON_MIDDLE) {
-      return;
-   }
-   GgazeGrid *p_grid = GGAZE_GRID(p_data);
+gboolean
+ggaze_grid_mark_at_pos(GgazeGrid *p_grid, gint i_x, gint i_y) {
+   g_return_val_if_fail(GGAZE_IS_GRID(p_grid), FALSE);
    if (p_grid->p_nav == NULL || p_grid->p_flow == NULL) {
-      return;
+      return (FALSE);
    }
-   GtkFlowBoxChild *p_child = gtk_flow_box_get_child_at_pos(
-      GTK_FLOW_BOX(p_grid->p_flow), (gint)d_x, (gint)d_y);
+   GtkFlowBoxChild *p_child =
+      gtk_flow_box_get_child_at_pos(GTK_FLOW_BOX(p_grid->p_flow), i_x, i_y);
    if (p_child == NULL) {
-      return;
+      return (FALSE);
    }
    /* Select the cell (this is what win.mark acts on), keep navigator.current
     * in step with it through the gate, then dispatch the shared toggle
@@ -261,6 +253,24 @@ _on_flow_middle_pressed(GtkGesture *p_g, gint i_n_press, gdouble d_x,
       _grid_select(p_grid, p_file);
    }
    gtk_widget_activate_action(GTK_WIDGET(p_grid), "win.mark", NULL);
+   return (TRUE);
+}
+
+/* Middle-click on a grid cell toggles its mark (pointer-accessible marks).
+ * The gesture callback is deliberately nothing but a button filter plus a
+ * coordinate hand-off: driving a real middle-click needs a synthesized
+ * pointer press, which GTK4 exposes no supported API for, so everything
+ * worth testing lives in ggaze_grid_mark_at_pos() where a test can reach it
+ * (tu0 review round 4). */
+static void
+_on_flow_middle_pressed(GtkGesture *p_g, gint i_n_press, gdouble d_x,
+                        gdouble d_y, gpointer p_data) {
+   (void)i_n_press;
+   if (gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(p_g)) !=
+       GDK_BUTTON_MIDDLE) {
+      return;
+   }
+   ggaze_grid_mark_at_pos(GGAZE_GRID(p_data), (gint)d_x, (gint)d_y);
 }
 
 /* --- refresh / rebuild --------------------------------------------------- */
