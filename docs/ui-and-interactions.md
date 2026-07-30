@@ -162,8 +162,8 @@ Loaded lazily; never blocks display of the pixels.
   small, fewer when large. Size persists in GSettings (`thumbnail-size`) and
   is restored on next launch; `0` resets to default.
 - Marks: `v` toggles a check badge on the current cell; `V` range-marks;
-  `Ctrl+a` marks all; middle-click a cell toggles its mark. `d`/`D`/`m` act on the
-  marked set (or current if none).
+  `Ctrl+a` marks all; middle-click a cell toggles its mark. `D`/`m` act on the
+  marked set (or current if none); `d` always trashes just the current image.
 
 ## Selection & moving
 
@@ -326,15 +326,17 @@ Loaded lazily; never blocks display of the pixels.
   modality is input-only, so the slideshow timer and the folder's file monitor
   keep running behind the dialog. They can move to the next image, and — via
   the rescan the monitor triggers — **prune marks** whose file has left the
-  folder. `d`/`D`/`m` therefore capture their whole target set at key-press
-  time, the marks-vs-current decision included: `D` with one file marked
+  folder. `d`/`D`/`m` therefore capture their targets at key-press time, and
+  for `D`/`m` — the two that consult the marks at all — the whole target set
+  including the marks-vs-current decision: `D` with one file marked
   deletes that file or nothing, never "whatever is current now because the
   mark disappeared", and three marks still ask the >1-mark confirmation even
   if two of them vanish while the prompt is up. Answering Discard can never
   trash, delete or move a file the user did not pick, and a captured target
   that no longer exists is refused with a status line instead of failing
-  silently. Deleting a target that is no longer the current image does not
-  advance the cursor, so nothing is skipped unseen. If the preview itself is
+  silently. Trashing, deleting or moving a target set that does not contain
+  the current image does not advance the cursor, so nothing is skipped
+  unseen. If the preview itself is
   gone by the time Save is pressed, ggaze reports "nothing to save" and still
   performs the action rather than silently doing neither.
 - GEGL runs only when a preset is active or on export; the fast decode path

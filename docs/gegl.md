@@ -50,10 +50,11 @@ editing remains a non-goal.
   prompt's own answer closes the window (a quit), where the queued request is
   discarded instead of being run against a window that is going away. The
   prompt's answer always applies to the image it was raised for: `d`/`D`/`m`
-  capture their whole target set — including the marks-vs-current decision —
-  at key-press time, because the slideshow timer and the folder's
-  GFileMonitor keep running behind an input-only modal grab and can both move
-  navigator.current and prune marks out from under the dialog. A captured
+  capture their targets at key-press time — for `D`/`m`, the two that consult
+  the marks at all, that includes the marks-vs-current decision itself —
+  because the slideshow timer and the folder's GFileMonitor keep running
+  behind an input-only modal grab and can both move navigator.current and
+  prune marks out from under the dialog. A captured
   target that has since been removed is refused with a status line rather than
   acted on. Toggling every preset back off, `0`, or `Esc` discards directly
   (no prompt). Slideshow auto-advance discards a dirty preview silently
