@@ -21,6 +21,7 @@
  *:*/
 
 #include "gridview.h"
+#include "gtk_helpers.h"
 #include "settings.h"
 #include "window.h"
 
@@ -36,10 +37,18 @@
  * g_object_unref(): GTK4 hands the caller's reference to its internal
  * toplevel list and only destroy() takes the entry back out (it drops that
  * reference too, so the window still finalizes). Full rationale in
- * tests/helpers/gtk_helpers.h, "window teardown". */
+ * tests/helpers/gtk_helpers.h, "window teardown".
+ *
+ * The focus grab is not cosmetic (5w0): this suite pops up the `m`
+ * destination popover, and a never-presented toplevel has no focus widget,
+ * which walks GTK into an unguarded NULL on the X11 backend CI runs under.
+ * See ggtest_focus_viewer() in tests/helpers/gtk_helpers.h for the full
+ * mechanism. */
 static GgazeWindow *
 new_window(void) {
-   return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
+   GgazeWindow *p_win = GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL));
+   ggtest_focus_viewer(p_win);
+   return (p_win);
 }
 
 static void

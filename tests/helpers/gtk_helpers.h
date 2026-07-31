@@ -21,6 +21,7 @@
 #include <gtk/gtk.h>
 
 #include "gridview.h"
+#include "window.h"
 
 /* --- grid cells ---------------------------------------------------------- */
 
@@ -33,6 +34,41 @@ GtkFlowBox *ggtest_find_flow_box(GtkWidget *p_w);
  * routing the cell's file through the installed select gate. Asserts the
  * flowbox and the cell exist. */
 void ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx);
+
+/* --- window focus ---------------------------------------------------------
+ *
+ * Grab keyboard focus into p_win's GgazeViewer (its stack's "large" child),
+ * so the toplevel has a focus widget. Asserts the grab succeeded.
+ *
+ * Why every suite that pops up one of the window's popovers needs this (5w0):
+ *
+ * A test builds its GgazeWindow with g_object_new() and never presents it, so
+ * the toplevel is never mapped and never gains keyboard focus -- and GTK only
+ * picks an initial focus widget when a window actually receives focus, so
+ * gtk_root_get_focus() on such a window stays NULL. The `e`/`!`/`m` popovers
+ * hold a single GtkLabel when nothing is configured, and a plain GtkLabel
+ * cannot take focus (gtk_label_grab_focus() returns FALSE unless the label is
+ * selectable or carries links), so that popover has no focusable descendant
+ * either.
+ *
+ * Those two facts together walk gtk-4.22.4 into an unguarded NULL:
+ * gtk_popover_show() ends with gtk_widget_child_focus() for an autohide
+ * popover, gtk_popover_focus() finds nothing to focus inside, and then calls
+ * gtk_widget_is_ancestor (gtk_root_get_focus (root), popover) with that NULL
+ * as the first argument (gtk/gtkpopover.c, "Empty popover" branch) -- a
+ * Gtk-CRITICAL, which the suites' g_log_set_always_fatal() turns into an
+ * abort.
+ *
+ * It only aborts on the X11 backend, which is what CI's xvfb-run gives it
+ * (.woodpecker/ci.yml). On Wayland gdk_popup_present() refuses a popup whose
+ * parent surface is unmapped, so gtk_popover_show() returns before the focus
+ * code runs -- which also means those popovers never actually map there and
+ * the suites were only ever asserting on an unmapped widget tree. Focusing
+ * the viewer fixes both: the abort is gone, and on X11 the popover really
+ * maps. Verified on live Wayland, live Xwayland with GDK_BACKEND=x11, and
+ * xvfb; the DRI3 warnings xvfb prints are unrelated (GSK_RENDERER=cairo, gl,
+ * ngl and vulkan all fail identically without this). */
+void ggtest_focus_viewer(GgazeWindow *p_win);
 
 /* --- window teardown ------------------------------------------------------
  *

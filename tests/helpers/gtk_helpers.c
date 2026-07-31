@@ -36,6 +36,22 @@ ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx) {
    g_signal_emit_by_name(p_flow, "child-activated", p_child);
 }
 
+/* --- window focus --------------------------------------------------------- */
+
+void
+ggtest_focus_viewer(GgazeWindow *p_win) {
+   GtkStack *p_stack = ggaze_window_get_stack(p_win);
+   g_assert_nonnull(p_stack);
+   GtkWidget *p_large = gtk_stack_get_child_by_name(p_stack, "large");
+   g_assert_nonnull(p_large);
+   /* GgazeViewer calls gtk_widget_set_focusable(TRUE) in its init, so the
+    * grab succeeds on an unmapped, never-presented window too. Asserted
+    * rather than ignored: if the viewer ever stops being focusable, the
+    * failure should surface here and not as a backend-specific abort inside
+    * an unrelated popover subtest. See gtk_helpers.h "window focus". */
+   g_assert_true(gtk_widget_grab_focus(p_large));
+}
+
 /* --- alert dialogs -------------------------------------------------------- */
 
 void

@@ -492,9 +492,9 @@ test('settings_ui', test_settings_ui,
 
 test_open_external = executable(
    'test_open_external', ['test_open_external.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
-   link_with : ggaze_lib, install : false,
+   link_with : [ggaze_lib, test_helpers_lib], install : false,
 )
 open_external_env = environment()
 open_external_env.set('GIO_USE_VFS', 'local')
@@ -512,9 +512,9 @@ test('open_external', test_open_external,
 
 test_move_undo = executable(
    'test_move_undo', ['test_move_undo.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
-   link_with : ggaze_lib, install : false,
+   link_with : [ggaze_lib, test_helpers_lib], install : false,
 )
 move_undo_env = environment()
 move_undo_env.set('GIO_USE_VFS', 'local')
@@ -532,9 +532,9 @@ test('move_undo', test_move_undo,
 
 test_runner_rescan = executable(
    'test_runner_rescan', ['test_runner_rescan.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
-   link_with : ggaze_lib, install : false,
+   link_with : [ggaze_lib, test_helpers_lib], install : false,
 )
 runner_rescan_env = environment()
 runner_rescan_env.set('GIO_USE_VFS', 'local')
