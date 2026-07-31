@@ -1830,7 +1830,9 @@ test_trash_does_not_advance_past_an_unseen_image(void) {
  * request is still parked" leg needs a dispose while the GtkAlertDialog is up,
  * and until 2w0 that abandoned the dialog's GTask: the task never completed,
  * so _save_dialog_cb never ran and the _SaveCtx (plus the _FileCtx/_OpenCtx it
- * carries) leaked -- 474 bytes in 11 allocations under ASan.
+ * carries) leaked -- 479 bytes in 11 allocations, measured by running exactly
+ * this subtest against the pre-fix window.c (tu0 measured 474/11 with its own
+ * slightly different version of it).
  *
  * g_object_run_dispose() is not a shortcut here, it is the only way in.
  * gtk_window_destroy() alone cannot dispose the window while a prompt is up:
@@ -1868,12 +1870,18 @@ test_dispose_under_a_live_prompt_releases_it(void) {
    g_object_run_dispose(G_OBJECT(fx.p_win));
    ggtest_drain_main(400);
 
-   /* The cancel finished the dialog's GTask, so its callback ran: the dialog
-    * is gone (gtk_alert_dialog_choose_finish destroys the dialog window) ... */
+   /* Nothing is left on screen. This one does NOT discriminate: GTK takes the
+    * dialog window down either way, because dispose emits the ::destroy that
+    * its destroy-with-parent is wired to. It is here to pin down that the
+    * ref taken in _save_prompt_show does not keep a dead dialog visible. */
    g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
                     0);
-   /* ... and both contexts released their window ref -- which is what the leak
-    * was: neither the _SaveCtx nor the parked _OpenCtx was ever freed. */
+   /* THIS is the assertion the fix is answerable to: the dialog's GTask
+    * completed, so _save_dialog_cb ran and released the _SaveCtx and the
+    * _FileCtx it gated. Without the cancel both were simply abandoned and the
+    * count stopped at u_ref + 2 (measured 4 against a wanted 2), taking 479
+    * bytes in 11 allocations down with them under ASan. Only the parked
+    * _OpenCtx came back on its own -- _enhance_dispose drops that one. */
    g_assert_cmpuint(((GObject *)fx.p_win)->ref_count, ==, fx.u_ref);
    /* The queued open never ran: a disposed window honours no request. */
    g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "small.png"));

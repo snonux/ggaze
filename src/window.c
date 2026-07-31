@@ -821,14 +821,20 @@ _prompt_dialog_window(GgazeWindow *p_win) {
  * both.
  *
  * The GCancellable is not optional bookkeeping: without one, nothing can ever
- * finish this dialog's GTask except a button press. gtk_window_destroy() on
- * the parent neither disposes it (the _SaveCtx's window ref pins it) nor takes
- * the dialog down (GTK wires destroy-with-parent to the parent's ::destroy,
- * which is emitted from dispose), so a teardown under a live prompt left the
- * task unfinished and the _SaveCtx -- plus whatever ctx the request carries --
- * leaked: 474 bytes in 11 allocations, measured under ASan (task 2w0). Both
- * this ctx and the window hold a ref on it; see _prompt_dispose for the
- * cancelling end. */
+ * finish this dialog's GTask except a button press, so a dispose under a live
+ * prompt abandoned the _SaveCtx and every ctx the request carries -- 479 bytes
+ * in 11 allocations, measured under ASan (task 2w0). Both this ctx and the
+ * window hold a ref on it; see _prompt_dispose for the cancelling end.
+ *
+ * What that does NOT cover is a plain gtk_window_destroy() with the prompt
+ * still up, because it never reaches dispose: the _SaveCtx's own window ref
+ * keeps the refcount off zero (measured 4 -> 3, the toplevel list's ref being
+ * the only one dropped), and GTK wires destroy-with-parent to the parent's
+ * ::destroy, which GtkWidget emits from dispose -- so the dialog stays up and
+ * clickable, and answering it then still resolves everything normally
+ * (measured: the answer arrives as the pressed button, refcount back to the
+ * caller's own). Only a process that exits under that dialog still loses the
+ * contexts. */
 static void
 _save_prompt_show(GgazeWindow *p_win, const _Request *p_req) {
    GtkAlertDialog *p_dlg =
@@ -3899,12 +3905,20 @@ _update_header(GgazeWindow *p_win) {
  * _SaveCtx and every ctx it carries were simply abandoned. The cancel resolves
  * the prompt as "do not proceed", which is the only honest answer here: by the
  * time dispose runs, the preview, the enhancer and the navigator a Save or a
- * continuation would need are already gone. A button pressed in the same main-
- * loop turn as the dispose would be overridden by the cancel (tu0's round-3
- * probe), and would land on that same teardown -- but it cannot happen through
- * an ordinary unref, because the _SaveCtx's own window ref keeps the refcount
- * off zero for exactly as long as the prompt is outstanding; only a forced
- * g_object_run_dispose() gets here with a live dialog. */
+ * continuation would need are already gone.
+ *
+ * The cancel CAN override an answer the user has already given, and that was
+ * measured, not assumed: clicking Discard and disposing in the same main-loop
+ * turn -- before GTask's completion idle runs -- came back as CANCELLED with
+ * no button index, exactly as tu0's round-3 probe reported. Drain that one
+ * idle first and the same click comes back as the button it was. This cancel
+ * is safe from that only because dispose is refcount-driven: the _SaveCtx's
+ * own window ref keeps the refcount off zero for exactly as long as the prompt
+ * is outstanding, and only that callback ever releases it, so an ordinary
+ * unref cannot get here ahead of an answer. Only a forced
+ * g_object_run_dispose() reaches this with a live dialog -- which is what the
+ * subtest in tests/test_enhance_flow.c does, and what an ASan run of a
+ * shutdown under a prompt reduces to. */
 static void
 _prompt_dispose(GgazeWindow *p_win) {
    if (p_win->p_pending != NULL) {
