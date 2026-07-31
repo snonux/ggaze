@@ -398,8 +398,11 @@ assert_all_files_present(ConfirmFixture *p_fx) {
  * actually takes and the one that would destroy the window.
  *
  * Blocking is only half of it -- the user must keep a way out. Unlike the Save
- * prompt, no request is queued behind the confirm (queueing one would recurse
- * through _proceed_quit; see _on_close_request), so the way out is the dialog
+ * prompt, no request is queued behind the confirm: the queue belongs to the
+ * Save prompt, which is not up here, so routing this close through
+ * _maybe_save_then would either do nothing whatsoever (clean mask -- the
+ * re-entrant gtk_window_close() is a no-op) or stack a second modal dialog on
+ * the confirm (dirty mask); see _on_close_request. The way out is the dialog
  * itself: answer it, and the next close goes through. */
 static void
 test_close_request_blocked_while_confirm_is_up(void) {

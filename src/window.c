@@ -455,9 +455,11 @@ _files_include_current(GgazeWindow *p_win, GList *p_files) {
  * Both of this window's modal GtkAlertDialogs -- the GEGL Save/Discard/Cancel
  * prompt and the >1-target delete confirm -- need the same two things: a ref
  * on the private toplevel GTK put up for them (below), and a GCancellable the
- * window can cancel when it disposes (see _prompt_dispose and
- * _delete_confirm_dispose). This lives outside the GEGL block because the
- * delete confirm exists in every build.
+ * window can cancel when it disposes (see _delete_confirm_dispose, and
+ * _prompt_dispose in a GEGL build). This lives outside the GEGL block because
+ * the delete confirm exists in every build -- so every Save-prompt name
+ * mentioned from here on is a GEGL-only counterpart, cited to show the shared
+ * pattern, not a symbol a minimal build has.
  */
 
 /* The GtkWindow gtk_alert_dialog_choose() has just presented for p_win,
@@ -1130,13 +1132,26 @@ _action_quit(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * ggaze_window_delete_captured against a destroyed window (task aw0).
  *
  * The delete confirm is refused WITHOUT going through _maybe_save_then, unlike
- * the Save prompt. That is not a stylistic difference: nothing queues behind
- * the confirm, so with a clean mask _maybe_save_then would run _proceed_quit
- * immediately, whose gtk_window_close() re-emits "close-request" into this
- * same handler, which would see the same still-outstanding confirm -- an
- * unbounded recursion. Refusing outright is also all the user needs: the
- * confirm is modal and on screen, so answering it (either way) clears the slot
- * and the next Alt+F4 goes through.
+ * the Save prompt. That is not a stylistic difference: _maybe_save_then queues
+ * only behind the SAVE prompt (b_save_prompt), which is FALSE while just the
+ * confirm is up, so neither branch it could take here is the one we want.
+ *
+ *   - Clean mask: it runs the continuation straight away, and _proceed_quit's
+ *     gtk_window_close() does nothing at all when called from inside a
+ *     close-request handler -- gtk_window_close() returns early on
+ *     priv->in_emit_close_request, which gtk_window_emit_close_request() sets
+ *     around the g_signal_emit (gtk 4.22.4 gtkwindow.c:1475 and :3876,
+ *     commented there as "avoid re-entrancy issues when calling
+ *     gtk_window_close from a close-request handler"). So the leg would be a
+ *     SILENT NO-OP: nothing queued, nothing prompted, nothing closed, while
+ *     looking like it had acted.
+ *   - Dirty mask: it goes to _save_prompt_show and stacks a SECOND modal
+ *     dialog on top of the confirm -- precisely what the one-prompt-at-a-time
+ *     guard above exists to prevent.
+ *
+ * Refusing outright is also all the user needs: the confirm is modal and on
+ * screen, so answering it (either way) clears the slot and the next Alt+F4
+ * goes through.
  *
  * Refusing a close under the Save prompt does not strand the user either: the
  * request is queued behind the prompt, so answering it in favour of proceeding
@@ -1262,13 +1277,19 @@ typedef struct {
    GgazeWindow *p_win; /* owned ref: outlives the async dialog */
    GFile       *p_dir; /* the captured targets' own parent folder (owned) */
    GList *p_files;     /* captured target GFile* list (owned, transfer full) */
-   GCancellable *p_cancel;  /* owned ref on the SAME GCancellable the window
-                             * parks in p_delete_cancel. Held here too so the
-                             * callback can ask the object itself whether this
-                             * dialog was cancelled -- see
-                             * _delete_confirm_answered -- and so the ref is
-                             * released on every exit path even after dispose
-                             * dropped the window's own */
+   GCancellable *p_cancel;  /* owned: created here, and the SAME object the
+                             * window parks a SECOND ref to in p_delete_cancel.
+                             * This is the ref handed to
+                             * gtk_alert_dialog_choose(), and the one that keeps
+                             * the object alive for the whole life of the ctx --
+                             * released on every exit path, and independent of
+                             * the window's slot, which _delete_confirm_cb
+                             * clears first thing and _delete_confirm_dispose
+                             * may clear earlier still. The callback never asks
+                             * this object anything (unlike _save_prompt_outcome
+                             * for the Save prompt): _delete_confirm_answered_yes
+                             * classifies on the button index and the GError
+                             * alone */
    GtkWindow *p_dlg_window; /* owned ref on the dialog's own toplevel, purely
                              * to keep it from being FREED under the GTask
                              * that still points at it -- see
@@ -1425,7 +1446,9 @@ _delete_confirm_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
  * the ctx is never handed to a callback holding uninitialised memory --
  * p_dlg_window included, which the caller can only fill in AFTER choose()
  * because the dialog window does not exist before it (same reasoning, and the
- * same GTask-completes-in-an-idle assumption, as _save_prompt_show). */
+ * same GTask-completes-in-an-idle assumption, as the Save prompt's
+ * _save_prompt_show -- which, unlike this ctx, only exists in a GEGL build).
+ */
 static _DeleteCtx *
 _delete_ctx_new(GgazeWindow *p_win, GFile *p_dir, GList *p_files) {
    _DeleteCtx *p_ctx   = g_new(_DeleteCtx, 1);
@@ -1484,6 +1507,13 @@ _delete_confirm_ask(GgazeWindow *p_win, GList *p_files) {
     * _delete_confirm_answered_yes: on a destructive dialog, "the user got rid
     * of the question" must mean no. */
    gtk_alert_dialog_set_cancel_button(p_dlg, _DELETE_BTN_CANCEL);
+   /* No gtk_alert_dialog_set_default_button() on purpose. GtkAlertDialog
+    * initialises default_button to -1 and only calls
+    * gtk_dialog_set_default_response() for the button whose index matches (gtk
+    * 4.22.4 gtkalertdialog.c:82 and :658), so with none set Enter activates
+    * nothing and a stray keypress cannot confirm a PERMANENT delete. If a
+    * default is ever added it MUST be _DELETE_BTN_CANCEL -- never
+    * _DELETE_BTN_DELETE, which would make Enter the destructive answer. */
    _DeleteCtx *p_ctx = _delete_ctx_new(p_win, p_dir, p_files);
    /* The slot is NULL here -- the guard at the top of this function is what
     * got us past, and _delete_confirm_cb clears it -- so this assignment can

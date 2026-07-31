@@ -63,8 +63,10 @@ editing remains a non-goal.
   the monitor above can clear that mask behind the dialog — and a close
   refused by the *prompt* is queued behind it, so
   answering it in favour of proceeding then closes the window (a close refused
-  by the delete confirm is not queued — nothing there could flush it, and
-  queueing one would recurse; answer the confirm and press the close again).
+  by the delete confirm is not queued — the queue belongs to the Save prompt,
+  which is not up then, so routing that close through it would either do
+  nothing at all or stack a second dialog on top of the confirm; answer the
+  confirm and press the close again).
   Without that,
   the close reached `gtk_window_destroy()` with the dialog still up, which
   cannot dispose the window (the prompt holds a window ref) and so orphaned
