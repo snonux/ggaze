@@ -88,10 +88,15 @@ GtkWindow *ggtest_find_dialog(GtkWindow *p_skip, const char *c_label);
  * must not stack a second dialog". */
 guint ggtest_count_dialogs(GtkWindow *p_skip, const char *c_label);
 
-/* Iterate the main context until such a dialog appears or u_timeout_ms
- * elapses. Returns it, or NULL on timeout. */
-GtkWindow *ggtest_wait_for_dialog(GtkWindow *p_skip, const char *c_label,
-                                  guint u_timeout_ms);
+/* Iterate the main context until such a dialog appears. Returns it, or NULL
+ * once the wait ceiling expires.
+ *
+ * There is deliberately no per-call budget: every call site wanted the same
+ * "as soon as it shows up, and give up eventually", and how long "eventually"
+ * has to be is a property of the machine and the build (sanitizers, parallel
+ * lane load), not of the call site. The ceiling and its scaling live in one
+ * documented place in gtk_helpers.c; GGAZE_TEST_TIMEOUT_SCALE widens it. */
+GtkWindow *ggtest_wait_for_dialog(GtkWindow *p_skip, const char *c_label);
 
 /* Click p_btn by emitting "clicked" -- what a real pointer click ends in.
  * NOT gtk_widget_activate(): GtkButton turns that into a keyboard-activation
@@ -113,8 +118,10 @@ gboolean ggtest_is_open_toplevel(GtkWindow *p_win);
  * injection API is needed: the dialog is an ordinary GtkWindow, so finding its
  * button and driving it through ggtest_click_button above (which emits
  * "clicked" -- see there for why gtk_widget_activate() silently does nothing)
- * is enough. Returns FALSE if no dialog with that button is up. Does NOT
- * iterate the main context; the caller drains. */
+ * is enough. Waits for the dialog on the same ceiling as
+ * ggtest_wait_for_dialog() above, so it does not race a prompt that is still
+ * being raised; returns FALSE only if none turns up before then. Iterates the
+ * main context while waiting, but not after the click -- the caller drains. */
 gboolean ggtest_click_dialog_button(GtkWindow *p_skip, const char *c_label);
 
 #endif /* GTK_HELPERS_H */

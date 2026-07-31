@@ -108,18 +108,66 @@ ggtest_count_dialogs(GtkWindow *p_skip, const char *c_label) {
    return (_scan_dialogs(p_skip, c_label, NULL, NULL));
 }
 
+/* Patience ceiling for ggtest_wait_for_dialog(), in milliseconds, before the
+ * scaling below. Not a "how long this normally takes" figure -- a prompt
+ * normally shows within a few hundred ms -- but "how long we are willing to
+ * wait before calling it a bug". */
+#define GGTEST_DIALOG_WAIT_MS 10000
+
+/* Scale factor applied to that ceiling.
+ *
+ * ASan/UBSan builds run several times slower than the plain lanes, and they
+ * are the same lanes meson packs nproc-wide in parallel, so they need the most
+ * room. GGAZE_TEST_TIMEOUT_SCALE lets a slow or heavily loaded machine widen
+ * every wait without a rebuild. Computed once; the test main loop is single-
+ * threaded, so the cached value needs no locking. */
+static gdouble
+_wait_scale(void) {
+   static gdouble d_scale = -1.0;
+   if (d_scale < 0.0) {
+      const char *c_env = g_getenv("GGAZE_TEST_TIMEOUT_SCALE");
+      d_scale           = (c_env != NULL) ? g_ascii_strtod(c_env, NULL) : 1.0;
+      if (!(d_scale > 0.0)) {
+         d_scale = 1.0; /* unset, unparseable or nonsense: ignore it */
+      }
+#ifdef __SANITIZE_ADDRESS__
+      d_scale *= 3.0;
+#endif
+   }
+   return (d_scale);
+}
+
+/* Poll until the dialog is up, or until the scaled ceiling expires.
+ *
+ * The budget is a real monotonic deadline. It used to be a count of poll
+ * iterations, each followed by a 1 ms sleep, which made it load-dependent in
+ * the worst possible direction: a *sleeping* poll loop is barely slowed by an
+ * oversubscribed box, while the worker thread it is waiting on is starved of
+ * CPU by exactly that oversubscription. So the loop kept roughly its nominal
+ * 2 s while the work it waited for took far longer, and a wait that always
+ * passed with the suite run alone failed on a full parallel lane (1w0).
+ *
+ * Widening a CONDITION wait cannot hide a defect: this returns the instant the
+ * dialog exists, so a dialog that is genuinely never shown still fails the
+ * caller's g_assert_nonnull, just later. The ceiling only sets how long we
+ * wait before saying so, and only one wait per run can ever burn it -- the
+ * assertion aborts the suite. */
 GtkWindow *
-ggtest_wait_for_dialog(GtkWindow *p_skip, const char *c_label,
-                       guint u_timeout_ms) {
-   for (guint u = 0; u < u_timeout_ms; u++) {
+ggtest_wait_for_dialog(GtkWindow *p_skip, const char *c_label) {
+   gint64 i_budget_us =
+      (gint64)(GGTEST_DIALOG_WAIT_MS * _wait_scale()) * G_GINT64_CONSTANT(1000);
+   gint64 i_deadline = g_get_monotonic_time() + i_budget_us;
+   for (;;) {
       GtkWindow *p_dlg = ggtest_find_dialog(p_skip, c_label);
       if (p_dlg != NULL) {
          return (p_dlg);
       }
+      if (g_get_monotonic_time() >= i_deadline) {
+         return (NULL);
+      }
       g_main_context_iteration(g_main_context_default(), FALSE);
       g_usleep(1000);
    }
-   return (NULL);
 }
 
 void
@@ -138,6 +186,14 @@ ggtest_is_open_toplevel(GtkWindow *p_win) {
 
 gboolean
 ggtest_click_dialog_button(GtkWindow *p_skip, const char *c_label) {
+   /* Wait for the button instead of sampling the toplevel list once. Dialogs
+    * are raised asynchronously, so a bare check races the main loop exactly
+    * as the old iteration-counted wait did -- observed as a load-dependent
+    * "should be TRUE" failure on a full parallel lane (1w0). A button that is
+    * genuinely never shown still returns FALSE, just after the ceiling. */
+   if (ggtest_wait_for_dialog(p_skip, c_label) == NULL) {
+      return (FALSE);
+   }
    GtkWidget *p_btn = NULL;
    if (_scan_dialogs(p_skip, c_label, NULL, &p_btn) == 0) {
       return (FALSE);
