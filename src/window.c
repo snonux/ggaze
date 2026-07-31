@@ -259,7 +259,9 @@ _proceed_last(gpointer d) {
  * handler. It lives up here with its navigation siblings because the prompt
  * machinery below has to recognise it by identity: a prompt whose own
  * continuation closes the window may not retry a queued request afterwards
- * (round 4, finding r -- see _save_prompt_show/_save_prompt_flush). */
+ * (round 4, finding r -- see _save_prompt_show/_save_prompt_flush, both of
+ * which, like the rest of that prompt machinery, exist only in a GEGL build;
+ * this continuation is compiled either way). */
 static gboolean
 _proceed_quit(gpointer p_data) {
    gtk_window_close(GTK_WINDOW(p_data));
@@ -1011,11 +1013,13 @@ _delete_confirm_outstanding(GgazeWindow *p_win) {
 
 /* TRUE while ANY modal dialog this window owns is outstanding.
  *
- * Task 2w0 gated _on_close_request on b_save_prompt, which answers a narrower
- * question -- "is the Save/Discard/Cancel prompt up?" -- and left the delete
- * confirm, raised AFTER that prompt has resolved, unguarded (task aw0). This
- * is the question the close gate actually wants, so it is asked once, here,
- * and every future modal dialog belongs in it rather than in a third flag. */
+ * Task 2w0 gated _on_close_request on b_save_prompt -- a GEGL-only field,
+ * which is half of why reaching for it from here was wrong -- and that answers
+ * a narrower question anyway ("is the Save/Discard/Cancel prompt up?"), so it
+ * left the delete confirm, raised AFTER that prompt has resolved, unguarded
+ * (task aw0). This is the question the close gate actually wants, so it is
+ * asked once, here, through the two accessors that exist in EVERY build, and
+ * every future modal dialog belongs in it rather than in a third flag. */
 static gboolean
 _modal_dialog_outstanding(GgazeWindow *p_win) {
    return (_save_prompt_outstanding(p_win) ||
@@ -1158,7 +1162,16 @@ _action_quit(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * flushes that quit through the gate and closes the window, and answering
  * Cancel means "stay here", which is exactly what a refused close leaves. A
  * prompt whose OWN continuation is the quit still gets through, because
- * _save_dialog_cb clears b_save_prompt before running it. */
+ * _save_dialog_cb clears b_save_prompt before running it.
+ *
+ * Every Save-prompt name used above -- _save_prompt_show, _save_dialog_cb and
+ * the b_save_prompt flag itself -- exists ONLY in a GEGL build. This handler
+ * does not: it reaches all of it through _modal_dialog_outstanding (i.e.
+ * _save_prompt_outstanding), ggaze_window_enhance_is_dirty and
+ * _maybe_save_then, each of which has a non-GEGL stub. So in a minimal build
+ * the first two answer FALSE always, the Save-prompt half of this comment is
+ * simply never live, and the delete-confirm leg is the only one that can
+ * refuse a close. */
 static gboolean
 _on_close_request(GtkWindow *p_gtk_win, gpointer p_data) {
    (void)p_gtk_win;
@@ -1286,10 +1299,10 @@ typedef struct {
                              * the window's slot, which _delete_confirm_cb
                              * clears first thing and _delete_confirm_dispose
                              * may clear earlier still. The callback never asks
-                             * this object anything (unlike _save_prompt_outcome
-                             * for the Save prompt): _delete_confirm_answered_yes
-                             * classifies on the button index and the GError
-                             * alone */
+                             * this object anything (unlike the Save prompt's
+                             * _save_prompt_outcome, a GEGL-only counterpart):
+                             * _delete_confirm_answered_yes classifies on the
+                             * button index and the GError alone */
    GtkWindow *p_dlg_window; /* owned ref on the dialog's own toplevel, purely
                              * to keep it from being FREED under the GTask
                              * that still points at it -- see
