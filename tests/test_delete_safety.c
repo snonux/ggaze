@@ -20,9 +20,16 @@
  *      ggaze_window_delete_captured(win, dirA, capturedA) while A is still
  *      open -> exactly the captured files are gone, the rest remain.
  *
- * Driving the real GtkAlertDialog programmatically is impractical (GTK4
- * exposes no API to inject a response), so the post-dialog decision function
- * is exercised directly — it is the exact code the real callback runs.
+ * The first three subtests exercise the post-dialog decision function
+ * directly — it is the exact code the real callback runs — because injecting
+ * a response into a GtkAlertDialog needs no API at all, only its buttons
+ * (tests/helpers/gtk_helpers.h), which arrived later.
+ *
+ * Task aw0 added the group that DOES drive the real dialog, because the
+ * questions it asks are about the dialog itself rather than about the
+ * decision: what a native window close does while the confirm is on screen,
+ * what a dispose underneath it does, and what "the user got rid of the
+ * question" means for a dialog that permanently deletes files.
  *
  * Needs a display (integration suite; CI uses xvfb).
  *
@@ -30,6 +37,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
+#include "gtk_helpers.h"
 #include "viewer.h"
 #include "window.h"
 
@@ -300,6 +308,232 @@ test_delete_targets_still_current_no_nav(void) {
    drain_main(100);
 }
 
+/* --- aw0: the real confirm dialog, on screen ----------------------------
+ *
+ * Everything above answers "what does the decision function do?". This group
+ * answers "what happens to the dialog itself?", which needs a real one up:
+ * a `D` on >1 marked files, raised through the actual action.
+ *
+ * The three files are all marked, so the confirm dialog names all three and
+ * "nothing was deleted" is checkable file by file. */
+typedef struct {
+   GgazeWindow *p_win; /* held with a ref of the TEST's own, so the window
+                        * stays a valid pointer even after a close/dispose
+                        * takes it out of the toplevel list */
+   char *c_dir;        /* temp folder (owned) */
+   guint u_ref;        /* p_win's refcount with the marks set and everything
+                        * settled, i.e. BEFORE the confirm dialog's _DeleteCtx
+                        * takes its own window ref. A ctx that is never freed
+                        * pins the whole GgazeWindow, so comparing against this
+                        * catches it in the plain lanes too, not only ASan */
+} ConfirmFixture;
+
+static const char *const CONFIRM_FILES[] = {"plain.jpg", "rot6.jpg",
+                                            "small.png"};
+
+/* Open a window on a fresh folder of CONFIRM_FILES, mark them all, press `D`
+ * and wait for the confirm dialog. Leaves that dialog UP: every caller must
+ * resolve it (answer, dismiss or dispose) before fixture_confirm_teardown,
+ * because an unanswered dialog holds the _DeleteCtx's window ref and would
+ * both keep the window alive and show up as a leak under ASan. */
+static void
+fixture_confirm_open(ConfirmFixture *p_fx, const char *c_tmpl) {
+   GError *p_err = NULL;
+   p_fx->c_dir   = g_dir_make_tmp(c_tmpl, &p_err);
+   g_assert_no_error(p_err);
+   for (guint u = 0; u < G_N_ELEMENTS(CONFIRM_FILES); u++) {
+      copy_fixture(p_fx->c_dir, CONFIRM_FILES[u]);
+   }
+   char  *c_first = g_build_filename(p_fx->c_dir, CONFIRM_FILES[0], NULL);
+   GFile *p_first = g_file_new_for_path(c_first);
+   p_fx->p_win    = new_window();
+   g_object_ref(p_fx->p_win);
+   ggaze_window_open(p_fx->p_win, p_first);
+   wait_for_load(p_fx->p_win);
+   /* Presented on purpose: gtk_window_close() is a no-op on a window that was
+    * never realized, and it is the path Alt+F4 and the WM button take. */
+   gtk_window_present(GTK_WINDOW(p_fx->p_win));
+   drain_main(200);
+   fire(p_fx->p_win, "win.mark-all");
+   drain_main(100);
+   p_fx->u_ref = ((GObject *)p_fx->p_win)->ref_count;
+   fire(p_fx->p_win, "win.delete"); /* >1 marks -> the confirm dialog */
+   g_assert_nonnull(ggtest_wait_for_dialog(GTK_WINDOW(p_fx->p_win), "Delete"));
+   /* The dialog's _DeleteCtx owns a window ref for as long as it lives. */
+   g_assert_cmpuint(((GObject *)p_fx->p_win)->ref_count, ==, p_fx->u_ref + 1);
+   g_object_unref(p_first);
+   g_free(c_first);
+}
+
+static void
+fixture_confirm_teardown(ConfirmFixture *p_fx) {
+   gtk_window_destroy(GTK_WINDOW(p_fx->p_win)); /* no-op if already closed */
+   g_object_unref(p_fx->p_win);                 /* the fixture's own ref */
+   drain_main(300);
+   cleanup_temp_dir(p_fx->c_dir);
+}
+
+/* Assert every file the fixture created is still on disk (nothing deleted). */
+static void
+assert_all_files_present(ConfirmFixture *p_fx) {
+   for (guint u = 0; u < G_N_ELEMENTS(CONFIRM_FILES); u++) {
+      char *c_p = g_build_filename(p_fx->c_dir, CONFIRM_FILES[u], NULL);
+      g_assert_true(path_exists(c_p));
+      g_free(c_p);
+   }
+}
+
+/* aw0's main bug. Task 2w0 gated _on_close_request on b_save_prompt, which is
+ * the SAVE prompt's flag: the `D` confirm is raised after that prompt has
+ * already resolved, so the flag is FALSE and the enhance mask is clear while
+ * the confirm is on screen. A native close (Alt+F4 / the WM button -- not
+ * input events, so the dialog's modal grab does not swallow them) therefore
+ * propagated into gtk_window_destroy(), which cannot dispose the window (the
+ * _DeleteCtx holds an owned window ref), so nothing cancelled the dialog: it
+ * stayed on screen, orphaned, still answerable, and answering it would have
+ * run ggaze_window_delete_captured against a destroyed window.
+ *
+ * Both close entry points are exercised deliberately: the raw signal emission
+ * pins the handler's own verdict, and gtk_window_close() is the path Alt+F4
+ * actually takes and the one that would destroy the window.
+ *
+ * Blocking is only half of it -- the user must keep a way out. Unlike the Save
+ * prompt, no request is queued behind the confirm (queueing one would recurse
+ * through _proceed_quit; see _on_close_request), so the way out is the dialog
+ * itself: answer it, and the next close goes through. */
+static void
+test_close_request_blocked_while_confirm_is_up(void) {
+   ConfirmFixture fx;
+   fixture_confirm_open(&fx, "ggaze-delsafe-closeconfirm-XXXXXX");
+
+   gboolean b_stop = FALSE;
+   g_signal_emit_by_name(fx.p_win, "close-request", &b_stop);
+   g_assert_true(b_stop); /* the handler must refuse the close */
+
+   gtk_window_close(GTK_WINDOW(fx.p_win)); /* the real Alt+F4 path */
+   drain_main(300);
+   g_assert_true(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Delete"), ==,
+                    1); /* not orphaned: still parented, still answerable */
+   assert_all_files_present(&fx);
+
+   /* The way out: answering the confirm clears the gate. */
+   g_assert_true(ggtest_click_dialog_button(GTK_WINDOW(fx.p_win), "Cancel"));
+   drain_main(300);
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Delete"), ==,
+                    0);
+   assert_all_files_present(&fx); /* Cancel deletes nothing */
+
+   gtk_window_close(GTK_WINDOW(fx.p_win));
+   drain_main(300);
+   g_assert_false(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));
+
+   fixture_confirm_teardown(&fx); /* the fixture ref is what keeps this valid */
+}
+
+/* The dispose-time cancel (aw0, mirroring 2w0's for the Save prompt). Without
+ * a GCancellable nothing but the dialog itself could finish its GTask, so a
+ * dispose underneath it abandoned the _DeleteCtx and its deep-copied target
+ * list; with one, the task completes, _delete_confirm_cb runs and everything
+ * is released.
+ *
+ * The refcount is what proves that, not the dialog's disappearance: the dialog
+ * goes away either way, because GTK wires destroy-with-parent to the parent's
+ * ::destroy and GtkWidget emits that from dispose. The abandoned _DeleteCtx
+ * stays behind holding its window ref (and its deep copy of the target list),
+ * which is exactly what the ref_count assertion below catches.
+ *
+ * The files must survive that cancel, and NOT because the delete happened to
+ * be refused downstream: gtk_alert_dialog_choose_finish() reports a cancel as
+ * -1 plus an error, and -1 read as a gboolean is TRUE, so the callback's old
+ * `gboolean b_ok = gtk_alert_dialog_choose_finish(...)` would have taken the
+ * cancel for a confirmed permanent delete. (Dispose clears p_nav first, so
+ * ggaze_window_delete_captured would refuse anyway -- this asserts the files
+ * because that is what the user would lose if either guard went away.)
+ *
+ * g_object_run_dispose() is the only way in, exactly as in
+ * test_dispose_under_a_live_prompt_releases_it: gtk_window_destroy() cannot
+ * dispose a window whose confirm dialog still holds a ref on it. */
+static void
+test_dispose_under_a_live_confirm_cancels_it(void) {
+   ConfirmFixture fx;
+   fixture_confirm_open(&fx, "ggaze-delsafe-disposeconfirm-XXXXXX");
+
+   g_object_run_dispose(G_OBJECT(fx.p_win));
+   drain_main(400);
+
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Delete"), ==,
+                    0);
+   /* The cancel completed the dialog's GTask, so its callback ran and the
+    * _DeleteCtx released the window ref it had taken. */
+   g_assert_cmpuint(((GObject *)fx.p_win)->ref_count, ==, fx.u_ref);
+   assert_all_files_present(&fx);
+
+   fixture_confirm_teardown(&fx);
+}
+
+/* Getting rid of the question is not an answer. Escape / the dialog's own WM
+ * close end in gtk_window_close() on the dialog toplevel, which GTK reports
+ * as -1 plus GTK_DIALOG_ERROR_DISMISSED unless a cancel button is configured
+ * -- and -1 as a gboolean is TRUE, so before aw0 the callback took a dismissed
+ * confirm for a confirmed PERMANENT delete of every marked file. Two things
+ * now stop that: _delete_confirm_ask names button 0 as the cancel button (so
+ * the dismissal arrives as a plain Cancel answer), and
+ * _delete_confirm_answered_yes requires no error AND the Delete button's own
+ * index. */
+static void
+test_dismissing_the_confirm_deletes_nothing(void) {
+   ConfirmFixture fx;
+   fixture_confirm_open(&fx, "ggaze-delsafe-dismissconfirm-XXXXXX");
+
+   GtkWindow *p_dlg = ggtest_find_dialog(GTK_WINDOW(fx.p_win), "Delete");
+   g_assert_nonnull(p_dlg);
+   gtk_window_close(p_dlg); /* what Escape does */
+   drain_main(300);
+
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Delete"), ==,
+                    0);
+   assert_all_files_present(&fx);
+   g_assert_true(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));
+
+   fixture_confirm_teardown(&fx);
+}
+
+/* The other half of the classification: pressing Delete really does delete.
+ * Without this, a wrong button index in _delete_confirm_answered_yes would
+ * quietly turn `D` into a no-op and every "nothing was deleted" assertion
+ * above would still pass. */
+static void
+test_confirming_deletes_the_marked_files(void) {
+   ConfirmFixture fx;
+   fixture_confirm_open(&fx, "ggaze-delsafe-confirmdelete-XXXXXX");
+
+   g_assert_true(ggtest_click_dialog_button(GTK_WINDOW(fx.p_win), "Delete"));
+   drain_main(400);
+
+   for (guint u = 0; u < G_N_ELEMENTS(CONFIRM_FILES); u++) {
+      char *c_p = g_build_filename(fx.c_dir, CONFIRM_FILES[u], NULL);
+      g_assert_false(path_exists(c_p));
+      g_free(c_p);
+   }
+
+   fixture_confirm_teardown(&fx);
+}
+
+/* Registration split so neither function runs past the ~30-line convention:
+ * the original decision-function coverage, and aw0's real-dialog group. */
+static void
+add_confirm_dialog_tests(void) {
+   g_test_add_func("/delete_safety/close_request_blocked_while_confirm_is_up",
+                   test_close_request_blocked_while_confirm_is_up);
+   g_test_add_func("/delete_safety/dispose_under_a_live_confirm_cancels_it",
+                   test_dispose_under_a_live_confirm_cancels_it);
+   g_test_add_func("/delete_safety/dismissing_the_confirm_deletes_nothing",
+                   test_dismissing_the_confirm_deletes_nothing);
+   g_test_add_func("/delete_safety/confirming_deletes_the_marked_files",
+                   test_confirming_deletes_the_marked_files);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -319,5 +553,6 @@ main(int i_argc, char **c_argv) {
                    test_delete_captured_deletes_only_targets);
    g_test_add_func("/delete_safety/still_current_no_nav",
                    test_delete_targets_still_current_no_nav);
+   add_confirm_dialog_tests();
    return (g_test_run());
 }

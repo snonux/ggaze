@@ -433,9 +433,9 @@ test('marks', test_marks, suite : 'integration', env : fixtures_env)
 
 test_delete_safety = executable(
    'test_delete_safety', ['test_delete_safety.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
-   link_with : ggaze_lib, install : false,
+   link_with : [ggaze_lib, test_helpers_lib], install : false,
 )
 test('delete_safety', test_delete_safety,
    suite : 'integration', env : fixtures_env)

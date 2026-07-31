@@ -81,15 +81,30 @@ struct _GgazeWindow {
                                  * none) */
    GgazeLastDestructive e_last_destructive; /* trash vs move, for win.undo */
    GtkWidget           *p_viewer;           /* GgazeViewer — the large view */
-   GgazeGrid *p_grid;      /* the thumbnail grid (the "grid" stack child) */
-   int        i_grid_size; /* current thumbnail size (64-512, decision T) */
-   GtkWidget *p_overlay;   /* GtkOverlay wrapping the stack (for info label) */
-   GtkWidget *p_info_lbl;  /* info overlay label (auto-hides) */
-   guint      u_info_hide; /* info auto-hide timeout id (0=none) */
-   guint      u_slideshow; /* slideshow timeout id (0=off) */
-   gboolean   b_fullscreen;
-   guint      u_hdr_hide; /* fullscreen header auto-hide timeout */
-   gboolean   b_disposed; /* set in dispose; async callbacks check it */
+   GgazeGrid    *p_grid;      /* the thumbnail grid (the "grid" stack child) */
+   int           i_grid_size; /* current thumbnail size (64-512, decision T) */
+   GtkWidget    *p_overlay; /* GtkOverlay wrapping the stack (for info label) */
+   GtkWidget    *p_info_lbl;  /* info overlay label (auto-hides) */
+   guint         u_info_hide; /* info auto-hide timeout id (0=none) */
+   guint         u_slideshow; /* slideshow timeout id (0=off) */
+   gboolean      b_fullscreen;
+   guint         u_hdr_hide;      /* fullscreen header auto-hide timeout */
+   gboolean      b_disposed;      /* set in dispose; async callbacks check it */
+   GCancellable *p_delete_cancel; /* the outstanding `D` delete-confirm
+                                   * dialog's GCancellable, and THE record
+                                   * that such a dialog is up: non-NULL for
+                                   * exactly as long as one is on screen
+                                   * (_delete_confirm_ask sets it,
+                                   * _delete_confirm_cb clears it, and that
+                                   * callback always runs). Two jobs, one
+                                   * slot: it answers "is a modal dialog
+                                   * outstanding?" for _on_close_request,
+                                   * and it lets dispose force the dialog's
+                                   * GTask to complete instead of leaving
+                                   * the _DeleteCtx it carries -- with its
+                                   * deep-copied target list -- hanging.
+                                   * Not under GGAZE_HAVE_GEGL: the delete
+                                   * confirm exists in every build */
 #if GGAZE_HAVE_GEGL
    guint8     u_enhance_mask;      /* bit i -> preset i enabled (layered) */
    Enhancer  *p_enhancer;          /* GEGL preset engine (NULL w/o GEGL) */
@@ -434,6 +449,57 @@ _files_include_current(GgazeWindow *p_win, GList *p_files) {
    }
    return (FALSE);
 }
+
+/* --- modal alert dialogs: shared plumbing --------------------------------
+ *
+ * Both of this window's modal GtkAlertDialogs -- the GEGL Save/Discard/Cancel
+ * prompt and the >1-target delete confirm -- need the same two things: a ref
+ * on the private toplevel GTK put up for them (below), and a GCancellable the
+ * window can cancel when it disposes (see _prompt_dispose and
+ * _delete_confirm_dispose). This lives outside the GEGL block because the
+ * delete confirm exists in every build.
+ */
+
+/* The GtkWindow gtk_alert_dialog_choose() has just presented for p_win,
+ * reffed (transfer full). NULL only if GTK ever stops using a plain toplevel
+ * for it.
+ *
+ * GtkAlertDialog keeps that window entirely private -- it exists only as the
+ * dialog GTask's task data -- but it IS an ordinary toplevel, appended to
+ * gtk_window_get_toplevels() by gtk_window_constructed(), so scanning that
+ * model backwards for the newest window transient-for p_win finds it. Callers
+ * call this immediately after choose(), when theirs is that newest one by
+ * construction. What makes the backwards scan sufficient is that ordering
+ * alone, not an enumeration of the alternatives: anything else transient-for
+ * p_win (the other alert dialog, and _action_open's GtkFileDialog on the
+ * non-portal path, where it really is a local toplevel) can only be OLDER, so
+ * scanning from the end reaches ours first whatever else is up.
+ *
+ * Why a ref is needed at all: the dialog is transient-for p_win with
+ * destroy-with-parent set, and GTK wires that to p_win's ::destroy, which
+ * GtkWidget emits from dispose. Once dispose cancels the dialog, its GTask
+ * completes in an IDLE -- i.e. after dispose has returned, and so after that
+ * ::destroy already destroyed the dialog window and the toplevel list dropped
+ * its last reference. The GTask still holds that window as a raw pointer (its
+ * task data), so gtk_alert_dialog_choose_finish() calls gtk_window_destroy()
+ * on it: without a reference of ours that is freed memory -- measured as
+ * "assertion 'GTK_IS_WINDOW (window)' failed" the moment a cancel made that
+ * callback run at all. With one, the window is merely destroyed-but-alive,
+ * and the second gtk_window_destroy() returns at once because the window is
+ * no longer in the toplevel list. Measured on gtk 4.22.4. */
+static GtkWindow *
+_alert_dialog_window(GgazeWindow *p_win) {
+   GListModel *p_tops = gtk_window_get_toplevels();
+   for (guint u = g_list_model_get_n_items(p_tops); u > 0; u--) {
+      GtkWindow *p_top = GTK_WINDOW(g_list_model_get_item(p_tops, u - 1));
+      if (gtk_window_get_transient_for(p_top) == GTK_WINDOW(p_win)) {
+         return (p_top);
+      }
+      g_object_unref(p_top);
+   }
+   return (NULL);
+}
+
 #if GGAZE_HAVE_GEGL
 /* Split p_base ("IMG_0001.jpg") into a stem ("IMG_0001") and a saver-
  * supported extension (defaults to ".jpg" if p_base's own extension is not
@@ -572,7 +638,7 @@ typedef struct {
    GtkWindow *p_dlg_window; /* owned ref on the dialog's own toplevel, purely
                              * to keep it from being FREED under the GTask
                              * that still points at it -- see
-                             * _prompt_dialog_window */
+                             * _alert_dialog_window */
 } _SaveCtx;
 
 /* How an outstanding prompt ended. Kept apart from the button index because
@@ -773,47 +839,6 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
                                     * proceed -- but still free the ctx */
 }
 
-/* The GtkWindow gtk_alert_dialog_choose() has just presented for p_win,
- * reffed (transfer full). NULL only if GTK ever stops using a plain toplevel
- * for it.
- *
- * GtkAlertDialog keeps that window entirely private -- it exists only as the
- * dialog GTask's task data -- but it IS an ordinary toplevel, appended to
- * gtk_window_get_toplevels() by gtk_window_constructed(), so scanning that
- * model backwards for the newest window transient-for p_win finds it. This is
- * called immediately after choose(), when ours is that newest one by
- * construction. What makes the backwards scan sufficient is that ordering
- * alone, not an enumeration of the alternatives: anything else transient-for
- * p_win (the `D` confirm dialog, and _action_open's GtkFileDialog on the
- * non-portal path, where it really is a local toplevel) can only be OLDER, so
- * scanning from the end reaches ours first whatever else is up.
- *
- * Why a ref is needed at all: the dialog is transient-for p_win with
- * destroy-with-parent set, and GTK wires that to p_win's ::destroy, which
- * GtkWidget emits from dispose. Once _prompt_dispose cancels the prompt, the
- * dialog's GTask completes in an IDLE -- i.e. after dispose has returned, and
- * so after that ::destroy already destroyed the dialog window and the toplevel
- * list dropped its last reference. The GTask still holds that window as a raw
- * pointer (its task data), so gtk_alert_dialog_choose_finish() calls
- * gtk_window_destroy() on it: without a reference of ours that is freed memory
- * -- measured as "assertion 'GTK_IS_WINDOW (window)' failed" the moment the
- * cancel made that callback run at all. With one, the window is merely
- * destroyed-but-alive, and the second gtk_window_destroy() returns at once
- * because the window is no longer in the toplevel list. Measured on gtk
- * 4.22.4. */
-static GtkWindow *
-_prompt_dialog_window(GgazeWindow *p_win) {
-   GListModel *p_tops = gtk_window_get_toplevels();
-   for (guint u = g_list_model_get_n_items(p_tops); u > 0; u--) {
-      GtkWindow *p_top = GTK_WINDOW(g_list_model_get_item(p_tops, u - 1));
-      if (gtk_window_get_transient_for(p_top) == GTK_WINDOW(p_win)) {
-         return (p_top);
-      }
-      g_object_unref(p_top);
-   }
-   return (NULL);
-}
-
 /* Build and show the modal Save/Discard/Cancel prompt for p_win, handing the
  * request over to _save_dialog_cb. Split out of _maybe_save_then to keep both
  * under the ~30-line convention.
@@ -879,7 +904,7 @@ _save_prompt_show(GgazeWindow *p_win, const _Request *p_req) {
    p_win->b_prompt_quits  = (p_req->fn == _proceed_quit);
    gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), p_ctx->p_cancel,
                            _save_dialog_cb, p_ctx);
-   p_ctx->p_dlg_window = _prompt_dialog_window(p_win); /* transfer full */
+   p_ctx->p_dlg_window = _alert_dialog_window(p_win); /* transfer full */
 }
 
 /* Park p_req until the outstanding prompt is answered. Exactly one slot, and
@@ -965,6 +990,35 @@ _save_prompt_outstanding(GgazeWindow *p_win) {
    return (FALSE);
 }
 #endif
+
+/* TRUE while the `D` >1-target delete-confirm dialog is outstanding.
+ *
+ * The cancellable slot IS the state -- there is no separate flag to drift out
+ * of step with it. It is set in _delete_confirm_ask immediately before
+ * gtk_alert_dialog_choose(), and cleared in _delete_confirm_cb, which that
+ * choose() always reaches: a button press, a dismissal and a cancel all
+ * complete the dialog's GTask, and nothing else can leave it unfinished (see
+ * _delete_confirm_ask). So "non-NULL" means "a dialog really is on screen and
+ * really is answerable", which is what _on_close_request needs it to mean --
+ * a slot that could stick non-NULL with no dialog up would be a window the
+ * user cannot close. */
+static gboolean
+_delete_confirm_outstanding(GgazeWindow *p_win) {
+   return (p_win->p_delete_cancel != NULL);
+}
+
+/* TRUE while ANY modal dialog this window owns is outstanding.
+ *
+ * Task 2w0 gated _on_close_request on b_save_prompt, which answers a narrower
+ * question -- "is the Save/Discard/Cancel prompt up?" -- and left the delete
+ * confirm, raised AFTER that prompt has resolved, unguarded (task aw0). This
+ * is the question the close gate actually wants, so it is asked once, here,
+ * and every future modal dialog belongs in it rather than in a third flag. */
+static gboolean
+_modal_dialog_outstanding(GgazeWindow *p_win) {
+   return (_save_prompt_outstanding(p_win) ||
+           _delete_confirm_outstanding(p_win));
+}
 
 /* Select gate installed on every grid (ggaze_grid_set_select_func, wired in
  * _open_rebuild_grid): gridview.c calls this instead of
@@ -1056,31 +1110,50 @@ _action_quit(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * do NOT open further dialogs -- _maybe_save_then queues a request while one
  * is outstanding (round 2, finding d).
  *
- * The outstanding-prompt check comes FIRST, ahead of the dirty test, for the
+ * The outstanding-dialog check comes FIRST, ahead of the dirty test, for the
  * same reason _maybe_save_then orders its own two guards that way (round 3,
  * finding j): the mask can go clear UNDER a live dialog -- the slideshow tick
  * discards a dirty preview outright and a GFileMonitor rescan moves
  * navigator.current, and neither is an input event the modal grab can stop.
  * Testing only the mask therefore let the very next Alt+F4 propagate into
- * gtk_window_destroy() with the prompt still up; that destroy cannot dispose
- * the window (it drops one ref, the toplevel list's, and the prompt's _SaveCtx
+ * gtk_window_destroy() with a dialog still up; that destroy cannot dispose
+ * the window (it drops one ref, the toplevel list's, and the dialog's own ctx
  * holds an owned window ref of its own -- see _save_prompt_show), so nothing
  * ever cancels the dialog and it is orphaned on screen with every ctx it
  * carries abandoned (2w0 review, finding A).
  *
- * Refusing the close does not strand the user: the request is queued behind
- * the prompt, so answering it in favour of proceeding flushes that quit
- * through the gate and closes the window, and answering Cancel means "stay
- * here", which is exactly what a refused close leaves. A prompt whose OWN
- * continuation is the quit still gets through, because _save_dialog_cb clears
- * b_save_prompt before running it. */
+ * It asks _modal_dialog_outstanding(), not "is the Save prompt up?": the `D`
+ * delete confirm is raised AFTER that prompt has resolved, so b_save_prompt is
+ * FALSE and the mask is clear while it is on screen, and a native close walked
+ * straight past both -- orphaning the confirm, its _DeleteCtx and the
+ * deep-copied target list, with an answer that would then run
+ * ggaze_window_delete_captured against a destroyed window (task aw0).
+ *
+ * The delete confirm is refused WITHOUT going through _maybe_save_then, unlike
+ * the Save prompt. That is not a stylistic difference: nothing queues behind
+ * the confirm, so with a clean mask _maybe_save_then would run _proceed_quit
+ * immediately, whose gtk_window_close() re-emits "close-request" into this
+ * same handler, which would see the same still-outstanding confirm -- an
+ * unbounded recursion. Refusing outright is also all the user needs: the
+ * confirm is modal and on screen, so answering it (either way) clears the slot
+ * and the next Alt+F4 goes through.
+ *
+ * Refusing a close under the Save prompt does not strand the user either: the
+ * request is queued behind the prompt, so answering it in favour of proceeding
+ * flushes that quit through the gate and closes the window, and answering
+ * Cancel means "stay here", which is exactly what a refused close leaves. A
+ * prompt whose OWN continuation is the quit still gets through, because
+ * _save_dialog_cb clears b_save_prompt before running it. */
 static gboolean
 _on_close_request(GtkWindow *p_gtk_win, gpointer p_data) {
    (void)p_gtk_win;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (!_save_prompt_outstanding(p_win) &&
+   if (!_modal_dialog_outstanding(p_win) &&
        !ggaze_window_enhance_is_dirty(p_win)) {
       return (GDK_EVENT_PROPAGATE); /* nothing to protect: allow the close */
+   }
+   if (_delete_confirm_outstanding(p_win)) {
+      return (GDK_EVENT_STOP); /* answer the confirm first (no queue here) */
    }
    _maybe_save_then(p_win, _proceed_quit, p_win, NULL);
    return (GDK_EVENT_STOP); /* block until the prompt resolves */
@@ -1189,6 +1262,17 @@ typedef struct {
    GgazeWindow *p_win; /* owned ref: outlives the async dialog */
    GFile       *p_dir; /* the captured targets' own parent folder (owned) */
    GList *p_files;     /* captured target GFile* list (owned, transfer full) */
+   GCancellable *p_cancel;  /* owned ref on the SAME GCancellable the window
+                             * parks in p_delete_cancel. Held here too so the
+                             * callback can ask the object itself whether this
+                             * dialog was cancelled -- see
+                             * _delete_confirm_answered -- and so the ref is
+                             * released on every exit path even after dispose
+                             * dropped the window's own */
+   GtkWindow *p_dlg_window; /* owned ref on the dialog's own toplevel, purely
+                             * to keep it from being FREED under the GTask
+                             * that still points at it -- see
+                             * _alert_dialog_window */
 } _DeleteCtx;
 
 static void
@@ -1198,6 +1282,8 @@ _delete_ctx_free(_DeleteCtx *p_ctx) {
    }
    g_clear_object(&p_ctx->p_dir);
    g_list_free_full(p_ctx->p_files, (GDestroyNotify)g_object_unref);
+   g_clear_object(&p_ctx->p_cancel);
+   g_clear_object(&p_ctx->p_dlg_window);
    g_clear_object(&p_ctx->p_win);
    g_free(p_ctx);
 }
@@ -1284,13 +1370,44 @@ ggaze_window_delete_captured(GgazeWindow *p_win, GFile *p_dir, GList *p_files) {
    return (TRUE);
 }
 
+/* Button indices of the confirm dialog, in the order _delete_confirm_ask
+ * hands them to gtk_alert_dialog_set_buttons(). */
+enum {
+   _DELETE_BTN_CANCEL = 0,
+   _DELETE_BTN_DELETE = 1
+};
+
+/* Did the user really press "Delete"? i_btn and p_err are what
+ * gtk_alert_dialog_choose_finish() returned and reported.
+ *
+ * This is a guard, not bookkeeping. choose_finish returns -1 AND sets an error
+ * for every non-answer -- measured on gtk 4.22.4: a GCancellable cancel gives
+ * G_IO_ERROR_CANCELLED, closing the dialog without choosing gives
+ * GTK_DIALOG_ERROR_DISMISSED -- and -1 read as a gboolean is TRUE. The old
+ * `gboolean b_ok = gtk_alert_dialog_choose_finish(...)` therefore took every
+ * such non-answer as a confirmed PERMANENT delete of the captured targets
+ * (task aw0). So: the error is checked first, and only the "Delete" button's
+ * own index counts as a yes.
+ *
+ * A cancelled or dismissed confirm is deliberately silent. It means "no files
+ * were touched", exactly like pressing Cancel, which says nothing either. */
+static gboolean
+_delete_confirm_answered_yes(int i_btn, const GError *p_err) {
+   return (p_err == NULL && i_btn == _DELETE_BTN_DELETE);
+}
+
 static void
 _delete_confirm_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    GtkAlertDialog *p_dlg = GTK_ALERT_DIALOG(p_src);
    _DeleteCtx     *p_ctx = (_DeleteCtx *)p_data;
    GError         *p_err = NULL;
-   gboolean        b_ok  = gtk_alert_dialog_choose_finish(p_dlg, p_res, &p_err);
-   if (b_ok) {
+   int             i_btn = gtk_alert_dialog_choose_finish(p_dlg, p_res, &p_err);
+   /* This dialog is gone, and so is its cancellable's job: a later `D` may
+    * open a fresh one, which brings its own. Clearing the window's slot here
+    * is safe even after _delete_confirm_dispose already cleared it -- the ctx
+    * keeps the cancellable, and the window, alive until _delete_ctx_free. */
+   g_clear_object(&p_ctx->p_win->p_delete_cancel);
+   if (_delete_confirm_answered_yes(i_btn, p_err)) {
       /* Delete the captured targets (NOT a re-read of p_nav marks): if the
        * folder was replaced while this dialog was pending, the safety check
        * inside ggaze_window_delete_captured refuses and no files are touched.
@@ -1301,13 +1418,48 @@ _delete_confirm_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    _delete_ctx_free(p_ctx);
 }
 
+/* The context _delete_confirm_cb will run against. p_dir is transfer-full;
+ * p_files is BORROWED and deep-copied here.
+ *
+ * Every field is initialised before the caller's gtk_alert_dialog_choose(), so
+ * the ctx is never handed to a callback holding uninitialised memory --
+ * p_dlg_window included, which the caller can only fill in AFTER choose()
+ * because the dialog window does not exist before it (same reasoning, and the
+ * same GTask-completes-in-an-idle assumption, as _save_prompt_show). */
+static _DeleteCtx *
+_delete_ctx_new(GgazeWindow *p_win, GFile *p_dir, GList *p_files) {
+   _DeleteCtx *p_ctx   = g_new(_DeleteCtx, 1);
+   p_ctx->p_win        = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->p_dir        = p_dir;                /* transfer full */
+   p_ctx->p_files      = _files_copy(p_files); /* owned by the context now */
+   p_ctx->p_cancel     = g_cancellable_new();
+   p_ctx->p_dlg_window = NULL;
+   return (p_ctx);
+}
+
 /* Ask before permanently deleting the >1 captured targets p_files (decision
  * #38). p_files is BORROWED (its owner is the _FilesCtx `D` captured it into,
  * which _maybe_save_then frees as soon as the continuation returns), so the
  * dialog's own _DeleteCtx takes a deep copy: the async callback must still
- * hold the exact file set the prompt counted, long after that ctx is gone. */
+ * hold the exact file set the prompt counted, long after that ctx is gone.
+ *
+ * The GCancellable is not optional bookkeeping, for the same two reasons the
+ * Save prompt's is (task 2w0, extended to this dialog by aw0): nothing but the
+ * dialog itself can finish its GTask, so a dispose underneath it would abandon
+ * the _DeleteCtx and the deep copy it carries; and while it is outstanding the
+ * window must refuse a native close, which _on_close_request asks
+ * _delete_confirm_outstanding -- i.e. this very slot. */
 static void
 _delete_confirm_ask(GgazeWindow *p_win, GList *p_files) {
+   if (_delete_confirm_outstanding(p_win)) {
+      /* One confirm at a time, so the slot always names THE dialog on screen.
+       * Unreachable through the UI (the dialog is modal and `D` is input-
+       * driven), but it is what makes that invariant structural rather than
+       * incidental -- and 2w0's finding was precisely that "modal" does not
+       * cover the paths which are not input events. No status line: the
+       * overlay it would paint on is behind the dialog. */
+      return;
+   }
    /* The guard folder comes from the CAPTURED targets, not from the live
     * navigator: the question _delete_confirm_cb has to answer is "do these
     * targets still belong to the folder they came from", and deriving it
@@ -1326,12 +1478,21 @@ _delete_confirm_ask(GgazeWindow *p_win, GList *p_files) {
       "Permanently delete %u marked images?", g_list_length(p_files));
    gtk_alert_dialog_set_buttons(p_dlg,
                                 (const char *[]){"Cancel", "Delete", NULL});
-   _DeleteCtx *p_ctx = g_new(_DeleteCtx, 1);
-   p_ctx->p_win      = (GgazeWindow *)g_object_ref(p_win);
-   p_ctx->p_dir      = p_dir; /* transfer full from g_file_get_parent */
-   p_ctx->p_files    = _files_copy(p_files); /* owned by the context now */
-   gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), NULL, _delete_confirm_cb,
-                           p_ctx);
+   /* Escape / the dialog's own WM close then arrive as a plain Cancel answer
+    * instead of GTK_DIALOG_ERROR_DISMISSED (GTK's response_cb turns a delete-
+    * event into cancel_return). Belt and braces with
+    * _delete_confirm_answered_yes: on a destructive dialog, "the user got rid
+    * of the question" must mean no. */
+   gtk_alert_dialog_set_cancel_button(p_dlg, _DELETE_BTN_CANCEL);
+   _DeleteCtx *p_ctx = _delete_ctx_new(p_win, p_dir, p_files);
+   /* The slot is NULL here -- the guard at the top of this function is what
+    * got us past, and _delete_confirm_cb clears it -- so this assignment can
+    * never drop a ref on the floor. Written BEFORE choose(), so the gate is
+    * already closed by the time anything can react to the dialog. */
+   p_win->p_delete_cancel = (GCancellable *)g_object_ref(p_ctx->p_cancel);
+   gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), p_ctx->p_cancel,
+                           _delete_confirm_cb, p_ctx);
+   p_ctx->p_dlg_window = _alert_dialog_window(p_win); /* transfer full */
    g_object_unref(p_dlg);
 }
 
@@ -4015,6 +4176,25 @@ _enhance_dispose(GgazeWindow *p_win) {
 }
 #endif
 
+/* Cancel the `D` delete-confirm dialog, for the same reason _prompt_dispose
+ * cancels the Save prompt: nothing but the dialog itself can finish its GTask,
+ * so without this the _DeleteCtx -- and the deep copy of the captured target
+ * list it carries -- was simply abandoned when the window went away.
+ *
+ * The cancel resolves the dialog as "not confirmed", which is the only honest
+ * answer here and the safe one twice over: _delete_confirm_answered_yes sees
+ * the cancel's error and refuses, and dispose has already cleared p_nav, so
+ * ggaze_window_delete_captured would refuse as well.
+ *
+ * Not under GGAZE_HAVE_GEGL, unlike _prompt_dispose: this dialog exists in
+ * every build. Cancelling a NULL cancellable is a no-op, so no guard is
+ * needed for the (usual) case where no confirm is up. */
+static void
+_delete_confirm_dispose(GgazeWindow *p_win) {
+   g_cancellable_cancel(p_win->p_delete_cancel);
+   g_clear_object(&p_win->p_delete_cancel);
+}
+
 static void
 ggaze_window_dispose(GObject *p_obj) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_obj);
@@ -4033,6 +4213,7 @@ ggaze_window_dispose(GObject *p_obj) {
    _open_ext_destroy(p_win);
    _run_script_destroy(p_win);
    _move_destroy(p_win);
+   _delete_confirm_dispose(p_win);
 #if GGAZE_HAVE_GEGL
    _enhance_dispose(p_win);
 #endif
