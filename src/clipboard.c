@@ -30,6 +30,8 @@ clipboard_copy_image_async(GdkClipboard *p_clip, GFile *p_file,
 
 static void
 _clip_image_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src; /* the GTask's source object is the GFile; the result carries
+                 * everything this callback needs */
    GdkClipboard *p_clip = GDK_CLIPBOARD(p_data);
    GError       *p_err  = NULL;
    GdkTexture   *p_tex  = g_task_propagate_pointer(G_TASK(p_res), &p_err);
@@ -122,11 +124,20 @@ clipboard_build_uri_provider(GList *p_files) {
       g_free(c_uri);
       g_free(c_path);
    }
-   GBytes *p_uri_bytes   = g_bytes_new_take(p_uris->str, p_uris->len);
-   GBytes *p_plain_bytes = g_bytes_new_take(p_plain->str, p_plain->len);
-   /* g_bytes_new_take freed the GString buffers; only the structs remain. */
-   g_string_free(p_uris, FALSE);
-   g_string_free(p_plain, FALSE);
+   /* Hand each body straight over to a GBytes. g_string_free(str, FALSE)
+    * frees only the GString struct and RETURNS the buffer, which
+    * g_bytes_new_take then owns (and g_free()s with the GBytes) -- so the
+    * returned pointer is used rather than dropped, which is what glib's
+    * warn_unused_result on the steal flavour of that macro asks for. The
+    * lengths are read into locals first: the struct the ->len lives in is
+    * gone the moment the buffer is stolen, and the order in which a call's
+    * arguments are evaluated is unspecified in C. */
+   gsize   u_uri_len   = p_uris->len;
+   gsize   u_plain_len = p_plain->len;
+   GBytes *p_uri_bytes =
+      g_bytes_new_take(g_string_free(p_uris, FALSE), u_uri_len);
+   GBytes *p_plain_bytes =
+      g_bytes_new_take(g_string_free(p_plain, FALSE), u_plain_len);
    GdkContentProvider *p_provs[2] = {
       gdk_content_provider_new_for_bytes("text/uri-list", p_uri_bytes),
       gdk_content_provider_new_for_bytes("text/plain", p_plain_bytes),
