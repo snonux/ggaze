@@ -696,8 +696,10 @@ _save_dialog_save(GgazeWindow *p_win) {
  * a cancelled task into G_IO_ERROR_CANCELLED no matter what GTK put in it, so
  * the domain/code alone cannot tell our own dispose-time cancel apart from
  * GTK's GTK_DIALOG_ERROR_CANCELLED -- and that same rewrite is why a cancel
- * issued after a button was pressed comes back looking like a cancel (measured
- * in tu0's round-3 probe). Asking the object we cancelled ourselves is exact.
+ * issued after a button was pressed comes back looking like a cancel, which
+ * tu0's round-3 probe hit and 2w0 re-measured (see _prompt_dispose for the
+ * numbers and for why this cancel cannot land in that order). Asking the
+ * object we cancelled ourselves is exact.
  *
  * That rewrite also means _PROMPT_ANSWERED is only ever reported when nothing
  * cancelled the prompt, which is what keeps a user's Save or Discard from
