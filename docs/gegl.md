@@ -56,12 +56,25 @@ editing remains a non-goal.
   behind an input-only modal grab and can both move navigator.current and
   prune marks out from under the dialog. A captured
   target that has since been removed is refused with a status line rather than
-  acted on. If the window is disposed while the prompt is still up, the prompt
-  is **cancelled** (a `GCancellable` handed to `gtk_alert_dialog_choose`) and
-  resolves as Cancel: by then the preview and the engine a Save would need are
-  already gone, so the only thing left to do is release everything the prompt
-  was holding — without that cancel nothing could ever finish the dialog's
-  `GTask` and its contexts leaked. Toggling every preset back off, `0`, or
+  acted on. A native close (Alt+F4 / the WM button) arriving while the prompt
+  is up is **refused** — the check is on the outstanding prompt, not just on
+  the dirty mask, precisely because the timer and the monitor above can clear
+  that mask behind the dialog — and the close is queued behind the prompt, so
+  answering it in favour of proceeding then closes the window. Without that,
+  the close reached `gtk_window_destroy()` with the dialog still up, which
+  cannot dispose the window (the prompt holds a window ref) and so orphaned
+  the dialog and everything it carried. If the window is *disposed* while the
+  prompt is still up, the prompt is **cancelled** (a `GCancellable` handed to
+  `gtk_alert_dialog_choose`) and resolves as Cancel: by then the preview and
+  the engine a Save would need are already gone, so the only thing left to do
+  is release everything the prompt was holding — without that cancel nothing
+  could ever finish the dialog's `GTask` and its contexts leaked. That cancel
+  is a safety property of dispose, not a shutdown fix: ggaze itself never
+  forces a dispose (`GtkApplication`'s shutdown does not destroy windows), so
+  the case it actually covers is a forced `g_object_run_dispose()`. What stays
+  uncovered is a process **exiting** under the dialog (SIGTERM, session
+  logout, `^C`), where no dispose runs at all and the prompt's contexts go
+  down with the process. Toggling every preset back off, `0`, or
   `Esc` discards directly
   (no prompt). Slideshow auto-advance discards a dirty preview silently
   instead of blocking on an unanswerable prompt.
