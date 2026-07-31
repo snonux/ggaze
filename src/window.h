@@ -58,7 +58,9 @@ GtkWidget *ggaze_window_get_info_label(GgazeWindow *p_win);
 
 /* The GdkContentProvider win.copy (Ctrl+c) would set on the clipboard, built
  * from the current window state WITHOUT touching the (display-backend-
- * dependent) system clipboard, so the copy decision is testable offscreen.
+ * dependent) system clipboard, so the copy decision is testable without a
+ * clipboard round-trip. (Still needs a display -- there is no offscreen GTK4
+ * backend and test_copy.c skips with exit 77 when gtk_init_check() fails.)
  *   - Marks present: text/uri-list + text/plain over the marked files.
  *   - No marks: the DISPLAYED GdkTexture as image/png (the enhanced preview
  *     when an enhance preset is active, else the original).

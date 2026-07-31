@@ -1,9 +1,11 @@
 /*:*
  * ggaze — window smoke test (integration)
  *
- * Constructs a GgazeWindow offscreen and asserts the two-view stack exists
- * (children "grid" and "large", default visible = "grid"), and that
- * ggaze_window_open titles the window with the file's basename.
+ * Constructs a GgazeWindow on a real display -- never presented, but not
+ * offscreen: there is no offscreen/headless GTK4 backend, so this suite needs
+ * a display and skips cleanly without one (see main()). Asserts the two-view
+ * stack exists (children "grid" and "large", default visible = "grid"), and
+ * that ggaze_window_open titles the window with the file's basename.
  *
  * Also covers gu0: the info overlay (`i`) must never keep showing a
  * PREVIOUS file's EXIF/dimensions after navigation displays a new one. See
@@ -16,9 +18,15 @@
  * stack/header are constructed in ggaze_window_init, independent of the app
  * association. Setting GtkWindow:application requires the GApplication
  * ::startup signal to have fired (it does in production via activate/open;
- * not in this isolated smoke test). Needs a display, so this lives in the
- * `integration` suite (CI runs it under xvfb); skipped cleanly when no
- * display is available.
+ * not in this isolated smoke test). Needing a display is why this lives in
+ * the `integration` suite, which CI runs under `xvfb-run` -- i.e. on the X11
+ * backend (.woodpecker/ci.yml).
+ *
+ * That backend is also why this suite is is_parallel : false in
+ * tests/meson.build (5w0): the `a` subtest opens the GEGL preset popover, and
+ * an autohide popover takes the display-global X11 seat grab. See
+ * tests/meson.build, "suites that need exclusive use of the display's seat
+ * grab".
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later

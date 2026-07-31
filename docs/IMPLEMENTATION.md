@@ -31,17 +31,66 @@ ggaze has **two complementary test tracks**. Both run under `meson test`.
   M10, *warn* before.
 - Each module lands its test file in the same milestone as the module.
 
-### Integration tests — `tests/integration/test_<flow>.c`
+### Integration tests — `tests/test_<flow>.c`
 
 - Exercise **multiple modules together** through the real public API, with a
   real temp directory and real files (no mocks of `GFile`/`GFileMonitor`). They
   verify the *contracts* between modules the unit tests can't reach.
-- Use a lightweight **offscreen GTK harness** (`gtk_test_init` +
-  `GtkWindow` offscreen via `GdkSurface`/`gtk_widget_realize` under
-  `GDK_DEBUG=no-grabs`) where a widget is needed; prefer pure-GLib harnesses
-  where one isn't.
+- They live **directly in `tests/`**, next to the unit tests, and are told
+  apart by `suite : 'integration'` in `tests/meson.build` — not by directory.
+  `tests/integration/` holds only a `meson.build`; no suite has ever lived
+  there and none should be added there (5w0).
+- There is **no offscreen or headless harness** and GTK4 has none to offer:
+  each suite's `main()` calls `gtk_init_check()` and returns 77 (meson SKIP)
+  when there is no display, and everything else runs against a **real GTK
+  display**. Earlier revisions of this page prescribed `gtk_test_init` +
+  `gtk_widget_realize` under `GDK_DEBUG=no-grabs`; none of that is true here.
+  **`GDK_DEBUG=no-grabs` does not exist in GTK4** and never did under that
+  spelling. Checked against the gtk-4.22.4 sources: neither the `GDK_DEBUG`
+  key table (`gdk/gdk.c`, `gdk_debug_keys[]`) nor the `GTK_DEBUG` one
+  (`gtk/gtkmain.c`) has any grab-related key; the unhyphenated `nograbs` that
+  once existed was dropped in 4.13.4 ("Tweak GDK_DEBUG values … The gl-legacy
+  and nograbs values have been dropped", GTK `NEWS`). An unknown key is a
+  behavioural no-op — `gdk_parse_debug_var()` just prints `Unrecognized value
+  "no-grabs". Try GDK_DEBUG=help` to stderr, confirmed on this toolchain. So
+  do **not** reach for it to work around the seat-grab problem below: it will
+  appear to do something and will do nothing.
 - No coverage gate (they cross module boundaries), but they must be green in CI.
 - Land at the milestone that first makes the flow possible, and grow with it.
+
+#### The X11 backend is the backend CI tests (5w0)
+
+`.woodpecker/ci.yml`'s last step is `xvfb-run -a meson test -C build --suite
+integration` on `fedora:40`, where no Wayland socket exists. Two consequences
+that cost a full investigation to learn, so they are written down here:
+
+- **X11 seat grabs are display-global.** An autohide `GtkPopover` (all four of
+  ggaze's `e`/`!`/`m`/`a` popups) is a `GdkPopup`, and on X11
+  `gdk_x11_surface_present_popup()` takes a `gdk_seat_grab()` for it. Only one
+  client can hold that grab; when it fails, `gdk_seat_default_grab()` hides
+  the popup surface it just mapped, which GtkPopover turns into `closed`, and
+  ggaze's own popover-destroy handlers then unparent it — so the test finds
+  NULL milliseconds after firing the action. CI runs every integration binary
+  in parallel against **one** Xvfb, so the popover suites were racing each
+  other for that single grab. The five suites that pop an autohide popover
+  (`window`, `open_external`, `move_undo`, `runner_rescan`, `enhance_flow`)
+  are therefore `is_parallel : false`; the full derivation and the measurements
+  are in `tests/meson.build`, "suites that need exclusive use of the display's
+  seat grab".
+- **`xvfb-run` alone does not give you an X11 run.** On a Wayland desktop,
+  `xvfb-run -a meson test …` silently runs the whole lane on **Wayland** and
+  reports green — proving nothing about CI. Unsetting `WAYLAND_DISPLAY` is not
+  enough either, because libwayland falls back to `$XDG_RUNTIME_DIR/wayland-0`.
+  Both are required:
+
+  ```sh
+  env -u WAYLAND_DISPLAY XDG_RUNTIME_DIR=$(mktemp -d) \
+    xvfb-run -a meson test -C build --suite integration
+  ```
+
+  Backends are not equivalent, so a green Wayland run is not evidence about
+  CI: a popover on a never-presented toplevel maps on X11 but not on Wayland.
+  See `tests/helpers/gtk_helpers.h`, "window focus".
 
 #### Planned integration suites (mapped to milestones)
 
@@ -61,20 +110,26 @@ ggaze has **two complementary test tracks**. Both run under `meson test`.
 
 ### Test infrastructure (built in Phase 0)
 
-- `tests/meson.build` wires `unit` and `integration` subdirs as separate
-  `meson test` suites (`-t suite:unit`, `-t suite:integration`) so they can be
-  run selectively in CI.
+- `tests/meson.build` declares every suite and tags each `test()` with
+  `suite : 'unit'` or `suite : 'integration'`, so a track is selected by
+  `meson test -C build --suite unit` / `--suite integration`. The split is by
+  tag, not by directory — both tracks' sources sit in `tests/`.
 - `tests/helpers/` — shared helpers, built as the `ggaze_test_helpers` static
-  library and linked by the suites that need it. `gtk_helpers.{c,h}` (M9):
-  grid-cell activation via the flowbox's `child-activated` (needs no laid-out
-  geometry, so no toplevel has to be presented) and driving
+  library and linked by the suites that need it. `gtk_helpers.{c,h}`: grid-cell
+  activation via the flowbox's `child-activated` (M9; needs no laid-out
+  geometry, so no toplevel has to be presented); driving
   `gtk_alert_dialog_choose()`'s dialog — it is an ordinary `GtkWindow` in
   `gtk_window_list_toplevels()`, so its buttons can be found by label and
-  clicked, which is how the dirty-preview prompt is answered in tests.
+  clicked, which is how the dirty-preview prompt is answered in tests; the
+  window-teardown rule (1w0); and `ggtest_focus_viewer()` (5w0), which every
+  suite that pops one of the window's popovers must call.
 - `tests/fixtures/` — curated images per format + a rotated-EXIF JPEG +
   progressive JPEG + RAW+JPEG pair + an injection-hostile filename (`;rm -rf /`).
-- CI runs: unit always; integration on the minimal lane; the `gegl` lane adds
-  the gated suites; ASan lane runs both.
+- CI runs **both tracks on all three lanes** (`.woodpecker/ci.yml`): each of
+  `minimal`, `gegl` and `asan` runs `meson test -C build --suite unit` and
+  then `xvfb-run -a meson test -C build --suite integration`; the `gegl` lane
+  additionally builds the GEGL-gated suites, and `minimal` also runs the
+  coverage build.
 
 ---
 
@@ -104,9 +159,10 @@ One commit. Lays the build/test/convention groundwork before any feature.
   Fedora user who finds the repo and wants to know what it is and how to
   run it — not a contributor-only wall of links.
 - **Top-level `AGENTS.md` for agents** — the machine-facing entry point: how
-  to build/test (`meson setup`, `meson test -t suite:unit` / `suite:integration`,
-  coverage target), the mandatory two test tracks and their locations,
-  convention enforcement (`clang-format`, header guards, `type_new`/
+  to build/test (`meson setup`, `meson test --suite unit` / `--suite
+  integration`, coverage target), the mandatory two test tracks and their
+  locations, how to reproduce CI's X11/xvfb lane, convention
+  enforcement (`clang-format`, header guards, `type_new`/
   `type_delete`), where the design lives (`docs/` index), the module map, the
   "optional features are off in CI" rule, the single-`GCancellable`/last-
   write-wins invariant, and a pointer to load the `agent-task-management` +
@@ -133,7 +189,9 @@ green (empty suites); CI builds the matrix; `clang-format --dry-run` clean.
 
 **Tests**
 - Unit: `test_app.c` — `--version`/`--help`/unknown arg.
-- Smoke: `test_window.c` — offscreen window, stack has two children.
+- Smoke: `test_window.c` — an unpresented `GgazeWindow` on a real display
+  (integration track, skipped when `gtk_init_check()` fails), stack has two
+  children.
 
 **Acceptance:** `ggaze IMG_0001.jpg` opens an empty window; `--version` works.
 
