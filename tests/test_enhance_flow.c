@@ -177,10 +177,24 @@ typedef struct {
    char        *c_dir;
    char        *c_path; /* the opened image ("plain.jpg") */
    GFile       *p_file;
-   GgazeWindow *p_win;  /* an EXTRA ref is held (see fixture_open) */
-   GdkTexture  *p_orig; /* texture before any preset was applied */
-   GdkTexture  *p_mod;  /* the enhance preview texture */
-   guint        u_ref;  /* p_win's refcount once dirty and settled */
+   GgazeWindow *p_win; /* an EXTRA ref is held (see fixture_open) */
+   /* Both textures are OWNED (reffed in fixture_make_dirty, released in
+    * fixture_teardown) and are NULL until the fixture is made dirty. The refs
+    * are not optional tidiness: subtests compare later textures against these
+    * pointers for identity, and neither is otherwise kept alive by anything
+    * the test controls. p_orig in particular is held only by the window's
+    * texture cache once the preview replaces it in the viewer, so
+    * ggaze_window_clear_texture_cache() finalizes it -- after which
+    * `p_reloaded != fx.p_orig` compares a live pointer against a freed
+    * address, so it says nothing about identity and holds only while the
+    * allocator keeps that address out of circulation. Measured before this
+    * ref existed: the original was dead after the clear in 15/15 runs, and a
+    * GdkMemoryTexture allocated at the first opportunity afterwards landed on
+    * exactly that address in 9/15. Owning a ref keeps both pointers valid and
+    * makes the identity comparisons mean what they say. */
+   GdkTexture *p_orig; /* texture before any preset was applied */
+   GdkTexture *p_mod;  /* the enhance preview texture */
+   guint       u_ref;  /* p_win's refcount once dirty and settled */
 } DirtyFixture;
 
 /* Open a window on a fresh folder holding c_names (NULL-terminated), on the
@@ -198,7 +212,11 @@ static void
 fixture_open_clean(DirtyFixture *p_fx, const char *c_tmpl,
                    const char *const *c_names) {
    GError *p_err = NULL;
-   p_fx->c_dir   = g_dir_make_tmp(c_tmpl, &p_err);
+   /* Cleared up front: several subtests stay clean and never call
+    * fixture_make_dirty, and fixture_teardown unrefs both unconditionally. */
+   p_fx->p_orig = NULL;
+   p_fx->p_mod  = NULL;
+   p_fx->c_dir  = g_dir_make_tmp(c_tmpl, &p_err);
    g_assert_no_error(p_err);
    for (guint u = 0; c_names[u] != NULL; u++) {
       copy_fixture(p_fx->c_dir, c_names[u]);
@@ -212,14 +230,15 @@ fixture_open_clean(DirtyFixture *p_fx, const char *c_tmpl,
    g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
 }
 
-/* Apply preset 1, so the window ends up dirty with a live preview, and record
- * the reference count every assert_ref_settled() call compares against. */
+/* Apply preset 1, so the window ends up dirty with a live preview, take a ref
+ * on both the original and the preview (see DirtyFixture), and record the
+ * reference count every assert_ref_settled() call compares against. */
 static void
 fixture_make_dirty(DirtyFixture *p_fx) {
-   p_fx->p_orig = viewer_texture(p_fx->p_win);
+   p_fx->p_orig = g_object_ref(viewer_texture(p_fx->p_win));
    fire(p_fx->p_win, "win.enhance-1");
    wait_for_texture_change(p_fx->p_win, p_fx->p_orig);
-   p_fx->p_mod = viewer_texture(p_fx->p_win);
+   p_fx->p_mod = g_object_ref(viewer_texture(p_fx->p_win));
    g_assert_true(p_fx->p_mod != p_fx->p_orig);
    g_assert_true(ggaze_window_enhance_is_dirty(p_fx->p_win));
    p_fx->u_ref = ((GObject *)p_fx->p_win)->ref_count;
@@ -240,6 +259,10 @@ fixture_teardown(DirtyFixture *p_fx) {
    g_object_unref(p_fx->p_win);                 /* the fixture's own ref */
    g_free(p_fx->c_path);
    ggtest_drain_main(300);
+   /* After the drain, so the fixture's textures stay valid for the whole of
+    * teardown; no-ops for a fixture that never went dirty. */
+   g_clear_object(&p_fx->p_orig);
+   g_clear_object(&p_fx->p_mod);
    cleanup_temp_dir(p_fx->c_dir);
 }
 
@@ -1351,7 +1374,12 @@ test_cache_miss_reload_keeps_dirty_preview(void) {
     * straight out of the texture cache, which was emptied above, so a
     * non-NULL, brand-new texture there can only have come from the reload.
     * This is also _preview_override's hold-original short-circuit under the
-    * miss path. */
+    * miss path.
+    *
+    * The `!= fx.p_orig` below is why DirtyFixture owns a ref on p_orig: the
+    * clear above drops the cache's last reference, and without the fixture's
+    * ref this would compare a live pointer with a dangling one -- true only
+    * for as long as the reload's texture misses the freed address. */
    ggaze_window_set_hold_original(fx.p_win, TRUE);
    GdkTexture *p_reloaded = viewer_texture(fx.p_win);
    g_assert_nonnull(p_reloaded);
