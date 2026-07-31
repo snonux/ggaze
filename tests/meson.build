@@ -437,8 +437,18 @@ test_delete_safety = executable(
    dependencies : ggaze_deps,
    link_with : [ggaze_lib, test_helpers_lib], install : false,
 )
+# aw0 added four subtests that drive the REAL confirm dialog (raise it, close
+# the window under it, dispose under it, answer it), each of which opens a
+# window, decodes an image and drains the main loop for an async
+# GtkAlertDialog: ~1.3-2 s apiece, taking the suite from ~3 s to 8.9 s
+# measured on the ASan lane (8.0 s plain). That is still inside meson's
+# default 30 s, but at only ~3.4x it is thinner than this suite ever needed
+# before, so the budget is stated explicitly -- 60 s is ~6.7x on the measured
+# figure, generous for a loaded CI box and tight enough that a dialog which
+# never appears is caught in a minute rather than five. Re-measure when
+# subtests are added: the margin shrinks with every one.
 test('delete_safety', test_delete_safety,
-   suite : 'integration', env : fixtures_env)
+   suite : 'integration', env : fixtures_env, timeout : 60)
 
 test_delete_nav = executable(
    'test_delete_nav', ['test_delete_nav.c', ggaze_conf_h],
@@ -560,8 +570,8 @@ if gegl_dep.found()
    # main loop for the async dialog, so ~1.5 s apiece is the floor; the
    # round-4 subtests that wait out the folder monitor's 250 ms debounce cost
    # ~3.5 s each. The default 30 s budget stopped being enough at ~20
-   # subtests. Slowest measured run: 69.4 s (ASan lane, 39 subtests; the
-   # plain lane needs 68.4 s for the same set), so 180 s is ~2.6x headroom --
+   # subtests. Slowest measured run: 71.7 s (ASan lane, 39 subtests; the
+   # plain lane needs 69.5 s for the same set), so 180 s is ~2.5x headroom --
    # generous enough for a loaded CI box, tight enough that a real hang is
    # caught in three minutes rather than five. Re-measure this when the
    # subtest count grows: the margin shrinks with every one added.
