@@ -449,7 +449,12 @@ If a user can't tell what a key or button does by looking, that's a bug.
   re-aiming. A transient toast confirms and offers **Undo** (`u`).
 - `D` permanently deletes (unlinks) — fast path for obvious garbage; **no
   undo**, so the toast warns and the grid badge marks it. Deleting **>1 marked**
-  image asks for a confirm dialog first.
+  image asks for a confirm dialog first. Only pressing **Delete** on that
+  dialog deletes: Cancel, `Esc`, closing the dialog and a window teardown
+  underneath it all mean *no*, and nothing is touched. While the dialog is up
+  the window itself refuses to close (Alt+F4 / the WM button are not input
+  events, so the modal grab does not stop them) — answer the dialog and the
+  close goes through.
 - Counter in the header (`n / total`) reflects *remaining* images so you can
   see the folder shrinking as you cull.
 - `./Trash` lives with the shoot: easy to inspect, empty via the menu, or

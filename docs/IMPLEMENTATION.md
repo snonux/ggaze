@@ -260,10 +260,18 @@ bounded memory.
 - `src/trash.c/.h` — `./Trash` bin (lazy, collision suffix), restore-last,
   permanent delete.
 - Window: `d`/`D`/`u`; `d` advances; `D` on **>1 marked** asks a confirm dialog; counter = remaining; `t` toggle.
+- That confirm dialog deletes on the **Delete** button alone. Every other
+  outcome — Cancel, a dismissal (`Esc` / closing the dialog), and the
+  dispose-time cancel — is a *no*; `gtk_alert_dialog_choose_finish()` reports
+  each of the latter two as `-1` plus a `GError`, which read as a `gboolean` is
+  `TRUE` (task aw0). A native window close is refused while the dialog is up,
+  the same way it is behind the Save/Discard/Cancel prompt.
 
 **Tests**
 - Unit: `test_thumbnail.c`, `test_trash.c`.
-- Integration: `test_grid_cull.c`.
+- Integration: `test_grid_cull.c`, `test_delete_safety.c` (the captured-target
+  decision, plus the real confirm dialog: close refused under it, dispose
+  cancels it, a dismissal deletes nothing, Delete deletes).
 
 **Acceptance:** `ggaze dir/` → grid; thumbnails load async; `Enter`→large;
 `d` dims+advances; `u` restores; `+`/`-` resizes and persists.

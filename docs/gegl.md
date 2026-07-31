@@ -57,10 +57,15 @@ editing remains a non-goal.
   prune marks out from under the dialog. A captured
   target that has since been removed is refused with a status line rather than
   acted on. A native close (Alt+F4 / the WM button) arriving while the prompt
-  is up is **refused** — the check is on the outstanding prompt, not just on
-  the dirty mask, precisely because the timer and the monitor above can clear
-  that mask behind the dialog — and the close is queued behind the prompt, so
-  answering it in favour of proceeding then closes the window. Without that,
+  is up is **refused** — the check is on any modal dialog the window owns (the
+  Save prompt, or the `D` >1-mark delete confirm the prompt's own answer can
+  go on to raise), not just on the dirty mask, precisely because the timer and
+  the monitor above can clear that mask behind the dialog — and a close
+  refused by the *prompt* is queued behind it, so
+  answering it in favour of proceeding then closes the window (a close refused
+  by the delete confirm is not queued — nothing there could flush it, and
+  queueing one would recurse; answer the confirm and press the close again).
+  Without that,
   the close reached `gtk_window_destroy()` with the dialog still up, which
   cannot dispose the window (the prompt holds a window ref) and so orphaned
   the dialog and everything it carried. If the window is *disposed* while the
