@@ -782,8 +782,11 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
  * gtk_window_get_toplevels() by gtk_window_constructed(), so scanning that
  * model backwards for the newest window transient-for p_win finds it. This is
  * called immediately after choose(), when ours is that newest one by
- * construction (the `D` confirm dialog is the only other window transient-for
- * p_win, and scanning from the end skips it).
+ * construction. What makes the backwards scan sufficient is that ordering
+ * alone, not an enumeration of the alternatives: anything else transient-for
+ * p_win (the `D` confirm dialog, and _action_open's GtkFileDialog on the
+ * non-portal path, where it really is a local toplevel) can only be OLDER, so
+ * scanning from the end reaches ours first whatever else is up.
  *
  * Why a ref is needed at all: the dialog is transient-for p_win with
  * destroy-with-parent set, and GTK wires that to p_win's ::destroy, which
@@ -830,13 +833,19 @@ _prompt_dialog_window(GgazeWindow *p_win) {
  *
  * What that does NOT cover is a plain gtk_window_destroy() with the prompt
  * still up, because it never reaches dispose: the _SaveCtx's own window ref
- * keeps the refcount off zero (measured 4 -> 3, the toplevel list's ref being
- * the only one dropped), and GTK wires destroy-with-parent to the parent's
- * ::destroy, which GtkWidget emits from dispose -- so the dialog stays up and
- * clickable, and answering it then still resolves everything normally
- * (measured: the answer arrives as the pressed button, refcount back to the
- * caller's own). Only a process that exits under that dialog still loses the
- * contexts. */
+ * keeps the refcount off zero (measured 4 -> 3 and then stuck at 3 across 5 s
+ * of draining, the toplevel list's ref being the only one dropped), and GTK
+ * wires destroy-with-parent to the parent's ::destroy, which GtkWidget emits
+ * from dispose -- so the dialog stays up and clickable, and answering it then
+ * still resolves everything normally (measured: the answer arrives as the
+ * pressed button, refcount back to the caller's own).
+ *
+ * Nothing in src/ calls gtk_window_destroy(), and _on_close_request now
+ * refuses a close while the prompt is outstanding, so no ggaze code path
+ * reaches that state. What is left uncovered is a process that EXITS under
+ * the dialog (SIGTERM, a session logout, ^C): dispose never runs at all
+ * there, so the cancel below never fires and the contexts go down with the
+ * process. */
 static void
 _save_prompt_show(GgazeWindow *p_win, const _Request *p_req) {
    GtkAlertDialog *p_dlg =
@@ -850,6 +859,14 @@ _save_prompt_show(GgazeWindow *p_win, const _Request *p_req) {
    p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
    p_ctx->t_req    = *p_req;
    p_ctx->p_cancel = g_cancellable_new();
+   /* Every field initialised BEFORE choose(), so the ctx is never handed to a
+    * callback holding uninitialised memory. The real assignment below happens
+    * only after choose() returns (the dialog window does not exist before
+    * that); today nothing can run _save_dialog_cb in between -- GTask defers
+    * completion to an idle and gtk_window_present() does not iterate the main
+    * context -- but _save_ctx_finish's g_clear_object(&p_ctx->p_dlg_window)
+    * would read garbage the day either of those changes. */
+   p_ctx->p_dlg_window = NULL;
    /* Already NULL -- _maybe_save_then's b_save_prompt guard is what gets us
     * here, and _save_dialog_cb clears the slot with that flag. Cleared anyway
     * so the slot can never silently accumulate a second ref. */
@@ -921,6 +938,15 @@ _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
    _save_prompt_show(p_win, &t_req);
 }
 
+/* TRUE while this window's modal Save/Discard/Cancel prompt is outstanding.
+ * Exists so _on_close_request -- which lives outside the GEGL block -- can ask
+ * the question without reaching into a field that only exists in the GEGL
+ * build, the same way it uses ggaze_window_enhance_is_dirty(). */
+static gboolean
+_save_prompt_outstanding(GgazeWindow *p_win) {
+   return (p_win->b_save_prompt);
+}
+
 #else /* !GGAZE_HAVE_GEGL */
 static void
 _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
@@ -928,6 +954,12 @@ _maybe_save_then(GgazeWindow *p_win, GSourceFunc fn, gpointer data,
    (void)p_win;
    _Request t_req = {fn, data, fn_free_data};
    _request_finish(&t_req, TRUE);
+}
+
+static gboolean
+_save_prompt_outstanding(GgazeWindow *p_win) {
+   (void)p_win; /* no prompt exists without GEGL */
+   return (FALSE);
 }
 #endif
 
@@ -1018,14 +1050,33 @@ _action_quit(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  *
  * Repeated closes while the prompt is up (Alt+F4 three times: not input
  * events, so the modal grab does not swallow them) keep returning STOP but
- * do NOT open further dialogs -- _maybe_save_then drops a request while one
- * is outstanding (round 2, finding d). */
+ * do NOT open further dialogs -- _maybe_save_then queues a request while one
+ * is outstanding (round 2, finding d).
+ *
+ * The outstanding-prompt check comes FIRST, ahead of the dirty test, for the
+ * same reason _maybe_save_then orders its own two guards that way (round 3,
+ * finding j): the mask can go clear UNDER a live dialog -- the slideshow tick
+ * discards a dirty preview outright and a GFileMonitor rescan moves
+ * navigator.current, and neither is an input event the modal grab can stop.
+ * Testing only the mask therefore let the very next Alt+F4 propagate into
+ * gtk_window_destroy() with the prompt still up; that destroy cannot dispose
+ * the window (the prompt's _SaveCtx holds an owned window ref -- measured
+ * 4 -> 3), so nothing ever cancels the dialog and it is orphaned on screen
+ * with every ctx it carries abandoned (2w0 review, finding A).
+ *
+ * Refusing the close does not strand the user: the request is queued behind
+ * the prompt, so answering it in favour of proceeding flushes that quit
+ * through the gate and closes the window, and answering Cancel means "stay
+ * here", which is exactly what a refused close leaves. A prompt whose OWN
+ * continuation is the quit still gets through, because _save_dialog_cb clears
+ * b_save_prompt before running it. */
 static gboolean
 _on_close_request(GtkWindow *p_gtk_win, gpointer p_data) {
    (void)p_gtk_win;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (!ggaze_window_enhance_is_dirty(p_win)) {
-      return (GDK_EVENT_PROPAGATE); /* nothing dirty: allow the close */
+   if (!_save_prompt_outstanding(p_win) &&
+       !ggaze_window_enhance_is_dirty(p_win)) {
+      return (GDK_EVENT_PROPAGATE); /* nothing to protect: allow the close */
    }
    _maybe_save_then(p_win, _proceed_quit, p_win, NULL);
    return (GDK_EVENT_STOP); /* block until the prompt resolves */
@@ -3921,9 +3972,17 @@ _update_header(GgazeWindow *p_win) {
  * own window ref keeps the refcount off zero for exactly as long as the prompt
  * is outstanding, and only that callback ever releases it, so an ordinary
  * unref cannot get here ahead of an answer. Only a forced
- * g_object_run_dispose() reaches this with a live dialog -- which is what the
- * subtest in tests/test_enhance_flow.c does, and what an ASan run of a
- * shutdown under a prompt reduces to. */
+ * g_object_run_dispose() reaches this with a live dialog.
+ *
+ * Which is the honest scope of this cancel: nothing in src/ forces a dispose,
+ * so the only caller that reaches it with a prompt up is the subtest in
+ * tests/test_enhance_flow.c. It is not the fix for a shutdown under a prompt
+ * -- gtk_application_shutdown() (gtk 4.22.4 gtkapplication.c:348) neither
+ * destroys nor disposes windows, and a process that simply exits runs no
+ * dispose at all. The reachable hazard, a native close arriving while the
+ * prompt is up, is refused in _on_close_request instead. This is what makes a
+ * forced dispose SAFE (and what an embedder or a future teardown path can
+ * rely on), not what keeps the app from leaking on the way out. */
 static void
 _prompt_dispose(GgazeWindow *p_win) {
    if (p_win->p_pending != NULL) {

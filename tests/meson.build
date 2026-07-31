@@ -560,8 +560,8 @@ if gegl_dep.found()
    # main loop for the async dialog, so ~1.5 s apiece is the floor; the
    # round-4 subtests that wait out the folder monitor's 250 ms debounce cost
    # ~3.5 s each. The default 30 s budget stopped being enough at ~20
-   # subtests. Slowest measured run: 65.4 s (ASan lane, 38 subtests; the
-   # plain lane needs 64.2 s for the same set), so 180 s is ~2.75x headroom --
+   # subtests. Slowest measured run: 69.4 s (ASan lane, 39 subtests; the
+   # plain lane needs 68.4 s for the same set), so 180 s is ~2.6x headroom --
    # generous enough for a loaded CI box, tight enough that a real hang is
    # caught in three minutes rather than five. Re-measure this when the
    # subtest count grows: the margin shrinks with every one added.

@@ -1837,10 +1837,18 @@ test_trash_does_not_advance_past_an_unseen_image(void) {
  * g_object_run_dispose() is not a shortcut here, it is the only way in.
  * gtk_window_destroy() alone cannot dispose the window while a prompt is up:
  * the _SaveCtx holds an owned window ref, so the refcount never reaches zero
- * (measured stuck at 4 across 5 s of draining), and GTK's destroy-with-parent
- * is wired to the parent's ::destroy, which is itself emitted from dispose --
- * so the dialog survives too. Forcing dispose is what an ASan run of a real
- * shutdown-with-a-prompt-up reduces to.
+ * (re-measured for this suite: 4 -> 3 on the destroy, the toplevel list's ref
+ * being the only one dropped, then stuck at 3 across 5 s of draining with the
+ * dialog still listed and still answerable), and GTK's destroy-with-parent is
+ * wired to the parent's ::destroy, which is itself emitted from dispose -- so
+ * the dialog survives too.
+ *
+ * That forced dispose is therefore the only thing this subtest shares with
+ * production, and it is a narrow thing to share: nothing in src/ calls
+ * g_object_run_dispose(), so what is covered here is the safety of a forced
+ * dispose, not a shutdown path ggaze itself takes. The reachable variant --
+ * a native close arriving with the prompt up -- is
+ * test_close_request_blocked_while_prompt_is_up below.
  *
  * The parked request is deliberately an ggaze_window_open: its _OpenCtx drops
  * an owned window ref from inside the window's own dispose, which is the
@@ -1890,6 +1898,65 @@ test_dispose_under_a_live_prompt_releases_it(void) {
    g_free(c_target);
    fixture_teardown(&fx);
    cleanup_temp_dir(c_other);
+}
+
+/* 2w0 review finding (A): "close-request is prompt-gated" was FALSE.
+ * _on_close_request used to consult only the dirty mask, so once something
+ * cleared that mask BEHIND the modal dialog -- the slideshow tick and the
+ * folder's GFileMonitor both keep running behind an input-only modal grab,
+ * and either can move navigator.current -- the very next Alt+F4 or WM close
+ * button (not input events, so the grab does not swallow them) propagated
+ * straight through to gtk_window_destroy() with the prompt still up. That
+ * destroy cannot dispose the window (the _SaveCtx's own window ref keeps the
+ * refcount off zero, measured 4 -> 3 here), so the cancel in _prompt_dispose
+ * never runs, the dialog is orphaned on screen and every ctx it carries is
+ * abandoned.
+ *
+ * ggaze_window_next() stands in for the timer/monitor: it is the same
+ * navigation choke point they use (nav_changed_cb -> _enhance_nav_changed
+ * clears the mask), and it is what test_trash_does_not_advance_past_an_-
+ * unseen_image already uses for the slideshow tick.
+ *
+ * Both close entry points are exercised deliberately: the raw signal emission
+ * pins the handler's own verdict, and gtk_window_close() -- which needs the
+ * presented toplevel, being a no-op on an unrealized window -- is the path
+ * Alt+F4 actually takes and the one that would destroy the window. */
+static void
+test_close_request_blocked_while_prompt_is_up(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-closeundeprompt-XXXXXX");
+   gtk_window_present(GTK_WINDOW(fx.p_win));
+   ggtest_drain_main(300);
+
+   fire(fx.p_win, "win.next"); /* raises the prompt */
+   ggtest_drain_main(150);
+   g_assert_nonnull(ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel"));
+
+   ggaze_window_next(fx.p_win); /* what the slideshow tick does */
+   ggtest_drain_main(300);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win)); /* mask gone... */
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    1); /* ...but the prompt is still up */
+
+   gboolean b_stop = FALSE;
+   g_signal_emit_by_name(fx.p_win, "close-request", &b_stop);
+   g_assert_true(b_stop); /* the handler must still block the close */
+
+   gtk_window_close(GTK_WINDOW(fx.p_win)); /* the real Alt+F4 path */
+   ggtest_drain_main(300);
+   g_assert_true(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    1); /* not orphaned: still parented, still answerable */
+
+   /* Blocking is only half of it -- the user must keep a way out. The close
+    * was queued behind the prompt, so answering it in favour of proceeding
+    * flushes that queued quit through the (now clean) gate and the window
+    * really closes, rather than the close being silently swallowed. */
+   answer_prompt(&fx, "Discard");
+   ggtest_drain_main(300);
+   g_assert_false(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));
+
+   fixture_teardown(&fx); /* the fixture ref is what keeps this valid */
 }
 
 /* Registration split in two so neither function runs past the ~30-line
@@ -2014,11 +2081,14 @@ add_trash_cursor_tests(void) {
                    test_trash_does_not_advance_past_an_unseen_image);
 }
 
-/* Task 2w0: the branch round 4 had to drop -- dispose under a live prompt. */
+/* Task 2w0: the branch round 4 had to drop -- dispose under a live prompt --
+ * plus the close-request hole the review of that fix turned up. */
 static void
 add_dispose_prompt_tests(void) {
    g_test_add_func("/enhance_flow/dispose_under_a_live_prompt_releases_it",
                    test_dispose_under_a_live_prompt_releases_it);
+   g_test_add_func("/enhance_flow/close_request_blocked_while_prompt_is_up",
+                   test_close_request_blocked_while_prompt_is_up);
 }
 
 int
