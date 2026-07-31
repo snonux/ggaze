@@ -36,7 +36,26 @@ ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 G_DEBUG=gc-friendly \
 | Track | Where | What | Gate |
 |-------|------|------|------|
 | unit | `tests/test_<module>.c` | plain-C modules, no display | >=80% line coverage (gcov) |
-| integration | `tests/integration/test_<flow>.c` | cross-module flows, real temp dirs, offscreen GTK | must be green, no coverage gate |
+| integration | `tests/test_<flow>.c` | cross-module flows, real temp dirs, real GTK on a real display | must be green, no coverage gate |
+
+Integration tests are **not** offscreen and there is no headless GTK backend
+here: each `main()` returns 77 (meson SKIP) when `gtk_init_check()` fails, and
+on X11 they really do map popover surfaces. CI (`.woodpecker/ci.yml`) runs the
+track as `xvfb-run -a meson test -C build --suite integration` on `fedora:40`,
+so **the X11 backend is the backend CI tests**. On a Wayland desktop
+`xvfb-run` alone does not reproduce that — GDK still finds the Wayland socket,
+and unsetting `WAYLAND_DISPLAY` is not enough because libwayland falls back to
+`$XDG_RUNTIME_DIR/wayland-0`. Reproduce the CI lane with:
+
+```sh
+env -u WAYLAND_DISPLAY XDG_RUNTIME_DIR=$(mktemp -d) \
+  xvfb-run -a meson test -C build --suite integration
+```
+
+Backends are not equivalent, so a green Wayland run is not evidence about CI:
+a popover on a never-presented toplevel maps on X11 but not on Wayland, and
+X11 seat grabs are display-global (see `tests/meson.build`, "suites that need
+exclusive use of the display's seat grab").
 
 Shared helpers go in `tests/helpers/`; fixtures in `tests/fixtures/` (grow per
 milestone). Integration suites land with the milestone that first makes a flow
