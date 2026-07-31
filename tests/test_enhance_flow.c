@@ -92,8 +92,9 @@ copy_fixture(const char *c_dir, const char *c_name) {
    g_free(c_dst);
 }
 
-/* Recursive: the trash subtests leave a "./Trash" folder inside the temp dir,
- * and a non-empty directory cannot be g_file_delete()d. */
+/* Recursive: the trash subtests leave a "./.Trash" folder (trash.c's lazy
+ * bin) inside the temp dir, and a non-empty directory cannot be
+ * g_file_delete()d. */
 static void
 remove_tree(GFile *p_dir) {
    GFileEnumerator *p_e =
@@ -1528,8 +1529,10 @@ test_trash_refuses_a_target_that_vanished(void) {
    g_assert_cmpstr(
       gtk_label_get_text(GTK_LABEL(ggaze_window_get_info_label(fx.p_win))), ==,
       "Nothing trashed — the file is gone");
-   /* Nothing was binned, so no ./Trash bin was ever created. */
-   g_assert_false(file_exists_in(fx.c_dir, "Trash"));
+   /* Nothing was binned, so the lazy bin was never created. The name is
+    * ".Trash" (trash.c _trash_dir), not "Trash" -- as written before (4w0)
+    * this assertion could never have failed whatever the code did. */
+   g_assert_false(file_exists_in(fx.c_dir, ".Trash"));
    g_assert_true(file_exists_in(fx.c_dir, "rot6.jpg"));
    assert_ref_settled(&fx);
 
@@ -1717,6 +1720,82 @@ test_move_advances_when_the_current_image_moves(void) {
    cleanup_temp_dir(c_dst);
 }
 
+/* --- 4w0: `d`'s cursor advance, both directions --------------------------
+ *
+ * The last leg of the destructive trio with no cursor coverage at all: the
+ * round-3/4 trash subtests assert WHICH file was binned, never where the
+ * cursor ended up, so _do_trash_now's advance could be deleted outright (or
+ * its `if (b_was_current)` gate dropped) and the whole suite stayed green --
+ * the same gap that let (q)'s and (x)'s twins survive several review rounds.
+ */
+
+/* Direction one: the binned file IS the current one, so the cursor must move
+ * off it. Nothing is dirty, so `d` runs its continuation synchronously
+ * (_maybe_save_then's "no preview" fast path calls fn straight away), which
+ * is what makes the pre-loop assertion below possible. */
+static void
+test_trash_advances_when_the_current_image_is_binned(void) {
+   DirtyFixture             fx;
+   static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
+                                         NULL};
+   fixture_open_clean(&fx, "ggaze-enhance-trashcur-XXXXXX", c_three);
+   assert_showing(fx.p_win, "plain.jpg");
+
+   fire(fx.p_win, "win.trash"); /* `d` on plain.jpg; clean, so no prompt */
+   /* Checked BEFORE the main loop gets a turn, exactly as the move twin
+    * above. Once the folder monitor's relist runs, _relist keeps current by
+    * path and -- plain.jpg having left the folder -- clamps the OLD index
+    * into the new listing, so rgba.png slides into the vacated slot and the
+    * monitor reproduces this very title on its own. Only the state the
+    * synchronous trash leaves behind tells a real advance apart from a
+    * cursor left parked on the file that just went to the bin. */
+   assert_showing(fx.p_win, "rgba.png"); /* advanced past it at once */
+   ggtest_drain_main(300);
+
+   g_assert_false(file_exists_in(fx.c_dir, "plain.jpg")); /* binned ... */
+   char *c_bin = g_build_filename(fx.c_dir, ".Trash", NULL);
+   g_assert_true(file_exists_in(c_bin, "plain.jpg")); /* ... into ./.Trash */
+   g_free(c_bin);
+   assert_showing(fx.p_win, "rgba.png"); /* and the cursor stayed */
+
+   fixture_teardown(&fx);
+}
+
+/* Direction two: the `if (b_was_current)` gate itself. `d` captures
+ * plain.jpg, the slideshow tick moves current on to rgba.png behind the
+ * prompt, Discard bins plain.jpg -- and the cursor must STAY on rgba.png,
+ * which the user has only just been shown.
+ *
+ * No pre-loop assertion is possible here (the trash runs inside the alert
+ * dialog's async callback, which only answer_prompt's own drain gets to), and
+ * none is needed: an unconditional navigator_next() takes the cursor to
+ * rot6.jpg, and the relist does NOT put it back -- rot6.jpg is still listed,
+ * so _relist keeps current by path and leaves it there. The trash twin of
+ * test_delete_does_not_advance_past_an_unseen_image. */
+static void
+test_trash_does_not_advance_past_an_unseen_image(void) {
+   DirtyFixture             fx;
+   static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
+                                         NULL};
+   fixture_open_clean(&fx, "ggaze-enhance-trashnav-XXXXXX", c_three);
+   fixture_make_dirty(&fx);
+
+   fire(fx.p_win, "win.trash"); /* `d` on plain.jpg, nothing marked */
+   ggtest_drain_main(150);
+   g_assert_nonnull(ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel"));
+   ggaze_window_next(fx.p_win); /* what the slideshow tick does */
+   ggtest_drain_main(300);
+   assert_showing(fx.p_win, "rgba.png");
+
+   answer_prompt(&fx, "Discard");
+   ggtest_drain_main(300);
+
+   g_assert_false(file_exists_in(fx.c_dir, "plain.jpg")); /* the captured one */
+   assert_showing(fx.p_win, "rgba.png"); /* and rot6.jpg was NOT skipped */
+
+   fixture_teardown(&fx);
+}
+
 /* Registration split in two so neither function runs past the ~30-line
  * convention: the original feature coverage, and the round-2 subtests that
  * answer the real Save/Discard/Cancel prompt (see the file header). */
@@ -1829,6 +1908,16 @@ add_round5_tests(void) {
                    test_move_advances_when_the_current_image_moves);
 }
 
+/* Task 4w0: both directions of `d`'s cursor advance -- the same gap as
+ * round 5's, left standing in the third member of the destructive trio. */
+static void
+add_trash_cursor_tests(void) {
+   g_test_add_func("/enhance_flow/trash_advances_when_current_image_binned",
+                   test_trash_advances_when_the_current_image_is_binned);
+   g_test_add_func("/enhance_flow/trash_does_not_advance_past_unseen_image",
+                   test_trash_does_not_advance_past_an_unseen_image);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -1856,5 +1945,6 @@ main(int i_argc, char **c_argv) {
    add_behind_the_prompt_tests();
    add_round4_tests();
    add_round5_tests();
+   add_trash_cursor_tests();
    return (g_test_run());
 }
