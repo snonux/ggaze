@@ -1824,6 +1824,66 @@ test_trash_does_not_advance_past_an_unseen_image(void) {
    fixture_teardown(&fx);
 }
 
+/* --- 2w0: disposing the window out from under a live prompt --------------
+ *
+ * The branch round 4 had to leave uncovered. Driving _enhance_dispose's "a
+ * request is still parked" leg needs a dispose while the GtkAlertDialog is up,
+ * and until 2w0 that abandoned the dialog's GTask: the task never completed,
+ * so _save_dialog_cb never ran and the _SaveCtx (plus the _FileCtx/_OpenCtx it
+ * carries) leaked -- 474 bytes in 11 allocations under ASan.
+ *
+ * g_object_run_dispose() is not a shortcut here, it is the only way in.
+ * gtk_window_destroy() alone cannot dispose the window while a prompt is up:
+ * the _SaveCtx holds an owned window ref, so the refcount never reaches zero
+ * (measured stuck at 4 across 5 s of draining), and GTK's destroy-with-parent
+ * is wired to the parent's ::destroy, which is itself emitted from dispose --
+ * so the dialog survives too. Forcing dispose is what an ASan run of a real
+ * shutdown-with-a-prompt-up reduces to.
+ *
+ * The parked request is deliberately an ggaze_window_open: its _OpenCtx drops
+ * an owned window ref from inside the window's own dispose, which is the
+ * ordering _enhance_dispose clears the slot before releasing for. */
+static void
+test_dispose_under_a_live_prompt_releases_it(void) {
+   DirtyFixture fx;
+   fixture_open(&fx, "ggaze-enhance-disposeprompt-XXXXXX");
+   GError *p_err = NULL;
+   char   *c_other =
+      g_dir_make_tmp("ggaze-enhance-disposeprompt2-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_other, "small.png");
+   char  *c_target = g_build_filename(c_other, "small.png", NULL);
+   GFile *p_target = g_file_new_for_path(c_target);
+
+   activate_other_cell(&fx);              /* raises the prompt (a _FileCtx) */
+   ggaze_window_open(fx.p_win, p_target); /* parked behind it (an _OpenCtx) */
+   ggtest_drain_main(200);
+   g_assert_nonnull(ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel"));
+   /* Three contexts now hold a window ref each, on top of the count the
+    * fixture settled at while merely dirty: the prompt's own _SaveCtx, the
+    * _FileCtx carrying the deferred grid select it gates, and the parked
+    * _OpenCtx. */
+   g_assert_cmpuint(((GObject *)fx.p_win)->ref_count, ==, fx.u_ref + 3);
+
+   g_object_run_dispose(G_OBJECT(fx.p_win));
+   ggtest_drain_main(400);
+
+   /* The cancel finished the dialog's GTask, so its callback ran: the dialog
+    * is gone (gtk_alert_dialog_choose_finish destroys the dialog window) ... */
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    0);
+   /* ... and both contexts released their window ref -- which is what the leak
+    * was: neither the _SaveCtx nor the parked _OpenCtx was ever freed. */
+   g_assert_cmpuint(((GObject *)fx.p_win)->ref_count, ==, fx.u_ref);
+   /* The queued open never ran: a disposed window honours no request. */
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "small.png"));
+
+   g_object_unref(p_target);
+   g_free(c_target);
+   fixture_teardown(&fx);
+   cleanup_temp_dir(c_other);
+}
+
 /* Registration split in two so neither function runs past the ~30-line
  * convention: the original feature coverage, and the round-2 subtests that
  * answer the real Save/Discard/Cancel prompt (see the file header). */
@@ -1899,12 +1959,12 @@ add_behind_the_prompt_tests(void) {
  * interaction (r), the vanished-target guard (u), and the queue's displace
  * branch, which no earlier subtest reached.
  *
- * NOT covered here: _enhance_dispose's "a request is still parked" branch.
- * Driving it needs g_object_run_dispose() on a window with a live
- * GtkAlertDialog, which leaves the dialog's GTask unfinished and leaks its
- * _SaveCtx (474 B measured under ASan) -- a real ggaze-side leak on any
- * teardown under a live prompt, filed as task 2w0. The subtest was dropped
- * rather than shipped leaking; it comes back with 2w0's fix. */
+ * _enhance_dispose's "a request is still parked" branch used to be listed here
+ * as NOT covered: driving it left the dialog's GTask unfinished and leaked the
+ * _SaveCtx, so the subtest was dropped rather than shipped leaking. Task 2w0
+ * cancels the prompt in dispose, and the subtest is back --
+ * test_dispose_under_a_live_prompt_releases_it, registered by
+ * add_dispose_prompt_tests below. */
 static void
 add_round4_tests(void) {
    g_test_add_func("/enhance_flow/delete_behind_prompt_deletes_marked_file",
@@ -1946,6 +2006,13 @@ add_trash_cursor_tests(void) {
                    test_trash_does_not_advance_past_an_unseen_image);
 }
 
+/* Task 2w0: the branch round 4 had to drop -- dispose under a live prompt. */
+static void
+add_dispose_prompt_tests(void) {
+   g_test_add_func("/enhance_flow/dispose_under_a_live_prompt_releases_it",
+                   test_dispose_under_a_live_prompt_releases_it);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -1974,5 +2041,6 @@ main(int i_argc, char **c_argv) {
    add_round4_tests();
    add_round5_tests();
    add_trash_cursor_tests();
+   add_dispose_prompt_tests();
    return (g_test_run());
 }

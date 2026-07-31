@@ -117,6 +117,15 @@ struct _GgazeWindow {
                                     * cannot stack a second dialog on top of
                                     * it, nor slip its continuation past the
                                     * gate while that dialog is still up */
+   GCancellable *p_prompt_cancel;  /* the outstanding prompt's GCancellable
+                                    * (NULL when no prompt is up), handed to
+                                    * gtk_alert_dialog_choose so dispose can
+                                    * force the dialog's GTask to complete
+                                    * instead of leaving it (and the _SaveCtx
+                                    * it carries) hanging -- see
+                                    * _prompt_dispose. Exactly one prompt is
+                                    * ever outstanding (b_save_prompt), so this
+                                    * single slot always names THAT prompt */
    gboolean b_prompt_quits;        /* TRUE while the outstanding prompt's OWN
                                     * continuation is _proceed_quit, i.e.
                                     * answering it in favour of proceeding
@@ -550,10 +559,31 @@ _enhance_do_save(GgazeWindow *p_win) {
 }
 
 typedef struct {
-   GgazeWindow *p_win; /* owned ref: outlives the async dialog (mirrors
-                        * _MoveIdxCtx/_OpenCtx/_DeleteCtx's own convention) */
-   _Request t_req;     /* the gated request; see _Request for ownership */
+   GgazeWindow *p_win;      /* owned ref: outlives the async dialog (mirrors
+                             * _MoveIdxCtx/_OpenCtx/_DeleteCtx's convention) */
+   _Request      t_req;     /* the gated request; see _Request for ownership */
+   GCancellable *p_cancel;  /* owned ref on the SAME GCancellable the window
+                             * parks in p_prompt_cancel. Held here as well so
+                             * the callback can ask the object itself whether
+                             * this prompt was cancelled, and so the ref is
+                             * released on every exit path even after dispose
+                             * has already dropped the window's own -- see
+                             * _save_prompt_outcome and _prompt_dispose. */
+   GtkWindow *p_dlg_window; /* owned ref on the dialog's own toplevel, purely
+                             * to keep it from being FREED under the GTask
+                             * that still points at it -- see
+                             * _prompt_dialog_window */
 } _SaveCtx;
+
+/* How an outstanding prompt ended. Kept apart from the button index because
+ * two of the three outcomes carry no index at all, and because folding them
+ * together is what made the dismissal case invisible (task 8w0): the callback
+ * used to treat "an error came back" as plain Cancel and say nothing. */
+typedef enum {
+   _PROMPT_ANSWERED,  /* the user pressed a button; the index says which */
+   _PROMPT_CANCELLED, /* ggaze cancelled it: the window is being disposed */
+   _PROMPT_DISMISSED  /* closed without an answer, or any other failure */
+} _PromptOutcome;
 
 /* Release the parked request p_req without ever running it, and say so. Takes
  * ownership of p_req (both the _Request box and, via _request_finish, the data
@@ -627,6 +657,8 @@ static void
 _save_ctx_finish(_SaveCtx *p_ctx, gboolean b_proceed) {
    GgazeWindow *p_win = p_ctx->p_win; /* borrowed until the unref below */
    _request_finish(&p_ctx->t_req, b_proceed);
+   g_object_unref(p_ctx->p_cancel);
+   g_clear_object(&p_ctx->p_dlg_window);
    g_free(p_ctx);
    _save_prompt_flush(p_win, b_proceed);
    g_object_unref(p_win);
@@ -656,6 +688,54 @@ _save_dialog_save(GgazeWindow *p_win) {
    return (_enhance_do_save(p_win));
 }
 
+/* Classify a finished prompt. p_err is what gtk_alert_dialog_choose_finish()
+ * reported (NULL means a button index came back).
+ *
+ * The CANCELLABLE, not the GError, is the authority on "we cancelled this".
+ * GTask's check_cancellable makes g_task_propagate_int() rewrite the result of
+ * a cancelled task into G_IO_ERROR_CANCELLED no matter what GTK put in it, so
+ * the domain/code alone cannot tell our own dispose-time cancel apart from
+ * GTK's GTK_DIALOG_ERROR_CANCELLED -- and that same rewrite is why a cancel
+ * issued after a button was pressed comes back looking like a cancel (measured
+ * in tu0's round-3 probe). Asking the object we cancelled ourselves is exact.
+ *
+ * That rewrite also means _PROMPT_ANSWERED is only ever reported when nothing
+ * cancelled the prompt, which is what keeps a user's Save or Discard from
+ * being silently downgraded on any path that does NOT cancel. */
+static _PromptOutcome
+_save_prompt_outcome(const _SaveCtx *p_ctx, const GError *p_err) {
+   if (p_err == NULL) {
+      return (_PROMPT_ANSWERED);
+   }
+   if (g_cancellable_is_cancelled(p_ctx->p_cancel)) {
+      return (_PROMPT_CANCELLED);
+   }
+   return (_PROMPT_DISMISSED);
+}
+
+/* Say so, once, when a prompt ended without an answer. Both outcomes mean
+ * "do not proceed", but they are different events and folding them into a
+ * silent Cancel is what left task 8w0 with nothing to look at: CANCELLED is
+ * ggaze tearing the window down under the dialog, DISMISSED is the dialog
+ * going away without a choice.
+ *
+ * DISMISSED is not reachable while _save_prompt_show configures a cancel
+ * button: GTK's response_cb turns a delete-event into that button's index
+ * (cancel_return), so an Escape/WM-close arrives as a plain Cancel answer, and
+ * GTK_DIALOG_ERROR_DISMISSED is only produced when no cancel button is set
+ * (gtk 4.22.4 gtkalertdialog.c). The branch stays because that is a GTK
+ * configuration detail, not an invariant of this callback -- and it is also
+ * where any genuinely unexpected failure would surface. */
+static void
+_report_unanswered_prompt(_PromptOutcome e_outcome) {
+   if (e_outcome == _PROMPT_CANCELLED) {
+      g_message("ggaze: Save/Discard/Cancel prompt cancelled — the window is "
+                "going away");
+      return;
+   }
+   g_message("ggaze: Save/Discard/Cancel prompt dismissed — treated as Cancel");
+}
+
 /* Alert-dialog response: 0=Cancel, 1=Discard, 2=Save. */
 static void
 _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
@@ -665,10 +745,16 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
    gint         i_btn =
       gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(p_dlg), p_res, &p_err);
    g_object_unref(GTK_ALERT_DIALOG(p_dlg));
-   p_win->b_save_prompt = FALSE; /* this prompt is gone; a later trigger may
-                                  * open a fresh one (see _maybe_save_then) */
-   if (p_err != NULL) {          /* dismissed / error -> treat as Cancel */
-      g_clear_error(&p_err);
+   _PromptOutcome e_outcome = _save_prompt_outcome(p_ctx, p_err);
+   g_clear_error(&p_err);
+   /* This prompt is gone, and so is its cancellable's job: a later trigger may
+    * open a fresh one, which brings its own (see _maybe_save_then). Clearing
+    * the window's slot here is safe even after _prompt_dispose already cleared
+    * it -- the ctx keeps the object alive until _save_ctx_finish. */
+   p_win->b_save_prompt = FALSE;
+   g_clear_object(&p_win->p_prompt_cancel);
+   if (e_outcome != _PROMPT_ANSWERED) { /* cancelled/dismissed -> as Cancel */
+      _report_unanswered_prompt(e_outcome);
       _save_ctx_finish(p_ctx, FALSE);
       return;
    }
@@ -685,6 +771,44 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
                                     * proceed -- but still free the ctx */
 }
 
+/* The GtkWindow gtk_alert_dialog_choose() has just presented for p_win,
+ * reffed (transfer full). NULL only if GTK ever stops using a plain toplevel
+ * for it.
+ *
+ * GtkAlertDialog keeps that window entirely private -- it exists only as the
+ * dialog GTask's task data -- but it IS an ordinary toplevel, appended to
+ * gtk_window_get_toplevels() by gtk_window_constructed(), so scanning that
+ * model backwards for the newest window transient-for p_win finds it. This is
+ * called immediately after choose(), when ours is that newest one by
+ * construction (the `D` confirm dialog is the only other window transient-for
+ * p_win, and scanning from the end skips it).
+ *
+ * Why a ref is needed at all: the dialog is transient-for p_win with
+ * destroy-with-parent set, and GTK wires that to p_win's ::destroy, which
+ * GtkWidget emits from dispose. Once _prompt_dispose cancels the prompt, the
+ * dialog's GTask completes in an IDLE -- i.e. after dispose has returned, and
+ * so after that ::destroy already destroyed the dialog window and the toplevel
+ * list dropped its last reference. The GTask still holds that window as a raw
+ * pointer (its task data), so gtk_alert_dialog_choose_finish() calls
+ * gtk_window_destroy() on it: without a reference of ours that is freed memory
+ * -- measured as "assertion 'GTK_IS_WINDOW (window)' failed" the moment the
+ * cancel made that callback run at all. With one, the window is merely
+ * destroyed-but-alive, and the second gtk_window_destroy() returns at once
+ * because the window is no longer in the toplevel list. Measured on gtk
+ * 4.22.4. */
+static GtkWindow *
+_prompt_dialog_window(GgazeWindow *p_win) {
+   GListModel *p_tops = gtk_window_get_toplevels();
+   for (guint u = g_list_model_get_n_items(p_tops); u > 0; u--) {
+      GtkWindow *p_top = GTK_WINDOW(g_list_model_get_item(p_tops, u - 1));
+      if (gtk_window_get_transient_for(p_top) == GTK_WINDOW(p_win)) {
+         return (p_top);
+      }
+      g_object_unref(p_top);
+   }
+   return (NULL);
+}
+
 /* Build and show the modal Save/Discard/Cancel prompt for p_win, handing the
  * request over to _save_dialog_cb. Split out of _maybe_save_then to keep both
  * under the ~30-line convention.
@@ -694,7 +818,17 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
  * must not be retried into a window the answer is about to close (round 4,
  * finding r). Both quit entry points -- win.quit and the native
  * "close-request" -- share _proceed_quit, so comparing against it catches
- * both. */
+ * both.
+ *
+ * The GCancellable is not optional bookkeeping: without one, nothing can ever
+ * finish this dialog's GTask except a button press. gtk_window_destroy() on
+ * the parent neither disposes it (the _SaveCtx's window ref pins it) nor takes
+ * the dialog down (GTK wires destroy-with-parent to the parent's ::destroy,
+ * which is emitted from dispose), so a teardown under a live prompt left the
+ * task unfinished and the _SaveCtx -- plus whatever ctx the request carries --
+ * leaked: 474 bytes in 11 allocations, measured under ASan (task 2w0). Both
+ * this ctx and the window hold a ref on it; see _prompt_dispose for the
+ * cancelling end. */
 static void
 _save_prompt_show(GgazeWindow *p_win, const _Request *p_req) {
    GtkAlertDialog *p_dlg =
@@ -704,13 +838,17 @@ _save_prompt_show(GgazeWindow *p_win, const _Request *p_req) {
    gtk_alert_dialog_set_default_button(p_dlg, 2);
    gtk_alert_dialog_set_cancel_button(p_dlg, 0);
    gtk_alert_dialog_set_modal(p_dlg, TRUE);
-   _SaveCtx *p_ctx       = g_new(_SaveCtx, 1);
-   p_ctx->p_win          = (GgazeWindow *)g_object_ref(p_win);
-   p_ctx->t_req          = *p_req;
-   p_win->b_save_prompt  = TRUE;
-   p_win->b_prompt_quits = (p_req->fn == _proceed_quit);
-   gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), NULL, _save_dialog_cb,
-                           p_ctx);
+   _SaveCtx *p_ctx = g_new(_SaveCtx, 1);
+   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->t_req    = *p_req;
+   p_ctx->p_cancel = g_cancellable_new();
+   g_clear_object(&p_win->p_prompt_cancel); /* no prompt can be up here */
+   p_win->p_prompt_cancel = (GCancellable *)g_object_ref(p_ctx->p_cancel);
+   p_win->b_save_prompt   = TRUE;
+   p_win->b_prompt_quits  = (p_req->fn == _proceed_quit);
+   gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), p_ctx->p_cancel,
+                           _save_dialog_cb, p_ctx);
+   p_ctx->p_dlg_window = _prompt_dialog_window(p_win); /* transfer full */
 }
 
 /* Park p_req until the outstanding prompt is answered. Exactly one slot, and
@@ -3746,6 +3884,39 @@ _update_header(GgazeWindow *p_win) {
 /* --- GObject ------------------------------------------------------------- */
 
 #if GGAZE_HAVE_GEGL
+/* Tear down the Save/Discard/Cancel prompt machinery: the request parked
+ * behind the prompt, and the prompt itself.
+ *
+ * Order matters. The parked request goes first, and its slot is cleared BEFORE
+ * it is released, because a parked _OpenCtx drops an owned window ref from
+ * inside this very dispose. The prompt is cancelled last, so that whichever
+ * way the dialog's callback is delivered -- and GTask completes it in an idle,
+ * so in practice after dispose has returned -- it finds an empty queue and
+ * simply releases itself.
+ *
+ * Cancelling is what makes that callback happen at all. Nothing else can
+ * finish the dialog's GTask (see _save_prompt_show), so before this the
+ * _SaveCtx and every ctx it carries were simply abandoned. The cancel resolves
+ * the prompt as "do not proceed", which is the only honest answer here: by the
+ * time dispose runs, the preview, the enhancer and the navigator a Save or a
+ * continuation would need are already gone. A button pressed in the same main-
+ * loop turn as the dispose would be overridden by the cancel (tu0's round-3
+ * probe), and would land on that same teardown -- but it cannot happen through
+ * an ordinary unref, because the _SaveCtx's own window ref keeps the refcount
+ * off zero for exactly as long as the prompt is outstanding; only a forced
+ * g_object_run_dispose() gets here with a live dialog. */
+static void
+_prompt_dispose(GgazeWindow *p_win) {
+   if (p_win->p_pending != NULL) {
+      _Request *p_req  = p_win->p_pending;
+      p_win->p_pending = NULL;
+      _drop_pending(p_win, p_req, TRUE);
+   }
+   p_win->b_prompt_quits = FALSE;
+   g_cancellable_cancel(p_win->p_prompt_cancel);
+   g_clear_object(&p_win->p_prompt_cancel);
+}
+
 /* Tear down every piece of enhance state the window owns, so
  * ggaze_window_dispose itself stays a flat list of one-liners (and under the
  * 50-line convention). The enhancer engine itself is released later in
@@ -3758,16 +3929,7 @@ _enhance_dispose(GgazeWindow *p_win) {
    g_clear_object(&p_win->p_enhance_cancel);
    g_clear_object(&p_win->p_enhance_tex);
    g_clear_object(&p_win->p_enhance_file);
-   if (p_win->p_pending != NULL) {
-      /* A request parked behind a prompt that will now never be answered
-       * (the window is going away): release its data, never run it. Clear the
-       * slot BEFORE releasing, because a parked _OpenCtx drops an owned window
-       * ref from inside this very dispose. */
-      _Request *p_req  = p_win->p_pending;
-      p_win->p_pending = NULL;
-      _drop_pending(p_win, p_req, TRUE);
-   }
-   p_win->b_prompt_quits = FALSE;
+   _prompt_dispose(p_win);
 }
 #endif
 
