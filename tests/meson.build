@@ -302,14 +302,64 @@ test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 # gtk_widget_compute_bounds(), and test_settings_ui asserts on the root window
 # adw_dialog_present() creates; a backend that never lays out would gut both.
 #
-# KNOWN, PRE-EXISTING, NOT FIXED HERE: the header above says CI uses xvfb-run,
-# and under plain xvfb three suites (open_external, runner_rescan, move_undo)
-# abort on assertions like "'p_pop' should not be NULL". xvfb has no DRI3
-# ("libEGL warning: DRI3 error: Could not get DRI3 device"), so GTK popovers
-# never materialise there. Verified pre-existing by re-running all three at
-# 7a0f3d2, before any 1w0 change. So a green xvfb lane is not achievable today
-# for reasons that have nothing to do with leaks -- worth knowing before
-# trusting "CI uses xvfb-run" as a statement about a passing lane.
+# The xvfb (X11) lane, and why popover suites are special (5w0).
+#
+# CI really does run this track under xvfb-run (.woodpecker/ci.yml, last step:
+# `xvfb-run -a meson test -C build --suite integration`, on fedora:40 where no
+# Wayland socket exists), so the X11 GDK backend is the backend CI uses. An
+# earlier note here blamed the three aborts on xvfb's missing DRI3. That was
+# wrong -- DRI3 is a renderer concern and forcing GSK_RENDERER=cairo/gl/ngl/
+# vulkan changed nothing. Two unrelated causes, both now fixed:
+#
+#  1. No focus widget on a never-presented toplevel. gtk_popover_show() ends
+#     with gtk_widget_child_focus() for an autohide popover, and GTK's
+#     "Empty popover" branch then dereferences a NULL gtk_root_get_focus().
+#     Fixed in the suites via ggtest_focus_viewer(); the mechanism is written
+#     up in full in tests/helpers/gtk_helpers.h.
+#
+#  2. X11 seat-grab contention, handled below with is_parallel : false.
+#
+# REPRODUCING THE X11 LANE LOCALLY IS A TRAP. On a Wayland desktop,
+# `xvfb-run -a meson test ...` does NOT test the X11 backend: GDK still finds
+# the Wayland socket and the whole lane silently runs on Wayland (21/21 green,
+# proving nothing about CI). Unsetting WAYLAND_DISPLAY is not enough either --
+# libwayland falls back to $XDG_RUNTIME_DIR/wayland-0. Both are needed:
+#
+#   env -u WAYLAND_DISPLAY XDG_RUNTIME_DIR=$(mktemp -d) \
+#     xvfb-run -a meson test -C build --suite integration
+
+# --- suites that need exclusive use of the display's seat grab (5w0) -------
+#
+# A GtkPopover with autohide (all four of ggaze's `e`/`!`/`m`/`a` popups) is a
+# GdkPopup, and on X11 gdk_x11_surface_present_popup() takes a gdk_seat_grab()
+# for it. An X seat grab is display-global: only ONE client can hold it. When
+# it fails, gdk_seat_default_grab() hides the popup surface it just mapped
+# (gdk/gdkseatdefault.c: `if (status != GDK_GRAB_SUCCESS && !was_visible)
+# gdk_surface_hide (surface)`), which arrives as notify::mapped on the popup
+# surface, and GtkPopover turns that into gtk_widget_set_visible (FALSE) ->
+# "closed" -> ggaze's own _open_ext_destroy()/_run_script_destroy()/
+# _move_destroy() unparent the popover. The suite then finds NULL a couple of
+# milliseconds after firing the action.
+#
+# CI runs every integration binary in parallel against ONE xvfb display, so
+# these suites were racing each other for that single grab. Measured on this
+# tree: 6 concurrent copies of /open_external/popup_structure on one Xvfb
+# failed 60 times out of 72; the same lane with --num-processes 1 was green.
+# On Wayland the race is invisible because the popup never presents at all
+# (see gtk_helpers.h), which is why only the X11 lane ever showed it.
+#
+# is_parallel : false says exactly what is true -- these tests need exclusive
+# use of a display-global resource. It is not a timing workaround and no
+# assertion was weakened to accommodate it. The listed suites are every suite
+# that pops an autohide popover, INCLUDING test_window (its `a` subtest opens
+# the GEGL preset popover) and test_enhance_flow (its move-continuation
+# subtest fires win.move): a suite that merely *takes* the grab still breaks
+# whichever suite is asserting on a popover at that moment, so being a
+# grabber is enough to require serialisation, not just being an asserter.
+#
+# Cost: the track goes from ~75 s to ~100 s wall-clock. Re-check that trade if
+# more popover suites appear -- serialising a long suite (enhance_flow is 70 s
+# on its own) is what dominates it.
 test_window = executable(
    'test_window',
    ['test_window.c', ggaze_conf_h],
@@ -318,7 +368,10 @@ test_window = executable(
    link_with : ggaze_lib,
    install : false,
 )
-test('window', test_window, suite : 'integration', env : fixtures_env)
+# is_parallel : false -- see "suites that need exclusive use of the
+# display's seat grab" above (its `a` subtest opens the preset popover).
+test('window', test_window, suite : 'integration', env : fixtures_env,
+   is_parallel : false)
 
 test_open_and_show = executable(
    'test_open_and_show',
@@ -508,7 +561,8 @@ open_external_env.set('LSAN_OPTIONS',
    'suppressions=' + join_paths(meson.project_source_root(), 'tests',
                                'lsan_suppressions.txt'))
 test('open_external', test_open_external,
-   suite : 'integration', env : open_external_env, depends : ggaze_gschemas)
+   suite : 'integration', env : open_external_env,
+   depends : ggaze_gschemas, is_parallel : false)
 
 test_move_undo = executable(
    'test_move_undo', ['test_move_undo.c', ggaze_conf_h],
@@ -528,7 +582,8 @@ move_undo_env.set('LSAN_OPTIONS',
    'suppressions=' + join_paths(meson.project_source_root(), 'tests',
                                'lsan_suppressions.txt'))
 test('move_undo', test_move_undo,
-   suite : 'integration', env : move_undo_env, depends : ggaze_gschemas)
+   suite : 'integration', env : move_undo_env,
+   depends : ggaze_gschemas, is_parallel : false)
 
 test_runner_rescan = executable(
    'test_runner_rescan', ['test_runner_rescan.c', ggaze_conf_h],
@@ -548,7 +603,8 @@ runner_rescan_env.set('LSAN_OPTIONS',
    'suppressions=' + join_paths(meson.project_source_root(), 'tests',
                                'lsan_suppressions.txt'))
 test('runner_rescan', test_runner_rescan,
-   suite : 'integration', env : runner_rescan_env, depends : ggaze_gschemas)
+   suite : 'integration', env : runner_rescan_env,
+   depends : ggaze_gschemas, is_parallel : false)
 
 # tu0: enhance-flow integration coverage, gated the same way as the
 # test_enhancer unit test above -- built (and run) only when GEGL is
@@ -577,7 +633,7 @@ if gegl_dep.found()
    # subtest count grows: the margin shrinks with every one added.
    test('enhance_flow', test_enhance_flow,
       suite : 'integration', env : fixtures_env, depends : ggaze_gschemas,
-      timeout : 180)
+      timeout : 180, is_parallel : false)
 endif
 
 subdir('integration')
