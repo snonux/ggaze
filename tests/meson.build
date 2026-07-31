@@ -2,7 +2,14 @@
 #
 #   unit        plain-C module tests, no display needed (>=80% coverage gate,
 #               warn until M10 then fail).
-#   integration  cross-module flows with real temp dirs + offscreen GTK.
+#   integration cross-module flows with real temp dirs and REAL GTK on a REAL
+#               display. Nothing here is offscreen and GTK4 offers no headless
+#               backend: each main() returns 77 (meson SKIP) when
+#               gtk_init_check() fails. Both tracks' sources live directly in
+#               tests/ -- the split is the suite tag below, not a directory
+#               (tests/integration/ contains only a meson.build). See the
+#               integration-track note further down for the X11/xvfb lane CI
+#               actually runs, and why five suites are is_parallel : false.
 #
 # Run one track:   meson test -C build --suite unit
 #                  meson test -C build --suite integration
@@ -312,10 +319,12 @@ test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 # vulkan changed nothing. Two unrelated causes, both now fixed:
 #
 #  1. No focus widget on a never-presented toplevel. gtk_popover_show() ends
-#     with gtk_widget_child_focus() for an autohide popover, and GTK's
-#     "Empty popover" branch then dereferences a NULL gtk_root_get_focus().
-#     Fixed in the suites via ggtest_focus_viewer(); the mechanism is written
-#     up in full in tests/helpers/gtk_helpers.h.
+#     with gtk_widget_child_focus() for an autohide popover, and
+#     gtk_popover_focus()'s autohide arm (gtk/gtkpopover.c:1119-1127 -- NOT
+#     the "Empty popover" branch at :1106-1110, which returns FALSE without
+#     touching focus) passes a NULL gtk_root_get_focus() to
+#     gtk_widget_is_ancestor(). Fixed in the suites via ggtest_focus_viewer();
+#     the mechanism is written up in full in tests/helpers/gtk_helpers.h.
 #
 #  2. X11 seat-grab contention, handled below with is_parallel : false.
 #

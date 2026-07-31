@@ -53,21 +53,38 @@ void ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx);
  *
  * Those two facts together walk gtk-4.22.4 into an unguarded NULL:
  * gtk_popover_show() ends with gtk_widget_child_focus() for an autohide
- * popover, gtk_popover_focus() finds nothing to focus inside, and then calls
- * gtk_widget_is_ancestor (gtk_root_get_focus (root), popover) with that NULL
- * as the first argument (gtk/gtkpopover.c, "Empty popover" branch) -- a
- * Gtk-CRITICAL, which the suites' g_log_set_always_fatal() turns into an
- * abort.
+ * popover, and gtk_popover_focus() (gtk/gtkpopover.c) then does this. Note
+ * the branch: it is NOT the "Empty popover" one -- that is :1106-1110, which
+ * sees a popover with no first child and returns FALSE without ever touching
+ * focus. Our popover HAS a child (the GtkLabel), so control goes to the
+ * *else* branch at :1111 onwards: gtk_widget_focus_move() fails because the
+ * label cannot take focus, and the autohide arm at :1119-1127 then calls
+ *
+ *    p = gtk_root_get_focus (gtk_widget_get_root (widget));   // NULL
+ *    if (!gtk_widget_is_ancestor (p, widget) && p != widget)
+ *
+ * -- gtk_widget_is_ancestor() with a NULL first argument, a Gtk-CRITICAL,
+ * which the suites' g_log_set_always_fatal() turns into an abort.
  *
  * It only aborts on the X11 backend, which is what CI's xvfb-run gives it
  * (.woodpecker/ci.yml). On Wayland gdk_popup_present() refuses a popup whose
  * parent surface is unmapped, so gtk_popover_show() returns before the focus
  * code runs -- which also means those popovers never actually map there and
- * the suites were only ever asserting on an unmapped widget tree. Focusing
- * the viewer fixes both: the abort is gone, and on X11 the popover really
- * maps. Verified on live Wayland, live Xwayland with GDK_BACKEND=x11, and
- * xvfb; the DRI3 warnings xvfb prints are unrelated (GSK_RENDERER=cairo, gl,
- * ngl and vulkan all fail identically without this). */
+ * the suites were only ever asserting on an unmapped widget tree.
+ *
+ * This helper fixes the ABORT, and only the abort. It does NOT close the
+ * Wayland gap: measured with gtk_widget_get_mapped() from one binary across
+ * three backends, the popover is mapped=1 on live X11 and on xvfb but still
+ * mapped=0 on Wayland, with and without this grab -- because the blocker
+ * there is the unmapped parent surface, not the missing focus widget. So a
+ * green Wayland run still says nothing about presentation (mapping,
+ * positioning, autohide/grab behaviour, dismissal); only the X11/xvfb lane
+ * exercises that. gtk_window_present() would map it on Wayland too; that is
+ * deliberately left to task cw0 rather than done quietly here.
+ *
+ * Verified on live Wayland, live Xwayland with GDK_BACKEND=x11, and xvfb; the
+ * DRI3 warnings xvfb prints are unrelated (GSK_RENDERER=cairo, gl, ngl and
+ * vulkan all fail identically without this). */
 void ggtest_focus_viewer(GgazeWindow *p_win);
 
 /* --- window teardown ------------------------------------------------------
