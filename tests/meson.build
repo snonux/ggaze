@@ -279,6 +279,13 @@ test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 #     backends" block is the canonical write-up, including the two ways those
 #     entries can look dead when they are not. Read it before editing it.
 #
+#  3. Load, not display: the dialog waits in tests/helpers/gtk_helpers.c spent
+#     a fixed number of poll iterations rather than wall-clock time, so a full
+#     parallel ASan lane could fail a wait that passed with the suite run
+#     alone. Fixed there; see ggtest_wait_for_dialog(). Verify with FULL lane
+#     runs, never a single suite -- running one suite alone is exactly what
+#     kept this invisible.
+#
 # Pinning GDK_BACKEND was considered and rejected. This GTK build offers
 # broadway, wayland and x11 (`pkg-config --variable=targets gtk4`) and none of
 # them is headless: broadway needs a broadwayd daemon and x11 needs an X
@@ -294,6 +301,15 @@ test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 # present_and_lay_out() exists to get true laid-out coordinates out of
 # gtk_widget_compute_bounds(), and test_settings_ui asserts on the root window
 # adw_dialog_present() creates; a backend that never lays out would gut both.
+#
+# KNOWN, PRE-EXISTING, NOT FIXED HERE: the header above says CI uses xvfb-run,
+# and under plain xvfb three suites (open_external, runner_rescan, move_undo)
+# abort on assertions like "'p_pop' should not be NULL". xvfb has no DRI3
+# ("libEGL warning: DRI3 error: Could not get DRI3 device"), so GTK popovers
+# never materialise there. Verified pre-existing by re-running all three at
+# 7a0f3d2, before any 1w0 change. So a green xvfb lane is not achievable today
+# for reasons that have nothing to do with leaks -- worth knowing before
+# trusting "CI uses xvfb-run" as a statement about a passing lane.
 test_window = executable(
    'test_window',
    ['test_window.c', ggaze_conf_h],
