@@ -1837,11 +1837,18 @@ test_trash_does_not_advance_past_an_unseen_image(void) {
  * g_object_run_dispose() is not a shortcut here, it is the only way in.
  * gtk_window_destroy() alone cannot dispose the window while a prompt is up:
  * the _SaveCtx holds an owned window ref, so the refcount never reaches zero
- * (re-measured for this suite: 4 -> 3 on the destroy, the toplevel list's ref
- * being the only one dropped, then stuck at 3 across 5 s of draining with the
- * dialog still listed and still answerable), and GTK's destroy-with-parent is
- * wired to the parent's ::destroy, which is itself emitted from dispose -- so
- * the dialog survives too.
+ * (re-measured for THIS subtest's fixture: 4 -> 3 on the destroy, then holding
+ * at 3 across 5 s of draining with the dialog still listed and still
+ * answerable), and GTK's destroy-with-parent is wired to the parent's
+ * ::destroy, which is itself emitted from dispose -- so the dialog survives
+ * too.
+ *
+ * Those absolutes are this fixture's, not a property of the destroy: they
+ * count whatever contexts happen to be outstanding (a grid-select prompt
+ * parks a _FileCtx too and gives 4 -> 3; a win.next prompt gives 3 -> 2).
+ * What generalises is the ONE ref gtk_window_destroy() drops -- the toplevel
+ * list's -- which is why any context still holding one keeps the window off
+ * zero.
  *
  * That forced dispose is therefore the only thing this subtest shares with
  * production, and it is a narrow thing to share: nothing in src/ calls
@@ -1907,10 +1914,12 @@ test_dispose_under_a_live_prompt_releases_it(void) {
  * and either can move navigator.current -- the very next Alt+F4 or WM close
  * button (not input events, so the grab does not swallow them) propagated
  * straight through to gtk_window_destroy() with the prompt still up. That
- * destroy cannot dispose the window (the _SaveCtx's own window ref keeps the
- * refcount off zero, measured 4 -> 3 here), so the cancel in _prompt_dispose
- * never runs, the dialog is orphaned on screen and every ctx it carries is
- * abandoned.
+ * destroy cannot dispose the window (it drops the toplevel list's ref, and the
+ * _SaveCtx's own window ref keeps the count off zero -- see
+ * test_dispose_under_a_live_prompt_releases_it above for the measurement and
+ * why the absolute numbers are a fixture property), so the cancel in
+ * _prompt_dispose never runs, the dialog is orphaned on screen and every ctx
+ * it carries is abandoned.
  *
  * ggaze_window_next() stands in for the timer/monitor: it is the same
  * navigation choke point they use (nav_changed_cb -> _enhance_nav_changed

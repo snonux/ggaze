@@ -832,12 +832,15 @@ _prompt_dialog_window(GgazeWindow *p_win) {
  * window hold a ref on it; see _prompt_dispose for the cancelling end.
  *
  * What that does NOT cover is a plain gtk_window_destroy() with the prompt
- * still up, because it never reaches dispose: the _SaveCtx's own window ref
- * keeps the refcount off zero (measured 4 -> 3 and then stuck at 3 across 5 s
- * of draining, the toplevel list's ref being the only one dropped), and GTK
- * wires destroy-with-parent to the parent's ::destroy, which GtkWidget emits
- * from dispose -- so the dialog stays up and clickable, and answering it then
- * still resolves everything normally (measured: the answer arrives as the
+ * still up, because it never reaches dispose: gtk_window_destroy() drops ONE
+ * reference, the toplevel list's, and the _SaveCtx's own window ref keeps the
+ * count off zero (measured on gtk 4.22.4: one ref dropped both for a window
+ * built with a GtkApplication, as production does, and for one built without,
+ * as the test harness does -- the application's window list holds no counted
+ * reference of its own; the count then holds steady across 5 s of draining).
+ * GTK wires destroy-with-parent to the parent's ::destroy, which GtkWidget
+ * emits from dispose -- so the dialog stays up and clickable, and answering it
+ * then still resolves everything normally (measured: the answer arrives as the
  * pressed button, refcount back to the caller's own).
  *
  * Nothing in src/ calls gtk_window_destroy(), and _on_close_request now
@@ -1060,9 +1063,10 @@ _action_quit(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * navigator.current, and neither is an input event the modal grab can stop.
  * Testing only the mask therefore let the very next Alt+F4 propagate into
  * gtk_window_destroy() with the prompt still up; that destroy cannot dispose
- * the window (the prompt's _SaveCtx holds an owned window ref -- measured
- * 4 -> 3), so nothing ever cancels the dialog and it is orphaned on screen
- * with every ctx it carries abandoned (2w0 review, finding A).
+ * the window (it drops one ref, the toplevel list's, and the prompt's _SaveCtx
+ * holds an owned window ref of its own -- see _save_prompt_show), so nothing
+ * ever cancels the dialog and it is orphaned on screen with every ctx it
+ * carries abandoned (2w0 review, finding A).
  *
  * Refusing the close does not strand the user: the request is queued behind
  * the prompt, so answering it in favour of proceeding flushes that quit
