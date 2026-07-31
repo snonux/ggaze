@@ -421,6 +421,110 @@ test_open_external_popup_empty_message(void) {
    reset_editors();
 }
 
+/* Present p_win and wait until its toplevel is really mapped. Asserted, not
+ * best-effort: a subtest that silently skipped the mapping it exists to check
+ * would be the vacuous-green trap all over again. */
+static void
+present_and_map(GgazeWindow *p_win) {
+   gtk_window_set_default_size(GTK_WINDOW(p_win), 400, 300);
+   gtk_window_present(GTK_WINDOW(p_win));
+   for (guint u = 0; u < 2000; u++) {
+      if (gtk_widget_get_mapped(GTK_WIDGET(p_win))) {
+         return;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_not_reached();
+}
+
+/* Wait until p_win's open-external popover reports itself mapped. Returns
+ * FALSE on timeout so the caller can assert with a useful message. */
+static gboolean
+wait_for_popover_mapped(GgazeWindow *p_win) {
+   for (guint u = 0; u < 2000; u++) {
+      GtkPopover *p_pop = find_open_external_popover(p_win);
+      if (p_pop != NULL && gtk_widget_get_mapped(GTK_WIDGET(p_pop))) {
+         return (TRUE);
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   return (FALSE);
+}
+
+/* THE one subtest in this suite that presents its window (bw0).
+ *
+ * Every other popover subtest here builds a GgazeWindow with g_object_new()
+ * and never presents it, which is cheap and fine for what they assert --
+ * row count, hotkey labels, the key controller -- because those are all
+ * construction-time facts about the widget tree.
+ *
+ * But it makes them silent about whether the popover ever actually appears,
+ * and the two backends genuinely differ there: gdk_popup_present() refuses a
+ * popup whose parent surface is unmapped, so on Wayland gtk_popover_show()
+ * returns before gtk_widget_map() and the popover is visible-but-never-
+ * mapped, while on X11 (what CI's xvfb-run gives it) the same code maps it
+ * for real. Measured with a probe on all three backends in 5w0: Wayland
+ * mapped=0, live X11 mapped=1, xvfb mapped=1.
+ *
+ * So a green Wayland run said nothing about presentation at all. Rather than
+ * make forty subtests present -- five suites popping real windows on a
+ * developer's desktop, for coverage they already have -- exactly one subtest
+ * presents and asserts the property the others cannot see. It needs no
+ * backend-conditional assertion: with a mapped parent the popover maps on
+ * Wayland and X11 alike.
+ *
+ * WHAT THIS SUBTEST DOES AND DOES NOT BUY YOU, measured by deleting the
+ * present_and_map() call and re-running (do this again if you edit it -- a
+ * mapping assertion that cannot fail is precisely the thing being fixed):
+ *
+ *   - without present, on Wayland: FAILS. Here the presenting is doing real
+ *     work and this subtest is the only thing in the tree that notices.
+ *   - without present, on X11/xvfb: still PASSES, because X11 maps a popup
+ *     regardless of whether its parent toplevel is mapped. So on CI the
+ *     present_and_map() call is not what makes this pass.
+ *
+ * The mapped-ness ASSERTION is still load-bearing on both backends -- no
+ * other subtest anywhere checks that a popover actually maps, so a future
+ * regression that left every popover unmapped would be caught here and
+ * nowhere else. But be honest about which half is working: on CI this
+ * subtest guards the property, and on a developer's Wayland box it also
+ * guards the presenting. */
+static void
+test_open_external_popup_really_maps(void) {
+   reset_editors();
+   set_named_editors(3);
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-oe-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "plain.jpg", "plain.jpg");
+   char  *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   GFile *p_file = g_file_new_for_path(c_path);
+
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_file);
+   drain_main(200);
+   present_and_map(p_win);
+
+   fire(p_win, "win.open-external");
+   g_assert_true(wait_for_popover_mapped(p_win));
+   /* Still the popover the other subtests describe -- so this subtest also
+    * proves their structural assertions hold on a really-presented window,
+    * not just on the never-presented one they build. */
+   GtkPopover *p_pop = find_open_external_popover(p_win);
+   g_assert_nonnull(p_pop);
+   g_assert_cmpint(popover_button_count(p_pop), ==, 3);
+   g_assert_cmpstr(popover_button_label(p_pop, 0), ==, "1  GIMP");
+
+   g_object_unref(p_file);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(300);
+   g_free(c_path);
+   cleanup_temp_dir(c_dir);
+   reset_editors();
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -444,5 +548,7 @@ main(int i_argc, char **c_argv) {
                    test_open_external_popup_structure);
    g_test_add_func("/open_external/popup_empty_message",
                    test_open_external_popup_empty_message);
+   g_test_add_func("/open_external/popup_really_maps",
+                   test_open_external_popup_really_maps);
    return (g_test_run());
 }
