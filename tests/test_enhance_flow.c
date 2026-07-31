@@ -131,6 +131,34 @@ viewer_texture(GgazeWindow *p_win) {
    return (ggaze_viewer_get_texture(GGAZE_VIEWER(p_large)));
 }
 
+/* Take an OWNED reference on whatever the viewer is showing right now.
+ *
+ * Every texture pointer a subtest keeps across main-loop iterations goes
+ * through here, because the identity comparisons those pointers exist for
+ * ("still the same texture", "a different one now") only mean something
+ * between two LIVE objects. Nothing the test controls keeps a displayed
+ * texture alive: the holders are the viewer itself (ggaze_viewer_set_texture
+ * g_set_object's it), the window's bounded LRU texture cache (cap 4), and --
+ * for a preview -- the window's own p_enhance_tex. Once the viewer moves on
+ * and the cache drops or evicts it, the object is finalized and comparing a
+ * borrowed pointer is a bet on the allocator not reusing the address; task
+ * 3w0 measured that reuse happening in 9 runs out of 15.
+ *
+ * The g_assert_nonnull is deliberate rather than defensive. viewer_texture()
+ * returns NULL before the first load lands and whenever the navigator has no
+ * current file (window.c _load_current) -- a cache-missing navigation is NOT
+ * one of those cases, it leaves the previous texture on screen until the new
+ * one arrives, which is why no subtest here has ever produced NULL. Should
+ * one ever do so, g_object_ref(NULL) would abort all the same (main() makes
+ * criticals fatal) but blame G_IS_OBJECT inside GLib; failing here names the
+ * step that had no texture to take. */
+static GdkTexture *
+ref_viewer_texture(GgazeWindow *p_win) {
+   GdkTexture *p_tex = viewer_texture(p_win);
+   g_assert_nonnull(p_tex);
+   return (g_object_ref(p_tex));
+}
+
 static void
 wait_for_load(GgazeWindow *p_win) {
    for (guint u = 0; u < 3000 && viewer_texture(p_win) == NULL; u++) {
@@ -191,7 +219,15 @@ typedef struct {
     * ref existed: the original was dead after the clear in 15/15 runs, and a
     * GdkMemoryTexture allocated at the first opportunity afterwards landed on
     * exactly that address in 9/15. Owning a ref keeps both pointers valid and
-    * makes the identity comparisons mean what they say. */
+    * makes the identity comparisons mean what they say.
+    *
+    * Because fixture_teardown releases them unconditionally, a fixture whose
+    * owned fields hold stack garbage unrefs that garbage. Two things keep that
+    * impossible rather than merely unlikely: every declaration site writes
+    * `DirtyFixture fx = {0};`, and fixture_open_clean zeroes the whole struct
+    * on entry. Neither is decoration -- with both removed the three subtests
+    * that stay clean crash (9w0 re-measured 3/3: one "g_object_unref:
+    * assertion 'G_IS_OBJECT (object)' failed", two SIGSEGV). */
    GdkTexture *p_orig; /* texture before any preset was applied */
    GdkTexture *p_mod;  /* the enhance preview texture */
    guint       u_ref;  /* p_win's refcount once dirty and settled */
@@ -212,11 +248,13 @@ static void
 fixture_open_clean(DirtyFixture *p_fx, const char *c_tmpl,
                    const char *const *c_names) {
    GError *p_err = NULL;
-   /* Cleared up front: several subtests stay clean and never call
-    * fixture_make_dirty, and fixture_teardown unrefs both unconditionally. */
-   p_fx->p_orig = NULL;
-   p_fx->p_mod  = NULL;
-   p_fx->c_dir  = g_dir_make_tmp(c_tmpl, &p_err);
+   /* Zeroed as a whole rather than field by field: several subtests stay clean
+    * and never call fixture_make_dirty, yet fixture_teardown releases p_orig
+    * and p_mod unconditionally (see DirtyFixture). Naming the owned fields one
+    * by one worked only for as long as everyone remembered to extend the list;
+    * a memset cannot be forgotten when a field is added. */
+   memset(p_fx, 0, sizeof(*p_fx));
+   p_fx->c_dir = g_dir_make_tmp(c_tmpl, &p_err);
    g_assert_no_error(p_err);
    for (guint u = 0; c_names[u] != NULL; u++) {
       copy_fixture(p_fx->c_dir, c_names[u]);
@@ -235,10 +273,10 @@ fixture_open_clean(DirtyFixture *p_fx, const char *c_tmpl,
  * reference count every assert_ref_settled() call compares against. */
 static void
 fixture_make_dirty(DirtyFixture *p_fx) {
-   p_fx->p_orig = g_object_ref(viewer_texture(p_fx->p_win));
+   p_fx->p_orig = ref_viewer_texture(p_fx->p_win);
    fire(p_fx->p_win, "win.enhance-1");
    wait_for_texture_change(p_fx->p_win, p_fx->p_orig);
-   p_fx->p_mod = g_object_ref(viewer_texture(p_fx->p_win));
+   p_fx->p_mod = ref_viewer_texture(p_fx->p_win);
    g_assert_true(p_fx->p_mod != p_fx->p_orig);
    g_assert_true(ggaze_window_enhance_is_dirty(p_fx->p_win));
    p_fx->u_ref = ((GObject *)p_fx->p_win)->ref_count;
@@ -411,6 +449,16 @@ click_move_row(DirtyFixture *p_fx) {
 }
 
 /* --- subtests ------------------------------------------------------------
+ *
+ * The subtests below build their windows by hand instead of using
+ * DirtyFixture, but they keep texture pointers across main-loop iterations for
+ * exactly the same reasons, so they take the same owned refs through
+ * ref_viewer_texture() and release them in their teardown block -- after the
+ * final drain, like fixture_teardown, so nothing the drain runs can invalidate
+ * a pointer while it is still comparable. Borrowing happened to be safe here
+ * only because none of these subtests clears the texture cache; that is a
+ * property of the tests, not of the code they exercise, and 3w0 is what
+ * borrowing costs once it stops holding.
  */
 
 /* Requirement 2/3: applying a preset runs off the main thread and swaps in a
@@ -432,7 +480,7 @@ test_apply_is_async_and_original_untouched(void) {
    wait_for_load(p_win);
    g_assert_false(ggaze_window_enhance_is_dirty(p_win));
 
-   GdkTexture *p_orig_tex = viewer_texture(p_win);
+   GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1"); /* Auto-fix */
    /* Not yet applied synchronously: the async worker has not necessarily run
     * a single main-loop iteration yet, so a change is not guaranteed this
@@ -454,6 +502,7 @@ test_apply_is_async_and_original_untouched(void) {
    gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
    ggtest_drain_main(300);
+   g_object_unref(p_orig_tex);
    cleanup_temp_dir(c_dir);
 }
 
@@ -471,12 +520,12 @@ test_toggle_off_resets_to_original(void) {
    ggaze_window_open(p_win, p_file);
    wait_for_load(p_win);
 
-   GdkTexture *p_orig_tex = viewer_texture(p_win);
+   GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
    wait_for_texture_change(p_win, p_orig_tex);
    g_assert_true(ggaze_window_enhance_is_dirty(p_win));
 
-   GdkTexture *p_enhanced_tex = viewer_texture(p_win);
+   GdkTexture *p_enhanced_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1"); /* toggle the same preset back off */
    wait_for_texture_change(p_win, p_enhanced_tex);
    g_assert_false(ggaze_window_enhance_is_dirty(p_win));
@@ -487,6 +536,8 @@ test_toggle_off_resets_to_original(void) {
    gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
    ggtest_drain_main(300);
+   g_object_unref(p_orig_tex);
+   g_object_unref(p_enhanced_tex);
    cleanup_temp_dir(c_dir);
 }
 
@@ -504,10 +555,10 @@ test_hold_space_compares_then_restores(void) {
    ggaze_window_open(p_win, p_file);
    wait_for_load(p_win);
 
-   GdkTexture *p_orig_tex = viewer_texture(p_win);
+   GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
    wait_for_texture_change(p_win, p_orig_tex);
-   GdkTexture *p_enhanced_tex = viewer_texture(p_win);
+   GdkTexture *p_enhanced_tex = ref_viewer_texture(p_win);
    g_assert_true(p_enhanced_tex != p_orig_tex);
 
    ggaze_window_set_hold_original(p_win, TRUE);
@@ -526,6 +577,8 @@ test_hold_space_compares_then_restores(void) {
    gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
    ggtest_drain_main(300);
+   g_object_unref(p_orig_tex);
+   g_object_unref(p_enhanced_tex);
    cleanup_temp_dir(c_dir);
 }
 
@@ -538,6 +591,28 @@ test_hold_space_compares_then_restores(void) {
  * branch). Stuck TRUE meant the next Space press was swallowed as "already
  * in that state" and hold-compare silently did nothing for one whole
  * press/release cycle. */
+
+/* One complete hold-compare cycle on a fresh preview: apply a preset, then
+ * Space down must show the original and Space up the preview again. Split out
+ * of the subtest below so it stays inside the 50-line convention, and because
+ * the two owned textures are of no interest outside the cycle. */
+static void
+assert_hold_cycle_works(GgazeWindow *p_win) {
+   GdkTexture *p_orig = ref_viewer_texture(p_win);
+   fire(p_win, "win.enhance-1");
+   wait_for_texture_change(p_win, p_orig);
+   GdkTexture *p_mod = ref_viewer_texture(p_win);
+   g_assert_true(p_mod != p_orig);
+
+   ggaze_window_set_hold_original(p_win, TRUE);
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   ggaze_window_set_hold_original(p_win, FALSE);
+   g_assert_true(viewer_texture(p_win) == p_mod);
+
+   g_object_unref(p_orig);
+   g_object_unref(p_mod);
+}
+
 static void
 test_hold_flag_not_stuck_after_mask_cleared(void) {
    GError *p_err = NULL;
@@ -550,7 +625,7 @@ test_hold_flag_not_stuck_after_mask_cleared(void) {
    ggaze_window_open(p_win, p_file);
    wait_for_load(p_win);
 
-   GdkTexture *p_orig_tex = viewer_texture(p_win);
+   GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
    wait_for_texture_change(p_win, p_orig_tex);
    g_assert_true(viewer_texture(p_win) != p_orig_tex);
@@ -570,22 +645,28 @@ test_hold_flag_not_stuck_after_mask_cleared(void) {
    /* Fresh press/release cycle on a fresh preview: hold-compare must work on
     * the FIRST press. It did not before the fix -- the stale TRUE flag made
     * this a no-op and left the modified texture on screen. */
-   GdkTexture *p_orig2 = viewer_texture(p_win);
-   fire(p_win, "win.enhance-1");
-   wait_for_texture_change(p_win, p_orig2);
-   GdkTexture *p_mod2 = viewer_texture(p_win);
-   g_assert_true(p_mod2 != p_orig2);
-
-   ggaze_window_set_hold_original(p_win, TRUE);
-   g_assert_true(viewer_texture(p_win) == p_orig2);
-   ggaze_window_set_hold_original(p_win, FALSE);
-   g_assert_true(viewer_texture(p_win) == p_mod2);
+   assert_hold_cycle_works(p_win);
 
    g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
    ggtest_drain_main(300);
+   g_object_unref(p_orig_tex);
    cleanup_temp_dir(c_dir);
+}
+
+/* A second `s` while the window is still dirty must not clobber the first
+ * export: mover.c's collision convention gives the new sibling a "-1" suffix.
+ * Split out of the subtest below to keep it inside the 50-line convention,
+ * which taking an owned texture ref (see the section comment) pushed it past.
+ */
+static void
+assert_second_save_is_suffixed(GgazeWindow *p_win, const char *c_dir) {
+   fire(p_win, "win.enhance-save");
+   ggtest_drain_main(300);
+   char *c_out2 = g_build_filename(c_dir, "plain-enhanced-1.jpg", NULL);
+   g_assert_true(g_file_test(c_out2, G_FILE_TEST_EXISTS));
+   g_free(c_out2);
 }
 
 /* Requirements 6/9: `s` exports a collision-suffixed copy next to the
@@ -606,7 +687,7 @@ test_save_exports_collision_safe_copy(void) {
    gsize u_before_len;
    char *c_before = load_bytes(c_path, &u_before_len);
 
-   GdkTexture *p_orig_tex = viewer_texture(p_win);
+   GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
    wait_for_texture_change(p_win, p_orig_tex);
 
@@ -623,25 +704,21 @@ test_save_exports_collision_safe_copy(void) {
    g_assert_cmpuint(u_after_len, ==, u_before_len);
    g_assert_cmpint(memcmp(c_before, c_after, u_before_len), ==, 0);
 
-   /* Save again (still dirty -- toggling didn't clear the mask) -> the first
-    * export must not be clobbered; a "-1" suffixed sibling appears instead
-    * (mover.c's collision convention). */
-   fire(p_win, "win.enhance-save");
-   ggtest_drain_main(300);
-   char  *c_out2 = g_build_filename(c_dir, "plain-enhanced-1.jpg", NULL);
-   GFile *p_out2 = g_file_new_for_path(c_out2);
-   g_assert_true(g_file_query_exists(p_out2, NULL));
+   /* Still dirty (toggling didn't clear the mask), so `s` again. */
+   assert_second_save_is_suffixed(p_win, c_dir);
+   /* The suffixed sibling is what says the first export was not written over;
+    * this only adds that it was not removed either. */
+   g_assert_true(g_file_query_exists(p_out1, NULL));
 
    g_free(c_before);
    g_free(c_after);
    g_object_unref(p_out1);
-   g_object_unref(p_out2);
    g_free(c_out1);
-   g_free(c_out2);
    g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
    ggtest_drain_main(300);
+   g_object_unref(p_orig_tex);
    cleanup_temp_dir(c_dir);
 }
 
@@ -706,7 +783,7 @@ test_navigate_when_not_dirty_is_immediate(void) {
  * nothing to do with this feature. */
 static void
 test_grid_select_gates_dirty_enhance(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-grid-XXXXXX");
 
    activate_other_cell(&fx); /* one of gridview.c's 4 gated call sites; this
@@ -779,7 +856,7 @@ test_close_request_gates_dirty_enhance(void) {
    GgazeWindow *p_win = new_window();
    ggaze_window_open(p_win, p_file);
    wait_for_load(p_win);
-   GdkTexture *p_orig_tex = viewer_texture(p_win);
+   GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
    wait_for_texture_change(p_win, p_orig_tex);
    g_assert_true(ggaze_window_enhance_is_dirty(p_win));
@@ -798,6 +875,7 @@ test_close_request_gates_dirty_enhance(void) {
    gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
    ggtest_drain_main(300);
+   g_object_unref(p_orig_tex);
    cleanup_temp_dir(c_dir);
 }
 
@@ -815,7 +893,7 @@ test_close_request_gates_dirty_enhance(void) {
  * whole GgazeWindow forever (measured 1 -> 3 -> 2). */
 static void
 test_cancel_keeps_preview_and_frees_ctx(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-cancel-XXXXXX");
 
    activate_other_cell(&fx);
@@ -836,7 +914,7 @@ test_cancel_keeps_preview_and_frees_ctx(void) {
  * every assertion stopped at "the change was deferred". */
 static void
 test_discard_applies_deferred_grid_select(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-discard-XXXXXX");
 
    activate_other_cell(&fx);
@@ -851,7 +929,7 @@ test_discard_applies_deferred_grid_select(void) {
 /* Save: exports the enhanced copy AND then applies the deferred change. */
 static void
 test_save_exports_then_applies_deferred_select(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-savego-XXXXXX");
 
    gsize u_len_before;
@@ -895,7 +973,7 @@ test_failed_save_keeps_preview_and_aborts(void) {
       g_test_skip("running as root: a read-only folder cannot be provoked");
       return;
    }
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-failsave-XXXXXX");
 
    g_assert_cmpint(g_chmod(fx.c_dir, 0500), ==, 0); /* r-x: no new files */
@@ -923,7 +1001,7 @@ test_failed_save_keeps_preview_and_aborts(void) {
  */
 static void
 test_activating_current_cell_does_not_prompt(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-nocell-XXXXXX");
 
    GtkStack  *p_stack = ggaze_window_get_stack(fx.p_win);
@@ -950,7 +1028,7 @@ test_activating_current_cell_does_not_prompt(void) {
  * is why this passes for the async load path too. */
 static void
 test_toggle_view_keeps_dirty_preview(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-toggle-XXXXXX");
 
    fire(fx.p_win, "win.toggle-view"); /* -> grid */
@@ -974,7 +1052,7 @@ test_toggle_view_keeps_dirty_preview(void) {
  * and ran the continuation three times. */
 static void
 test_repeated_close_request_does_not_stack_dialogs(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-restack-XXXXXX");
 
    for (guint u = 0; u < 3; u++) {
@@ -1008,7 +1086,7 @@ test_repeated_close_request_does_not_stack_dialogs(void) {
  * live toplevel" (ggtest_is_open_toplevel). */
 static void
 test_close_request_discard_closes_window(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-closego-XXXXXX");
    gtk_window_present(GTK_WINDOW(fx.p_win));
    ggtest_drain_main(300);
@@ -1034,7 +1112,7 @@ test_close_request_discard_closes_window(void) {
  * _proceed_open -- which no test had ever executed. */
 static void
 test_open_while_dirty_cancel_then_discard(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-open-XXXXXX");
 
    GError *p_err   = NULL;
@@ -1074,7 +1152,7 @@ test_move_while_dirty_cancel_then_discard(void) {
    g_assert_no_error(p_err);
    set_one_destination("dest one", c_dest);
 
-   DirtyFixture fx; /* the window reads destinations at construction */
+   DirtyFixture fx = {0}; /* the window reads destinations at construction */
    fixture_open(&fx, "ggaze-enhance-move-XXXXXX");
 
    click_move_row(&fx);
@@ -1115,7 +1193,7 @@ test_move_while_dirty_cancel_then_discard(void) {
  * key-press time (_FileCtx), the same discipline _DeleteCtx already had. */
 static void
 test_prompt_acts_on_the_file_it_was_raised_for(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-captured-XXXXXX");
    char *c_other = g_build_filename(fx.c_dir, "rot6.jpg", NULL);
 
@@ -1144,7 +1222,7 @@ test_prompt_acts_on_the_file_it_was_raised_for(void) {
  * request is parked instead. */
 static void
 test_request_behind_stale_prompt_is_not_run(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-stale-XXXXXX");
    GError *p_err   = NULL;
    char   *c_other = g_dir_make_tmp("ggaze-enhance-stale2-XXXXXX", &p_err);
@@ -1184,7 +1262,7 @@ test_request_behind_stale_prompt_is_not_run(void) {
  * and aborted the trash the user had asked for. */
 static void
 test_save_with_no_preview_left_reports_and_proceeds(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-nosave-XXXXXX");
 
    fire(fx.p_win, "win.trash"); /* `d`, pressed on plain.jpg */
@@ -1217,7 +1295,7 @@ test_save_with_no_preview_left_reports_and_proceeds(void) {
  * the same gate once the prompt resolves in favour of proceeding. */
 static void
 test_second_request_is_queued_then_retried(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-queue-XXXXXX");
    GError *p_err   = NULL;
    char   *c_other = g_dir_make_tmp("ggaze-enhance-queue2-XXXXXX", &p_err);
@@ -1254,7 +1332,7 @@ test_second_request_is_queued_then_retried(void) {
  * assert_ref_settled is what proves it was actually released. */
 static void
 test_queued_request_is_dropped_on_cancel(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-drop-XXXXXX");
    GError *p_err   = NULL;
    char   *c_other = g_dir_make_tmp("ggaze-enhance-drop2-XXXXXX", &p_err);
@@ -1291,7 +1369,7 @@ test_queued_request_is_dropped_on_cancel(void) {
  * a live toplevel". */
 static void
 test_close_request_save_closes_window(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-closesave-XXXXXX");
    gtk_window_present(GTK_WINDOW(fx.p_win));
    ggtest_drain_main(300);
@@ -1320,7 +1398,7 @@ test_close_request_failed_save_keeps_window(void) {
       g_test_skip("running as root: a read-only folder cannot be provoked");
       return;
    }
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-closefail-XXXXXX");
    gtk_window_present(GTK_WINDOW(fx.p_win));
    ggtest_drain_main(300);
@@ -1355,7 +1433,7 @@ test_close_request_failed_save_keeps_window(void) {
  * through _show_texture, which is where the override lives. */
 static void
 test_cache_miss_reload_keeps_dirty_preview(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-miss-XXXXXX");
 
    ggaze_window_clear_texture_cache(fx.p_win);
@@ -1409,7 +1487,7 @@ test_cache_miss_reload_keeps_dirty_preview(void) {
  * the repro below could pass simply because delete had stopped working. */
 static void
 test_delete_behind_prompt_deletes_the_marked_file(void) {
-   DirtyFixture             fx;
+   DirtyFixture             fx      = {0};
    static const char *const c_two[] = {"plain.jpg", "rot6.jpg", NULL};
    fixture_open_clean(&fx, "ggaze-enhance-delctl-XXXXXX", c_two);
    mark_file_and_return(&fx, "rot6.jpg");
@@ -1439,7 +1517,7 @@ test_delete_behind_prompt_deletes_the_marked_file(void) {
  * honest outcome is: delete nothing, say so, leave plain.jpg alone. */
 static void
 test_delete_ignores_marks_pruned_behind_the_prompt(void) {
-   DirtyFixture             fx;
+   DirtyFixture             fx      = {0};
    static const char *const c_two[] = {"plain.jpg", "rot6.jpg", NULL};
    fixture_open_clean(&fx, "ggaze-enhance-delprune-XXXXXX", c_two);
    mark_file_and_return(&fx, "rot6.jpg");
@@ -1473,7 +1551,7 @@ test_delete_ignores_marks_pruned_behind_the_prompt(void) {
  * required -- and answering Cancel there leaves everything on disk. */
 static void
 test_delete_confirm_uses_the_captured_count(void) {
-   DirtyFixture             fx;
+   DirtyFixture             fx       = {0};
    static const char *const c_four[] = {"plain.jpg", "rgba.png", "rot6.jpg",
                                         "small.png", NULL};
    fixture_open_clean(&fx, "ggaze-enhance-delthree-XXXXXX", c_four);
@@ -1515,7 +1593,7 @@ test_delete_confirm_uses_the_captured_count(void) {
  * rgba.png (it used to jump on to rot6.jpg). */
 static void
 test_delete_does_not_advance_past_an_unseen_image(void) {
-   DirtyFixture             fx;
+   DirtyFixture             fx        = {0};
    static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
                                          NULL};
    fixture_open_clean(&fx, "ggaze-enhance-delnav-XXXXXX", c_three);
@@ -1543,7 +1621,7 @@ test_delete_does_not_advance_past_an_unseen_image(void) {
  * both the trash and the delete side of the guard are covered. */
 static void
 test_trash_refuses_a_target_that_vanished(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-gonetrash-XXXXXX");
 
    fire(fx.p_win, "win.trash"); /* `d`, captured on plain.jpg */
@@ -1574,7 +1652,7 @@ test_trash_refuses_a_target_that_vanished(void) {
  * running (newest wins), the second must be the one retried. */
 static void
 test_second_queued_request_displaces_the_first(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-displace-XXXXXX");
    GError *p_err = NULL;
    char   *c_a   = g_dir_make_tmp("ggaze-enhance-dispA-XXXXXX", &p_err);
@@ -1618,7 +1696,7 @@ test_second_queued_request_displaces_the_first(void) {
  * request, so the queue is dropped instead. */
 static void
 test_quit_continuation_drops_the_queued_request(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-quitdrop-XXXXXX");
    gtk_window_present(GTK_WINDOW(fx.p_win));
    ggtest_drain_main(300);
@@ -1661,7 +1739,7 @@ test_move_acts_on_the_targets_captured_at_click(void) {
    g_assert_no_error(p_err);
    set_one_destination("dest one", c_dst);
 
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-movecapsrc-XXXXXX");
    click_move_row(&fx); /* captures plain.jpg, raises the prompt */
    g_assert_nonnull(ggtest_wait_for_dialog(GTK_WINDOW(fx.p_win), "Cancel"));
@@ -1695,7 +1773,7 @@ test_move_does_not_advance_past_an_unseen_image(void) {
    g_assert_no_error(p_err);
    set_one_destination("dest one", c_dst);
 
-   DirtyFixture             fx;
+   DirtyFixture             fx        = {0};
    static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
                                          NULL};
    fixture_open_clean(&fx, "ggaze-enhance-movenavsrc-XXXXXX", c_three);
@@ -1725,7 +1803,7 @@ test_move_advances_when_the_current_image_moves(void) {
    g_assert_no_error(p_err);
    set_one_destination("dest one", c_dst);
 
-   DirtyFixture             fx;
+   DirtyFixture             fx        = {0};
    static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
                                          NULL};
    fixture_open_clean(&fx, "ggaze-enhance-movecursrc-XXXXXX", c_three);
@@ -1763,7 +1841,7 @@ test_move_advances_when_the_current_image_moves(void) {
  * is what makes the pre-loop assertion below possible. */
 static void
 test_trash_advances_when_the_current_image_is_binned(void) {
-   DirtyFixture             fx;
+   DirtyFixture             fx        = {0};
    static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
                                          NULL};
    fixture_open_clean(&fx, "ggaze-enhance-trashcur-XXXXXX", c_three);
@@ -1802,7 +1880,7 @@ test_trash_advances_when_the_current_image_is_binned(void) {
  * test_delete_does_not_advance_past_an_unseen_image. */
 static void
 test_trash_does_not_advance_past_an_unseen_image(void) {
-   DirtyFixture             fx;
+   DirtyFixture             fx        = {0};
    static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
                                          NULL};
    fixture_open_clean(&fx, "ggaze-enhance-trashnav-XXXXXX", c_three);
@@ -1862,7 +1940,7 @@ test_trash_does_not_advance_past_an_unseen_image(void) {
  * ordering _enhance_dispose clears the slot before releasing for. */
 static void
 test_dispose_under_a_live_prompt_releases_it(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-disposeprompt-XXXXXX");
    GError *p_err = NULL;
    char   *c_other =
@@ -1932,7 +2010,7 @@ test_dispose_under_a_live_prompt_releases_it(void) {
  * Alt+F4 actually takes and the one that would destroy the window. */
 static void
 test_close_request_blocked_while_prompt_is_up(void) {
-   DirtyFixture fx;
+   DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-closeundeprompt-XXXXXX");
    gtk_window_present(GTK_WINDOW(fx.p_win));
    ggtest_drain_main(300);
