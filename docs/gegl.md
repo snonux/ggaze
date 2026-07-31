@@ -56,7 +56,13 @@ editing remains a non-goal.
   behind an input-only modal grab and can both move navigator.current and
   prune marks out from under the dialog. A captured
   target that has since been removed is refused with a status line rather than
-  acted on. Toggling every preset back off, `0`, or `Esc` discards directly
+  acted on. If the window is disposed while the prompt is still up, the prompt
+  is **cancelled** (a `GCancellable` handed to `gtk_alert_dialog_choose`) and
+  resolves as Cancel: by then the preview and the engine a Save would need are
+  already gone, so the only thing left to do is release everything the prompt
+  was holding — without that cancel nothing could ever finish the dialog's
+  `GTask` and its contexts leaked. Toggling every preset back off, `0`, or
+  `Esc` discards directly
   (no prompt). Slideshow auto-advance discards a dirty preview silently
   instead of blocking on an unanswerable prompt.
 - Export format: defaults to the original extension (JPEG quality 95); a

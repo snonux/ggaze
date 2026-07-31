@@ -848,7 +848,10 @@ _save_prompt_show(GgazeWindow *p_win, const _Request *p_req) {
    p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
    p_ctx->t_req    = *p_req;
    p_ctx->p_cancel = g_cancellable_new();
-   g_clear_object(&p_win->p_prompt_cancel); /* no prompt can be up here */
+   /* Already NULL -- _maybe_save_then's b_save_prompt guard is what gets us
+    * here, and _save_dialog_cb clears the slot with that flag. Cleared anyway
+    * so the slot can never silently accumulate a second ref. */
+   g_clear_object(&p_win->p_prompt_cancel);
    p_win->p_prompt_cancel = (GCancellable *)g_object_ref(p_ctx->p_cancel);
    p_win->b_save_prompt   = TRUE;
    p_win->b_prompt_quits  = (p_req->fn == _proceed_quit);
