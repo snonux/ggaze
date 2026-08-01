@@ -453,12 +453,19 @@ click_move_row(DirtyFixture *p_fx) {
  * The subtests below build their windows by hand instead of using
  * DirtyFixture, but they keep texture pointers across main-loop iterations for
  * exactly the same reasons, so they take the same owned refs through
- * ref_viewer_texture() and release them in their teardown block -- after the
- * final drain, like fixture_teardown, so nothing the drain runs can invalidate
- * a pointer while it is still comparable. Borrowing happened to be safe here
- * only because none of these subtests clears the texture cache; that is a
- * property of the tests, not of the code they exercise, and 3w0 is what
- * borrowing costs once it stops holding.
+ * ref_viewer_texture(). A texture a subtest still compares against once its
+ * teardown has started is released in that teardown block AFTER the final
+ * drain, like fixture_teardown, so nothing the drain runs can invalidate a
+ * pointer while it is still comparable.
+ *
+ * That is the rule for the subtests' own locals, not a blanket claim about
+ * every owned ref below: assert_hold_cycle_works() releases its two textures
+ * inside the helper, before its caller's final drain, because the cycle it
+ * owns them for has finished by then and nothing compares them afterwards.
+ *
+ * Borrowing happened to be safe here only because none of these subtests
+ * clears the texture cache; that is a property of the tests, not of the code
+ * they exercise, and 3w0 is what borrowing costs once it stops holding.
  */
 
 /* Requirement 2/3: applying a preset runs off the main thread and swaps in a
@@ -1459,6 +1466,12 @@ test_cache_miss_reload_keeps_dirty_preview(void) {
     * ref this would compare a live pointer with a dangling one -- true only
     * for as long as the reload's texture misses the freed address. */
    ggaze_window_set_hold_original(fx.p_win, TRUE);
+   /* p_reloaded is the one BORROWED texture local left in this file, and it is
+    * correct only because nothing between this line and the last comparison
+    * three lines down iterates the main loop -- so nothing can drop the
+    * viewer's reference underneath it. Putting a drain in that gap would
+    * restore exactly the dangling comparison 3w0 removed; take an owned ref
+    * through ref_viewer_texture() instead, as the rest of the file does. */
    GdkTexture *p_reloaded = viewer_texture(fx.p_win);
    g_assert_nonnull(p_reloaded);
    g_assert_true(p_reloaded != fx.p_mod);
