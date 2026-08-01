@@ -370,7 +370,7 @@ test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 # (is_parallel : false since 5w0, and --repeat runs a non-parallel test strictly
 # one at a time: mesonbuild/mtest.py _run_tests awaits every outstanding future
 # before AND after such a runner) lowers the odds without conferring immunity.
-# Click or type during those 72 s of enhance_flow and you can hit it. So soak
+# Click or type during enhance_flow's ~75 s and you can hit it. So soak
 # -- and run day to day -- with the xvfb command above, not with the session
 # display.
 
