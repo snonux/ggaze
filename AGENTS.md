@@ -52,6 +52,18 @@ env -u WAYLAND_DISPLAY XDG_RUNTIME_DIR=$(mktemp -d) \
   xvfb-run -a meson test -C build --suite integration
 ```
 
+**Use that form for day-to-day local runs, not just for reproducing CI.**
+Several suites present real toplevels — `test_grid_select_gate`,
+`test_settings_ui`, `test_delete_safety`, `test_enhance_flow` (5 sites) and
+`/open_external/popup_really_maps` (`grep -rn gtk_window_present tests/` for
+the current list) — so a run against your live session steals focus and pops
+windows over whatever you are doing.
+The command above renders into Xvfb instead: nothing reaches your screen. It
+is also the *stronger* lane for popover coverage, since popovers only map on
+X11 — so preferring it locally costs nothing except GDK-Wayland-backend
+coverage. Run the live-display lane before claiming a lane green on Wayland;
+otherwise stay in Xvfb and keep your desktop.
+
 Backends are not equivalent, so a green Wayland run is not evidence about CI:
 a popover on a never-presented toplevel maps on X11 but not on Wayland, and
 X11 seat grabs are display-global (see `tests/meson.build`, "suites that need
