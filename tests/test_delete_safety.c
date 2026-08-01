@@ -331,6 +331,48 @@ typedef struct {
 static const char *const CONFIRM_FILES[] = {"plain.jpg", "rot6.jpg",
                                             "small.png"};
 
+/* Wait for a dialog carrying a c_button button and return it, naming the
+ * toplevels that DO exist if none turns up. Call it through ASSERT_DIALOG_UP().
+ *
+ * The bare g_assert_nonnull(ggtest_wait_for_dialog(...)) this replaces said
+ * "should not be NULL" and nothing else, which cannot tell "the confirm never
+ * appeared" from "it appeared and then left the toplevel list again" -- and
+ * the fixture below is the most exposed wait in the tree to the second,
+ * because it deliberately calls gtk_window_present(): on a live session the
+ * confirm therefore has real keyboard focus and a real window manager able to
+ * close it, and a close arrives here as a plain Cancel answer, silently (task
+ * 8w0; see "A LIVE COMPOSITOR IS NOT A NEUTRAL DISPLAY EITHER" in
+ * tests/meson.build for why this dialog, unlike the Save prompt, keeps the
+ * cancel button that makes it silent).
+ *
+ * c_loc is the call site, which g_error() cannot supply: it prints the file
+ * and line of the g_error() itself, i.e. this helper's.
+ *
+ * tests/test_enhance_flow.c carries the same pair. The shared home for both is
+ * tests/helpers/gtk_helpers.{c,h}; move it there the next time that header is
+ * opened for other reasons.
+ *
+ * The GString is never freed: g_error() does not return. */
+static GtkWindow *
+assert_dialog_up_at(const char *c_loc, GtkWindow *p_own, const char *c_button) {
+   GtkWindow *p_dlg = ggtest_wait_for_dialog(p_own, c_button);
+   if (p_dlg != NULL) {
+      return (p_dlg);
+   }
+   GString *p_msg  = g_string_new(NULL);
+   GList   *p_tops = gtk_window_list_toplevels();
+   for (GList *p_l = p_tops; p_l != NULL; p_l = p_l->next) {
+      g_string_append_printf(p_msg, " %s%s", G_OBJECT_TYPE_NAME(p_l->data),
+                             (p_l->data == p_own) ? "(own)" : "");
+   }
+   g_list_free(p_tops);
+   g_error("%s: no toplevel carries a \"%s\" button; toplevels present:%s",
+           c_loc, c_button, p_msg->str);
+}
+
+#define ASSERT_DIALOG_UP(p_own, c_button)                                      \
+   assert_dialog_up_at(G_STRLOC, (p_own), (c_button))
+
 /* Open a window on a fresh folder of CONFIRM_FILES, mark them all, press `D`
  * and wait for the confirm dialog. Leaves that dialog UP: every caller must
  * resolve it (answer, dismiss or dispose) before fixture_confirm_teardown,
@@ -358,7 +400,7 @@ fixture_confirm_open(ConfirmFixture *p_fx, const char *c_tmpl) {
    drain_main(100);
    p_fx->u_ref = ((GObject *)p_fx->p_win)->ref_count;
    fire(p_fx->p_win, "win.delete"); /* >1 marks -> the confirm dialog */
-   g_assert_nonnull(ggtest_wait_for_dialog(GTK_WINDOW(p_fx->p_win), "Delete"));
+   ASSERT_DIALOG_UP(GTK_WINDOW(p_fx->p_win), "Delete");
    /* The dialog's _DeleteCtx owns a window ref for as long as it lives. */
    g_assert_cmpuint(((GObject *)p_fx->p_win)->ref_count, ==, p_fx->u_ref + 1);
    g_object_unref(p_first);
@@ -489,8 +531,7 @@ test_dismissing_the_confirm_deletes_nothing(void) {
    ConfirmFixture fx;
    fixture_confirm_open(&fx, "ggaze-delsafe-dismissconfirm-XXXXXX");
 
-   GtkWindow *p_dlg = ggtest_find_dialog(GTK_WINDOW(fx.p_win), "Delete");
-   g_assert_nonnull(p_dlg);
+   GtkWindow *p_dlg = ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Delete");
    gtk_window_close(p_dlg); /* what Escape does */
    drain_main(300);
 
