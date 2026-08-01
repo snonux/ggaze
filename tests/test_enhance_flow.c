@@ -314,8 +314,8 @@ assert_ref_settled(DirtyFixture *p_fx) {
    g_assert_cmpuint(((GObject *)p_fx->p_win)->ref_count, ==, p_fx->u_ref);
 }
 
-/* Wait for a dialog carrying a c_button button, and say something useful if
- * none turns up.
+/* Wait for a dialog carrying a c_button button and return it, saying something
+ * useful if none turns up. Call it through ASSERT_DIALOG_UP() below.
  *
  * The bare g_assert_nonnull(ggtest_wait_for_dialog(...)) this replaces reports
  * "should not be NULL" and nothing else, which cannot tell the two halves of
@@ -325,14 +325,22 @@ assert_ref_settled(DirtyFixture *p_fx) {
  * window GtkAlertDialog actually puts up) means the button moved, none at all
  * means the dialog is gone. 8w0 measured the second, and only on a display
  * with a window manager: the prompt was answered without this file clicking
- * anything, which GTK reports as an ordinary button index and nothing else.
- * See "A LIVE COMPOSITOR IS NOT A NEUTRAL DISPLAY EITHER" in tests/meson.build.
+ * anything, which GTK reported as an ordinary button index and nothing else.
+ * See "A LIVE COMPOSITOR IS NOT A NEUTRAL DISPLAY EITHER" in tests/meson.build
+ * (window.c's Save prompt no longer configures a cancel button, so the same
+ * close now also leaves a g_message behind).
+ *
+ * c_loc is the CALL SITE, which g_error() alone cannot give: it prints the file
+ * and line of the g_error() itself, i.e. this helper, and 13 of the 15 sites
+ * wait for the same "Cancel" button -- so in a subtest that waits twice, GLib's
+ * TAP line narrows the failure to the subtest but no further.
  *
  * The GString is never freed: g_error() does not return. */
-static void
-assert_dialog_up(GtkWindow *p_own, const char *c_button) {
-   if (ggtest_wait_for_dialog(p_own, c_button) != NULL) {
-      return;
+static GtkWindow *
+assert_dialog_up_at(const char *c_loc, GtkWindow *p_own, const char *c_button) {
+   GtkWindow *p_dlg = ggtest_wait_for_dialog(p_own, c_button);
+   if (p_dlg != NULL) {
+      return (p_dlg);
    }
    GString *p_msg  = g_string_new(NULL);
    GList   *p_tops = gtk_window_list_toplevels();
@@ -341,16 +349,19 @@ assert_dialog_up(GtkWindow *p_own, const char *c_button) {
                              (p_l->data == p_own) ? "(own)" : "");
    }
    g_list_free(p_tops);
-   g_error("no toplevel carries a \"%s\" button; toplevels present:%s",
-           c_button, p_msg->str);
+   g_error("%s: no toplevel carries a \"%s\" button; toplevels present:%s",
+           c_loc, c_button, p_msg->str);
 }
+
+#define ASSERT_DIALOG_UP(p_own, c_button)                                      \
+   assert_dialog_up_at(G_STRLOC, (p_own), (c_button))
 
 /* Answer the outstanding Save/Discard/Cancel prompt. Asserts one really is
  * up (so a subtest can never silently "pass" because no dialog appeared). */
 static void
 answer_prompt(DirtyFixture *p_fx, const char *c_button) {
    GtkWindow *p_own = GTK_WINDOW(p_fx->p_win);
-   assert_dialog_up(p_own, c_button);
+   ASSERT_DIALOG_UP(p_own, c_button);
    g_assert_true(ggtest_click_dialog_button(p_own, c_button));
    ggtest_drain_main(400);
    g_assert_cmpuint(ggtest_count_dialogs(p_own, "Cancel"), ==, 0);
@@ -903,7 +914,7 @@ test_close_request_gates_dirty_enhance(void) {
    g_signal_emit_by_name(p_win, "close-request", &b_stop);
    g_assert_true(b_stop);                               /* close blocked */
    g_assert_true(ggaze_window_enhance_is_dirty(p_win)); /* still dirty */
-   assert_dialog_up(GTK_WINDOW(p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(p_win), "Cancel");
 
    /* Answer it, so nothing is left pending across teardown. */
    g_assert_true(ggtest_click_dialog_button(GTK_WINDOW(p_win), "Cancel"));
@@ -943,6 +954,57 @@ test_cancel_keeps_preview_and_frees_ctx(void) {
    assert_showing(fx.p_win, "plain.jpg");                  /* did not move */
    g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);    /* still shown */
    assert_ref_settled(&fx);
+
+   fixture_teardown(&fx);
+}
+
+/* Task 8w0: getting rid of the question is not an answer either. The Save
+ * prompt's half of test_delete_safety.c's
+ * test_dismissing_the_confirm_deletes_nothing, and the assertion 8w0's
+ * diagnosis was missing -- until now, "a close-request on the Save prompt
+ * resolves it like Cancel, silently" was a comment nobody had executed.
+ *
+ * gtk_window_close() on the dialog's OWN toplevel is what Escape does
+ * (gtk/deprecated/gtkdialog.c binds Escape to ::close, which calls
+ * gtk_window_close()) and what a window manager's close button does
+ * (gtkmain.c turns GDK_DELETE into gtk_window_emit_close_request). Neither a
+ * window manager nor a real key is needed to drive it from here, so this runs
+ * on every lane -- including the Xvfb one, where the flake it pins cannot
+ * happen by itself.
+ *
+ * Both halves of the outcome are asserted, and each pins a decision made two
+ * functions apart in window.c:
+ *
+ *   - the STATE: preview kept, deferred select not run, ctx released. That is
+ *     _save_prompt_outcome's classification plus _save_dialog_cb's terminal
+ *     _save_ctx_finish(ctx, FALSE), and it is what the flake did silently.
+ *   - the REPORT: one g_message. It exists only because _save_prompt_show
+ *     configures no cancel button (8w0); put that call back and the close
+ *     returns button index 0 instead, _report_unanswered_prompt never runs,
+ *     and g_test_assert_expected_messages() fails while every state assertion
+ *     below still passes -- which is exactly the invisibility 8w0 was filed
+ *     for. */
+static void
+test_closing_the_prompt_keeps_the_preview(void) {
+   DirtyFixture fx = {0};
+   fixture_open(&fx, "ggaze-enhance-closeprompt-XXXXXX");
+
+   activate_other_cell(&fx); /* the deferred change the prompt now gates */
+   GtkWindow *p_dlg = ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
+
+   g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
+                         "*prompt dismissed*");
+   gtk_window_close(p_dlg); /* what Escape and the WM close button do */
+   ggtest_drain_main(400);
+   g_test_assert_expected_messages();
+
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    0);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win)); /* preview kept */
+   assert_showing(fx.p_win, "plain.jpg");                  /* select not run */
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);    /* still shown */
+   assert_ref_settled(&fx); /* the ctx was released, not orphaned */
+   g_assert_true(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));
 
    fixture_teardown(&fx);
 }
@@ -1237,7 +1299,7 @@ test_prompt_acts_on_the_file_it_was_raised_for(void) {
 
    fire(fx.p_win, "win.trash"); /* `d`, pressed on plain.jpg */
    ggtest_drain_main(150);
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
 
    ggaze_window_next(fx.p_win); /* what the slideshow tick does */
    ggtest_drain_main(300);
@@ -1271,7 +1333,7 @@ test_request_behind_stale_prompt_is_not_run(void) {
 
    fire(fx.p_win, "win.trash"); /* prompt, raised for plain.jpg */
    ggtest_drain_main(150);
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
    ggaze_window_next(fx.p_win); /* clears the mask under the live dialog */
    ggtest_drain_main(200);
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
@@ -1305,7 +1367,7 @@ test_save_with_no_preview_left_reports_and_proceeds(void) {
 
    fire(fx.p_win, "win.trash"); /* `d`, pressed on plain.jpg */
    ggtest_drain_main(150);
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
    ggaze_window_next(fx.p_win); /* clears the mask under the live dialog */
    ggtest_drain_main(200);
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
@@ -1569,7 +1631,7 @@ test_delete_ignores_marks_pruned_behind_the_prompt(void) {
 
    fire(fx.p_win, "win.delete");
    ggtest_drain_main(150);
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
 
    remove_behind_the_prompt(&fx, "rot6.jpg");
    assert_marked_count(fx.p_win, 0); /* the mark really WAS pruned */
@@ -1608,7 +1670,7 @@ test_delete_confirm_uses_the_captured_count(void) {
 
    fire(fx.p_win, "win.delete");
    ggtest_drain_main(150);
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
    remove_behind_the_prompt(&fx, "rgba.png");
    remove_behind_the_prompt(&fx, "rot6.jpg");
    assert_marked_count(fx.p_win, 1); /* pruned 3 -> 1 */
@@ -1616,17 +1678,17 @@ test_delete_confirm_uses_the_captured_count(void) {
    /* Answered by hand rather than through answer_prompt(): the confirm
     * dialog this must raise has a "Cancel" button of its own, so the
     * "no dialog remains" assertion there would fire on the very thing this
-    * subtest is looking for. The assert_dialog_up() ahead of each click is
+    * subtest is looking for. The ASSERT_DIALOG_UP() ahead of each click is
     * what answer_prompt() does for its own click, and it is not decoration
     * here: the 3 s of draining the two remove_behind_the_prompt() calls above
     * spend with the prompt on screen is where 8w0's flake was reproduced, and
     * ggtest_click_dialog_button()'s bare FALSE says nothing about why. */
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Discard");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Discard");
    g_assert_true(ggtest_click_dialog_button(GTK_WINDOW(fx.p_win), "Discard"));
    ggtest_drain_main(400);
 
    /* The >1-mark confirm must still be raised, for the captured three. */
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Delete");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Delete");
    g_assert_true(ggtest_click_dialog_button(GTK_WINDOW(fx.p_win), "Cancel"));
    ggtest_drain_main(300);
    g_assert_true(file_exists_in(fx.c_dir, "small.png")); /* Cancel: intact */
@@ -1650,7 +1712,7 @@ test_delete_does_not_advance_past_an_unseen_image(void) {
 
    fire(fx.p_win, "win.delete"); /* `D` on plain.jpg, nothing marked */
    ggtest_drain_main(150);
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
    ggaze_window_next(fx.p_win); /* what the slideshow tick does */
    ggtest_drain_main(300);
    assert_showing(fx.p_win, "rgba.png");
@@ -1675,7 +1737,7 @@ test_trash_refuses_a_target_that_vanished(void) {
 
    fire(fx.p_win, "win.trash"); /* `d`, captured on plain.jpg */
    ggtest_drain_main(150);
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
    remove_behind_the_prompt(&fx, "plain.jpg");
 
    answer_prompt(&fx, "Discard");
@@ -1791,7 +1853,7 @@ test_move_acts_on_the_targets_captured_at_click(void) {
    DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-movecapsrc-XXXXXX");
    click_move_row(&fx); /* captures plain.jpg, raises the prompt */
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
    ggaze_window_next(fx.p_win); /* what the slideshow tick does */
    ggtest_drain_main(300);
    assert_showing(fx.p_win, "rot6.jpg");
@@ -1937,7 +1999,7 @@ test_trash_does_not_advance_past_an_unseen_image(void) {
 
    fire(fx.p_win, "win.trash"); /* `d` on plain.jpg, nothing marked */
    ggtest_drain_main(150);
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
    ggaze_window_next(fx.p_win); /* what the slideshow tick does */
    ggtest_drain_main(300);
    assert_showing(fx.p_win, "rgba.png");
@@ -2002,7 +2064,7 @@ test_dispose_under_a_live_prompt_releases_it(void) {
    activate_other_cell(&fx);              /* raises the prompt (a _FileCtx) */
    ggaze_window_open(fx.p_win, p_target); /* parked behind it (an _OpenCtx) */
    ggtest_drain_main(200);
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
    /* Three contexts now hold a window ref each, on top of the count the
     * fixture settled at while merely dirty: the prompt's own _SaveCtx, the
     * _FileCtx carrying the deferred grid select it gates, and the parked
@@ -2066,7 +2128,7 @@ test_close_request_blocked_while_prompt_is_up(void) {
 
    fire(fx.p_win, "win.next"); /* raises the prompt */
    ggtest_drain_main(150);
-   assert_dialog_up(GTK_WINDOW(fx.p_win), "Cancel");
+   ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
 
    ggaze_window_next(fx.p_win); /* what the slideshow tick does */
    ggtest_drain_main(300);
@@ -2122,6 +2184,8 @@ static void
 add_prompt_outcome_tests(void) {
    g_test_add_func("/enhance_flow/cancel_keeps_preview_and_frees_ctx",
                    test_cancel_keeps_preview_and_frees_ctx);
+   g_test_add_func("/enhance_flow/closing_the_prompt_keeps_the_preview",
+                   test_closing_the_prompt_keeps_the_preview);
    g_test_add_func("/enhance_flow/discard_applies_deferred_grid_select",
                    test_discard_applies_deferred_grid_select);
    g_test_add_func("/enhance_flow/save_exports_then_applies_deferred_select",
