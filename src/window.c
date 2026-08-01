@@ -791,13 +791,13 @@ _save_prompt_outcome(const _SaveCtx *p_ctx, const GError *p_err) {
  * ggaze tearing the window down under the dialog, DISMISSED is the dialog
  * going away without a choice.
  *
- * DISMISSED is not reachable while _save_prompt_show configures a cancel
- * button: GTK's response_cb turns a delete-event into that button's index
- * (cancel_return), so an Escape/WM-close arrives as a plain Cancel answer, and
- * GTK_DIALOG_ERROR_DISMISSED is only produced when no cancel button is set
- * (gtk 4.22.4 gtkalertdialog.c). The branch stays because that is a GTK
- * configuration detail, not an invariant of this callback -- and it is also
- * where any genuinely unexpected failure would surface. */
+ * DISMISSED is the arm an Escape or a window manager closing the dialog takes,
+ * and it only is because _save_prompt_show configures NO cancel button: with
+ * one, GTK's response_cb returns that button's index (cancel_return) for every
+ * negative response instead of raising GTK_DIALOG_ERROR_DISMISSED (gtk 4.22.4
+ * gtkalertdialog.c:620), which is exactly the silence task 8w0 was sent to
+ * explain. See _save_prompt_show for that decision and its price. The delete
+ * confirm still sets one, for the opposite reason (aw0). */
 static void
 _report_unanswered_prompt(_PromptOutcome e_outcome) {
    if (e_outcome == _PROMPT_CANCELLED) {
@@ -810,20 +810,22 @@ _report_unanswered_prompt(_PromptOutcome e_outcome) {
 
 /* Alert-dialog response: 0=Cancel, 1=Discard, 2=Save.
  *
- * "0" does not mean the user pressed Cancel; it means the prompt ended in the
- * cancel button _save_prompt_show named. Escape and a window manager closing
- * the dialog both arrive that way -- gtkmain.c turns GDK_DELETE into
+ * "0" really does mean the Cancel button was pressed, because
+ * _save_prompt_show configures no cancel button: a prompt that goes away
+ * without a press comes back as -1 plus GTK_DIALOG_ERROR_DISMISSED and is
+ * reported by _report_unanswered_prompt above. What is still NOT
+ * distinguishable is Escape from a window manager closing the dialog -- both
+ * are one signal by the time GTK sees them (gtkmain.c turns GDK_DELETE into
  * gtk_window_emit_close_request, gtk_window_close() does the same for Escape,
- * GtkDialog's close_request answers GTK_RESPONSE_DELETE_EVENT, and
- * gtkalertdialog.c's response_cb maps that negative response onto
- * cancel_return whenever a cancel button is configured (gtk 4.22.4). That is
- * the right OUTCOME for all three -- keep the preview, do not proceed -- but
- * it is also why "the prompt disappeared and nothing was logged" is a real
- * state and not a contradiction: it is _PROMPT_ANSWERED, so
- * _report_unanswered_prompt below never runs. Task 8w0 chased that on a
- * managed display; see "A LIVE COMPOSITOR IS NOT A NEUTRAL DISPLAY EITHER" in
- * tests/meson.build. Distinguishing the three is not possible from here: they
- * are the same signal by the time GTK reports an index. */
+ * and gtk/deprecated/gtkdialog.c's close_request answers
+ * GTK_RESPONSE_DELETE_EVENT for either) -- but that split is not the useful
+ * one. The useful one, "a button was pressed" vs "nobody pressed anything",
+ * is what this callback now has, and it is what task 8w0 lacked when a prompt
+ * vanished on a managed display with nothing in the log; see "A LIVE
+ * COMPOSITOR IS NOT A NEUTRAL DISPLAY EITHER" in tests/meson.build.
+ *
+ * All three end in the same place either way: keep the preview, do not
+ * proceed. */
 static void
 _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
    _SaveCtx    *p_ctx = (_SaveCtx *)p_data;
@@ -900,7 +902,21 @@ _save_prompt_show(GgazeWindow *p_win, const _Request *p_req) {
    static const char *const c_btns[] = {"Cancel", "Discard", "Save", NULL};
    gtk_alert_dialog_set_buttons(p_dlg, c_btns);
    gtk_alert_dialog_set_default_button(p_dlg, 2);
-   gtk_alert_dialog_set_cancel_button(p_dlg, 0);
+   /* No gtk_alert_dialog_set_cancel_button() on purpose (8w0), unlike
+    * _delete_confirm_ask. With one set, GTK's response_cb answers every
+    * negative response -- Escape and a WM close both arrive as
+    * GTK_RESPONSE_DELETE_EVENT -- with that button's index (gtk 4.22.4
+    * gtkalertdialog.c:620), so "the prompt vanished without an answer" was
+    * indistinguishable from "the user pressed Cancel" and nothing was logged.
+    * Without one, that close comes back as -1 plus GTK_DIALOG_ERROR_DISMISSED,
+    * which _report_unanswered_prompt says out loud. The OUTCOME is unchanged:
+    * index 0 and _PROMPT_DISMISSED both end in _save_ctx_finish(p_ctx, FALSE).
+    * The price, stated because it is a real one: an ordinary user pressing
+    * Escape now logs a line too. It buys the only split that was ever
+    * available -- a button was pressed vs nobody pressed anything -- and
+    * nothing destructive rides on it: unlike the delete confirm, where -1 read
+    * as a gboolean meant "yes, delete" (aw0), -1 here matches neither the
+    * Discard nor the Save arm and falls through to the same FALSE. */
    gtk_alert_dialog_set_modal(p_dlg, TRUE);
    _SaveCtx *p_ctx = g_new(_SaveCtx, 1);
    p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
@@ -1542,7 +1558,10 @@ _delete_confirm_ask(GgazeWindow *p_win, GList *p_files) {
     * instead of GTK_DIALOG_ERROR_DISMISSED (GTK's response_cb turns a delete-
     * event into cancel_return). Belt and braces with
     * _delete_confirm_answered_yes: on a destructive dialog, "the user got rid
-    * of the question" must mean no. */
+    * of the question" must mean no. The Save prompt makes the opposite call
+    * for the opposite reason (8w0): nothing destructive rides on its
+    * non-answer, so it drops the cancel button and takes the log line that
+    * DISMISSED buys instead. */
    gtk_alert_dialog_set_cancel_button(p_dlg, _DELETE_BTN_CANCEL);
    /* No gtk_alert_dialog_set_default_button() on purpose. GtkAlertDialog
     * initialises default_button to -1 and only calls
