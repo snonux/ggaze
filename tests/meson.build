@@ -380,8 +380,14 @@ test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 # these suites were racing each other for that single grab. Measured on this
 # tree: 6 concurrent copies of /open_external/popup_structure on one Xvfb
 # failed 60 times out of 72; the same lane with --num-processes 1 was green.
-# On Wayland the race is invisible because the popup never presents at all
-# (see gtk_helpers.h), which is why only the X11 lane ever showed it.
+# The grab is taken by gdk_x11_surface_present_popup(), so the race is X11-only
+# to begin with -- and on Wayland there was additionally nothing to contend
+# for, because every popover subtest but one builds a toplevel it never
+# presents and a popup whose parent surface is unrealized never presents there
+# either (see gtk_helpers.h). That "but one" is /open_external/popup_really_maps
+# (cw0), which does present; it lives in a suite that is is_parallel : false
+# below, so it cannot reintroduce contention. Either way, only the X11 lane
+# ever showed the race.
 #
 # is_parallel : false says exactly what is true -- these tests need exclusive
 # use of a display-global resource. It is not a timing workaround and no

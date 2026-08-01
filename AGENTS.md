@@ -59,10 +59,11 @@ Several suites present real toplevels — `test_grid_select_gate`,
 the current list) — so a run against your live session steals focus and pops
 windows over whatever you are doing.
 The command above renders into Xvfb instead: nothing reaches your screen. It
-is also the *stronger* lane for popover coverage, since popovers only map on
-X11 — so preferring it locally costs nothing except GDK-Wayland-backend
-coverage. Run the live-display lane before claiming a lane green on Wayland;
-otherwise stay in Xvfb and keep your desktop.
+is also the *stronger* lane for popover coverage, since a popover on one of the
+never-presented toplevels the subtests build maps only on X11 — so preferring
+it locally costs nothing except GDK-Wayland-backend coverage. Run the
+live-display lane before claiming a lane green on Wayland; otherwise stay in
+Xvfb and keep your desktop.
 
 Backends are not equivalent, so a green Wayland run is not evidence about CI:
 a popover on a never-presented toplevel maps on X11 but not on Wayland, and

@@ -72,15 +72,51 @@ void ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx);
  * code runs -- which also means those popovers never actually map there and
  * the suites were only ever asserting on an unmapped widget tree.
  *
- * This helper fixes the ABORT, and only the abort. It does NOT close the
- * Wayland gap: measured with gtk_widget_get_mapped() from one binary across
- * three backends, the popover is mapped=1 on live X11 and on xvfb but still
- * mapped=0 on Wayland, with and without this grab -- because the blocker
- * there is the unmapped parent surface, not the missing focus widget. So a
- * green Wayland run still says nothing about presentation (mapping,
- * positioning, autohide/grab behaviour, dismissal); only the X11/xvfb lane
- * exercises that. gtk_window_present() would map it on Wayland too; that is
- * deliberately left to task cw0 rather than done quietly here.
+ * This helper fixes the ABORT, and only the abort. It does NOT itself close
+ * the Wayland gap: measured with gtk_widget_get_mapped() from one binary
+ * across three backends, the popover is mapped=1 on live X11 and on xvfb but
+ * still mapped=0 on Wayland, with and without this grab -- because the
+ * blocker there is the unmapped parent surface, not the missing focus widget.
+ * So for a window a test never presents, a green Wayland run still says
+ * nothing about presentation: mapping, positioning, autohide/grab behaviour,
+ * dismissal.
+ *
+ * WHAT HAS SINCE BEEN CLOSED, AND WHAT HAS NOT (cw0, commit 9aeb902 -- whose
+ * subject says "bw0", the deleted duplicate filing of the same task).
+ *
+ * Exactly ONE subtest presents: /open_external/popup_really_maps in
+ * tests/test_open_external.c calls gtk_window_present(), waits for the
+ * toplevel to map, fires win.open-external and asserts the popover is mapped.
+ * With a mapped parent the popover maps on Wayland and on X11 alike, so it
+ * needs no backend-conditional assertion. The other ~40 popover subtests were
+ * deliberately left as they are -- they assert construction-time facts, which
+ * are honest on both backends, and converting five suites to present would pop
+ * real windows on a developer's desktop for coverage one subtest already buys.
+ *
+ * The residual, stated here so nobody has to re-derive it:
+ *
+ *   - MAPPING is the only one of the four presentation aspects listed above
+ *     that anything asserts. Positioning is unasserted on both backends, and
+ *     so is real dismissal: the popover's "closed" -> _open_ext_closed_cb ->
+ *     _open_ext_destroy path is never driven, because popup_structure's
+ *     toggle-close fires win.open-external a second time, which is the ACTION
+ *     path, not the dismissal path.
+ *   - Only ONE of the four popover builders in src/window.c is covered, the
+ *     `e` one (_action_open_external). `a` (_enhance_build_rows /
+ *     _enhance_build_box), `!` (_action_run_script) and `m` (_move_build_box)
+ *     are not. All four share the same set_parent-onto-the-stack +
+ *     gtk_popover_popup() shape, so the single guard does catch a GTK-version
+ *     or shared-pattern regression -- but a regression confined to one of the
+ *     other three (a dropped gtk_widget_set_parent, say) would leave that
+ *     popover unmapped with nothing failing on EITHER backend.
+ *
+ * One consequence to know before touching the grabs in those builders:
+ * gtk_popover_show() (gtk/gtkpopover.c:1151-1169 in gtk-4.22.4) only reaches
+ * its gtk_widget_child_focus() arm after present_popup() has succeeded, so
+ * presenting makes that arm run on Wayland for the first time -- in that one
+ * subtest. It does NOT revive the builders' own gtk_widget_grab_focus() calls:
+ * those run BEFORE gtk_widget_set_parent(), so the button has no GtkRoot
+ * whether or not the toplevel was presented, and they stay no-ops either way.
  *
  * Verified on live Wayland, live Xwayland with GDK_BACKEND=x11, and xvfb; the
  * DRI3 warnings xvfb prints are unrelated (GSK_RENDERER=cairo, gl, ngl and

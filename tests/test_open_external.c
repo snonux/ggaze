@@ -421,21 +421,26 @@ test_open_external_popup_empty_message(void) {
    reset_editors();
 }
 
-/* Present p_win and wait until its toplevel is really mapped. Asserted, not
- * best-effort: a subtest that silently skipped the mapping it exists to check
- * would be the vacuous-green trap all over again. */
-static void
+/* Present p_win and wait until its toplevel is really mapped. The result is
+ * asserted by the caller, never ignored: a subtest that silently skipped the
+ * mapping it exists to check would be the vacuous-green trap all over again.
+ * Returns FALSE on timeout rather than aborting here, for the same reason as
+ * wait_for_popover_mapped() below -- on a genuinely broken desktop this is
+ * what fires, and "present_and_map(p_win) should be TRUE" at the call site
+ * names what timed out, where g_assert_not_reached()'s "code should not be
+ * reached" does not. */
+static gboolean
 present_and_map(GgazeWindow *p_win) {
    gtk_window_set_default_size(GTK_WINDOW(p_win), 400, 300);
    gtk_window_present(GTK_WINDOW(p_win));
    for (guint u = 0; u < 2000; u++) {
       if (gtk_widget_get_mapped(GTK_WIDGET(p_win))) {
-         return;
+         return (TRUE);
       }
       g_main_context_iteration(g_main_context_default(), FALSE);
       g_usleep(1000);
    }
-   g_assert_not_reached();
+   return (FALSE);
 }
 
 /* Wait until p_win's open-external popover reports itself mapped. Returns
@@ -453,7 +458,9 @@ wait_for_popover_mapped(GgazeWindow *p_win) {
    return (FALSE);
 }
 
-/* THE one subtest in this suite that presents its window (bw0).
+/* THE one subtest in this suite that presents its window (cw0 -- commit
+ * 9aeb902's subject says "bw0", which was the deleted duplicate filing of the
+ * same task and resolves to nothing; the rationale lives under cw0).
  *
  * Every other popover subtest here builds a GgazeWindow with g_object_new()
  * and never presents it, which is cheap and fine for what they assert --
@@ -471,13 +478,24 @@ wait_for_popover_mapped(GgazeWindow *p_win) {
  * So a green Wayland run said nothing about presentation at all. Rather than
  * make forty subtests present -- five suites popping real windows on a
  * developer's desktop, for coverage they already have -- exactly one subtest
- * presents and asserts the property the others cannot see. It needs no
- * backend-conditional assertion: with a mapped parent the popover maps on
- * Wayland and X11 alike.
+ * presents and asserts that the popover MAPS. It needs no backend-conditional
+ * assertion: with a mapped parent the popover maps on Wayland and X11 alike.
  *
- * WHAT THIS SUBTEST DOES AND DOES NOT BUY YOU, measured by deleting the
- * present_and_map() call and re-running (do this again if you edit it -- a
- * mapping assertion that cannot fail is precisely the thing being fixed):
+ * SCOPE, so this is not read as more than it is. Mapping is the only one of
+ * the four presentation aspects (mapping, positioning, autohide/grab
+ * behaviour, dismissal) that anything in the tree asserts; positioning and
+ * real dismissal are unasserted on BOTH backends -- popup_structure's
+ * toggle-close fires win.open-external a second time, which is the action
+ * path, not the "closed" -> _open_ext_closed_cb -> _open_ext_destroy path.
+ * And this covers the `e` builder only: `a`, `!` and `m` in src/window.c
+ * build their popovers independently, so a regression confined to one of
+ * them would leave that popover unmapped with nothing failing anywhere. See
+ * tests/helpers/gtk_helpers.h, "window focus", for the full residual.
+ *
+ * WHAT THIS SUBTEST DOES AND DOES NOT BUY YOU, measured by replacing the
+ * g_assert_true(present_and_map(p_win)) call below with `(void)
+ * present_and_map;` and re-running (do this again if you edit it -- a mapping
+ * assertion that cannot fail is precisely the thing being fixed):
  *
  *   - without present, on Wayland: FAILS. Here the presenting is doing real
  *     work and this subtest is the only thing in the tree that notices.
@@ -490,7 +508,17 @@ wait_for_popover_mapped(GgazeWindow *p_win) {
  * regression that left every popover unmapped would be caught here and
  * nowhere else. But be honest about which half is working: on CI this
  * subtest guards the property, and on a developer's Wayland box it also
- * guards the presenting. */
+ * guards the presenting.
+ *
+ * Re-running that falsification needs a real Wayland backend, and it does NOT
+ * need your session's -- a headless compositor gives one without a window ever
+ * reaching your screen, which is otherwise the reason to stay in Xvfb:
+ *
+ *   export XDG_RUNTIME_DIR=$(mktemp -d)
+ *   mutter --headless --virtual-monitor 1280x720 --wayland \
+ *     --wayland-display=probe &
+ *   WAYLAND_DISPLAY=probe GDK_BACKEND=wayland meson test -C build open_external
+ */
 static void
 test_open_external_popup_really_maps(void) {
    reset_editors();
@@ -505,7 +533,7 @@ test_open_external_popup_really_maps(void) {
    GgazeWindow *p_win = new_window();
    ggaze_window_open(p_win, p_file);
    drain_main(200);
-   present_and_map(p_win);
+   g_assert_true(present_and_map(p_win));
 
    fire(p_win, "win.open-external");
    g_assert_true(wait_for_popover_mapped(p_win));
