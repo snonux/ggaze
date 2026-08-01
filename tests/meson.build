@@ -336,6 +336,32 @@ test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 #
 #   env -u WAYLAND_DISPLAY XDG_RUNTIME_DIR=$(mktemp -d) \
 #     xvfb-run -a meson test -C build --suite integration
+#
+# A LIVE COMPOSITOR IS NOT A NEUTRAL DISPLAY EITHER (8w0). The mirror image of
+# that trap: the session display has a window manager, and a window manager can
+# close a window a test is asserting on. GTK maps such a close straight onto
+# the dialog's cancel button -- gtkmain.c GDK_DELETE ->
+# gtk_window_emit_close_request -> gtkdialog.c gtk_dialog_close_request ->
+# gtk_dialog_response(GTK_RESPONSE_DELETE_EVENT) -> gtkalertdialog.c
+# response_cb, which returns cancel_return whenever a cancel button is
+# configured, as both of window.c's alert dialogs configure one. The prompt
+# therefore resolves as a plain "Cancel was pressed": the dialog leaves
+# gtk_window_list_toplevels() and NOTHING is logged, because that is neither a
+# dismissal (GTK_DIALOG_ERROR_DISMISSED is unreachable with a cancel button
+# set, task 2w0) nor a cancellation. Escape reaches the same signal via
+# gtk_window_close(), so the two are not distinguishable from inside the app.
+#
+# Measured at 9aeb902 with 8 concurrent copies of test_enhance_flow against one
+# display: on the session's Wayland compositor, 1 run in 32 failed exactly that
+# way (a Save prompt asserted present by its "Cancel" button, its "Discard"
+# button gone a few lines later); on Xvfb, which runs no window manager at all,
+# the same binary produced 0 failures in 30 runs at 6-way concurrency and the
+# two subtests 8w0 was filed against produced 0 in 120. No meson lane can reach
+# that state any more -- since 5w0 this suite is is_parallel : false, and
+# --repeat runs a non-parallel test strictly one at a time (mesonbuild/mtest.py
+# _run_tests awaits every outstanding future before AND after such a runner) --
+# but several copies of the binary started BY HAND on a managed display still
+# can. Soak with the xvfb command above, not with the session display.
 
 # --- suites that need exclusive use of the display's seat grab (5w0) -------
 #
