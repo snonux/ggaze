@@ -808,7 +808,22 @@ _report_unanswered_prompt(_PromptOutcome e_outcome) {
    g_message("ggaze: Save/Discard/Cancel prompt dismissed — treated as Cancel");
 }
 
-/* Alert-dialog response: 0=Cancel, 1=Discard, 2=Save. */
+/* Alert-dialog response: 0=Cancel, 1=Discard, 2=Save.
+ *
+ * "0" does not mean the user pressed Cancel; it means the prompt ended in the
+ * cancel button _save_prompt_show named. Escape and a window manager closing
+ * the dialog both arrive that way -- gtkmain.c turns GDK_DELETE into
+ * gtk_window_emit_close_request, gtk_window_close() does the same for Escape,
+ * GtkDialog's close_request answers GTK_RESPONSE_DELETE_EVENT, and
+ * gtkalertdialog.c's response_cb maps that negative response onto
+ * cancel_return whenever a cancel button is configured (gtk 4.22.4). That is
+ * the right OUTCOME for all three -- keep the preview, do not proceed -- but
+ * it is also why "the prompt disappeared and nothing was logged" is a real
+ * state and not a contradiction: it is _PROMPT_ANSWERED, so
+ * _report_unanswered_prompt below never runs. Task 8w0 chased that on a
+ * managed display; see "A LIVE COMPOSITOR IS NOT A NEUTRAL DISPLAY EITHER" in
+ * tests/meson.build. Distinguishing the three is not possible from here: they
+ * are the same signal by the time GTK reports an index. */
 static void
 _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
    _SaveCtx    *p_ctx = (_SaveCtx *)p_data;
@@ -1416,12 +1431,21 @@ enum {
  *
  * This is a guard, not bookkeeping. choose_finish returns -1 AND sets an error
  * for every non-answer -- measured on gtk 4.22.4: a GCancellable cancel gives
- * G_IO_ERROR_CANCELLED, closing the dialog without choosing gives
+ * G_IO_ERROR_CANCELLED, and a dialog closed without an answer gives
  * GTK_DIALOG_ERROR_DISMISSED -- and -1 read as a gboolean is TRUE. The old
  * `gboolean b_ok = gtk_alert_dialog_choose_finish(...)` therefore took every
  * such non-answer as a confirmed PERMANENT delete of the captured targets
  * (task aw0). So: the error is checked first, and only the "Delete" button's
  * own index counts as a yes.
+ *
+ * Only the cancel arm of that is reachable from _delete_confirm_ask as it
+ * stands: it names _DELETE_BTN_CANCEL as the dialog's cancel button, and GTK's
+ * response_cb returns that index instead of raising DISMISSED whenever one is
+ * configured (8w0, re-reading gtkalertdialog.c). The DISMISSED measurement is
+ * what the dialog did BEFORE that call was added, in the same commit. The
+ * check stays: it is the guard for every failure this function cannot
+ * enumerate, and a destructive default must not depend on a dialog property
+ * set 100 lines away.
  *
  * A cancelled or dismissed confirm is deliberately silent. It means "no files
  * were touched", exactly like pressing Cancel, which says nothing either. */
