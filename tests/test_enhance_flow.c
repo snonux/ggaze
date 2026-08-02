@@ -962,18 +962,35 @@ test_closing_the_prompt_keeps_the_preview(void) {
     * point -- would abort the suite behind a first line naming the wrong
     * problem.
     *
-    * The obvious conclusion, "shorten the armed window", does NOT follow.
-    * Probed both ways: a foreign Gtk-WARNING is ALREADY fatal here with no
-    * expectation armed at all, because g_test_init() makes warnings fatal.
-    * Armed and unarmed both end in "Bail out!", and both name the real
-    * culprit on the `not ok` line ("Gtk-FATAL-WARNING: Unknown key
-    * gtk-modules"); arming only prepends the spurious CRITICAL. Narrowing
-    * the drain would therefore buy nothing but a slightly tidier log for a
-    * failure that is fatal either way, at the price of making a 400 ms
-    * settle race the GTask idle that carries the g_message. Left as is.
+    * Arming is what makes that fatal, and this is the correction of an
+    * earlier note here that said the opposite. That note claimed a foreign
+    * Gtk-WARNING was "ALREADY fatal with nothing armed, because
+    * g_test_init() makes warnings fatal". g_test_init() does widen the
+    * always-fatal mask to include warnings -- but main() below NARROWS it
+    * again on the very next line, g_log_set_always_fatal(G_LOG_LEVEL_ERROR |
+    * G_LOG_LEVEL_CRITICAL), and that call wins. A probe that replicates only
+    * g_test_init() therefore measures a different program than this one.
     *
-    * What WOULD be worth doing, if a Gtk warning ever does start landing
-    * here: fix the warning. It fails this suite armed or not. */
+    * Re-probed on glib 2.88.2 with BOTH lines, in this order:
+    *
+    *   unarmed : "# Gtk-WARNING: ..." then the subtest CONTINUES, "ok 1".
+    *   armed   : "GLib-CRITICAL **: Did not see expected message ..." then
+    *             "not ok - Gtk-FATAL-: ...", "Bail out!", exit 134.
+    *
+    * So the armed window really does convert a survivable warning into a
+    * suite abort whose first line names the wrong problem. Corroborated
+    * independently by a real run of this binary: the startup Gtk-WARNING
+    * this box emits ("Unknown key gtk-modules" from
+    * ~/.config/gtk-4.0/settings.ini) is survived, and the suite runs on.
+    *
+    * Left as is anyway, but for the OTHER reason the earlier note gave,
+    * which stands on its own: shortening the armed window means racing the
+    * GTask idle that carries the g_message against a shorter settle, trading
+    * a rare cosmetic mis-attribution for a real flake. The exposure is one
+    * 400 ms drain in one subtest, and nothing is expected to log in it.
+    *
+    * If a Gtk warning ever does start landing here, fix the warning -- but
+    * do not expect this suite to have failed without the arming. */
    g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
                          "*prompt dismissed*");
    gtk_window_close(p_dlg); /* what Escape and the WM close button do */
