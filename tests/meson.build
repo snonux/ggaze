@@ -412,6 +412,33 @@ test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 # Cost: the track goes from ~75 s to ~100 s wall-clock. Re-check that trade if
 # more popover suites appear -- serialising a long suite (enhance_flow is 70 s
 # on its own) is what dominates it.
+#
+# SCOPE OF THE GUARANTEE: is_parallel : false serialises tests WITHIN ONE
+# `meson test` INVOCATION, and that is all it can do (dw0). Meson has no
+# cross-process lock on the display; two invocations racing each other for the
+# same X seat grab are exactly the contention this setting exists to prevent,
+# and neither one can see the other. CI is safe because .woodpecker/ci.yml runs
+# one invocation per lane, each under its own `xvfb-run -a`, i.e. its own
+# display. A DEVELOPER IS NOT: AGENTS.md lists `meson test -C build` and
+# `meson test -C build-asan` as separate commands, so running two lanes at once
+# against one display reintroduces the race in full.
+#
+# Measured on this tree, one Xvfb display shared by two concurrent
+# invocations -- `meson test -C build-minimal --suite integration` and
+# `meson test -C build-min-asan --suite integration`:
+#
+#   lane 1 (build-minimal)  : Ok 20, Fail 0
+#   lane 2 (build-min-asan) : Ok 19, Fail 1
+#     integration - ggaze:move_undo  FAIL  killed by signal 6 SIGABRT
+#     not ok /move/popup_structure - ERROR:../tests/test_move_undo.c:644:
+#            test_move_popup_structure: 'p_pop' should not be NULL
+#
+# That is the seat-grab signature described above -- the popover was unparented
+# out from under the assertion because the other lane held the grab -- but what
+# a developer SEES is "SIGABRT" and a NULL widget, which reads like a product
+# crash rather than two test runs fighting over a display. Hence this note.
+# The fix is a display each, not a meson setting: give the second lane its own
+# `xvfb-run -a`, or just run the lanes one after another.
 test_window = executable(
    'test_window',
    ['test_window.c', ggaze_conf_h],
@@ -422,6 +449,20 @@ test_window = executable(
 )
 # is_parallel : false -- see "suites that need exclusive use of the
 # display's seat grab" above (its `a` subtest opens the preset popover).
+#
+# It only takes that grab in the GEGL lanes, though (dw0). The `a` subtest is
+# test_enhance_a_is_safe_with_and_without_gegl, and its popover only opens
+# under #if GGAZE_HAVE_GEGL; in build-minimal and build-min-asan there is no
+# p_enhancer, so win.enhance returns early, no popover opens and nothing
+# contends for the seat grab. The serialisation therefore buys nothing in
+# those two lanes and costs them 2.3 s.
+#
+# Left unconditional deliberately. Meson would need the flag varied by
+# get_option('gegl'), which is a `feature` defaulting to auto -- so the
+# condition would have to be resolved the same way the C code resolves it, in
+# a second place, to save 2.3 s in two lanes. A wrong answer there is a
+# reintroduced flake in the GEGL lanes; the right answer is worth 2.3 s. Do
+# not "optimise" this without re-reading this paragraph.
 test('window', test_window, suite : 'integration', env : fixtures_env,
    is_parallel : false)
 

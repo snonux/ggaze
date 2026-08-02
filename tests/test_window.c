@@ -274,7 +274,14 @@ test_enhance_a_is_safe_with_and_without_gegl(void) {
    fire(p_win, "win.enhance");
 #if GGAZE_HAVE_GEGL
    /* GEGL built in: `a` opens the preset popover -- no crash, and nothing
-    * was toggled, so still not dirty. */
+    * was toggled, so still not dirty.
+    *
+    * This popover is also the ONLY reason the whole suite runs
+    * is_parallel : false. In the minimal lanes the #else branch runs
+    * instead, no popover opens, and nothing here contends for the X seat
+    * grab -- so the serialisation buys those two lanes nothing and costs
+    * them 2.3 s. Kept anyway; tests/meson.build (at the `window` test) has
+    * the reasoning, so it does not need deriving again. */
    g_assert_false(ggaze_window_enhance_is_dirty(p_win));
 #else
    /* GEGL not built in: `a` must be a safe no-op that clearly reports its
