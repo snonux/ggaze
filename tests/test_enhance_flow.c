@@ -950,47 +950,54 @@ test_closing_the_prompt_keeps_the_preview(void) {
    activate_other_cell(&fx); /* the deferred change the prompt now gates */
    GtkWindow *p_dlg = GGTEST_ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
 
-   /* The tree's only g_test_expect_message(). What it costs, measured on
-    * glib 2.88.2 rather than assumed (dw0):
+   /* The tree's only g_test_expect_message(). What it costs, measured by
+    * instrumenting THIS binary -- not a probe replicating it (dw0). That
+    * distinction is the whole history of this note: main() is not just
+    * g_test_init(). It is g_test_init() at :2303 and then
+    * g_log_set_always_fatal(G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL) at
+    * :2304, which STRIPS the warning bit g_test_init() had just set. A probe
+    * that replicates only the first line measures a different program, and
+    * twice now has been transcribed in here as if it did not.
     *
-    * While an expectation is armed, GLib compares every non-debug message
-    * against the head of the queue, and on a mismatch logs "Did not see
-    * expected message ..." as a CRITICAL and marks the mismatching message
-    * G_LOG_FLAG_FATAL. So a Gtk-WARNING arriving in the drain below -- and
-    * this box does emit "Gtk-WARNING: Unknown key gtk-modules" from
-    * ~/.config/gtk-4.0/settings.ini, though at startup, well before this
-    * point -- would abort the suite behind a first line naming the wrong
-    * problem.
+    * So warnings are survivable in this suite, and ARMING is what makes one
+    * fatal -- not the other way round. While an expectation is armed GLib
+    * compares every non-debug message against the head of the queue, and on a
+    * mismatch logs "Did not see expected message ..." as a CRITICAL and marks
+    * the mismatching message G_LOG_FLAG_FATAL.
     *
-    * Arming is what makes that fatal, and this is the correction of an
-    * earlier note here that said the opposite. That note claimed a foreign
-    * Gtk-WARNING was "ALREADY fatal with nothing armed, because
-    * g_test_init() makes warnings fatal". g_test_init() does widen the
-    * always-fatal mask to include warnings -- but main() below NARROWS it
-    * again on the very next line, g_log_set_always_fatal(G_LOG_LEVEL_ERROR |
-    * G_LOG_LEVEL_CRITICAL), and that call wins. A probe that replicates only
-    * g_test_init() therefore measures a different program than this one.
+    * Measured by injecting g_log("Gtk", G_LOG_LEVEL_WARNING, "Unknown key
+    * gtk-modules") into this subtest and running it on the X11 lane, gtk
+    * 4.22.4 / glib 2.88.2:
     *
-    * Re-probed on glib 2.88.2 with BOTH lines, in this order:
+    *   before the arm : logged, the subtest CONTINUES, "ok 1", exit 0.
+    *   after the arm  : "GLib-CRITICAL **: Did not see expected message ..."
+    *                    then "not ok - Gtk-FATAL-: ...", "Bail out!", abort.
     *
-    *   unarmed : "# Gtk-WARNING: ..." then the subtest CONTINUES, "ok 1".
-    *   armed   : "GLib-CRITICAL **: Did not see expected message ..." then
-    *             "not ok - Gtk-FATAL-: ...", "Bail out!", exit 134.
+    * Note the armed line reads "Gtk-FATAL-:" with no "WARNING" in it; the
+    * mask override above is why. Quoting a "Gtk-FATAL-WARNING" here would be
+    * a tell that the text came from somewhere else.
     *
-    * So the armed window really does convert a survivable warning into a
-    * suite abort whose first line names the wrong problem. Corroborated
-    * independently by a real run of this binary: the startup Gtk-WARNING
-    * this box emits ("Unknown key gtk-modules" from
-    * ~/.config/gtk-4.0/settings.ini) is survived, and the suite runs on.
+    * KEPT AT 400 ms, re-derived rather than restated. Narrowing is possible:
+    * g_test_assert_expected_messages() disarms, so a short armed drain
+    * followed by the rest of the settle would shrink the window without
+    * changing the total. And there is room -- time from gtk_window_close() to
+    * the g_message, 5 runs each: 2.35-2.49 ms plain, 2.77-4.14 ms ASan. The
+    * armed window is ~100x what the GTask idle actually needs, so the race
+    * against that idle is not what blocks narrowing.
     *
-    * Left as is anyway, but for the OTHER reason the earlier note gave,
-    * which stands on its own: shortening the armed window means racing the
-    * GTask idle that carries the g_message against a shorter settle, trading
-    * a rare cosmetic mis-attribution for a real flake. The exposure is one
-    * 400 ms drain in one subtest, and nothing is expected to log in it.
+    * What blocks it is that the exposure narrowing removes is not the one
+    * that exists. The only foreign warning this box emits is the startup
+    * "Unknown key gtk-modules" from ~/.config/gtk-4.0/settings.ini, and it
+    * fires ~770 ms BEFORE this window opens (same instrumented run) -- i.e.
+    * outside it either way. Narrowing would buy a hypothetical, and pay for
+    * it with a constant tuned on one box, in a suite whose recorded failure
+    * mode is exactly that. It would also swap a diagnosability problem (an
+    * abort whose first line names the wrong thing) for a correctness one (a
+    * lane that fails when a loaded box stretches the idle past the constant).
     *
-    * If a Gtk warning ever does start landing here, fix the warning -- but
-    * do not expect this suite to have failed without the arming. */
+    * If a Gtk warning ever does start landing IN this window, the numbers
+    * above are what you need to narrow it safely -- but do not expect this
+    * suite to have failed without the arming. */
    g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
                          "*prompt dismissed*");
    gtk_window_close(p_dlg); /* what Escape and the WM close button do */
