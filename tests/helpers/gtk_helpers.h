@@ -110,13 +110,15 @@ void ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx);
  *     other three (a dropped gtk_widget_set_parent, say) would leave that
  *     popover unmapped with nothing failing on EITHER backend.
  *
- * One consequence to know before touching the grabs in those builders:
+ * One consequence, which is why that subtest also asserts on focus:
  * gtk_popover_show() (gtk/gtkpopover.c:1151-1169 in gtk-4.22.4) only reaches
  * its gtk_widget_child_focus() arm after present_popup() has succeeded, so
  * presenting makes that arm run on Wayland for the first time -- in that one
- * subtest. It does NOT revive the builders' own gtk_widget_grab_focus() calls:
- * those run BEFORE gtk_widget_set_parent(), so the button has no GtkRoot
- * whether or not the toplevel was presented, and they stay no-ops either way.
+ * subtest. That arm is now the ONLY thing focusing a popover row: the four
+ * builders used to grab focus themselves, but those calls ran before
+ * gtk_widget_set_parent() and so were no-ops in every condition, and dw0
+ * deleted them (see src/window.c:209-230). popup_really_maps is therefore
+ * where the reliance on child_focus is checked rather than assumed.
  *
  * Verified on live Wayland, live Xwayland with GDK_BACKEND=x11, and xvfb; the
  * DRI3 warnings xvfb prints are unrelated (GSK_RENDERER=cairo, gl, ngl and
