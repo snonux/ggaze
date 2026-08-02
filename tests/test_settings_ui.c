@@ -64,7 +64,34 @@ note_finalized(gpointer p_flag, GObject *p_where) {
 
 /* Iterate the default main context until *p_flag (raised by a
  * g_object_weak_ref(..., note_finalized, p_flag)) turns TRUE, or the bound
- * above expires. Returns whether it turned TRUE, so callers assert on it. */
+ * above expires. Returns whether it turned TRUE, so callers assert on it.
+ *
+ * p_flag is deliberately NOT volatile, and adding volatile here would be cargo
+ * cult, not a fix. Two separate reasons, both checked rather than assumed:
+ *
+ *   - It is not undefined behaviour. note_finalized() writes the flag on THIS
+ *     thread: the watched object's last reference is dropped either by the
+ *     destroy/close that precedes the loop, or by a callback that this loop's
+ *     own g_main_context_iteration() dispatches. There is no second thread,
+ *     hence no data race -- and if there were one, volatile would not be the
+ *     remedy anyway (an atomic would).
+ *   - The load cannot be hoisted out of the loop. The flag's address escapes
+ *     into g_object_weak_ref() at the call site, and every iteration calls
+ *     functions the compiler cannot see through (g_main_context_iteration(),
+ *     g_usleep(), g_get_monotonic_time()), any of which may legally write
+ *     through that pointer -- so a fresh load per iteration is required at any
+ *     optimisation level, not merely emitted by luck at -O0. Verified by
+ *     disassembly, not assumed. In the object the lanes actually build (gcc
+ *     16.1.1, -O0) the loop reloads through the parameter at
+ *     wait_for_finalized+0x39: "mov -0x18(%rbp),%rax; mov (%rax),%eax". The
+ *     same source at -O1 and -Os keeps a standalone wait_for_finalized() and
+ *     re-reads through it once per iteration ("cmpl $0x0,0x0(%rbp)"); at -O2
+ *     and clang 22 -O2 it is inlined into destroy_window_and_wait(), at -O3
+ *     inlined all the way into each subtest, and there the loop re-reads the
+ *     caller's stack slot instead ("mov 0xc(%rsp),%edx" under gcc, "cmpl
+ *     $0x0,0xc(%rsp)" under clang). Every one of them goes back to memory;
+ *     none caches the flag in a register across the calls.
+ */
 static gboolean
 wait_for_finalized(const gboolean *p_flag) {
    const gint64 i_deadline = g_get_monotonic_time() + TEARDOWN_TIMEOUT_US;
@@ -121,7 +148,36 @@ wait_for_finalized(const gboolean *p_flag) {
  * GtkWidget" in /settings/prefs_dialog_constructs, seen once under concurrent
  * load, never reproduced). That is STILL UNEXPLAINED. What is established is
  * a real cross-subtest coupling, now removed, and better failure attribution.
- * If the critical recurs, do not assume this was its cause. */
+ * If the critical recurs, do not assume this was its cause.
+ *
+ * WHY THE FLAG MAY LIVE ON THE STACK. The weak ref stays registered until it
+ * fires, so a wait that RETURNED FALSE would leave a notify aimed at this
+ * frame, to be written long after the frame is gone. It cannot return FALSE:
+ * g_assert_true() does not come back from a failure. That is not the usual
+ * "assertions are on in test builds" hand-wave -- checked against
+ * glib-2.88.2, whose installed header is byte-identical to the tarball:
+ * g_assert_true() is defined at gtestutils.h:227, OUTSIDE the G_DISABLE_ASSERT
+ * block at :261-280, which removes only g_assert() and g_assert_not_reached()
+ * (compiled both ways, g_assert_true still calls g_assertion_message; NDEBUG
+ * does nothing to it either), and g_test_init() itself refuses to run under
+ * G_DISABLE_ASSERT -- it prints "Tests were compiled with G_DISABLE_ASSERT and
+ * are likely no-ops" and exit(1)s (:364-378), before any subtest starts. The
+ * only in-glib way to make g_assert_true() return is non-fatal assertions
+ * (g_assertion_message() calls g_test_fail() and returns when they are on,
+ * gtestutils.c:3452-3457), and those have no command-line or environment
+ * switch: they are reachable solely from source in this file, via
+ * g_test_set_nonfatal_assertions() or G_TEST_OPTION_NONFATAL_ASSERTIONS passed
+ * to g_test_init(). main() below uses neither.
+ *
+ * So the coupling is real but is edit-gated, not build-gated. If you ever make
+ * this function tolerate a shortfall, give the flag a lifetime that outlives
+ * the weak ref FIRST. Do not reach for `static`: one flag shared by the four
+ * call sites means a stale weak ref left by an earlier shortfall can raise it
+ * for the NEXT wait, which would then report success for a window that never
+ * finalized -- a silent vacuous pass, strictly worse than the dangling write
+ * it was meant to prevent. Unregistering on the failure path is the honest
+ * fix: g_object_weak_unref() is valid exactly there, because a flag still
+ * FALSE means the notify has not run and the object is still alive. */
 static void
 destroy_window_and_wait(GgazeWindow *p_win) {
    gboolean b_finalized = FALSE;
@@ -242,7 +298,11 @@ test_prefs_dialog_constructs(void) {
     * g_settings bindings and the row closures (each freed via its destroy
     * notify), so the weak notify above is the check that it happened. Wait on
     * the flag rather than draining a fixed count and then asserting: the
-    * assertion is identical, but this one is not racing a busy machine. */
+    * assertion is identical, but this one is not racing a busy machine. The
+    * assertion is also what keeps b_finalized's stack lifetime safe here, for
+    * the same reason and under the same conditions as in
+    * destroy_window_and_wait() -- see "WHY THE FLAG MAY LIVE ON THE STACK"
+    * there before changing either site. */
    adw_dialog_close(ADW_DIALOG(p_dlg));
    g_assert_true(wait_for_finalized(&b_finalized));
 

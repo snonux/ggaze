@@ -157,8 +157,28 @@ void ggtest_focus_viewer(GgazeWindow *p_win);
  * gtk4-4.22.4.
  *
  * Where a test needs the destroy to settle (pending idles, in-flight loads),
- * it iterates the main context afterwards -- ggtest_drain_main() below, or
- * the suite's own local drain.
+ * it iterates the main context afterwards -- ggtest_drain_main() below, or the
+ * suite's own local drain. Which of the two things you are doing matters, and
+ * they are not interchangeable (zw0):
+ *
+ *   - A FIXED DRAIN IS A SETTLE, not a wait. It dispatches whatever is ready
+ *     and returns after a fixed number of iterations regardless of what
+ *     happened. Only use it where the assertions that FOLLOW are themselves
+ *     the check, so a settle that was too short fails loudly.
+ *   - WHERE THE DISPOSAL ITSELF IS THE PROPERTY -- "this window/dialog is
+ *     really gone" -- a fixed drain closes it by margin, not by construction,
+ *     and a drain that comes up short says nothing: it just leaks the object
+ *     onward, silently, into whichever later subtest happens to be turning the
+ *     loop when the teardown finally runs. Weak-ref the object, iterate UNTIL
+ *     the notify fires or a generous bound expires, and assert that it fired,
+ *     so a shortfall is a loud failure naming the subtest that caused it.
+ *
+ * That distinction is measured, not stylistic: a 200-iteration drain after
+ * gtk_window_destroy() left the window alive in 23 of 64 runs of
+ * test_settings_ui at 16-way concurrency with 16 CPU burners, and the wait
+ * that replaced it needed MORE than 200 iterations in 28 of 64 (worst 282,
+ * 366 ms). The numbers, the bound, and the pattern to copy are at
+ * destroy_window_and_wait() in tests/test_settings_ui.c.
  */
 
 /* --- alert dialogs -------------------------------------------------------- */
