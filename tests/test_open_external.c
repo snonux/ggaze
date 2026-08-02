@@ -199,25 +199,6 @@ popover_button_count(GtkPopover *p_pop) {
    return (u_n);
 }
 
-/* The label text of the i-th GtkButton in the popover's content box. */
-static const char *
-popover_button_label(GtkPopover *p_pop, guint u_idx) {
-   GtkWidget *p_box = gtk_popover_get_child(p_pop);
-   g_assert_nonnull(p_box);
-   GtkWidget *p_child = gtk_widget_get_first_child(p_box);
-   guint      u_i     = 0;
-   while (p_child != NULL) {
-      if (GTK_IS_BUTTON(p_child)) {
-         if (u_i == u_idx) {
-            return (gtk_button_get_label(GTK_BUTTON(p_child)));
-         }
-         u_i++;
-      }
-      p_child = gtk_widget_get_next_sibling(p_child);
-   }
-   return (NULL);
-}
-
 /* The i-th GtkButton in the popover's content box, or NULL. */
 static GtkWidget *
 popover_button(GtkPopover *p_pop, guint u_idx) {
@@ -235,6 +216,14 @@ popover_button(GtkPopover *p_pop, guint u_idx) {
       p_child = gtk_widget_get_next_sibling(p_child);
    }
    return (NULL);
+}
+
+/* The label text of the i-th GtkButton in the popover's content box, or NULL
+ * when there is no such button -- the walk lives in popover_button() only. */
+static const char *
+popover_button_label(GtkPopover *p_pop, guint u_idx) {
+   GtkWidget *p_btn = popover_button(p_pop, u_idx);
+   return (p_btn == NULL ? NULL : gtk_button_get_label(GTK_BUTTON(p_btn)));
 }
 
 /* TRUE iff a GtkEventControllerKey is attached to p_pop. */
@@ -579,8 +568,13 @@ test_open_external_popup_really_maps(void) {
     * map and no focus is taken, which is exactly the toplevel the other
     * popover subtests build. This one presents (present_and_map above), so
     * the assertion holds on both backends. */
-   g_assert_true(gtk_root_get_focus(GTK_ROOT(p_win)) ==
-                 popover_button(p_pop, 0));
+   /* cmphex on guintptr, not g_assert_true(a == b), so a failure prints both
+    * pointers instead of just "should be TRUE". There is no g_assert_cmpptr
+    * in glib (2.88.2 has cmpint/cmpuint/cmphex/cmpstr/cmpstrv/cmpfloat/
+    * cmpmem/cmpvariant and no pointer variant); cmphex is the one that takes
+    * these. */
+   g_assert_cmphex((guintptr)gtk_root_get_focus(GTK_ROOT(p_win)), ==,
+                   (guintptr)popover_button(p_pop, 0));
 
    g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));
