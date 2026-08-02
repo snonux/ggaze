@@ -213,4 +213,36 @@ gboolean ggtest_is_open_toplevel(GtkWindow *p_win);
  * main context while waiting, but not after the click -- the caller drains. */
 gboolean ggtest_click_dialog_button(GtkWindow *p_skip, const char *c_label);
 
+/* Wait for a dialog carrying a c_label button and return it; if none turns up,
+ * g_error() out naming the toplevels that DO exist. Never returns NULL. Call
+ * it through GGTEST_ASSERT_DIALOG_UP() below, which supplies c_loc.
+ *
+ * This exists because the bare g_assert_nonnull(ggtest_wait_for_dialog(...))
+ * it replaces reported "should not be NULL" and nothing else, which cannot
+ * tell the two halves of task 8w0's flake apart: a dialog that never appeared,
+ * and one that appeared and then left the toplevel list again. Naming the
+ * surviving toplevels separates them at the moment of failure -- a live
+ * GtkMessageDialog (which is what GtkAlertDialog actually puts up) means the
+ * button moved; none at all means the dialog is gone. 8w0 measured the second,
+ * and only on a display with a window manager: the prompt was answered without
+ * the test clicking anything, which GTK reported as an ordinary button index
+ * and nothing else. See "A LIVE COMPOSITOR IS NOT A NEUTRAL DISPLAY EITHER" in
+ * tests/meson.build.
+ *
+ * c_loc is the CALL SITE, which g_error() alone cannot give: it prints the
+ * file and line of the g_error() itself, i.e. this helper. Most call sites
+ * wait for the same "Cancel" button, so in a subtest that waits twice GLib's
+ * TAP line narrows the failure to the subtest but no further.
+ *
+ * Shared home since dw0. test_enhance_flow.c and test_delete_safety.c each
+ * carried a byte-identical private copy; the exposure differs between them
+ * (delete_safety's fixture calls gtk_window_present(), so on a live session
+ * its confirm has real keyboard focus and a real WM able to close it), but
+ * the code did not, so it lives here once. */
+GtkWindow *ggtest_assert_dialog_up_at(const char *c_loc, GtkWindow *p_own,
+                                      const char *c_button);
+
+#define GGTEST_ASSERT_DIALOG_UP(p_own, c_button)                               \
+   ggtest_assert_dialog_up_at(G_STRLOC, (p_own), (c_button))
+
 #endif /* GTK_HELPERS_H */

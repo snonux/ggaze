@@ -217,3 +217,23 @@ ggtest_click_dialog_button(GtkWindow *p_skip, const char *c_label) {
    ggtest_click_button(p_btn);
    return (TRUE);
 }
+
+/* See gtk_helpers.h for why this reports the way it does. The GString is
+ * never freed: g_error() does not return. */
+GtkWindow *
+ggtest_assert_dialog_up_at(const char *c_loc, GtkWindow *p_own,
+                           const char *c_button) {
+   GtkWindow *p_dlg = ggtest_wait_for_dialog(p_own, c_button);
+   if (p_dlg != NULL) {
+      return (p_dlg);
+   }
+   GString *p_msg  = g_string_new(NULL);
+   GList   *p_tops = gtk_window_list_toplevels();
+   for (GList *p_l = p_tops; p_l != NULL; p_l = p_l->next) {
+      g_string_append_printf(p_msg, " %s%s", G_OBJECT_TYPE_NAME(p_l->data),
+                             (p_l->data == p_own) ? "(own)" : "");
+   }
+   g_list_free(p_tops);
+   g_error("%s: no toplevel carries a \"%s\" button; toplevels present:%s",
+           c_loc, c_button, p_msg->str);
+}
