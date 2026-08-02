@@ -193,6 +193,50 @@ static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
  * mapping. Defined once, below, near their first historical use. */
 static char _popup_hotkey_char(guint u_idx);
 static gint _popup_key_to_index(guint u_keyval);
+
+/* POPOVER KEYBOARD FOCUS -- who focuses the first row (dw0).
+ *
+ * Nothing here does. All four builders below hand the finished popover to
+ * gtk_popover_popup(), and GtkPopover focuses the first focusable child
+ * itself: gtk_popover_show() ends with
+ *
+ *    if (priv->autohide)
+ *      if (!gtk_widget_get_focus_child (widget))
+ *        gtk_widget_child_focus (widget, GTK_DIR_TAB_FORWARD);
+ *
+ * (gtk/gtkpopover.c:1164-1168, gtk 4.22.4). autohide defaults to TRUE
+ * (gtkpopover.c:1019) and ggaze never unsets it, so that arm always applies.
+ * The first focusable child is the first row button -- the "Open in:" /
+ * "Run script:" / "Move N images to:" title label above it is a GtkLabel and
+ * takes no focus.
+ *
+ * Each builder used to call gtk_widget_grab_focus() on its i == 0 row with
+ * the comment "ensure the popover gets keys". That call was a guaranteed
+ * no-op in all four: it ran inside the row loop, i.e. BEFORE
+ * gtk_widget_set_parent(p_pop, p_win->p_stack), so the button had no GtkRoot
+ * yet and gtk_widget_grab_focus() returned FALSE at its
+ * `widget->priv->root == NULL` guard (gtk/gtkwidget.c:5158-5161).
+ *
+ * Measured on gtk 4.22.4 with a probe replicating this exact build order,
+ * comparing the grab where it was ("asis"), moved after set_parent
+ * ("moved"), and removed ("none"), reading gtk_root_get_focus() after popup:
+ *
+ *   X11 (Xvfb), toplevel presented or not : all three -> first row button.
+ *   Wayland, toplevel presented           : all three -> first row button.
+ *   Wayland, toplevel NEVER presented     : asis/none -> no focus, and the
+ *                                           popup surface never maps either;
+ *                                           moved -> first row button focused
+ *                                           inside an UNMAPPED popover.
+ *
+ * So the grab was observationally identical to having no grab in every
+ * condition, and moving it after set_parent would have been strictly worse
+ * in the one condition where they differ: it would put keyboard focus into a
+ * popover the compositor never showed (gdk_popup_present() refuses a popup
+ * whose parent surface has no xdg_surface, so gtk_popover_show() returns at
+ * its `if (!present_popup (popover)) return;`, gtkpopover.c:1159-1160, before
+ * both the map and the focus arm). The grabs were therefore deleted rather
+ * than moved. Do not reintroduce one: if a popover ever does need a specific
+ * row focused, grab it after set_parent AND only once the popup has mapped. */
 #if GGAZE_HAVE_GEGL
 static void     _enhance_update_highlights(GgazeWindow *p_win);
 static void     _enhance_apply_async(GgazeWindow *p_win);
@@ -2499,9 +2543,6 @@ _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
       gtk_box_append(GTK_BOX(p_box), p_btn);
       p_win->p_enhance_btns[i] = p_btn;
       g_free(c_lbl);
-      if (i == 0) {
-         gtk_widget_grab_focus(p_btn); /* ensure the popover gets keys */
-      }
    }
    GtkWidget *p_btn0 = gtk_button_new_with_label("0  Original");
    gtk_widget_set_halign(p_btn0, GTK_ALIGN_START);
@@ -2566,6 +2607,8 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
                          _enhance_build_box(p_win, p_presets));
    gtk_widget_set_parent(p_pop, p_win->p_stack);
    p_win->p_enhance_pop = p_pop;
+   /* Focuses the first preset row itself -- see "POPOVER KEYBOARD FOCUS"
+    * near the top of this file. */
    gtk_popover_popup(GTK_POPOVER(p_pop));
 }
 
@@ -3154,14 +3197,13 @@ _action_open_external(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
                           G_CALLBACK(_open_ext_row_clicked_cb), p_win);
          gtk_box_append(GTK_BOX(p_box), p_btn);
          g_free(c_lbl);
-         if (i == 0) {
-            gtk_widget_grab_focus(p_btn); /* ensure the popover gets keys */
-         }
       }
    }
 
    gtk_widget_set_parent(p_pop, p_win->p_stack);
    p_win->p_open_ext_pop = p_pop;
+   /* Focuses the first editor row itself -- see "POPOVER KEYBOARD FOCUS"
+    * near the top of this file. */
    gtk_popover_popup(GTK_POPOVER(p_pop));
 }
 
@@ -3411,14 +3453,13 @@ _action_run_script(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
                           G_CALLBACK(_run_script_row_clicked_cb), p_win);
          gtk_box_append(GTK_BOX(p_box), p_btn);
          g_free(c_lbl);
-         if (i == 0) {
-            gtk_widget_grab_focus(p_btn); /* ensure the popover gets keys */
-         }
       }
    }
 
    gtk_widget_set_parent(p_pop, p_win->p_stack);
    p_win->p_run_script_pop = p_pop;
+   /* Focuses the first script row itself -- see "POPOVER KEYBOARD FOCUS"
+    * near the top of this file. */
    gtk_popover_popup(GTK_POPOVER(p_pop));
 }
 
@@ -3730,9 +3771,6 @@ _move_build_box(GgazeWindow *p_win, const GPtrArray *p_dests, guint u_count) {
                        p_win);
       gtk_box_append(GTK_BOX(p_box), p_btn);
       g_free(c_lbl);
-      if (i == 0) {
-         gtk_widget_grab_focus(p_btn); /* ensure the popover gets keys */
-      }
    }
    return (p_box);
 }
@@ -3776,6 +3814,8 @@ _action_move(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
                          _move_build_box(p_win, p_dests, u_count));
    gtk_widget_set_parent(p_pop, p_win->p_stack);
    p_win->p_move_pop = p_pop;
+   /* Focuses the first destination row itself -- see "POPOVER KEYBOARD
+    * FOCUS" near the top of this file. */
    gtk_popover_popup(GTK_POPOVER(p_pop));
 }
 
