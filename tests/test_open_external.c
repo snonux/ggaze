@@ -218,6 +218,25 @@ popover_button_label(GtkPopover *p_pop, guint u_idx) {
    return (NULL);
 }
 
+/* The i-th GtkButton in the popover's content box, or NULL. */
+static GtkWidget *
+popover_button(GtkPopover *p_pop, guint u_idx) {
+   GtkWidget *p_box = gtk_popover_get_child(p_pop);
+   g_assert_nonnull(p_box);
+   GtkWidget *p_child = gtk_widget_get_first_child(p_box);
+   guint      u_i     = 0;
+   while (p_child != NULL) {
+      if (GTK_IS_BUTTON(p_child)) {
+         if (u_i == u_idx) {
+            return (p_child);
+         }
+         u_i++;
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (NULL);
+}
+
 /* TRUE iff a GtkEventControllerKey is attached to p_pop. */
 static gboolean
 popover_has_key_controller(GtkPopover *p_pop) {
@@ -544,6 +563,24 @@ test_open_external_popup_really_maps(void) {
    g_assert_nonnull(p_pop);
    g_assert_cmpint(popover_button_count(p_pop), ==, 3);
    g_assert_cmpstr(popover_button_label(p_pop, 0), ==, "1  GIMP");
+
+   /* The first row really holds the keyboard focus, so the hotkeys the key
+    * controller implements can reach it (dw0).
+    *
+    * Nothing in src/window.c focuses it: gtk_popover_show() ends with
+    * gtk_widget_child_focus() for an autohide popover, and the builders rely
+    * on that -- see "POPOVER KEYBOARD FOCUS" in src/window.c for the four
+    * dead gtk_widget_grab_focus() calls this replaced and why they never ran.
+    * The assertion exists so that reliance is checked rather than assumed.
+    *
+    * It belongs in THIS subtest and not in popup_structure, because
+    * gtk_popover_show() reaches that arm only after present_popup()
+    * succeeds: on Wayland a popup whose parent was never presented does not
+    * map and no focus is taken, which is exactly the toplevel the other
+    * popover subtests build. This one presents (present_and_map above), so
+    * the assertion holds on both backends. */
+   g_assert_true(gtk_root_get_focus(GTK_ROOT(p_win)) ==
+                 popover_button(p_pop, 0));
 
    g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));
