@@ -950,6 +950,30 @@ test_closing_the_prompt_keeps_the_preview(void) {
    activate_other_cell(&fx); /* the deferred change the prompt now gates */
    GtkWindow *p_dlg = GGTEST_ASSERT_DIALOG_UP(GTK_WINDOW(fx.p_win), "Cancel");
 
+   /* The tree's only g_test_expect_message(). What it costs, measured on
+    * glib 2.88.2 rather than assumed (dw0):
+    *
+    * While an expectation is armed, GLib compares every non-debug message
+    * against the head of the queue, and on a mismatch logs "Did not see
+    * expected message ..." as a CRITICAL and marks the mismatching message
+    * G_LOG_FLAG_FATAL. So a Gtk-WARNING arriving in the drain below -- and
+    * this box does emit "Gtk-WARNING: Unknown key gtk-modules" from
+    * ~/.config/gtk-4.0/settings.ini, though at startup, well before this
+    * point -- would abort the suite behind a first line naming the wrong
+    * problem.
+    *
+    * The obvious conclusion, "shorten the armed window", does NOT follow.
+    * Probed both ways: a foreign Gtk-WARNING is ALREADY fatal here with no
+    * expectation armed at all, because g_test_init() makes warnings fatal.
+    * Armed and unarmed both end in "Bail out!", and both name the real
+    * culprit on the `not ok` line ("Gtk-FATAL-WARNING: Unknown key
+    * gtk-modules"); arming only prepends the spurious CRITICAL. Narrowing
+    * the drain would therefore buy nothing but a slightly tidier log for a
+    * failure that is fatal either way, at the price of making a 400 ms
+    * settle race the GTask idle that carries the g_message. Left as is.
+    *
+    * What WOULD be worth doing, if a Gtk warning ever does start landing
+    * here: fix the warning. It fails this suite armed or not. */
    g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
                          "*prompt dismissed*");
    gtk_window_close(p_dlg); /* what Escape and the WM close button do */
