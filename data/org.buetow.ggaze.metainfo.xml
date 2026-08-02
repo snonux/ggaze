@@ -7,7 +7,7 @@
   <name>ggaze</name>
   <summary>Fast native image viewer for culling camera shoots</summary>
   <description>
-    <p>ggaze (GNOME Gaze) is a small, fast, native image viewer for Fedora
+    <p>ggaze (GTK Gaze) is a small, fast, native image viewer for Fedora
     Linux. It opens a folder of pictures, shows a thumbnail grid, and lets
     you flip through the shoot with vi-style keys, check EXIF, trash rejects,
     and move on — no library, no database, no sidecars.</p>

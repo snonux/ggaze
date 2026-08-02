@@ -18,7 +18,7 @@ BuildRequires: libjxl-devel libheif-devel
 Requires: gtk4 glib2 libadwaita gdk-pixbuf2 libexif libjpeg-turbo
 
 %description
-ggaze (GNOME Gaze) is a small, fast, native image viewer for Fedora Linux.
+ggaze (GTK Gaze) is a small, fast, native image viewer for Fedora Linux.
 It opens a folder of pictures, shows a thumbnail grid, and lets you flip
 through the shoot with vi-style keys, check EXIF, trash rejects, and move
 on. No library, no database, no sidecars.

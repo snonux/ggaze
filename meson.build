@@ -1,4 +1,4 @@
-# ggaze — GNOME Gaze
+# ggaze — GTK Gaze
 #
 # A small, fast, native image viewer for Fedora Linux, written in C with
 # GTK4. Full design lives in docs/; this file is the build root. Phase 0

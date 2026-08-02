@@ -1,6 +1,6 @@
 # ggaze — Project Plan (living document)
 
-**GNOME Gaze** — a small, fast, native image viewer for Fedora
+**GTK Gaze** — a small, fast, native image viewer for Fedora
 Linux, written in C with GTK4. Its job: quickly preview a folder of pictures
 downloaded from a camera, cull the rejects, move on.
 
