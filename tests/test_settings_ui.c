@@ -35,7 +35,28 @@ new_window(void) {
 }
 
 /* Iterate the main context for roughly u_ms milliseconds, so presenting and
- * closing a dialog (both driven by idles/frame clock) can settle. */
+ * closing a dialog (both driven by idles/frame clock) can settle.
+ *
+ * Every subtest that destroys a window must call this AFTERWARDS, and the
+ * reason is not tidiness (ew0). gtk_window_destroy() does not finalize a
+ * window that still has async work in flight: ggaze_window_open() starts a
+ * navigator walk plus the thumbnail/texture pipeline, and those hold
+ * references. Measured here with weak refs, before this drain existed:
+ * entering /settings/prefs_dialog_constructs, the windows built by
+ * /settings/window_thumbnail_size and /settings/open_applies_sort were BOTH
+ * still alive (the one from /settings/preferences_action_present, which never
+ * opens a folder, was already gone), g_main_context_pending() was TRUE, and
+ * five iterations of that subtest's own drain dispatched their leftovers --
+ * which is where all three windows finally finalized.
+ *
+ * That made the LAST subtest run the disposal of the FIRST subtests' windows.
+ * Anything those teardowns log is then attributed by GLib's TAP output to
+ * whichever subtest happened to be turning the main loop, which is how ew0
+ * came to be filed as a prefs_dialog_constructs failure
+ * ("GLib-GObject-FATAL-CRITICAL: invalid unclassed pointer in cast to
+ * GtkWidget", once, never reproduced there). Draining after each destroy
+ * keeps every subtest's cleanup inside the subtest that caused it, so a
+ * future failure names its own culprit. */
 static void
 drain_main(guint u_ms) {
    for (guint u = 0; u < u_ms; u++) {
@@ -68,6 +89,7 @@ test_window_uses_thumbnail_size(void) {
    g_assert_cmpint(ggaze_grid_get_thumbnail_size(GGAZE_GRID(p_grid)), ==, 192);
    g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(200); /* dispose HERE, not in a later subtest -- see drain_main */
    g_free(c_path);
 }
 
@@ -77,6 +99,7 @@ test_preferences_action_present(void) {
    GActionMap  *p_map = G_ACTION_MAP(p_win);
    g_assert_nonnull(g_action_map_lookup_action(p_map, "preferences"));
    gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(100); /* nothing async here, but keep the pattern uniform */
 }
 
 static void
@@ -99,6 +122,7 @@ test_open_applies_sort_setting(void) {
    g_assert_nonnull(c_title);
    g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(200); /* dispose HERE, not in a later subtest -- see drain_main */
    g_free(c_path);
 }
 
