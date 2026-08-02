@@ -320,10 +320,20 @@ bounded memory.
 - Window: `d`/`D`/`u`; `d` advances; `D` on **>1 marked** asks a confirm dialog; counter = remaining; `t` toggle.
 - That confirm dialog deletes on the **Delete** button alone. Every other
   outcome — Cancel, a dismissal (`Esc` / closing the dialog), and the
-  dispose-time cancel — is a *no*; `gtk_alert_dialog_choose_finish()` reports
-  each of the latter two as `-1` plus a `GError`, which read as a `gboolean` is
-  `TRUE` (task aw0). A native window close is refused while the dialog is up,
-  the same way it is behind the Save/Discard/Cancel prompt.
+  dispose-time cancel — is a *no*. How each one is *reported* changed when
+  `aw0` gave the dialog a cancel button, and this list said otherwise until
+  `dw0`: because `_delete_confirm_ask` calls
+  `gtk_alert_dialog_set_cancel_button(p_dlg, 0)`, a dismissal now comes back
+  as that button's **index `0`**, not as `-1` plus a `GError` — GTK's
+  `response_cb` returns `cancel_return` whenever one is set and only raises
+  `GTK_DIALOG_ERROR_DISMISSED` when none is
+  (`gtk/gtkalertdialog.c:616-623`). Only the dispose-time cancel still
+  reports `-1` plus a `GError` (`G_IO_ERROR_CANCELLED`), and `-1` read as a
+  `gboolean` is `TRUE` — the misread `aw0` fixed. `src/window.c`'s
+  `_delete_confirm_answered_yes` is the authority and carries the full
+  argument for why the error check stays anyway. A native window close is
+  refused while the dialog is up, the same way it is behind the
+  Save/Discard/Cancel prompt.
 
 **Tests**
 - Unit: `test_thumbnail.c`, `test_trash.c`.
