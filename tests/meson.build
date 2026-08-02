@@ -425,20 +425,36 @@ test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 #
 # Measured on this tree, one Xvfb display shared by two concurrent
 # invocations -- `meson test -C build-minimal --suite integration` and
-# `meson test -C build-min-asan --suite integration`:
+# `meson test -C build-min-asan --suite integration`. TWO separate runs of
+# that setup, and they did not fail the same way:
 #
-#   lane 1 (build-minimal)  : Ok 20, Fail 0
-#   lane 2 (build-min-asan) : Ok 19, Fail 1
+#   run 1: build-minimal Ok 20 / Fail 0, build-min-asan Ok 19 / Fail 1
 #     integration - ggaze:move_undo  FAIL  killed by signal 6 SIGABRT
 #     not ok /move/popup_structure - ERROR:../tests/test_move_undo.c:644:
 #            test_move_popup_structure: 'p_pop' should not be NULL
 #
-# That is the seat-grab signature described above -- the popover was unparented
-# out from under the assertion because the other lane held the grab -- but what
-# a developer SEES is "SIGABRT" and a NULL widget, which reads like a product
-# crash rather than two test runs fighting over a display. Hence this note.
-# The fix is a display each, not a meson setting: give the second lane its own
-# `xvfb-run -a`, or just run the lanes one after another.
+#   run 2: build-minimal Ok 19 / Fail 1, build-min-asan Ok 20 / Fail 0
+#     integration - ggaze:progress_lww  FAIL  killed by signal 11 SIGSEGV,
+#            no output at all
+#
+# Opposite lanes, different suites, different signals. Contention is
+# nonetheless the cause: the control -- the same manual Xvfb, that lane alone
+# -- was 20/20.
+#
+# DO NOT READ A MECHANISM INTO EITHER ONE. It is tempting to explain run 1 as
+# "the popover was unparented out from under the assertion because the other
+# lane held the grab", and that story cannot be general: test_progress_lww.c
+# contains no popover and never calls gtk_window_present, and progress_lww is
+# not even one of the is_parallel : false suites, so whatever damaged it was
+# not the seat grab this section is about. Two samples with nothing in common
+# but the shared display do not identify a failure mode; treat them as two
+# observed instances, not a signature.
+#
+# What generalises is the shape, and it is the reason for this note: what a
+# developer SEES is a fatal signal and either a NULL widget or no output at
+# all, which reads like a product crash rather than two test runs fighting
+# over a display. The fix is a display each, not a meson setting: give the
+# second lane its own `xvfb-run -a`, or just run the lanes one after another.
 test_window = executable(
    'test_window',
    ['test_window.c', ggaze_conf_h],
