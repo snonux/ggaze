@@ -31,6 +31,17 @@ ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 G_DEBUG=gc-friendly \
   meson test -C build-asan
 ```
 
+**Run integration lanes one at a time, or give each its own display.** The
+`is_parallel : false` that keeps the popover suites from racing each other
+serialises tests *within one* `meson test` invocation and cannot do more —
+meson has no cross-process lock on the display. So `meson test -C build` and
+`meson test -C build-asan` running concurrently against one X display
+reintroduce the contention in full, and what you see is a fatal signal in an
+unrelated suite that reads like a product crash. CI is safe (one invocation
+per lane, each under its own `xvfb-run -a`); a developer running two of the
+commands above at once is not. See `tests/meson.build`, "SCOPE OF THE
+GUARANTEE", for the measured instances.
+
 ## Two test tracks (both mandatory)
 
 | Track | Where | What | Gate |
