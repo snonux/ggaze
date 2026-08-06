@@ -12,6 +12,8 @@
 
 #include "viewer.h"
 
+#include <math.h>
+
 #include <glib.h>
 #include <graphene.h>
 
@@ -119,6 +121,15 @@ _current_scale(GgazeViewer *p_v) {
 static void
 _zoom_at(GgazeViewer *p_v, gdouble d_cx, gdouble d_cy, gdouble d_new_zoom) {
    if (p_v->p_texture == NULL) {
+      return;
+   }
+   /* Reject a non-finite centre or zoom instead of storing it (hx0). CLAMP
+    * cannot filter NaN -- both of its comparisons are false, so NaN passes
+    * straight through -- and a single NaN reaching d_pan_x/d_pan_y is not a
+    * one-frame glitch: it makes the draw rect NaN, the image disappears, and
+    * because every later zoom derives the new pan from the old one the widget
+    * never recovers. Bailing keeps the last good geometry on screen. */
+   if (!isfinite(d_cx) || !isfinite(d_cy) || !isfinite(d_new_zoom)) {
       return;
    }
    d_new_zoom = CLAMP(d_new_zoom, GGAZE_ZOOM_MIN, GGAZE_ZOOM_MAX);
@@ -258,12 +269,42 @@ scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
    }
    (void)d_dx;
 
+   /* Zoom centre: the pointer if the event carries a usable position, else the
+    * widget centre.
+    *
+    * hx0: the return value of gdk_event_get_position() is NOT optional here.
+    * A scroll event frequently has no position at all -- on X11 it reports
+    * none for ordinary wheel events -- and GDK then writes NAN to BOTH
+    * out-parameters rather than leaving them untouched. Ignoring the result
+    * therefore did not "keep the centre default": it replaced it with NaN,
+    * which flowed through _zoom_at into d_pan_x/d_pan_y, made _compute_geom
+    * hand ggaze_viewer_snapshot a NaN rect, and left the texture undrawn --
+    * the picture vanished on the FIRST wheel notch. Worse, the NaN persisted
+    * in the pan fields, so every later zoom recomputed NaN from NaN and even
+    * the keyboard could not bring the image back.
+    *
+    * The position, when there is one, is in the SURFACE coordinate space, so
+    * it must be translated into widget space -- otherwise the header bar's
+    * height alone offsets every cursor-centred zoom. The isfinite() check
+    * guards the translated result too: it is the invariant the pan/zoom state
+    * depends on, and it is cheaper to enforce here than to reason about every
+    * arithmetic path downstream. */
    gdouble   d_cx = (gdouble)gtk_widget_get_width(GTK_WIDGET(p_v)) / 2.0;
    gdouble   d_cy = (gdouble)gtk_widget_get_height(GTK_WIDGET(p_v)) / 2.0;
    GdkEvent *p_event =
       gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(p_scroll));
-   if (p_event != NULL) {
-      gdk_event_get_position(p_event, &d_cx, &d_cy);
+   GtkRoot *p_root = gtk_widget_get_root(GTK_WIDGET(p_v));
+   gdouble  d_sx, d_sy;
+   if (p_event != NULL && p_root != NULL &&
+       gdk_event_get_position(p_event, &d_sx, &d_sy)) {
+      graphene_point_t pt_out;
+      if (gtk_widget_compute_point(
+             GTK_WIDGET(p_root), GTK_WIDGET(p_v),
+             &GRAPHENE_POINT_INIT((float)d_sx, (float)d_sy), &pt_out) &&
+          isfinite(pt_out.x) && isfinite(pt_out.y)) {
+         d_cx = (gdouble)pt_out.x;
+         d_cy = (gdouble)pt_out.y;
+      }
    }
 
    switch (p_v->e_scroll) {
@@ -406,6 +447,26 @@ ggaze_viewer_zoom_out(GgazeViewer *p_viewer) {
             _current_scale(p_viewer) / GGAZE_ZOOM_FACTOR);
 }
 
+gdouble
+ggaze_viewer_get_scale(GgazeViewer *p_viewer) {
+   g_return_val_if_fail(GGAZE_IS_VIEWER(p_viewer), 0.0);
+   if (p_viewer->p_texture == NULL) {
+      return (0.0);
+   }
+   return (_current_scale(p_viewer));
+}
+
+void
+ggaze_viewer_get_pan(GgazeViewer *p_viewer, gdouble *p_x, gdouble *p_y) {
+   g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
+   if (p_x != NULL) {
+      *p_x = p_viewer->d_pan_x;
+   }
+   if (p_y != NULL) {
+      *p_y = p_viewer->d_pan_y;
+   }
+}
+
 void
 ggaze_viewer_toggle_fit_100(GgazeViewer *p_viewer) {
    g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
@@ -432,6 +493,15 @@ ggaze_viewer_fit(GgazeViewer *p_viewer) {
 void
 ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy) {
    g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
+   /* Same invariant _zoom_at enforces (hx0): the pan fields must stay finite.
+    * A non-finite delta is absorbed by the += and is unrecoverable afterwards
+    * -- the image stops being drawn and no later pan or zoom can restore it,
+    * because every subsequent value derives from this one. The drag gesture
+    * feeds this directly from event coordinates, so the guard belongs here
+    * rather than at each call site. */
+   if (!isfinite(d_dx) || !isfinite(d_dy)) {
+      return;
+   }
    p_viewer->d_pan_x += d_dx;
    p_viewer->d_pan_y += d_dy;
    gtk_widget_queue_draw(GTK_WIDGET(p_viewer));

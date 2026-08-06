@@ -133,7 +133,16 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
 - Fit-to-window is the default on load.
 - `0` toggles fit ↔ 100% (double-click also toggles).
 - Zoom centers on cursor (mouse) / pinch midpoint (touch) / window center (keys).
+  A scroll event does not always carry a pointer position — plain X11 wheel
+  events carry none — and zoom then falls back to the **window center** rather
+  than to a bogus point. Do not "simplify" that fallback away by ignoring
+  `gdk_event_get_position()`'s return value: it writes NaN to its
+  out-parameters on failure, and a NaN reaching the pan state makes the image
+  vanish for good (hx0). `viewer.c` guards both the scroll centre and the pan.
 - Panning clamps so the image can't drift off-screen.
+- Zoom is limited to 2 %–6400 % (`GGAZE_ZOOM_MIN`/`MAX`). Note that an image
+  small enough for fit-to-window to exceed 6400 % is currently clamped *down*
+  by a zoom-in — see the open task filed for it.
 
 ## Info overlay (`i`)
 

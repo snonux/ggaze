@@ -487,6 +487,16 @@ test_window = executable(
 test('window', test_window, suite : 'integration', env : fixtures_env,
    is_parallel : false)
 
+test_viewer = executable(
+   'test_viewer',
+   ['test_viewer.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib,
+   install : false,
+)
+test('viewer', test_viewer, suite : 'integration', env : fixtures_env)
+
 test_open_and_show = executable(
    'test_open_and_show',
    ['test_open_and_show.c', ggaze_conf_h],

@@ -37,6 +37,23 @@ ggaze_viewer_get_texture(GgazeViewer *p_viewer); /* (transfer none) */
 /* Zoom + pan actions (also reachable via the on-widget controllers). */
 void ggaze_viewer_zoom_in(GgazeViewer *p_viewer);
 void ggaze_viewer_zoom_out(GgazeViewer *p_viewer);
+
+/* The scale actually being drawn: the fit-to-window ratio while fitting, else
+ * the explicit zoom factor (1.0 = 100%). Returns 0.0 with no texture.
+ *
+ * Exists because zoom state was otherwise unobservable from outside the
+ * widget, which is why the zoom path carried no tests and hx0's regression
+ * went unnoticed. Prefer this over inferring zoom from a rendered snapshot. */
+gdouble ggaze_viewer_get_scale(GgazeViewer *p_viewer);
+
+/* Current pan offset from centred, in widget pixels. Companion to
+ * ggaze_viewer_pan(); either out-parameter may be NULL.
+ *
+ * The scale alone is NOT enough to tell whether the widget is healthy: it is
+ * derived from the fit ratio or d_zoom and stays perfectly finite while the
+ * pan is NaN -- the exact state in which hx0's blank view was drawn. Assert on
+ * this too when checking that the image is still displayable. */
+void ggaze_viewer_get_pan(GgazeViewer *p_viewer, gdouble *p_x, gdouble *p_y);
 void ggaze_viewer_toggle_fit_100(GgazeViewer *p_viewer);
 void ggaze_viewer_fit(GgazeViewer *p_viewer);
 void ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy);
