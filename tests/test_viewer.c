@@ -270,6 +270,49 @@ test_finite_pan_still_applies(void) {
    fx_close(&fx);
 }
 
+/* jx0: an image small enough that fit-to-window already exceeds
+ * GGAZE_ZOOM_MAX. tests/fixtures/plain.jpg is 6x3, so in this 600x400 window
+ * it fits at 100x -- above the 64x ceiling. Zooming in must never make such a
+ * picture SMALLER, which is exactly what clamping to a bare GGAZE_ZOOM_MAX
+ * did (scale went 100 -> 64 on the first win.zoom-in). At the top end a
+ * no-op is correct; a reversal is not. */
+static void
+test_zoom_in_never_shrinks_a_tiny_image(void) {
+   const gchar *c_fx = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_fx);
+   char        *c_path = g_build_filename(c_fx, "plain.jpg", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GgazeWindow *p_win  = GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL));
+   gtk_window_set_default_size(GTK_WINDOW(p_win), 600, 400);
+   gtk_window_present(GTK_WINDOW(p_win));
+   ggaze_window_open(p_win, p_file);
+   GgazeViewer *p_v = viewer_of(p_win);
+   for (guint u = 0; u < 3000 && ggaze_viewer_get_texture(p_v) == NULL; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_nonnull(ggaze_viewer_get_texture(p_v));
+   for (guint u = 0; u < 3000 && gtk_widget_get_width(GTK_WIDGET(p_v)) == 0;
+        u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+
+   /* Guard the premise: if this fixture ever stops fitting above the ceiling
+    * the test would silently stop covering jx0. */
+   gdouble d_fit = ggaze_viewer_get_scale(p_v);
+   g_assert_cmpfloat(d_fit, >, 64.0);
+
+   ggaze_viewer_zoom_in(p_v);
+   drain_main(50);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(p_v), >=, d_fit);
+
+   g_object_unref(p_file);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(200);
+   g_free(c_path);
+}
+
 /* Negative: with no texture there is nothing to scale, and zoom/pan must be
  * safe no-ops rather than dividing by a zero-sized image. */
 static void
@@ -307,6 +350,8 @@ main(int i_argc, char **c_argv) {
                    test_non_finite_pan_is_rejected);
    g_test_add_func("/viewer/finite_pan_still_applies",
                    test_finite_pan_still_applies);
+   g_test_add_func("/viewer/zoom_in_never_shrinks_a_tiny_image",
+                   test_zoom_in_never_shrinks_a_tiny_image);
    g_test_add_func("/viewer/zoom_without_texture_is_safe",
                    test_zoom_without_texture_is_safe);
    return (g_test_run());

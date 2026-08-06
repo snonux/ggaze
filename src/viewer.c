@@ -53,6 +53,24 @@ _tex_h(GgazeViewer *p_v) {
    return (p_v->p_texture != NULL) ? gdk_texture_get_height(p_v->p_texture) : 0;
 }
 
+/* The fit-to-window ratio for the given allocation: the largest scale that
+ * shows the whole image. 1.0 when either the texture or the allocation has no
+ * size yet, so callers never divide by zero.
+ *
+ * Note this is NOT bounded by GGAZE_ZOOM_MAX -- an image small enough relative
+ * to the window fits at far more than 6400% (a 6x3 image in a 600x400 window
+ * fits at 100x). _zoom_at relies on that being expressible; see the ceiling it
+ * derives from this (jx0). */
+static gdouble
+_fit_scale(GgazeViewer *p_v, int i_w, int i_h) {
+   int i_tw = _tex_w(p_v);
+   int i_th = _tex_h(p_v);
+   if (i_tw <= 0 || i_th <= 0 || i_w <= 0 || i_h <= 0) {
+      return (1.0);
+   }
+   return (MIN((gdouble)i_w / i_tw, (gdouble)i_h / i_th));
+}
+
 /* Display scale + clamped top-left for the current state. Also writes the
  * clamped pan back so stored state matches what is drawn (no "dead zone" when
  * a new drag begins from a clamped edge). */
@@ -62,16 +80,7 @@ _compute_geom(GgazeViewer *p_v, int i_w, int i_h, gdouble *p_scale,
    int i_tw = _tex_w(p_v);
    int i_th = _tex_h(p_v);
 
-   gdouble s;
-   if (p_v->b_fit) {
-      if (i_tw <= 0 || i_th <= 0 || i_w <= 0 || i_h <= 0) {
-         s = 1.0;
-      } else {
-         s = MIN((gdouble)i_w / i_tw, (gdouble)i_h / i_th);
-      }
-   } else {
-      s = p_v->d_zoom;
-   }
+   gdouble s = p_v->b_fit ? _fit_scale(p_v, i_w, i_h) : p_v->d_zoom;
 
    gdouble dw = (gdouble)i_tw * s;
    gdouble dh = (gdouble)i_th * s;
@@ -132,10 +141,19 @@ _zoom_at(GgazeViewer *p_v, gdouble d_cx, gdouble d_cy, gdouble d_new_zoom) {
    if (!isfinite(d_cx) || !isfinite(d_cy) || !isfinite(d_new_zoom)) {
       return;
    }
-   d_new_zoom = CLAMP(d_new_zoom, GGAZE_ZOOM_MIN, GGAZE_ZOOM_MAX);
+   int i_w = gtk_widget_get_width(GTK_WIDGET(p_v));
+   int i_h = gtk_widget_get_height(GTK_WIDGET(p_v));
 
-   int     i_w = gtk_widget_get_width(GTK_WIDGET(p_v));
-   int     i_h = gtk_widget_get_height(GTK_WIDGET(p_v));
+   /* Ceiling is the NORMAL limit or the fit ratio, whichever is larger (jx0).
+    * Clamping to GGAZE_ZOOM_MAX alone is wrong whenever fit-to-window already
+    * exceeds it -- a small image in a big window fits at 100x -- because then
+    * the very first zoom-in clamped 100 -> 64 and made the picture SMALLER,
+    * the opposite of what was asked. Letting the ceiling rise to the fit ratio
+    * turns that into a no-op at the top end instead of a reversal, while
+    * keeping the normal 6400% limit for every image that fits below it. */
+   gdouble d_max = MAX(GGAZE_ZOOM_MAX, _fit_scale(p_v, i_w, i_h));
+   d_new_zoom    = CLAMP(d_new_zoom, GGAZE_ZOOM_MIN, d_max);
+
    gdouble s_old;
    gdouble x_old, y_old;
    _compute_geom(p_v, i_w, i_h, &s_old, &x_old, &y_old, NULL, NULL);

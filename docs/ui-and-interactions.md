@@ -140,9 +140,11 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
   out-parameters on failure, and a NaN reaching the pan state makes the image
   vanish for good (hx0). `viewer.c` guards both the scroll centre and the pan.
 - Panning clamps so the image can't drift off-screen.
-- Zoom is limited to 2 %–6400 % (`GGAZE_ZOOM_MIN`/`MAX`). Note that an image
-  small enough for fit-to-window to exceed 6400 % is currently clamped *down*
-  by a zoom-in — see the open task filed for it.
+- Zoom is limited to 2 %–6400 % (`GGAZE_ZOOM_MIN`/`MAX`), except that the upper
+  limit rises to the fit-to-window ratio when that is already larger — a small
+  enough image in a large window fits above 6400 %, and clamping to the bare
+  ceiling made zoom-in *shrink* it (jx0). At the top end zoom-in is a no-op,
+  never a reversal.
 
 ## Info overlay (`i`)
 
