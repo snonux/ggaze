@@ -24,6 +24,10 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_Left, 0, "win.prev"},
    {GDK_KEY_l, 0, "win.next"},
    {GDK_KEY_Right, 0, "win.next"},
+   {GDK_KEY_j, 0, "win.cursor-down"},
+   {GDK_KEY_Down, 0, "win.cursor-down"},
+   {GDK_KEY_k, 0, "win.cursor-up"},
+   {GDK_KEY_Up, 0, "win.cursor-up"},
    {GDK_KEY_g, 0, "win.first"},
    {GDK_KEY_G, 0, "win.last"},
    /* open / quit / back */

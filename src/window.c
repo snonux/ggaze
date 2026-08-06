@@ -106,13 +106,21 @@ struct _GgazeWindow {
                                    * Not under GGAZE_HAVE_GEGL: the delete
                                    * confirm exists in every build */
 #if GGAZE_HAVE_GEGL
-   guint8     u_enhance_mask;      /* bit i -> preset i enabled (layered) */
-   Enhancer  *p_enhancer;          /* GEGL preset engine (NULL w/o GEGL) */
-   GtkWidget *p_enhance_pop;       /* `a` preset popover (NULL when none) */
-   GtkWidget *p_enhance_btns[8];   /* popover preset rows, for highlighting;
-                                    * only valid while the popover is open,
-                                    * NULL'd out on close */
-   GdkTexture *p_enhance_tex;      /* last-applied modified texture, cached
+   guint8     u_enhance_mask;       /* bit i -> preset i enabled (layered) */
+   Enhancer  *p_enhancer;           /* GEGL preset engine (NULL w/o GEGL) */
+   GtkWidget *p_enhance_ui;         /* `a` gallery window or compact popover */
+   GtkWidget *p_enhance_btns[8];    /* preset rows, for highlighting;
+                                     * only valid while the UI is open,
+                                     * NULL'd out on close */
+   GtkWidget    *p_enhance_pics[8]; /* optional per-preset preview pictures */
+   GtkWidget    *p_original_pic;    /* optional Original preview picture */
+   GtkWidget    *p_enhance_gallery; /* responsive preview flow box */
+   GtkWidget    *p_enhance_scroll;  /* gallery viewport sized to the window */
+   int           i_enhance_gallery_width;  /* last gallery allocation */
+   int           i_enhance_gallery_height; /* avoids redundant resize work */
+   GCancellable *p_preview_cancel; /* separate thumbnail-preview request */
+   guint         u_preview_gen;    /* invalidates stale gallery completions */
+   GdkTexture   *p_enhance_tex;    /* last-applied modified texture, cached
                                     * so hold-Space can restore it without a
                                     * GEGL recompute */
    GCancellable *p_enhance_cancel; /* in-flight enhance-apply GTask */
@@ -1152,6 +1160,32 @@ _action_next(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 static void
+_action_cursor_vertical(GgazeWindow *p_win, int i_direction) {
+   const char *c_cur =
+      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
+   if (g_strcmp0(c_cur, "grid") == 0 && p_win->p_grid != NULL) {
+      ggaze_grid_move_cursor(p_win->p_grid, i_direction);
+   } else {
+      ggaze_viewer_pan(GGAZE_VIEWER(p_win->p_viewer), 0.0,
+                       i_direction * GGAZE_VIEWER_PAN_STEP);
+   }
+}
+
+static void
+_action_cursor_down(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _action_cursor_vertical(GGAZE_WINDOW(p_data), 1);
+}
+
+static void
+_action_cursor_up(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _action_cursor_vertical(GGAZE_WINDOW(p_data), -1);
+}
+
+static void
 _action_first(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
@@ -1927,14 +1961,14 @@ static const char *SHORTCUTS_UI =
    "            </child>\n"
    "            <child>\n"
    "              <object class=\"GtkShortcutsShortcut\">\n"
-   "                <property name=\"accelerator\">j</property>\n"
+   "                <property name=\"accelerator\">j Down</property>\n"
    "                <property name=\"title\">Cursor down one row (grid)\n"
    "                </property>\n"
    "              </object>\n"
    "            </child>\n"
    "            <child>\n"
    "              <object class=\"GtkShortcutsShortcut\">\n"
-   "                <property name=\"accelerator\">k</property>\n"
+   "                <property name=\"accelerator\">k Up</property>\n"
    "                <property name=\"title\">Cursor up one row (grid)\n"
    "                </property>\n"
    "              </object>\n"
@@ -2283,7 +2317,7 @@ _enhance_req_free(_EnhanceReq *p_req) {
 
 /* Update each popover preset row's "ggaze-enhance-on" highlight from the
  * mask. A no-op when the popover is closed (rows are NULL'd by
- * _enhance_destroy), so callers never need to check p_enhance_pop first. */
+ * _enhance_destroy), so callers never need to check p_enhance_ui first. */
 static void
 _enhance_update_highlights(GgazeWindow *p_win) {
    for (guint i = 0; i < G_N_ELEMENTS(p_win->p_enhance_btns); i++) {
@@ -2440,23 +2474,33 @@ _enhance_row_toggle(GgazeWindow *p_win, GtkWidget *p_btn) {
    _enhance_apply_async(p_win);
 }
 
-/* Synchronously tear down the current enhance popover (unparent + clear the
- * field and its now-dangling row pointers). Safe to call when none is open.
- * The popover's "closed" handler (autohide / outside-click / Esc) also
- * routes here. Closing the popover never touches u_enhance_mask -- the
- * preview persists until explicitly discarded (Esc when no popover is open,
- * or the "0 Original" row/hotkey). */
+/* Synchronously tear down the current enhance UI and clear its now-dangling
+ * row pointers. Safe to call when none is open. Closing it never touches
+ * u_enhance_mask -- the preview persists until explicitly discarded. */
 static void
 _enhance_destroy(GgazeWindow *p_win) {
-   if (p_win->p_enhance_pop == NULL) {
+   p_win->u_preview_gen++;
+   g_cancellable_cancel(p_win->p_preview_cancel);
+   g_clear_object(&p_win->p_preview_cancel);
+   if (p_win->p_enhance_ui == NULL) {
       return;
    }
-   GtkWidget *p_pop     = p_win->p_enhance_pop;
-   p_win->p_enhance_pop = NULL;
+   GtkWidget *p_ui     = p_win->p_enhance_ui;
+   p_win->p_enhance_ui = NULL;
    for (guint i = 0; i < G_N_ELEMENTS(p_win->p_enhance_btns); i++) {
       p_win->p_enhance_btns[i] = NULL;
+      p_win->p_enhance_pics[i] = NULL;
    }
-   gtk_widget_unparent(p_pop);
+   p_win->p_original_pic           = NULL;
+   p_win->p_enhance_gallery        = NULL;
+   p_win->p_enhance_scroll         = NULL;
+   p_win->i_enhance_gallery_width  = 0;
+   p_win->i_enhance_gallery_height = 0;
+   if (GTK_IS_WINDOW(p_ui)) {
+      gtk_window_destroy(GTK_WINDOW(p_ui));
+   } else {
+      gtk_widget_unparent(p_ui);
+   }
 }
 
 static void
@@ -2465,11 +2509,16 @@ _enhance_closed_cb(GtkPopover *p_pop, gpointer p_data) {
    _enhance_destroy(GGAZE_WINDOW(p_data));
 }
 
-/* Popover key controller: Esc closes the popover only (the preview, if any,
- * stays -- Esc discards it via win.back's dedicated rung when the popover is
- * NOT open, see _action_back); '0' discards the whole preview outright
- * (the "0 Original" row's hotkey); any other bound digit/letter toggles that
- * preset's bit without closing the popover. Modified keys are propagated. */
+static gboolean
+_enhance_window_close_cb(GtkWindow *p_window, gpointer p_data) {
+   (void)p_window;
+   _enhance_destroy(GGAZE_WINDOW(p_data));
+   return (TRUE);
+}
+
+/* Enhance-UI key controller: Esc closes the gallery/popover only (the preview,
+ * if any, stays); '0' discards the whole preview outright. Any other bound
+ * digit/letter toggles that preset without closing the UI. */
 static gboolean
 _enhance_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
                         GdkModifierType e_state, gpointer p_data) {
@@ -2520,8 +2569,121 @@ _enhance_build_title(GgazeWindow *p_win, GtkWidget *p_box) {
  * hotkey + current highlight. Split out of _enhance_build_box (30-line
  * convention). */
 static void
+_enhance_resize_gallery(GgazeWindow *p_win, int i_width, int i_height) {
+   if (p_win->p_enhance_gallery == NULL || p_win->p_enhance_scroll == NULL) {
+      return;
+   }
+   int i_gallery_width  = MAX(280, i_width - 48);
+   int i_gallery_height = MAX(220, i_height - 96);
+   int i_items          = p_win->p_original_pic != NULL ? 1 : 0;
+   for (guint i = 0; i < G_N_ELEMENTS(p_win->p_enhance_pics); i++) {
+      i_items += p_win->p_enhance_pics[i] != NULL ? 1 : 0;
+   }
+   int i_columns        = 1;
+   int i_picture_width  = 32;
+   int i_picture_height = 24;
+   int i_best_area      = 0;
+   for (int i_cols = 1; i_cols <= MAX(1, i_items); i_cols++) {
+      int i_rows        = (i_items + i_cols - 1) / i_cols;
+      int i_cell_width  = (i_gallery_width - (i_cols - 1) * 4) / i_cols - 24;
+      int i_cell_height = (i_gallery_height - (i_rows - 1) * 4) / i_rows - 48;
+      if (i_cell_width <= 0 || i_cell_height <= 0) {
+         continue;
+      }
+      int i_candidate_width =
+         MIN(512, MIN(i_cell_width, i_cell_height * 3 / 2));
+      int i_candidate_height = MIN(i_cell_height, i_candidate_width * 2 / 3);
+      int i_area             = i_candidate_width * i_candidate_height;
+      if (i_area > i_best_area) {
+         i_best_area      = i_area;
+         i_columns        = i_cols;
+         i_picture_width  = i_candidate_width;
+         i_picture_height = i_candidate_height;
+      }
+   }
+   gtk_widget_set_size_request(p_win->p_enhance_scroll, i_gallery_width,
+                               i_gallery_height);
+   gtk_flow_box_set_min_children_per_line(
+      GTK_FLOW_BOX(p_win->p_enhance_gallery), (guint)i_columns);
+   gtk_flow_box_set_max_children_per_line(
+      GTK_FLOW_BOX(p_win->p_enhance_gallery), (guint)i_columns);
+   for (guint i = 0; i < G_N_ELEMENTS(p_win->p_enhance_pics); i++) {
+      if (p_win->p_enhance_pics[i] != NULL) {
+         gtk_widget_set_size_request(p_win->p_enhance_pics[i], i_picture_width,
+                                     i_picture_height);
+      }
+   }
+   if (p_win->p_original_pic != NULL) {
+      gtk_widget_set_size_request(p_win->p_original_pic, i_picture_width,
+                                  i_picture_height);
+   }
+}
+
+static gboolean
+_enhance_gallery_tick_cb(GtkWidget *p_window, GdkFrameClock *p_clock,
+                         gpointer p_data) {
+   (void)p_clock;
+   GgazeWindow *p_win    = GGAZE_WINDOW(p_data);
+   int          i_width  = gtk_widget_get_width(p_window);
+   int          i_height = gtk_widget_get_height(p_window);
+   if (i_width > 0 && i_height > 0 &&
+       (i_width != p_win->i_enhance_gallery_width ||
+        i_height != p_win->i_enhance_gallery_height)) {
+      p_win->i_enhance_gallery_width  = i_width;
+      p_win->i_enhance_gallery_height = i_height;
+      _enhance_resize_gallery(p_win, i_width, i_height);
+   }
+   return (G_SOURCE_CONTINUE);
+}
+
+static GtkWidget *
+_enhance_original_button(GgazeWindow *p_win, gboolean b_previews) {
+   GtkWidget *p_btn = gtk_button_new();
+   if (b_previews) {
+      GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+      GtkWidget *p_pic = gtk_picture_new();
+      GtkWidget *p_lbl = gtk_label_new("0  Original");
+      gtk_picture_set_content_fit(GTK_PICTURE(p_pic), GTK_CONTENT_FIT_CONTAIN);
+      gtk_widget_set_halign(p_lbl, GTK_ALIGN_CENTER);
+      gtk_box_append(GTK_BOX(p_box), p_pic);
+      gtk_box_append(GTK_BOX(p_box), p_lbl);
+      gtk_button_set_child(GTK_BUTTON(p_btn), p_box);
+      p_win->p_original_pic = p_pic;
+   } else {
+      gtk_button_set_label(GTK_BUTTON(p_btn), "0  Original");
+   }
+   gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
+   g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER(-1));
+   g_signal_connect_swapped(p_btn, "clicked", G_CALLBACK(_enhance_row_toggle),
+                            p_win);
+   return (p_btn);
+}
+
+static void
 _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
                     const GPtrArray *p_presets) {
+   gboolean b_previews =
+      settings_get_enhance_preview_thumbnails(p_win->p_settings);
+   GtkWidget *p_gallery = NULL;
+   if (b_previews) {
+      p_gallery = gtk_flow_box_new();
+      gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(p_gallery), TRUE);
+      gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(p_gallery),
+                                      GTK_SELECTION_NONE);
+      gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(p_gallery), 4);
+      gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(p_gallery), 4);
+      GtkWidget *p_scroll = gtk_scrolled_window_new();
+      gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(p_scroll),
+                                     GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+      gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(p_scroll), p_gallery);
+      gtk_box_append(GTK_BOX(p_box), p_scroll);
+      p_win->p_enhance_gallery = p_gallery;
+      p_win->p_enhance_scroll  = p_scroll;
+   }
+   GtkWidget *p_btn0 = _enhance_original_button(p_win, b_previews);
+   if (b_previews) {
+      gtk_flow_box_append(GTK_FLOW_BOX(p_gallery), p_btn0);
+   }
    guint u_n = p_presets != NULL ? p_presets->len : 0;
    if (u_n > G_N_ELEMENTS(p_win->p_enhance_btns)) {
       u_n = G_N_ELEMENTS(p_win->p_enhance_btns); /* the mask is 8 bits wide */
@@ -2532,7 +2694,22 @@ _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
       char                 *c_lbl =
          g_strdup_printf("%c  %s", c_hk != 0 ? c_hk : ' ',
                          p_pr->c_name != NULL ? p_pr->c_name : "(unnamed)");
-      GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
+      GtkWidget *p_btn = gtk_button_new();
+      if (b_previews) {
+         GtkWidget *p_row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+         GtkWidget *p_pic = gtk_picture_new();
+         GtkWidget *p_lbl = gtk_label_new(c_lbl);
+         gtk_widget_set_size_request(p_pic, 128, 80);
+         gtk_picture_set_content_fit(GTK_PICTURE(p_pic),
+                                     GTK_CONTENT_FIT_CONTAIN);
+         gtk_widget_set_halign(p_lbl, GTK_ALIGN_CENTER);
+         gtk_box_append(GTK_BOX(p_row), p_pic);
+         gtk_box_append(GTK_BOX(p_row), p_lbl);
+         gtk_button_set_child(GTK_BUTTON(p_btn), p_row);
+         p_win->p_enhance_pics[i] = p_pic;
+      } else {
+         gtk_button_set_label(GTK_BUTTON(p_btn), c_lbl);
+      }
       gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
       g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER((gint)i));
       g_signal_connect_swapped(p_btn, "clicked",
@@ -2540,22 +2717,77 @@ _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
       if ((p_win->u_enhance_mask & (guint8)(1u << i)) != 0) {
          gtk_widget_add_css_class(p_btn, "ggaze-enhance-on");
       }
-      gtk_box_append(GTK_BOX(p_box), p_btn);
+      if (b_previews) {
+         gtk_flow_box_append(GTK_FLOW_BOX(p_gallery), p_btn);
+      } else {
+         gtk_box_append(GTK_BOX(p_box), p_btn);
+      }
       p_win->p_enhance_btns[i] = p_btn;
       g_free(c_lbl);
    }
-   GtkWidget *p_btn0 = gtk_button_new_with_label("0  Original");
-   gtk_widget_set_halign(p_btn0, GTK_ALIGN_START);
-   g_object_set_data(G_OBJECT(p_btn0), "idx", GINT_TO_POINTER(-1));
-   g_signal_connect_swapped(p_btn0, "clicked", G_CALLBACK(_enhance_row_toggle),
-                            p_win);
-   gtk_box_append(GTK_BOX(p_box), p_btn0);
+   if (!b_previews) {
+      gtk_box_append(GTK_BOX(p_box), p_btn0);
+   }
 
    GtkWidget *p_hint = gtk_label_new("s  Save enhanced copy");
    gtk_widget_set_halign(p_hint, GTK_ALIGN_START);
    gtk_widget_set_margin_top(p_hint, 8);
    gtk_widget_add_css_class(p_hint, "dim-label");
    gtk_box_append(GTK_BOX(p_box), p_hint);
+}
+
+typedef struct {
+   GgazeWindow *p_win;
+   guint        u_gen;
+} _PreviewCtx;
+
+static void
+_preview_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   _PreviewCtx *p_ctx = (_PreviewCtx *)p_data;
+   GError      *p_err = NULL;
+   GPtrArray   *p_tex = enhancer_preview_thumbnails_finish(p_res, &p_err);
+   GgazeWindow *p_win = p_ctx->p_win;
+   if (!p_win->b_disposed && p_ctx->u_gen == p_win->u_preview_gen &&
+       p_win->p_enhance_ui != NULL && p_tex != NULL && p_tex->len > 0) {
+      GdkTexture *p_original = g_ptr_array_index(p_tex, 0);
+      if (p_win->p_original_pic != NULL && p_original != NULL) {
+         gtk_picture_set_paintable(GTK_PICTURE(p_win->p_original_pic),
+                                   GDK_PAINTABLE(p_original));
+      }
+      for (guint i = 0; i + 1 < p_tex->len && i < 8; i++) {
+         GdkTexture *p_one = g_ptr_array_index(p_tex, i + 1);
+         if (p_win->p_enhance_pics[i] != NULL && p_one != NULL) {
+            gtk_picture_set_paintable(GTK_PICTURE(p_win->p_enhance_pics[i]),
+                                      GDK_PAINTABLE(p_one));
+         }
+      }
+   }
+   g_clear_pointer(&p_tex, g_ptr_array_unref);
+   g_clear_error(&p_err);
+   g_object_unref(p_win);
+   g_free(p_ctx);
+}
+
+static void
+_enhance_start_previews(GgazeWindow *p_win, const GPtrArray *p_presets) {
+   if (!settings_get_enhance_preview_thumbnails(p_win->p_settings)) {
+      return;
+   }
+   GFile *p_file = navigator_get_current(p_win->p_nav);
+   if (p_file == NULL) {
+      return;
+   }
+   p_win->u_preview_gen++;
+   g_cancellable_cancel(p_win->p_preview_cancel);
+   g_clear_object(&p_win->p_preview_cancel);
+   p_win->p_preview_cancel = g_cancellable_new();
+   _PreviewCtx *p_ctx      = g_new(_PreviewCtx, 1);
+   p_ctx->p_win            = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->u_gen            = p_win->u_preview_gen;
+   enhancer_preview_thumbnails_async(p_win->p_enhancer, p_file, p_presets,
+                                     p_win->p_preview_cancel, _preview_done_cb,
+                                     p_ctx);
 }
 
 /* Build the popover's content box (title + preset rows). Split out of
@@ -2572,12 +2804,29 @@ _enhance_build_box(GgazeWindow *p_win, const GPtrArray *p_presets) {
    return (p_box);
 }
 
-/* win.enhance (key 'a'): open the preset popover (same GtkPopover +
- * hotkey-assignment pattern as `m`/`e`/`!`, docs/gegl.md). Toggles closed on
- * a second press, same as the other popups. Unlike them, a row click/hotkey
- * does NOT close the popover -- presets are layered toggles, and staying
- * open lets you compare combinations before closing (Esc / outside click /
- * re-press `a`). */
+static GtkWidget *
+_enhance_build_gallery_window(GgazeWindow *p_win, const GPtrArray *p_presets) {
+   GtkWidget *p_window = gtk_window_new();
+   gtk_window_set_title(GTK_WINDOW(p_window), "Enhance previews");
+   gtk_window_set_transient_for(GTK_WINDOW(p_window), GTK_WINDOW(p_win));
+   gtk_window_set_destroy_with_parent(GTK_WINDOW(p_window), TRUE);
+   gtk_window_set_resizable(GTK_WINDOW(p_window), TRUE);
+   int i_width  = MAX(500, gtk_widget_get_width(GTK_WIDGET(p_win)));
+   int i_height = MAX(500, gtk_widget_get_height(GTK_WIDGET(p_win)));
+   gtk_window_set_default_size(GTK_WINDOW(p_window), i_width, i_height);
+   gtk_window_set_child(GTK_WINDOW(p_window),
+                        _enhance_build_box(p_win, p_presets));
+   g_signal_connect(p_window, "close-request",
+                    G_CALLBACK(_enhance_window_close_cb), p_win);
+   gtk_widget_add_tick_callback(p_window, _enhance_gallery_tick_cb, p_win,
+                                NULL);
+   return (p_window);
+}
+
+/* win.enhance (key 'a'): thumbnail mode opens a resizable gallery window;
+ * compact mode retains the anchored popover used by the other chooser UIs.
+ * A second press closes either form. Row clicks and hotkeys keep it open so
+ * several layered presets can be compared. */
 static void
 _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -2586,30 +2835,48 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (p_win->p_nav == NULL || p_win->p_enhancer == NULL) {
       return;
    }
-   if (p_win->p_enhance_pop != NULL) {
+   if (p_win->p_enhance_ui != NULL) {
       _enhance_destroy(p_win);
       return;
    }
-   GtkWidget *p_pop = gtk_popover_new();
-   gtk_popover_set_position(GTK_POPOVER(p_pop), GTK_POS_TOP);
-   gtk_popover_set_pointing_to(GTK_POPOVER(p_pop),
-                               &(const GdkRectangle){0, 0, 1, 1});
-   g_signal_connect(GTK_POPOVER(p_pop), "closed",
-                    G_CALLBACK(_enhance_closed_cb), p_win);
+   const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
+   gboolean         b_previews =
+      settings_get_enhance_preview_thumbnails(p_win->p_settings);
+   GtkWidget *p_ui = NULL;
+   if (b_previews) {
+      p_ui = _enhance_build_gallery_window(p_win, p_presets);
+   } else {
+      p_ui = gtk_popover_new();
+      gtk_popover_set_position(GTK_POPOVER(p_ui), GTK_POS_TOP);
+      gtk_popover_set_pointing_to(GTK_POPOVER(p_ui),
+                                  &(const GdkRectangle){0, 0, 1, 1});
+      g_signal_connect(GTK_POPOVER(p_ui), "closed",
+                       G_CALLBACK(_enhance_closed_cb), p_win);
+      gtk_popover_set_child(GTK_POPOVER(p_ui),
+                            _enhance_build_box(p_win, p_presets));
+      gtk_widget_set_parent(p_ui, p_win->p_stack);
+   }
    GtkEventController *p_kc = gtk_event_controller_key_new();
    gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
    g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_enhance_key_pressed_cb),
                     p_win);
-   gtk_widget_add_controller(p_pop, p_kc);
-
-   const GPtrArray *p_presets = enhancer_get_presets(p_win->p_enhancer);
-   gtk_popover_set_child(GTK_POPOVER(p_pop),
-                         _enhance_build_box(p_win, p_presets));
-   gtk_widget_set_parent(p_pop, p_win->p_stack);
-   p_win->p_enhance_pop = p_pop;
-   /* Focuses the first preset row itself -- see "POPOVER KEYBOARD FOCUS"
-    * near the top of this file. */
-   gtk_popover_popup(GTK_POPOVER(p_pop));
+   gtk_widget_add_controller(p_ui, p_kc);
+   p_win->p_enhance_ui = p_ui;
+   int i_width         = gtk_widget_get_width(GTK_WIDGET(p_win));
+   int i_height        = gtk_widget_get_height(GTK_WIDGET(p_win));
+   if (i_width <= 0 || i_height <= 0) {
+      i_width  = 800;
+      i_height = 600;
+   }
+   _enhance_resize_gallery(p_win, i_width, i_height);
+   _enhance_start_previews(p_win, p_presets);
+   if (b_previews) {
+      gtk_window_present(GTK_WINDOW(p_ui));
+   } else {
+      /* Focuses the first preset row itself -- see "POPOVER KEYBOARD FOCUS"
+       * near the top of this file. */
+      gtk_popover_popup(GTK_POPOVER(p_ui));
+   }
 }
 
 /* win.enhance-N (keys 1-8, always live -- not gated on the popover being
@@ -3822,6 +4089,8 @@ _action_move(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 static const GActionEntry ACTIONS[] = {
    {.name = "prev", .activate = _action_prev},
    {.name = "next", .activate = _action_next},
+   {.name = "cursor-down", .activate = _action_cursor_down},
+   {.name = "cursor-up", .activate = _action_cursor_up},
    {.name = "first", .activate = _action_first},
    {.name = "last", .activate = _action_last},
    {.name = "open", .activate = _action_open},
@@ -3900,6 +4169,7 @@ _enhance_nav_changed(GgazeWindow *p_win) {
    gboolean b_same = (p_cur != NULL && p_win->p_enhance_file != NULL &&
                       g_file_equal(p_cur, p_win->p_enhance_file));
    if (!b_same) {
+      _enhance_destroy(p_win);
       p_win->u_enhance_mask  = 0;
       p_win->b_hold_original = FALSE; /* mask cleared without going through
                                        * _enhance_apply_async, so reset the
@@ -4289,8 +4559,7 @@ _prompt_dispose(GgazeWindow *p_win) {
 /* Tear down every piece of enhance state the window owns, so
  * ggaze_window_dispose itself stays a flat list of one-liners (and under the
  * 50-line convention). The enhancer engine itself is released later in
- * dispose, after the widgets, because _enhance_destroy only unparents the
- * popover. */
+ * dispose, after the widgets, because _enhance_destroy closes the UI. */
 static void
 _enhance_dispose(GgazeWindow *p_win) {
    _enhance_destroy(p_win);

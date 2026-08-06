@@ -37,6 +37,10 @@
 #include "ggaze-config.h"
 #include "viewer.h"
 
+#if GGAZE_HAVE_GEGL
+#include <gegl.h>
+#endif
+
 #include <gio/gio.h>
 #include <glib.h>
 #include <gtk/gtk.h>
@@ -306,6 +310,20 @@ test_enhance_a_is_safe_with_and_without_gegl(void) {
 
 int
 main(int i_argc, char **c_argv) {
+#if GGAZE_HAVE_GEGL
+   /* Production always calls gegl_init() at GApplication startup (app.c) well
+    * before any window/enhance action exists; this bare test window (built via
+    * g_object_new, bypassing GgazeApp) needs the same explicit call
+    * test_enhancer.c and test_enhance_flow.c already make.
+    *
+    * Newly required here: the `a` subtest used to only open the preset
+    * popover, which touched no GEGL. The popover now populates per-preset
+    * preview thumbnails, and that work runs enhancer_load() on a GTask thread
+    * pool -- where an uninitialised operation registry makes GEGL's own
+    * gegl_operations_update_visible() abort on a NULL hash table, off the main
+    * thread and with no hint that the registry was the problem. */
+   gegl_init(&i_argc, &c_argv);
+#endif
    g_test_init(&i_argc, &c_argv, NULL);
 
    /* Tolerate host GTK WARNINGs (e.g. an unknown gtk-modules key delivered

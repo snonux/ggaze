@@ -67,6 +67,25 @@ copy_fixture(const char *c_dir, const char *c_name) {
 }
 
 static void
+copy_fixture_as(const char *c_dir, const char *c_name,
+                const char *c_dest_name) {
+   const gchar *c_fx = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_fx);
+   char   *c_src = g_build_filename(c_fx, c_name, NULL);
+   char   *c_dst = g_build_filename(c_dir, c_dest_name, NULL);
+   GFile  *p_src = g_file_new_for_path(c_src);
+   GFile  *p_dst = g_file_new_for_path(c_dst);
+   GError *p_err = NULL;
+   g_assert_true(g_file_copy(p_src, p_dst, G_FILE_COPY_OVERWRITE, NULL, NULL,
+                             NULL, &p_err));
+   g_assert_no_error(p_err);
+   g_object_unref(p_src);
+   g_object_unref(p_dst);
+   g_free(c_src);
+   g_free(c_dst);
+}
+
+static void
 cleanup_temp_dir(char *c_dir) {
    GFile           *p_dir = g_file_new_for_path(c_dir);
    GFileEnumerator *p_e =
@@ -130,6 +149,57 @@ make_folder(guint u_n_fixtures, GFile **p_first_out) {
       *p_first_out = p_file;
    }
    return (c_dir);
+}
+
+static char *
+make_large_folder(guint u_count) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-gridviewport-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   for (guint u = 0; u < u_count; u++) {
+      char *c_name = g_strdup_printf("image-%02u.jpg", u);
+      copy_fixture_as(c_dir, "plain.jpg", c_name);
+      g_free(c_name);
+   }
+   return (c_dir);
+}
+
+static GtkWidget *
+find_picture(GtkWidget *p_root, guint u_target, guint *p_seen) {
+   if (GTK_IS_PICTURE(p_root)) {
+      if (*p_seen == u_target) {
+         return (p_root);
+      }
+      (*p_seen)++;
+      return (NULL);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
+   while (p_child != NULL) {
+      GtkWidget *p_found = find_picture(p_child, u_target, p_seen);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (NULL);
+}
+
+static GtkWidget *
+grid_picture(GgazeGrid *p_grid, guint u_index) {
+   guint u_seen = 0;
+   return (find_picture(GTK_WIDGET(p_grid), u_index, &u_seen));
+}
+
+static gboolean
+wait_for_paintable(GtkWidget *p_picture, guint u_timeout_ms) {
+   for (guint u = 0; u < u_timeout_ms; u++) {
+      if (gtk_picture_get_paintable(GTK_PICTURE(p_picture)) != NULL) {
+         return (TRUE);
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   return (FALSE);
 }
 
 /* --- subtests ----------------------------------------------------------- */
@@ -212,6 +282,61 @@ test_grid_refresh_with_inflight(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* A GtkFlowBox maps every child, including cells below the viewport. Loading
+ * on "map" therefore queues an entire large folder and leaves newly exposed
+ * cells behind that backlog when the window is maximized. Only visible cells
+ * should load initially; a later viewport resize must schedule the cells it
+ * exposes. */
+static void
+test_grid_loads_newly_visible_after_resize(void) {
+   const guint u_count = 8;
+   char       *c_dir   = make_large_folder(u_count);
+   GFile      *p_dir   = g_file_new_for_path(c_dir);
+   Navigator  *p_nav   = navigator_new(p_dir, GGAZE_SORT_NAME, FALSE, FALSE);
+   Thumbnail  *p_thumb = thumbnail_new();
+   GgazeGrid  *p_grid  = GGAZE_GRID(ggaze_grid_new(p_nav, p_thumb, 128, FALSE));
+   GtkWindow  *p_win   = GTK_WINDOW(gtk_window_new());
+   gtk_window_set_child(p_win, GTK_WIDGET(p_grid));
+   gtk_window_set_default_size(p_win, 300, 200);
+   gtk_window_present(p_win);
+
+   GtkWidget *p_first = grid_picture(p_grid, 0);
+   GtkWidget *p_last  = grid_picture(p_grid, u_count - 1);
+   g_assert_nonnull(p_first);
+   g_assert_nonnull(p_last);
+   g_assert_true(wait_for_paintable(p_first, 5000));
+   /* A small fixture finishes quickly even in a loaded CI lane. Waiting here
+    * makes this assert distinguish "never submitted" from merely "queued
+    * behind the visible cells" under the old eager map-based scheduler. */
+   drain_main(2000);
+   g_assert_null(gtk_picture_get_paintable(GTK_PICTURE(p_last)));
+
+   int i_initial_width  = gtk_widget_get_width(GTK_WIDGET(p_grid));
+   int i_initial_height = gtk_widget_get_height(GTK_WIDGET(p_grid));
+   gtk_window_set_default_size(p_win, 600, 500);
+   for (guint u = 0;
+        u < 3000 &&
+        (gtk_widget_get_width(GTK_WIDGET(p_grid)) <= i_initial_width ||
+         gtk_widget_get_height(GTK_WIDGET(p_grid)) <= i_initial_height);
+        u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpint(gtk_widget_get_width(GTK_WIDGET(p_grid)), >,
+                   i_initial_width);
+   g_assert_cmpint(gtk_widget_get_height(GTK_WIDGET(p_grid)), >,
+                   i_initial_height);
+   g_assert_true(wait_for_paintable(p_last, 5000));
+
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -229,5 +354,7 @@ main(int i_argc, char **c_argv) {
                    test_grid_detach_with_inflight);
    g_test_add_func("/grid/refresh_with_inflight",
                    test_grid_refresh_with_inflight);
+   g_test_add_func("/grid/loads_newly_visible_after_resize",
+                   test_grid_loads_newly_visible_after_resize);
    return (g_test_run());
 }

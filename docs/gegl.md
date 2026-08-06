@@ -19,18 +19,26 @@ editing remains a non-goal.
 
 ## The quick-enhance feature
 
-- `a` → **enhance popover** (same `GtkPopover` + hotkey-assignment pattern as
-  `m`/`e`/`!`): lists presets, each with an auto-assigned hotkey (`1`, `2`, …
-  then `0`, `a`-`z`), plus a `0 Original` reset row.
+- `a` → **enhance chooser**: a resizable preview window by default, or the same
+  compact `GtkPopover` pattern as `m`/`e`/`!` when thumbnails are disabled. It
+  lists presets with auto-assigned hotkeys (`1`, `2`, … then `0`, `a`-`z`),
+  plus a `0 Original` reset row.
 - Selecting a preset toggles a **GEGL graph** on/off and re-renders the
   viewer through the chain of every currently-enabled preset —
   non-destructively, and **layered**: multiple presets compose (e.g.
   Auto-fix + Sharpen at once). A hotkey/row click does not close the
-  popover, so combinations can be compared before dismissing it (`Esc`,
-  outside click, or re-press `a`); `0` (or `Esc` when the popover is closed)
-  discards the whole preview outright. Applying the chain runs off the GTK
-  main thread (a GTask worker; last-write-wins if superseded before it
-  finishes).
+  chooser, so combinations can be compared before dismissing it (`Esc`,
+  re-press `a`, or the gallery's close button; outside click also works in
+  compact popover mode). `0` (or `Esc` when the chooser is closed) discards the
+  whole preview outright. Applying the chain runs off the GTK main thread (a
+  GTask worker; last-write-wins if superseded before it finishes).
+- By default `a` opens a separate, resizable gallery of bounded previews for
+  all eight presets. It can be maximized to use the whole screen and reflows to
+  choose the largest cards that keep every enhancer plus the Original reset
+  card visible at once. Each preset is shown independently on the current
+  original and all previews are generated as one cancellable background batch.
+  Preferences can disable thumbnails and restore the compact popover text list
+  on slower systems.
 - `s` (or menu *Save enhanced copy…*) writes the enhanced result to a new
   file, e.g. `IMG_0001-enhanced.jpg`, or `-enhanced-1.jpg`, `-2`, … if that
   name is taken (same collision suffixing as the move popup), via a GEGL

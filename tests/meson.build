@@ -455,11 +455,16 @@ test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 # all, which reads like a product crash rather than two test runs fighting
 # over a display. The fix is a display each, not a meson setting: give the
 # second lane its own `xvfb-run -a`, or just run the lanes one after another.
+# gegl_dep is needed for the gegl_init() call in main() (see test_window.c):
+# the `a` subtest now reaches GEGL on a worker thread, so this bare window
+# must initialise the operation registry the way GgazeApp does in production.
+# Conditional because the minimal lanes build without GEGL, where the subtest
+# takes its #else branch and never touches the library.
 test_window = executable(
    'test_window',
    ['test_window.c', ggaze_conf_h],
    include_directories : [inc, src_inc],
-   dependencies : ggaze_deps,
+   dependencies : ggaze_deps + (gegl_dep.found() ? [gegl_dep] : []),
    link_with : ggaze_lib,
    install : false,
 )

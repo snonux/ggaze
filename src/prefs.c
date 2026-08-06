@@ -348,6 +348,9 @@ _build_general_page(Settings *p_s, GSettings *p_gs) {
       p_grp, _make_switch_row("Hide trashed items", "hide-trashed", p_gs));
    adw_preferences_group_add(
       p_grp, _make_switch_row("Hide RAW sidecars", "hide-raw-sidecars", p_gs));
+   adw_preferences_group_add(
+      p_grp, _make_switch_row("GEGL enhance preview thumbnails",
+                              "enhance-preview-thumbnails", p_gs));
    adw_preferences_page_add(p_page, p_grp);
    return (ADW_PREFERENCES_PAGE(p_page));
 }

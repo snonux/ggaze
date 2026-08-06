@@ -2,7 +2,7 @@
  * ggaze — thumbnail grid view
  *
  * GgazeGrid wraps a GtkFlowBox (in a GtkScrolledWindow): one cell per
- * navigator file, thumbnails loaded lazily (async, on realize) from the
+ * navigator file, thumbnails loaded lazily (async, while visible) from the
  * thumbnail cache. Removed (trashed/deleted) cells are dimmed; marked cells
  * get a check badge. Resize (+/-) updates the cell size and reflows. Enter or
  * double-click emits "activate". Cursor follows navigator.current.
@@ -33,14 +33,17 @@ struct _GgazeGrid {
    gboolean            b_hide_trashed;
    guint               u_nav_handler;
    guint               u_last_count; /* navigator count at last full refresh */
-   GCancellable       *p_cancel;     /* cancels pending thumbnails on dispose */
-   GgazeGridSelectFunc fn_select;    /* selection gate hook, or NULL */
+   guint               u_visible_idle; /* queued viewport thumbnail scan */
+   GCancellable       *p_cancel;  /* cancels pending thumbnails on dispose */
+   GgazeGridSelectFunc fn_select; /* selection gate hook, or NULL */
    gpointer            p_select_data; /* fn_select's user data */
 };
 
 G_DEFINE_TYPE(GgazeGrid, ggaze_grid, GTK_TYPE_WIDGET)
 
 static guint u_activate_signal = 0;
+
+static void _queue_visible_thumbnails(GgazeGrid *p_grid);
 
 static void
 _cell_data_free(gpointer p_void) {
@@ -127,10 +130,70 @@ _request_thumbnail(GtkWidget *p_pic) {
                        p_grid->p_cancel, _thumb_finish_cb, g_object_ref(p_pic));
 }
 
+static gboolean
+_picture_is_visible(GgazeGrid *p_grid, GtkWidget *p_pic) {
+   graphene_rect_t t_bounds;
+   if (!gtk_widget_compute_bounds(p_pic, p_grid->p_flow, &t_bounds)) {
+      return (FALSE);
+   }
+   GtkAdjustment *p_hadjustment = gtk_scrolled_window_get_hadjustment(
+      GTK_SCROLLED_WINDOW(p_grid->p_scrolled));
+   GtkAdjustment *p_vadjustment = gtk_scrolled_window_get_vadjustment(
+      GTK_SCROLLED_WINDOW(p_grid->p_scrolled));
+   double d_left   = gtk_adjustment_get_value(p_hadjustment);
+   double d_top    = gtk_adjustment_get_value(p_vadjustment);
+   double d_right  = d_left + gtk_adjustment_get_page_size(p_hadjustment);
+   double d_bottom = d_top + gtk_adjustment_get_page_size(p_vadjustment);
+   return (t_bounds.origin.x < d_right && t_bounds.origin.y < d_bottom &&
+           t_bounds.origin.x + t_bounds.size.width > d_left &&
+           t_bounds.origin.y + t_bounds.size.height > d_top);
+}
+
+static gboolean
+_request_visible_idle_cb(gpointer p_data) {
+   GgazeGrid *p_grid      = GGAZE_GRID(p_data);
+   p_grid->u_visible_idle = 0;
+   if (!gtk_widget_get_mapped(GTK_WIDGET(p_grid)) || p_grid->p_thumb == NULL ||
+       p_grid->p_cancel == NULL) {
+      return (G_SOURCE_REMOVE);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
+   while (p_child != NULL) {
+      GtkWidget *p_box =
+         gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(p_child));
+      GtkWidget *p_pic =
+         (p_box != NULL) ? gtk_widget_get_first_child(p_box) : NULL;
+      if (p_pic != NULL && _picture_is_visible(p_grid, p_pic)) {
+         _request_thumbnail(p_pic);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (G_SOURCE_REMOVE);
+}
+
+static void
+_queue_visible_thumbnails(GgazeGrid *p_grid) {
+   if (p_grid->p_cancel == NULL || p_grid->u_visible_idle != 0) {
+      return;
+   }
+   p_grid->u_visible_idle = g_idle_add_full(
+      G_PRIORITY_DEFAULT_IDLE, _request_visible_idle_cb, p_grid, NULL);
+}
+
 static void
 _on_pic_map(GtkWidget *p_pic, gpointer p_data) {
    (void)p_data;
-   _request_thumbnail(p_pic);
+   GgazeGrid *p_grid =
+      GGAZE_GRID(gtk_widget_get_ancestor(p_pic, GGAZE_TYPE_GRID));
+   if (p_grid != NULL) {
+      _queue_visible_thumbnails(p_grid);
+   }
+}
+
+static void
+_on_adjustment_changed(GtkAdjustment *p_adjustment, gpointer p_data) {
+   (void)p_adjustment;
+   _queue_visible_thumbnails(GGAZE_GRID(p_data));
 }
 
 /* --- cell construction --------------------------------------------------- */
@@ -205,15 +268,21 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
       g_signal_emit(p_grid, u_activate_signal, 0);
       return (TRUE);
    }
-   if (u_kv == GDK_KEY_j) {
-      /* Move the cursor down one row (vim-style); h/l stay linear via the
+   if (u_kv == GDK_KEY_j || u_kv == GDK_KEY_Down) {
+      /* Move the cursor down one row; h/l and Left/Right stay linear via the
        * global win.next/win.prev shortcuts. */
       ggaze_grid_move_cursor(p_grid, 1);
       return (TRUE);
    }
-   if (u_kv == GDK_KEY_k) {
+   if (u_kv == GDK_KEY_k || u_kv == GDK_KEY_Up) {
       ggaze_grid_move_cursor(p_grid, -1);
       return (TRUE);
+   }
+   if (u_kv == GDK_KEY_Left) {
+      return (gtk_widget_activate_action(GTK_WIDGET(p_grid), "win.prev", NULL));
+   }
+   if (u_kv == GDK_KEY_Right) {
+      return (gtk_widget_activate_action(GTK_WIDGET(p_grid), "win.next", NULL));
    }
    if (u_kv == GDK_KEY_d) {
       /* `d` in the grid trashes the current file (window handles via action).
@@ -515,6 +584,10 @@ _on_nav_changed(Navigator *p_nav, gpointer p_data) {
 static void
 ggaze_grid_dispose(GObject *p_obj) {
    GgazeGrid *p_grid = GGAZE_GRID(p_obj);
+   if (p_grid->u_visible_idle != 0) {
+      g_source_remove(p_grid->u_visible_idle);
+      p_grid->u_visible_idle = 0;
+   }
    if (p_grid->p_cancel != NULL) {
       g_cancellable_cancel(p_grid->p_cancel);
       g_clear_object(&p_grid->p_cancel);
@@ -563,6 +636,18 @@ ggaze_grid_init(GgazeGrid *p_grid) {
    gtk_widget_set_parent(p_grid->p_scrolled, GTK_WIDGET(p_grid));
    gtk_widget_set_hexpand(p_grid->p_scrolled, TRUE);
    gtk_widget_set_vexpand(p_grid->p_scrolled, TRUE);
+   GtkAdjustment *p_hadjustment = gtk_scrolled_window_get_hadjustment(
+      GTK_SCROLLED_WINDOW(p_grid->p_scrolled));
+   GtkAdjustment *p_vadjustment = gtk_scrolled_window_get_vadjustment(
+      GTK_SCROLLED_WINDOW(p_grid->p_scrolled));
+   g_signal_connect(p_hadjustment, "changed",
+                    G_CALLBACK(_on_adjustment_changed), p_grid);
+   g_signal_connect(p_vadjustment, "changed",
+                    G_CALLBACK(_on_adjustment_changed), p_grid);
+   g_signal_connect(p_hadjustment, "value-changed",
+                    G_CALLBACK(_on_adjustment_changed), p_grid);
+   g_signal_connect(p_vadjustment, "value-changed",
+                    G_CALLBACK(_on_adjustment_changed), p_grid);
    p_grid->p_flow = gtk_flow_box_new();
    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(p_grid->p_flow), TRUE);
    gtk_flow_box_set_activate_on_single_click(GTK_FLOW_BOX(p_grid->p_flow),
@@ -570,6 +655,7 @@ ggaze_grid_init(GgazeGrid *p_grid) {
    g_signal_connect(p_grid->p_flow, "child-activated",
                     G_CALLBACK(_on_child_activated), p_grid);
    GtkEventController *p_key = gtk_event_controller_key_new();
+   gtk_event_controller_set_propagation_phase(p_key, GTK_PHASE_CAPTURE);
    g_signal_connect(p_key, "key-pressed", G_CALLBACK(_on_flow_key), p_grid);
    gtk_widget_add_controller(p_grid->p_flow, p_key);
    /* Middle-click on a cell toggles its mark (pointer-accessible marks). */
@@ -633,6 +719,7 @@ ggaze_grid_set_thumbnail_size(GgazeGrid *p_grid, int i_size) {
       p_child = gtk_widget_get_next_sibling(p_child);
    }
    gtk_widget_queue_resize(p_grid->p_flow);
+   _queue_visible_thumbnails(p_grid);
 }
 
 int

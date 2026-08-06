@@ -251,8 +251,9 @@ Loaded lazily; never blocks display of the pixels.
 
 ## Quick enhance (GEGL, optional)
 
-- **`a` → enhance popover**: same `GtkPopover` + hotkey-assignment pattern as
-  `m`/`e`/`!` (shared `_popup_hotkey_char`/`_popup_key_to_index` helpers).
+- **`a` → enhance chooser**: a resizable preview window by default, or the
+  same compact `GtkPopover` pattern as `m`/`e`/`!` when preview thumbnails are
+  disabled (shared `_popup_hotkey_char`/`_popup_key_to_index` helpers).
   Lists configurable presets, each with an auto-assigned hotkey (`1`, `2`, …
   then `0`, `a`-`z`, capped at the mask's 8 slots) plus a `0  Original` reset
   row. Example:
@@ -268,11 +269,17 @@ Loaded lazily; never blocks display of the pixels.
   ```
   Presets are **layered**: pressing `1` toggles "Auto-fix" on as a
   **non-destructive live preview**, and `2` composes "Brightness" on top of
-  it — press either again to toggle it back off. Unlike the other popovers,
-  a hotkey/row click does **not** close the popover (toggling combinations
-  while comparing is the point); `Esc`, an outside click, or re-pressing `a`
-  closes the popover without touching the preview itself. `0` (or its row)
+  it — press either again to toggle it back off. A hotkey/row click does **not**
+  close the chooser (toggling combinations while comparing is the point);
+  `Esc`, re-pressing `a`, or closing the gallery window leaves the preview in
+  place. An outside click also closes compact popover mode. `0` (or its row)
   discards the whole preview outright.
+- By default `a` opens a separate, resizable thumbnail gallery window that can
+  be maximized to use the whole screen. It reflows as it grows and chooses the
+  row/column layout that makes the cards largest while keeping the Original
+  and all eight enhancer previews visible at once. The bounded previews are
+  generated together off the GTK thread. Preferences can disable thumbnails
+  and use the compact popover text list on slower systems.
 - Presets are GEGL op graphs (e.g. Auto-fix = `gegl:stretch-contrast` →
   `gegl:color-enhance`; Brightness = `gegl:exposure`; Contrast =
   `gegl:brightness-contrast`; Saturation = `gegl:saturation`; Sharpen =

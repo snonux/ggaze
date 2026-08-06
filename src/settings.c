@@ -215,6 +215,18 @@ settings_set_hide_raw(Settings *p_s, gboolean b_hide) {
    g_settings_set_boolean(p_s->p_gs, "hide-raw-sidecars", b_hide);
 }
 
+gboolean
+settings_get_enhance_preview_thumbnails(Settings *p_s) {
+   g_return_val_if_fail(p_s != NULL, TRUE);
+   return (g_settings_get_boolean(p_s->p_gs, "enhance-preview-thumbnails"));
+}
+
+void
+settings_set_enhance_preview_thumbnails(Settings *p_s, gboolean b_enabled) {
+   g_return_if_fail(p_s != NULL);
+   g_settings_set_boolean(p_s->p_gs, "enhance-preview-thumbnails", b_enabled);
+}
+
 /* --- ordered a(ss) lists ------------------------------------------------- */
 
 GPtrArray *

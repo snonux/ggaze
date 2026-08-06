@@ -333,18 +333,18 @@ test_shortcut_keypath_toggle_and_back(void) {
 static void
 test_shortcut_full_table_registered(void) {
    static const char *ACTIONS[] = {
-      "win.prev",        "win.next",         "win.first",
-      "win.last",        "win.open",         "win.open-external",
-      "win.run-script",  "win.move",         "win.quit",
-      "win.trash",       "win.delete",       "win.undo",
-      "win.toggle-view", "win.mark",         "win.mark-all",
-      "win.mark-range",  "win.copy",         "win.shortcuts",
-      "win.zoom-in",     "win.zoom-out",     "win.fullscreen",
-      "win.slideshow",   "win.info",         "win.back",
-      "win.enhance",     "win.enhance-save", "win.enhance-1",
-      "win.enhance-2",   "win.enhance-3",    "win.enhance-4",
-      "win.enhance-5",   "win.enhance-6",    "win.enhance-7",
-      "win.enhance-8",
+      "win.prev",         "win.next",          "win.cursor-down",
+      "win.cursor-up",    "win.first",         "win.last",
+      "win.open",         "win.open-external", "win.run-script",
+      "win.move",         "win.quit",          "win.trash",
+      "win.delete",       "win.undo",          "win.toggle-view",
+      "win.mark",         "win.mark-all",      "win.mark-range",
+      "win.copy",         "win.shortcuts",     "win.zoom-in",
+      "win.zoom-out",     "win.fullscreen",    "win.slideshow",
+      "win.info",         "win.back",          "win.enhance",
+      "win.enhance-save", "win.enhance-1",     "win.enhance-2",
+      "win.enhance-3",    "win.enhance-4",     "win.enhance-5",
+      "win.enhance-6",    "win.enhance-7",     "win.enhance-8",
    };
    GgazeWindow           *p_win = new_window();
    GtkShortcutController *p_sc  = find_shortcut_controller(GTK_WIDGET(p_win));
@@ -354,10 +354,25 @@ test_shortcut_full_table_registered(void) {
       g_assert_nonnull(p_s);
       g_object_unref(p_s);
    }
-   /* The SHORTCUTS[] table has 39 rows now (some actions appear twice, e.g.
-    * win.prev for h and Left; win.zoom-in for plus and equal; pu0 added `m`
-    * -> win.move). */
-   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 39);
+   static const struct {
+      guint       u_keyval;
+      const char *c_action;
+   } CURSOR_KEYS[] = {
+      {GDK_KEY_Left, "win.prev"},
+      {GDK_KEY_Right, "win.next"},
+      {GDK_KEY_Down, "win.cursor-down"},
+      {GDK_KEY_Up, "win.cursor-up"},
+   };
+   for (gsize i = 0; i < G_N_ELEMENTS(CURSOR_KEYS); i++) {
+      GtkShortcut *p_s = find_shortcut_by_key(p_sc, CURSOR_KEYS[i].u_keyval, 0);
+      g_assert_nonnull(p_s);
+      g_assert_cmpstr(shortcut_action_name(p_s), ==, CURSOR_KEYS[i].c_action);
+      g_object_unref(p_s);
+   }
+   /* The SHORTCUTS[] table has 43 rows now (some actions appear twice, e.g.
+    * win.prev for h and Left, win.cursor-down for j and Down, and win.zoom-in
+    * for plus and equal). */
+   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 43);
    g_object_unref(p_sc);
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(200);

@@ -5,8 +5,8 @@
  * ggaze — thumbnail grid view
  *
  * GgazeGrid : GtkWidget is the folder-overview grid: one cell per navigator
- * file, thumbnails decoded lazily (async, on realize) from the thumbnail cache,
- * resizable (+/-), trashed/deleted cells dimmed, marked cells badged,
+ * file, thumbnails decoded lazily (async, while visible) from the thumbnail
+ * cache, resizable (+/-), trashed/deleted cells dimmed, marked cells badged,
  * Enter/double-click emits "activate" (grid->large). Cursor follows the
  * navigator. See docs/architecture.md "gridview" + docs/ui-and-interactions.md
  * "Grid view behavior".

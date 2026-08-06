@@ -88,6 +88,8 @@ gboolean settings_get_hide_trashed(Settings *p_s);
 void     settings_set_hide_trashed(Settings *p_s, gboolean b_hide);
 gboolean settings_get_hide_raw(Settings *p_s);
 void     settings_set_hide_raw(Settings *p_s, gboolean b_hide);
+gboolean settings_get_enhance_preview_thumbnails(Settings *p_s);
+void settings_set_enhance_preview_thumbnails(Settings *p_s, gboolean b_enabled);
 
 /* --- ordered a(ss) lists ------------------------------------------------- */
 /* Each getter returns a freshly-allocated GPtrArray of SettingsPair* (transfer

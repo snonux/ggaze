@@ -186,6 +186,49 @@ wait_for_texture_change(GgazeWindow *p_win, GdkTexture *p_before) {
    ggtest_drain_main(50);
 }
 
+static GtkWidget *
+find_widget_type(GtkWidget *p_root, GType e_type) {
+   if (G_TYPE_CHECK_INSTANCE_TYPE(p_root, e_type)) {
+      return (p_root);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
+   while (p_child != NULL) {
+      GtkWidget *p_found = find_widget_type(p_child, e_type);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (NULL);
+}
+
+/* Return an owned reference to the transient gallery window, if present. */
+static GtkWindow *
+find_transient_window(GtkWindow *p_parent) {
+   GListModel *p_windows = gtk_window_get_toplevels();
+   guint       u_n       = g_list_model_get_n_items(p_windows);
+   for (guint i = 0; i < u_n; i++) {
+      GtkWindow *p_window = g_list_model_get_item(p_windows, i);
+      if (gtk_window_get_transient_for(p_window) == p_parent) {
+         return (p_window);
+      }
+      g_object_unref(p_window);
+   }
+   return (NULL);
+}
+
+static void
+collect_pictures(GtkWidget *p_root, GPtrArray *p_pictures) {
+   if (GTK_IS_PICTURE(p_root)) {
+      g_ptr_array_add(p_pictures, p_root);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
+   while (p_child != NULL) {
+      collect_pictures(p_child, p_pictures);
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+}
+
 static char *
 load_bytes(const char *c_path, gsize *pu_len) {
    char   *c_data = NULL;
@@ -193,6 +236,123 @@ load_bytes(const char *c_path, gsize *pu_len) {
    g_assert_true(g_file_get_contents(c_path, &c_data, pu_len, &p_err));
    g_assert_no_error(p_err);
    return (c_data);
+}
+
+static void
+test_preview_thumbnail_window(void) {
+   Settings *p_cfg = settings_new();
+   settings_set_enhance_preview_thumbnails(p_cfg, TRUE);
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-enhance-thumbs-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "plain.jpg");
+   char        *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GgazeWindow *p_win  = new_window();
+   ggaze_window_open(p_win, p_file);
+   gtk_window_set_default_size(GTK_WINDOW(p_win), 500, 500);
+   gtk_window_present(GTK_WINDOW(p_win));
+   wait_for_load(p_win);
+
+   fire(p_win, "win.enhance");
+   GtkWindow *p_gallery = find_transient_window(GTK_WINDOW(p_win));
+   g_assert_nonnull(p_gallery);
+   g_assert_true(gtk_window_get_resizable(p_gallery));
+   GtkWidget *p_scroll =
+      find_widget_type(GTK_WIDGET(p_gallery), GTK_TYPE_SCROLLED_WINDOW);
+   GtkWidget *p_flow =
+      find_widget_type(GTK_WIDGET(p_gallery), GTK_TYPE_FLOW_BOX);
+   g_assert_nonnull(p_scroll);
+   g_assert_nonnull(p_flow);
+   for (guint u = 0; u < 3000 && gtk_widget_get_width(p_scroll) == 0; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpint(gtk_widget_get_width(p_scroll), >, 0);
+   int        i_initial_width    = gtk_widget_get_width(p_scroll);
+   GPtrArray *p_initial_pictures = g_ptr_array_new();
+   collect_pictures(GTK_WIDGET(p_gallery), p_initial_pictures);
+   g_assert_cmpuint(p_initial_pictures->len, ==, 9);
+   int i_initial_picture_width = gtk_widget_get_width(
+      GTK_WIDGET(g_ptr_array_index(p_initial_pictures, 0)));
+   g_ptr_array_unref(p_initial_pictures);
+   /* Widen via a size request on the scroll area, NOT
+    * gtk_window_set_default_size() on the gallery. GTK4's set_default_size on
+    * an ALREADY-PRESENTED window only asks the window manager to resize, and
+    * the suites run under `xvfb-run` with no WM at all -- so the request is
+    * dropped, the gallery stays 500 wide and the reflow assertions below fail
+    * against an unchanged 484px scroll area. A size request grows the widget
+    * (and with it the toplevel) through GTK's own layout pass, which needs no
+    * WM and settles synchronously enough for the wait loop to observe. */
+   /* Grow the gallery via a size request on the TOPLEVEL, not
+    * gtk_window_set_default_size() and not a request on p_scroll.
+    *
+    * set_default_size on an already-presented GTK4 window only asks the window
+    * manager to resize, and these suites run under `xvfb-run` with no WM at
+    * all -- the request is dropped and the gallery stays 500 wide. A request
+    * on p_scroll does not work either: _enhance_gallery_tick_cb (window.c)
+    * owns that widget's size request and rewrites it from the gallery window's
+    * own allocation on every frame, so a test-side value is overwritten before
+    * the next assertion reads it. Requesting on the toplevel grows the window
+    * through GTK's layout pass (no WM needed), which is exactly the input the
+    * tick callback reacts to -- so this drives the real reflow path. */
+   gtk_widget_set_size_request(GTK_WIDGET(p_gallery), 1200, 800);
+   for (guint u = 0;
+        u < 3000 && gtk_widget_get_width(p_scroll) <= i_initial_width; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpint(gtk_widget_get_width(p_scroll), >, i_initial_width);
+   GPtrArray *p_pictures = g_ptr_array_new();
+   collect_pictures(GTK_WIDGET(p_gallery), p_pictures);
+   g_assert_cmpuint(p_pictures->len, ==, 9);
+   /* The pictures need their own wait: _enhance_resize_gallery sets a size
+    * REQUEST on each one, and a request only becomes an allocation on the next
+    * layout pass. The scroll-area loop above returns as soon as the scroll
+    * grew, which is that same pass -- one frame too early for the children. */
+   for (guint u = 0;
+        u < 3000 &&
+        gtk_widget_get_width(GTK_WIDGET(g_ptr_array_index(p_pictures, 0))) <=
+           i_initial_picture_width;
+        u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpint(
+      gtk_widget_get_width(GTK_WIDGET(g_ptr_array_index(p_pictures, 0))), >,
+      i_initial_picture_width);
+   guint u_painted = 0;
+   for (guint u = 0; u < 10000 && u_painted < p_pictures->len; u++) {
+      u_painted = 0;
+      for (guint i = 0; i < p_pictures->len; i++) {
+         GtkPicture *p_pic = g_ptr_array_index(p_pictures, i);
+         if (gtk_picture_get_paintable(p_pic) != NULL) {
+            u_painted++;
+         }
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpuint(u_painted, ==, p_pictures->len);
+   GtkAdjustment *p_vadjustment =
+      gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(p_scroll));
+   g_assert_cmpfloat(gtk_adjustment_get_upper(p_vadjustment), <=,
+                     gtk_adjustment_get_page_size(p_vadjustment) + 1.0);
+   g_ptr_array_unref(p_pictures);
+
+   fire(p_win, "win.enhance"); /* close resized gallery */
+   g_object_unref(p_gallery);
+   fire(p_win, "win.enhance"); /* reopen, start another preview batch */
+   fire(p_win, "win.enhance"); /* immediately close and cancel it */
+   ggtest_drain_main(500);
+   g_settings_reset(settings_get_gsettings(p_cfg),
+                    "enhance-preview-thumbnails");
+   settings_delete(p_cfg);
+   g_object_unref(p_file);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   g_free(c_path);
+   ggtest_drain_main(300);
+   cleanup_temp_dir(c_dir);
 }
 
 /* --- dirty-preview fixture ----------------------------------------------- */
@@ -2169,6 +2329,8 @@ test_close_request_blocked_while_prompt_is_up(void) {
  * answer the real Save/Discard/Cancel prompt (see the file header). */
 static void
 add_feature_tests(void) {
+   g_test_add_func("/enhance_flow/preview_thumbnail_window",
+                   test_preview_thumbnail_window);
    g_test_add_func("/enhance_flow/apply_is_async_and_original_untouched",
                    test_apply_is_async_and_original_untouched);
    g_test_add_func("/enhance_flow/toggle_off_resets_to_original",

@@ -20,6 +20,7 @@ new_settings(void) {
    g_settings_reset(settings_get_gsettings(p_s), "thumbnail-size");
    g_settings_reset(settings_get_gsettings(p_s), "hide-trashed");
    g_settings_reset(settings_get_gsettings(p_s), "hide-raw-sidecars");
+   g_settings_reset(settings_get_gsettings(p_s), "enhance-preview-thumbnails");
    g_settings_reset(settings_get_gsettings(p_s), "destinations");
    g_settings_reset(settings_get_gsettings(p_s), "editors");
    g_settings_reset(settings_get_gsettings(p_s), "scripts");
@@ -37,6 +38,7 @@ test_scalars_roundtrip(void) {
    g_assert_true(settings_get_wrap(p_s));
    g_assert_false(settings_get_hide_trashed(p_s));
    g_assert_true(settings_get_hide_raw(p_s));
+   g_assert_true(settings_get_enhance_preview_thumbnails(p_s));
    g_assert_cmpfloat(settings_get_slideshow_delay(p_s), ==, 3.0);
    g_assert_cmpint(settings_get_thumbnail_size(p_s), ==, 128);
 
@@ -54,6 +56,8 @@ test_scalars_roundtrip(void) {
    g_assert_true(settings_get_hide_trashed(p_s));
    settings_set_hide_raw(p_s, FALSE);
    g_assert_false(settings_get_hide_raw(p_s));
+   settings_set_enhance_preview_thumbnails(p_s, FALSE);
+   g_assert_false(settings_get_enhance_preview_thumbnails(p_s));
    settings_set_slideshow_delay(p_s, 0.25);
    g_assert_cmpfloat(settings_get_slideshow_delay(p_s), ==, 0.25);
    settings_set_thumbnail_size(p_s, 256);

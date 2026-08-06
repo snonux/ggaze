@@ -20,7 +20,6 @@
 #define GGAZE_ZOOM_FACTOR 1.25
 #define GGAZE_ZOOM_MIN 0.02
 #define GGAZE_ZOOM_MAX 64.0
-#define GGAZE_PAN_STEP 24.0
 
 struct _GgazeViewer {
    GtkWidget           parent_instance;
@@ -274,7 +273,7 @@ scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
       if (p_v->b_fit) {
          return (FALSE);
       }
-      ggaze_viewer_pan(p_v, 0.0, -d_dy * GGAZE_PAN_STEP);
+      ggaze_viewer_pan(p_v, 0.0, -d_dy * GGAZE_VIEWER_PAN_STEP);
       return (TRUE);
    case GGAZE_SCROLL_NAVIGATE:
       /* Emit "navigate": d_dy > 0 -> next, < 0 -> prev. The window connects
@@ -313,16 +312,24 @@ key_cb(GtkEventControllerKey *p_key, guint u_keyval, guint u_keycode,
       ggaze_viewer_toggle_fit_100(p_v);
       break;
    case GDK_KEY_j:
-      ggaze_viewer_pan(p_v, 0.0, GGAZE_PAN_STEP);
+   case GDK_KEY_Down:
+      ggaze_viewer_pan(p_v, 0.0, GGAZE_VIEWER_PAN_STEP);
       break;
    case GDK_KEY_k:
-      ggaze_viewer_pan(p_v, 0.0, -GGAZE_PAN_STEP);
+   case GDK_KEY_Up:
+      ggaze_viewer_pan(p_v, 0.0, -GGAZE_VIEWER_PAN_STEP);
+      break;
+   case GDK_KEY_Left:
+      g_signal_emit(p_v, u_navigate_sig, 0, -1);
+      break;
+   case GDK_KEY_Right:
+      g_signal_emit(p_v, u_navigate_sig, 0, 1);
       break;
    case GDK_KEY_H:
-      ggaze_viewer_pan(p_v, -GGAZE_PAN_STEP, 0.0);
+      ggaze_viewer_pan(p_v, -GGAZE_VIEWER_PAN_STEP, 0.0);
       break;
    case GDK_KEY_L:
-      ggaze_viewer_pan(p_v, GGAZE_PAN_STEP, 0.0);
+      ggaze_viewer_pan(p_v, GGAZE_VIEWER_PAN_STEP, 0.0);
       break;
    default:
       b_handled = FALSE;
@@ -354,6 +361,7 @@ ggaze_viewer_init(GgazeViewer *p_v) {
    g_signal_connect(p_scroll, "scroll", G_CALLBACK(scroll_cb), p_v);
 
    GtkEventController *p_key = gtk_event_controller_key_new();
+   gtk_event_controller_set_propagation_phase(p_key, GTK_PHASE_CAPTURE);
    gtk_widget_add_controller(GTK_WIDGET(p_v), p_key);
    g_signal_connect(p_key, "key-pressed", G_CALLBACK(key_cb), p_v);
 }

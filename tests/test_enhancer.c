@@ -504,6 +504,54 @@ test_apply_chain(void) {
    enhancer_delete(e);
 }
 
+typedef struct {
+   GMainLoop *p_loop;
+   GPtrArray *p_result;
+   GError    *p_err;
+} PreviewResult;
+
+static void
+preview_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   PreviewResult *p_result = (PreviewResult *)p_data;
+   p_result->p_result =
+      enhancer_preview_thumbnails_finish(p_res, &p_result->p_err);
+   g_main_loop_quit(p_result->p_loop);
+}
+
+static void
+test_preview_thumbnails(void) {
+   const gchar  *c_fx   = g_getenv("GGAZE_FIXTURES_DIR");
+   char         *c_path = g_build_filename(c_fx, "plain.jpg", NULL);
+   GFile        *p_file = g_file_new_for_path(c_path);
+   Enhancer     *p_e    = enhancer_new();
+   PreviewResult result = {.p_loop = g_main_loop_new(NULL, FALSE)};
+   enhancer_preview_thumbnails_async(p_e, p_file, enhancer_get_presets(p_e),
+                                     NULL, preview_done_cb, &result);
+   g_main_loop_run(result.p_loop);
+   g_assert_no_error(result.p_err);
+   g_assert_nonnull(result.p_result);
+   g_assert_cmpuint(result.p_result->len, ==, 9);
+   g_assert_nonnull(g_ptr_array_index(result.p_result, 0));
+   guint u_rendered = 0;
+   for (guint i = 0; i < result.p_result->len; i++) {
+      GdkTexture *p_tex = g_ptr_array_index(result.p_result, i);
+      if (p_tex != NULL) {
+         u_rendered++;
+         g_assert_cmpint(gdk_texture_get_width(p_tex), >, 0);
+         g_assert_cmpint(gdk_texture_get_height(p_tex), >, 0);
+         g_assert_cmpint(gdk_texture_get_width(p_tex), <=, 512);
+         g_assert_cmpint(gdk_texture_get_height(p_tex), <=, 512);
+      }
+   }
+   g_assert_cmpuint(u_rendered, >, 0);
+   g_ptr_array_unref(result.p_result);
+   g_main_loop_unref(result.p_loop);
+   enhancer_delete(p_e);
+   g_object_unref(p_file);
+   g_free(c_path);
+}
+
 int
 main(int argc, char **argv) {
    gegl_init(&argc, &argv);
@@ -517,5 +565,6 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer/export_reject_unsupported",
                    test_export_reject_unsupported);
    g_test_add_func("/enhancer/apply_chain", test_apply_chain);
+   g_test_add_func("/enhancer/preview_thumbnails", test_preview_thumbnails);
    return g_test_run();
 }

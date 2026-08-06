@@ -76,6 +76,18 @@ void enhancer_apply_chain_async(Enhancer *p_e, GFile *p_file,
 /* Finish enhancer_apply_chain_async(). Returns a new GdkTexture (caller
  * unrefs) or NULL with p_err set. */
 GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, GError **p_err);
+
+/* Generate the max-512px original followed by up to eight independent preset
+ * previews. The returned array owns its GdkTexture entries; index 0 is the
+ * original and index i + 1 corresponds to preset i. An unsupported individual
+ * preset is represented by NULL. */
+void       enhancer_preview_thumbnails_async(Enhancer *p_e, GFile *p_file,
+                                             const GPtrArray    *p_presets,
+                                             GCancellable       *p_cancel,
+                                             GAsyncReadyCallback p_cb,
+                                             gpointer            p_data);
+GPtrArray *enhancer_preview_thumbnails_finish(GAsyncResult *p_res,
+                                              GError      **p_err);
 #endif /* GGAZE_HAVE_GEGL */
 
 G_END_DECLS

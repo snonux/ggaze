@@ -23,6 +23,7 @@
 G_BEGIN_DECLS
 
 #define GGAZE_TYPE_VIEWER (ggaze_viewer_get_type())
+#define GGAZE_VIEWER_PAN_STEP 24.0
 G_DECLARE_FINAL_TYPE(GgazeViewer, ggaze_viewer, GGAZE, VIEWER, GtkWidget)
 
 GtkWidget *ggaze_viewer_new(void);

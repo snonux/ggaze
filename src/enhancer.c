@@ -368,22 +368,23 @@ enhancer_load(GFile *p_file, GError **p_err) {
 GdkTexture *
 enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err) {
    g_return_val_if_fail(p_buf != NULL, NULL);
-   gint i_w = gegl_buffer_get_width(p_buf);
-   gint i_h = gegl_buffer_get_height(p_buf);
+   const GeglRectangle *p_rect = gegl_buffer_get_extent(p_buf);
+   gint                 i_w    = p_rect->width;
+   gint                 i_h    = p_rect->height;
    if (i_w <= 0 || i_h <= 0) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
                   "enhancer: empty buffer");
       return NULL;
    }
-   const Babl   *p_fmt    = babl_format("R'G'B'A u8");
-   gint          i_stride = i_w * 4;
-   gsize         u_size   = (gsize)i_stride * (gsize)i_h;
-   gpointer      p_data   = g_malloc(u_size);
-   GeglRectangle rect     = {0, 0, i_w, i_h};
-   gegl_buffer_get(p_buf, &rect, 1.0, p_fmt, p_data, i_stride, GEGL_ABYSS_NONE);
+   const Babl *p_fmt    = babl_format("R'G'B'A u8");
+   gint        i_stride = i_w * 4;
+   gsize       u_size   = (gsize)i_stride * (gsize)i_h;
+   gpointer    p_data   = g_malloc(u_size);
+   gegl_buffer_get(p_buf, p_rect, 1.0, p_fmt, p_data, i_stride,
+                   GEGL_ABYSS_NONE);
    GBytes     *p_bytes = g_bytes_new_take(p_data, u_size);
-   GdkTexture *p_tex   = gdk_memory_texture_new(
-      i_w, i_h, GDK_MEMORY_R8G8B8A8_PREMULTIPLIED, p_bytes, i_stride);
+   GdkTexture *p_tex =
+      gdk_memory_texture_new(i_w, i_h, GDK_MEMORY_R8G8B8A8, p_bytes, i_stride);
    g_bytes_unref(p_bytes);
    return p_tex;
 }
@@ -465,6 +466,142 @@ GdkTexture *
 enhancer_apply_chain_finish(GAsyncResult *p_res, GError **p_err) {
    g_return_val_if_fail(G_IS_TASK(p_res), NULL);
    return ((GdkTexture *)g_task_propagate_pointer((GTask *)p_res, p_err));
+}
+
+typedef struct {
+   GFile     *p_file;
+   GPtrArray *p_presets;
+} _PreviewReq;
+
+static void
+_preview_req_free(_PreviewReq *p_req) {
+   g_clear_object(&p_req->p_file);
+   g_ptr_array_unref(p_req->p_presets);
+   g_free(p_req);
+}
+
+static void
+_texture_free(gpointer p_data) {
+   if (p_data != NULL) {
+      g_object_unref(p_data);
+   }
+}
+
+static GeglBuffer *
+_preview_downscale(GeglBuffer *p_in, GError **p_err) {
+   gint i_w = gegl_buffer_get_width(p_in);
+   gint i_h = gegl_buffer_get_height(p_in);
+   if (i_w <= 0 || i_h <= 0) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "enhancer: empty preview source");
+      return (NULL);
+   }
+   gdouble   d_scale = MIN(1.0, 512.0 / (gdouble)MAX(i_w, i_h));
+   gint      i_out_w = MAX(1, (gint)(i_w * d_scale));
+   gint      i_out_h = MAX(1, (gint)(i_h * d_scale));
+   GeglNode *p_graph = gegl_node_new();
+   GeglNode *p_src   = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-source", "buffer", p_in, NULL);
+   GeglNode *p_scale =
+      gegl_node_new_child(p_graph, "operation", "gegl:scale-size", "x",
+                          (gdouble)i_out_w, "y", (gdouble)i_out_h, NULL);
+   GeglBuffer *p_out  = NULL;
+   GeglNode   *p_sink = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-sink", "buffer", &p_out, NULL);
+   gegl_node_link_many(p_src, p_scale, p_sink, NULL);
+   gegl_node_process(p_sink);
+   g_object_unref(p_graph);
+   if (p_out == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "enhancer: preview downscale failed");
+   }
+   return (p_out);
+}
+
+static void
+_preview_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
+                GCancellable *p_cancel) {
+   (void)p_src;
+   _PreviewReq *p_req = (_PreviewReq *)p_task_data;
+   if (g_task_return_error_if_cancelled(p_task)) {
+      return;
+   }
+   GError     *p_err  = NULL;
+   GeglBuffer *p_full = enhancer_load(p_req->p_file, &p_err);
+   if (p_full != NULL && g_cancellable_is_cancelled(p_cancel)) {
+      g_object_unref(p_full);
+      g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                              "enhancer preview cancelled");
+      return;
+   }
+   GeglBuffer *p_small =
+      p_full != NULL ? _preview_downscale(p_full, &p_err) : NULL;
+   g_clear_object(&p_full);
+   if (p_small == NULL) {
+      g_task_return_error(p_task, p_err);
+      return;
+   }
+   if (g_cancellable_is_cancelled(p_cancel)) {
+      g_object_unref(p_small);
+      g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                              "enhancer preview cancelled");
+      return;
+   }
+   GPtrArray  *p_out      = g_ptr_array_new_with_free_func(_texture_free);
+   GdkTexture *p_original = enhancer_buffer_to_texture(p_small, &p_err);
+   if (p_original == NULL) {
+      g_object_unref(p_small);
+      g_ptr_array_unref(p_out);
+      g_task_return_error(p_task, p_err);
+      return;
+   }
+   g_ptr_array_add(p_out, p_original);
+   for (guint i = 0; i < p_req->p_presets->len; i++) {
+      if (g_cancellable_is_cancelled(p_cancel)) {
+         g_object_unref(p_small);
+         g_ptr_array_unref(p_out);
+         g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                 "enhancer preview cancelled");
+         return;
+      }
+      EnhancerPreset *p_preset  = g_ptr_array_index(p_req->p_presets, i);
+      GError         *p_one_err = NULL;
+      GeglBuffer     *p_effect =
+         enhancer_apply(NULL, p_small, p_preset, &p_one_err);
+      GdkTexture *p_tex = p_effect != NULL
+                             ? enhancer_buffer_to_texture(p_effect, &p_one_err)
+                             : NULL;
+      g_clear_object(&p_effect);
+      g_clear_error(&p_one_err);
+      g_ptr_array_add(p_out, p_tex);
+   }
+   g_object_unref(p_small);
+   g_task_return_pointer(p_task, p_out, (GDestroyNotify)g_ptr_array_unref);
+}
+
+void
+enhancer_preview_thumbnails_async(Enhancer *p_e, GFile *p_file,
+                                  const GPtrArray    *p_presets,
+                                  GCancellable       *p_cancel,
+                                  GAsyncReadyCallback p_cb, gpointer p_data) {
+   (void)p_e;
+   g_return_if_fail(G_IS_FILE(p_file));
+   _PreviewReq *p_req = g_new0(_PreviewReq, 1);
+   p_req->p_file      = (GFile *)g_object_ref(p_file);
+   p_req->p_presets   = _presets_copy(p_presets);
+   if (p_req->p_presets->len > 8) {
+      g_ptr_array_set_size(p_req->p_presets, 8);
+   }
+   GTask *p_task = g_task_new(p_file, p_cancel, p_cb, p_data);
+   g_task_set_task_data(p_task, p_req, (GDestroyNotify)_preview_req_free);
+   g_task_run_in_thread(p_task, _preview_thread);
+   g_object_unref(p_task);
+}
+
+GPtrArray *
+enhancer_preview_thumbnails_finish(GAsyncResult *p_res, GError **p_err) {
+   g_return_val_if_fail(G_IS_TASK(p_res), NULL);
+   return ((GPtrArray *)g_task_propagate_pointer(G_TASK(p_res), p_err));
 }
 
 #endif /* GGAZE_HAVE_GEGL */
