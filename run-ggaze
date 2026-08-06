@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly project_dir
+build_dir="${project_dir}/build"
+readonly build_dir
+
+if [[ ! -d "${build_dir}" ]]; then
+   meson setup "${build_dir}" "${project_dir}"
+fi
+
+ninja -C "${build_dir}"
+
+if (( $# == 0 )); then
+   set -- "${PWD}"
+fi
+
+export GSETTINGS_SCHEMA_DIR="${build_dir}/data"
+exec "${build_dir}/src/ggaze" "$@"
