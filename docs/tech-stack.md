@@ -59,7 +59,21 @@ it. Treat as a later milestone, but design the loader signature for it now.
 - freedesktop Thumbnail Managing Standard: `~/.cache/thumbnails/normal`
   (128×128) and `large` (256×256); shared with other compliant apps.
 - Store PNG with `Thumb::URI`, `Thumb::MTime`, `Thumb::Size` keys.
-- Verify mtime before trust; re-decode on mismatch.
+- Verify before trust, and re-decode on any mismatch: `Thumb::MTime` must equal
+  the source file's mtime (staleness), and `Thumb::URI`, when present, must
+  equal the source URI — the entry is named only `md5(URI)`, so this is what
+  stops a hash collision or another app's entry from displaying the wrong
+  picture.
+- **This is what makes thumbnails survive a restart**, so reopening a folder
+  re-uses last run's PNGs instead of re-decoding every file. Deliberately *not*
+  a private `.ggaze` directory next to the pictures: the shared cache is also
+  populated by Nautilus/gthumb, and picture folders are often read-only or
+  cloud-synced. See decision #41.
+- Gotcha that cost us exactly that persistence until ix0: gdk-pixbuf takes tEXt
+  keys as `tEXt::Thumb::MTime` in `gdk_pixbuf_save()` **and** hands them back
+  under that same prefixed name from its PNG loader. Reading the unprefixed
+  `Thumb::MTime` silently yields `NULL`, i.e. "stale", i.e. a cache that is
+  written on every run and never read.
 
 ## Settings keys (GSettings schema `org.buetow.ggaze`)
 

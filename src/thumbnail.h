@@ -10,6 +10,10 @@
  * asynchronously in a GTask worker; the GdkTexture is returned on the main
  * thread. See docs/tech-stack.md "Thumbnail cache".
  *
+ * The cache lives on disk, so it persists across ggaze runs and is shared with
+ * other TMS-compliant apps: reopening a folder re-uses the PNGs written last
+ * time instead of re-decoding every picture.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -33,6 +37,13 @@ void thumbnail_get_async(Thumbnail *p_t, GFile *p_file, int i_size,
                          gpointer p_data);
 GdkTexture *thumbnail_get_finish(Thumbnail *p_t, GAsyncResult *p_res,
                                  GError **p_err);
+
+/* Absolute path of the on-disk cache entry ggaze uses for p_file at ~i_size px
+ * (<cache>/thumbnails/<bucket>/<md5-of-uri>.png). Stateless -- no Thumbnail
+ * instance needed. Public so tests can assert on the persisted entry itself
+ * (present, re-used, re-written when stale) rather than re-deriving the md5
+ * naming and drifting from it. Returns a newly allocated string (g_free). */
+char *thumbnail_cache_path(GFile *p_file, int i_size);
 
 G_END_DECLS
 

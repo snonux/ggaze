@@ -5,6 +5,13 @@
  * x-large bucket (512) for >256 (decision #37/T). Caches PNG keyed by md5(URI),
  * stores Thumb::URI/MTime/Size, verifies mtime. Async decode via GTask.
  *
+ * The cache is on disk and therefore survives across ggaze runs (and is shared
+ * with every other TMS-compliant app, e.g. Nautilus) -- that is the whole point
+ * of following the spec instead of hiding a private .ggaze directory next to
+ * the pictures. Persistence only actually worked from ix0 on, though: the write
+ * side was always correct, but the read side asked gdk-pixbuf for the wrong
+ * option key and so judged *every* entry stale. See _thumb_option() below.
+ *
  * JPEG-specific guard (mu0 review round 2): _generate() calls
  * gdk_pixbuf_new_from_file_at_scale() directly on the source file, bypassing
  * src/loader/loader.c entirely, so it did not inherit that module's
@@ -64,8 +71,7 @@ _cache_dir_for_bucket(int i_bucket) {
 }
 
 static char *
-_cache_path(Thumbnail *p_t, GFile *p_file, int i_bucket) {
-   (void)p_t;
+_cache_path(GFile *p_file, int i_bucket) {
    char      *c_uri = g_file_get_uri(p_file);
    GChecksum *p_sum = g_checksum_new(G_CHECKSUM_MD5);
    g_checksum_update(p_sum, (const guchar *)c_uri, strlen(c_uri));
@@ -76,6 +82,32 @@ _cache_path(Thumbnail *p_t, GFile *p_file, int i_bucket) {
    g_checksum_free(p_sum);
    g_free(c_uri);
    return (c_path);
+}
+
+/* Read a Thumb::* value out of a loaded cache PNG.
+ *
+ * gdk-pixbuf is asymmetric about tEXt keys and that asymmetry is exactly the
+ * ix0 bug: gdk_pixbuf_save() takes them as "tEXt::Thumb::MTime", but its PNG
+ * *loader* also re-exposes them prefixed (io-png.c does
+ * g_strconcat("tEXt::", key)), so the plain "Thumb::MTime" this module used to
+ * ask for always came back NULL. Every lookup was therefore treated as stale
+ * and every thumbnail re-decoded and re-written on every launch -- the on-disk
+ * cache was effectively write-only, which is precisely what "thumbnails are
+ * regenerated from scratch when I reopen ggaze" looked like from the outside.
+ *
+ * Ask for the prefixed spelling, then fall back to the bare one: entries
+ * written by another TMS app through a loader that does not prefix (or a
+ * future glycin-backed PNG loader with different conventions) then still count
+ * as hits instead of being silently regenerated. */
+static const char *
+_thumb_option(GdkPixbuf *p_pix, const char *c_key) {
+   char       *c_prefixed = g_strconcat("tEXt::", c_key, NULL);
+   const char *c_val      = gdk_pixbuf_get_option(p_pix, c_prefixed);
+   g_free(c_prefixed);
+   if (c_val == NULL) {
+      c_val = gdk_pixbuf_get_option(p_pix, c_key);
+   }
+   return (c_val);
 }
 
 static GdkTexture *
@@ -100,19 +132,36 @@ _texture_from_pixbuf(GdkPixbuf *p_pix) {
    return (p_tex);
 }
 
-/* Load a cached PNG into a texture, verifying Thumb::MTime == i_mtime. */
+/* Load a cached PNG into a texture, but only if the entry really describes the
+ * current state of p_file:
+ *   - Thumb::MTime must equal i_mtime -- the spec's staleness check, so an
+ *     edited/replaced source file gets a fresh thumbnail rather than the old
+ *     picture;
+ *   - Thumb::URI, when present, must equal p_file's URI -- the file name is
+ *     only md5(URI), and ~/.cache/thumbnails is shared with every other TMS
+ *     app, so this is what keeps a hash collision from showing the wrong
+ *     image. Absent is tolerated (older/foreign writers omit it); a matching
+ *     mtime alone is then the guarantee.
+ *
+ * Any failure -- missing file, corrupt or unreadable PNG, mismatch -- returns
+ * NULL, which makes the caller regenerate. A cache must never be able to turn
+ * a displayable image into an error. */
 static GdkTexture *
-_load_cached(const char *c_path, gint64 i_mtime) {
+_load_cached(GFile *p_file, const char *c_path, gint64 i_mtime) {
    GError    *p_err = NULL;
    GdkPixbuf *p_pix = gdk_pixbuf_new_from_file(c_path, &p_err);
    if (p_pix == NULL) {
       g_clear_error(&p_err);
       return (NULL);
    }
-   const char *c_m = gdk_pixbuf_get_option(p_pix, "Thumb::MTime");
-   if (c_m == NULL || g_ascii_strtoll(c_m, NULL, 10) != i_mtime) {
+   const char *c_m       = _thumb_option(p_pix, "Thumb::MTime");
+   const char *c_u       = _thumb_option(p_pix, "Thumb::URI");
+   char       *c_uri     = g_file_get_uri(p_file);
+   gboolean    b_foreign = (c_u != NULL && !g_str_equal(c_u, c_uri));
+   g_free(c_uri);
+   if (c_m == NULL || g_ascii_strtoll(c_m, NULL, 10) != i_mtime || b_foreign) {
       g_object_unref(p_pix);
-      return (NULL); /* stale or missing mtime */
+      return (NULL); /* stale, foreign or unverifiable entry */
    }
    GdkTexture *p_tex = _texture_from_pixbuf(p_pix);
    g_object_unref(p_pix);
@@ -219,18 +268,27 @@ _thumb_task_free(gpointer p_void) {
    g_free(p_tt);
 }
 
+/* Return TRUE (having completed p_task with G_IO_ERROR_CANCELLED) if the
+ * request was cancelled. Checked twice in _thumb_run: once before any I/O so a
+ * detached grid releases the GTask -- and the picture ref it carries --
+ * promptly, and again right before the expensive decode. */
+static gboolean
+_thumb_bail_if_cancelled(GTask *p_task, GCancellable *p_cancel) {
+   if (!g_cancellable_is_cancelled(p_cancel)) {
+      return (FALSE);
+   }
+   g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                           "thumbnail request cancelled");
+   return (TRUE);
+}
+
 static void
 _thumb_run(GTask *p_task) {
    ThumbTask    *p_tt     = (ThumbTask *)g_task_get_task_data(p_task);
    GCancellable *p_cancel = g_task_get_cancellable(p_task);
    GError       *p_err    = NULL;
 
-   /* Bail before any I/O if the grid was already detached/disposed: this
-    * releases the GTask (and the picture ref it carries) promptly instead of
-    * decoding a thumbnail no one wants. */
-   if (g_cancellable_is_cancelled(p_cancel)) {
-      g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
-                              "thumbnail request cancelled");
+   if (_thumb_bail_if_cancelled(p_task, p_cancel)) {
       return;
    }
 
@@ -247,20 +305,22 @@ _thumb_run(GTask *p_task) {
    gint64 i_size = (gint64)g_file_info_get_size(p_info);
    g_object_unref(p_info);
 
-   /* Ensure the cache dir exists (best-effort). */
+   /* Ensure the cache dir exists, 0700 as the TMS requires. Best-effort: if it
+    * cannot be created (read-only $XDG_CACHE_HOME, a file in the way, quota)
+    * the lookup below just misses and _generate() still returns a texture --
+    * an unusable cache degrades ggaze to "slow", never to "broken". */
    char *c_dir = g_path_get_dirname(p_tt->c_cache_path);
    g_mkdir_with_parents(c_dir, 0700);
    g_free(c_dir);
 
-   GdkTexture *p_tex = _load_cached(p_tt->c_cache_path, i_mtime);
+   GdkTexture *p_tex = _load_cached(p_tt->p_file, p_tt->c_cache_path, i_mtime);
    if (p_tex == NULL) {
       /* The decode is the expensive step; re-check cancellation first so a
        * detached grid doesn't pay for gdk_pixbuf_new_from_file_at_scale plus
        * a cache write it no longer needs. */
-      if (g_cancellable_is_cancelled(p_cancel)) {
-         g_clear_error(&p_err);
-         g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
-                                 "thumbnail request cancelled");
+      g_clear_error(&p_err); /* nothing has set it yet; hand _generate() a
+                                pristine GError either way */
+      if (_thumb_bail_if_cancelled(p_task, p_cancel)) {
          return;
       }
       p_tex = _generate(p_tt->p_file, p_tt->i_bucket, p_tt->c_cache_path,
@@ -338,7 +398,7 @@ thumbnail_get_async(Thumbnail *p_t, GFile *p_file, int i_size,
    p_tt->p_file        = (GFile *)g_object_ref(p_file);
    p_tt->i_size        = i_size;
    p_tt->i_bucket      = i_bucket;
-   p_tt->c_cache_path  = _cache_path(p_t, p_file, i_bucket);
+   p_tt->c_cache_path  = _cache_path(p_file, i_bucket);
    GTask *p_task       = g_task_new(p_file, p_cancel, p_cb, p_data);
    g_task_set_task_data(p_task, p_tt, _thumb_task_free);
    if (p_t->p_pool != NULL) {
@@ -350,6 +410,12 @@ thumbnail_get_async(Thumbnail *p_t, GFile *p_file, int i_size,
       g_task_run_in_thread(p_task, _thumb_pool_func_wrap);
       g_object_unref(p_task);
    }
+}
+
+char *
+thumbnail_cache_path(GFile *p_file, int i_size) {
+   g_return_val_if_fail(G_IS_FILE(p_file), NULL);
+   return (_cache_path(p_file, _bucket_for(i_size)));
 }
 
 GdkTexture *
