@@ -33,10 +33,25 @@ editing remains a non-goal.
   whole preview outright. Applying the chain runs off the GTK main thread (a
   GTask worker; last-write-wins if superseded before it finishes).
 - By default `a` opens a separate, resizable gallery of bounded previews for
-  all eight presets. It can be maximized to use the whole screen. The nine
-  cards (Original + eight presets) sit in a fixed square-ish grid — 3×3 — whose
+  all eight presets. It can be maximized to use the whole screen. Ten cards —
+  **Original**, **Current**, and the eight presets — sit in a fixed grid whose
   cells **expand to fill the window exactly** at any size, so the cards grow
   and shrink with the window and never leave an unused strip beside them.
+- **Current** shows the LAYERED result: presets stack (the mask is a bitmask,
+  not a selection), so with two or more enabled the image on screen is not any
+  of the other cards — Original is unmodified and each preset card shows that
+  preset applied *alone*. Current is the one card that shows the combination,
+  which is what makes a stack judgeable without looking away from the gallery.
+  It reuses the texture already computed for the large view, so it costs no
+  extra GEGL pass and cannot disagree with what is being judged; with an empty
+  mask it mirrors Original. It reports state rather than offering a toggle, so
+  it takes no clicks and no focus.
+- The column count is chosen **once**, when the gallery opens, as the count
+  that makes the thumbnails largest at that size — cell *aspect* dominates, so
+  a layout that tiles perfectly can still lose (10 cards in 790×590: 5×2 wastes
+  no cell but shows a 158×105 image, while 4×3 wastes two cells and shows
+  197×131). A later resize keeps the column count and simply lets the cells
+  grow.
   That fit comes from GTK's own layout: the cells expand, and each card fills
   its cell. Nothing measures the window and pushes pixel sizes back into it.
   Do not reintroduce such a pass (a tick callback or size-allocate handler that

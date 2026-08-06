@@ -112,8 +112,13 @@ struct _GgazeWindow {
    GtkWidget *p_enhance_btns[8];    /* preset rows, for highlighting;
                                      * only valid while the UI is open,
                                      * NULL'd out on close */
-   GtkWidget    *p_enhance_pics[8]; /* optional per-preset preview pictures */
-   GtkWidget    *p_original_pic;    /* optional Original preview picture */
+   GtkWidget *p_enhance_pics[8];    /* optional per-preset preview pictures */
+   GtkWidget *p_original_pic;       /* optional Original preview picture */
+   GtkWidget *p_current_pic;        /* optional "Current" (layered chain)
+                                     * preview picture; shows the SAME texture
+                                     * the viewer displays, so it costs no
+                                     * extra GEGL work -- see
+                                     * _enhance_sync_current_card */
    GtkWidget    *p_enhance_gallery; /* responsive preview flow box */
    GtkWidget    *p_enhance_scroll;  /* gallery viewport sized to the window */
    GCancellable *p_preview_cancel;  /* separate thumbnail-preview request */
@@ -2331,6 +2336,37 @@ _enhance_update_highlights(GgazeWindow *p_win) {
    }
 }
 
+/* Point the "Current" card at whatever the large view is showing: the layered
+ * chain result when any preset is on, else the Original preview.
+ *
+ * Presets LAYER (u_enhance_mask is a bitmask, not a selection), so once two
+ * are on, the image the user is actually looking at is not any of the eight
+ * per-preset cards -- each of those shows its preset applied alone to the
+ * original. Without this card the combined result is only visible in the main
+ * window, which is exactly what makes a layered stack hard to judge.
+ *
+ * It reuses p_enhance_tex, the texture _enhance_apply_done_cb already cached
+ * for the viewer, so showing it costs no additional GEGL pass -- and it cannot
+ * disagree with the large view, because it IS the large view's texture. With
+ * an empty mask there is no chain result and "current" means the original, so
+ * the Original card's paintable is mirrored rather than left blank. */
+static void
+_enhance_sync_current_card(GgazeWindow *p_win) {
+   if (p_win->p_current_pic == NULL) {
+      return;
+   }
+   if (p_win->p_enhance_tex != NULL) {
+      gtk_picture_set_paintable(GTK_PICTURE(p_win->p_current_pic),
+                                GDK_PAINTABLE(p_win->p_enhance_tex));
+      return;
+   }
+   GdkPaintable *p_orig =
+      p_win->p_original_pic != NULL
+         ? gtk_picture_get_paintable(GTK_PICTURE(p_win->p_original_pic))
+         : NULL;
+   gtk_picture_set_paintable(GTK_PICTURE(p_win->p_current_pic), p_orig);
+}
+
 /* Async apply completion (tu0): last-write-wins via u_enhance_gen -- a
  * newer apply, a discard, or the window closing while this was still
  * processing in its worker thread all bump the generation, so a stale
@@ -2358,6 +2394,8 @@ _enhance_apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       g_set_object(&p_win->p_enhance_tex, p_tex);
       _show_texture(p_win, p_tex);
       g_object_unref(p_tex);
+      _enhance_sync_current_card(
+         p_win); /* after the cache, before the header */
       _update_header(p_win);
    }
    _enhance_req_free(p_req);
@@ -2422,6 +2460,10 @@ _enhance_apply_async(GgazeWindow *p_win) {
       p_win->b_hold_original = FALSE;
       g_clear_object(&p_win->p_enhance_tex);
       _load_current(p_win); /* restore original (texturecache is fast) */
+      /* Mask empty => "current" is the original again. Must run AFTER the
+       * clear above, so the card falls back to the Original card's paintable
+       * instead of redisplaying the stale chain result. */
+      _enhance_sync_current_card(p_win);
       _update_header(p_win);
       return;
    }
@@ -2490,6 +2532,7 @@ _enhance_destroy(GgazeWindow *p_win) {
       p_win->p_enhance_pics[i] = NULL;
    }
    p_win->p_original_pic    = NULL;
+   p_win->p_current_pic     = NULL;
    p_win->p_enhance_gallery = NULL;
    p_win->p_enhance_scroll  = NULL;
    if (GTK_IS_WINDOW(p_ui)) {
@@ -2589,14 +2632,48 @@ _enhance_expand_preview(GtkWidget *p_pic) {
    gtk_widget_set_size_request(p_pic, 96, 64);
 }
 
+/* Pick the column count that makes the thumbnails BIGGEST for a gallery of
+ * i_width x i_height, then pin the flow box to it.
+ *
+ * Maximising fitted image area is the same objective the original
+ * _enhance_resize_gallery had, and it is the right one: a column count that
+ * tiles the cells perfectly can still be the worse layout. With 10 cards in a
+ * 790x590 window, 5x2 leaves no empty cell but gives each card a 158x295 slot
+ * that a landscape photo fills only 158x105 of, while 4x3 wastes two cells and
+ * still shows a far larger 197x131 image in each. Cell ASPECT dominates; empty
+ * cells in the last row do not.
+ *
+ * What was wrong before was never this arithmetic -- it was running it on
+ * every frame against the window it was itself resizing. This runs ONCE, from
+ * the size the gallery is about to be given, and nothing re-runs it: a later
+ * resize keeps the column count and simply lets the cells grow, which is
+ * stable by construction. i_cell_h subtracts a label strip; the exact figure
+ * only has to be in the right neighbourhood, since it merely ranks candidates
+ * against each other. */
 static void
-_enhance_apply_grid_columns(GgazeWindow *p_win, int i_items) {
+_enhance_apply_grid_columns(GgazeWindow *p_win, int i_items, int i_width,
+                            int i_height) {
    if (p_win->p_enhance_gallery == NULL) {
       return;
    }
-   int i_columns = 1;
-   while (i_columns * i_columns < MAX(1, i_items)) {
-      i_columns++;
+   i_items         = MAX(1, i_items);
+   int i_columns   = 1;
+   int i_best_area = -1;
+   for (int i_try = 1; i_try <= i_items; i_try++) {
+      int i_rows   = (i_items + i_try - 1) / i_try;
+      int i_cell_w = i_width / i_try - 8;
+      int i_cell_h = i_height / i_rows - 40; /* card padding + label */
+      if (i_cell_w <= 0 || i_cell_h <= 0) {
+         continue;
+      }
+      /* The image is letterboxed into the cell, so its area is set by
+       * whichever dimension runs out first at a typical 3:2 photo aspect. */
+      int i_fit_w = MIN(i_cell_w, i_cell_h * 3 / 2);
+      int i_area  = i_fit_w * (i_fit_w * 2 / 3);
+      if (i_area > i_best_area) {
+         i_best_area = i_area;
+         i_columns   = i_try;
+      }
    }
    gtk_flow_box_set_min_children_per_line(
       GTK_FLOW_BOX(p_win->p_enhance_gallery), (guint)i_columns);
@@ -2604,26 +2681,53 @@ _enhance_apply_grid_columns(GgazeWindow *p_win, int i_items) {
       GTK_FLOW_BOX(p_win->p_enhance_gallery), (guint)i_columns);
 }
 
+/* One picture-over-label preview card. Returns the button and hands back its
+ * GtkPicture so the caller can store it in the right field. */
+static GtkWidget *
+_enhance_preview_card(const char *c_label, GtkWidget **p_pic_out) {
+   GtkWidget *p_btn = gtk_button_new();
+   GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+   GtkWidget *p_pic = gtk_picture_new();
+   GtkWidget *p_lbl = gtk_label_new(c_label);
+   gtk_picture_set_content_fit(GTK_PICTURE(p_pic), GTK_CONTENT_FIT_CONTAIN);
+   _enhance_expand_preview(p_pic);
+   gtk_widget_set_halign(p_lbl, GTK_ALIGN_CENTER);
+   gtk_box_append(GTK_BOX(p_box), p_pic);
+   gtk_box_append(GTK_BOX(p_box), p_lbl);
+   gtk_button_set_child(GTK_BUTTON(p_btn), p_box);
+   gtk_widget_set_halign(p_btn, GTK_ALIGN_FILL);
+   *p_pic_out = p_pic;
+   return (p_btn);
+}
+
+/* The "Current" card: the layered result of every enabled preset, i.e. what
+ * the large view is showing. Read-only on purpose -- it reports a state rather
+ * than offering a toggle, so it takes no clicks and no focus (can_target /
+ * can_focus FALSE) while keeping the same card framing as its neighbours. */
+static GtkWidget *
+_enhance_current_card(GgazeWindow *p_win) {
+   GtkWidget *p_pic = NULL;
+   GtkWidget *p_btn = _enhance_preview_card("Current", &p_pic);
+   gtk_widget_set_can_target(p_btn, FALSE);
+   gtk_widget_set_can_focus(p_btn, FALSE);
+   p_win->p_current_pic = p_pic;
+   return (p_btn);
+}
+
 static GtkWidget *
 _enhance_original_button(GgazeWindow *p_win, gboolean b_previews) {
-   GtkWidget *p_btn = gtk_button_new();
+   GtkWidget *p_btn = NULL;
    if (b_previews) {
-      GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-      GtkWidget *p_pic = gtk_picture_new();
-      GtkWidget *p_lbl = gtk_label_new("0  Original");
-      gtk_picture_set_content_fit(GTK_PICTURE(p_pic), GTK_CONTENT_FIT_CONTAIN);
-      _enhance_expand_preview(p_pic);
-      gtk_widget_set_halign(p_lbl, GTK_ALIGN_CENTER);
-      gtk_box_append(GTK_BOX(p_box), p_pic);
-      gtk_box_append(GTK_BOX(p_box), p_lbl);
-      gtk_button_set_child(GTK_BUTTON(p_btn), p_box);
+      GtkWidget *p_pic      = NULL;
+      p_btn                 = _enhance_preview_card("0  Original", &p_pic);
       p_win->p_original_pic = p_pic;
    } else {
+      p_btn = gtk_button_new();
       gtk_button_set_label(GTK_BUTTON(p_btn), "0  Original");
+      /* The compact popover keeps the left-aligned list shape a vertical menu
+       * wants; preview cards FILL their share of the grid (set above). */
+      gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
    }
-   /* Preview cells FILL their share of the grid; the compact popover keeps the
-    * left-aligned list shape a vertical menu wants. */
-   gtk_widget_set_halign(p_btn, b_previews ? GTK_ALIGN_FILL : GTK_ALIGN_START);
    g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER(-1));
    g_signal_connect_swapped(p_btn, "clicked", G_CALLBACK(_enhance_row_toggle),
                             p_win);
@@ -2661,7 +2765,11 @@ _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
    }
    GtkWidget *p_btn0 = _enhance_original_button(p_win, b_previews);
    if (b_previews) {
+      /* Original then Current, so the two whole-image references sit side by
+       * side ahead of the per-preset cards. */
       gtk_flow_box_append(GTK_FLOW_BOX(p_gallery), p_btn0);
+      gtk_flow_box_append(GTK_FLOW_BOX(p_gallery),
+                          _enhance_current_card(p_win));
    }
    guint u_n = p_presets != NULL ? p_presets->len : 0;
    if (u_n > G_N_ELEMENTS(p_win->p_enhance_btns)) {
@@ -2709,14 +2817,6 @@ _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
       gtk_box_append(GTK_BOX(p_box), p_btn0);
    }
 
-   if (b_previews) {
-      /* Now that every cell exists, fix the column count once. The item count
-       * cannot change while the gallery is open (the pictures are all created
-       * here; only their paintables arrive later), so there is nothing to
-       * recompute afterwards. */
-      _enhance_apply_grid_columns(p_win, (int)u_n + 1);
-   }
-
    GtkWidget *p_hint = gtk_label_new("s  Save enhanced copy");
    gtk_widget_set_halign(p_hint, GTK_ALIGN_START);
    gtk_widget_set_margin_top(p_hint, 8);
@@ -2750,6 +2850,9 @@ _preview_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
                                       GDK_PAINTABLE(p_one));
          }
       }
+      /* The Original card just gained its paintable, which is what the
+       * Current card mirrors while the mask is empty. */
+      _enhance_sync_current_card(p_win);
    }
    g_clear_pointer(&p_tex, g_ptr_array_unref);
    g_clear_error(&p_err);
@@ -2804,6 +2907,16 @@ _enhance_build_gallery_window(GgazeWindow *p_win, const GPtrArray *p_presets) {
    gtk_window_set_default_size(GTK_WINDOW(p_window), i_width, i_height);
    gtk_window_set_child(GTK_WINDOW(p_window),
                         _enhance_build_box(p_win, p_presets));
+   /* Choose the column count once, now that the cells exist and the size the
+    * gallery will open at is known. The item count cannot change while the
+    * gallery is open -- every picture is created up front and only its
+    * paintable arrives later -- so nothing has to recompute this. +2 for the
+    * Original and Current cards. */
+   guint u_presets = p_presets != NULL ? p_presets->len : 0;
+   if (u_presets > G_N_ELEMENTS(p_win->p_enhance_btns)) {
+      u_presets = G_N_ELEMENTS(p_win->p_enhance_btns);
+   }
+   _enhance_apply_grid_columns(p_win, (int)u_presets + 2, i_width, i_height);
    g_signal_connect(p_window, "close-request",
                     G_CALLBACK(_enhance_window_close_cb), p_win);
    return (p_window);
@@ -2851,6 +2964,11 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    /* No initial sizing pass: the cells expand into whatever the gallery
     * window's layout gives them, so they are correct from the first frame and
     * stay correct through every later resize without anything measuring. */
+   /* Opening on an ALREADY-enhanced image: p_enhance_tex exists right now, so
+    * fill the Current card immediately rather than leaving it blank until the
+    * preview batch lands (that batch only produces the original and the eight
+    * single-preset previews -- never the chain). */
+   _enhance_sync_current_card(p_win);
    _enhance_start_previews(p_win, p_presets);
    if (b_previews) {
       gtk_window_present(GTK_WINDOW(p_ui));
