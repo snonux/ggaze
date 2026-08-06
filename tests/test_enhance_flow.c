@@ -229,6 +229,18 @@ collect_pictures(GtkWidget *p_root, GPtrArray *p_pictures) {
    }
 }
 
+/* Direct children of the flow box -- i.e. the grid CELLS (GtkFlowBoxChild),
+ * not the buttons inside them. Cell geometry is what "fits the window" is
+ * about; the button is just what fills the cell. */
+static void
+collect_cells(GtkWidget *p_flow, GPtrArray *p_cells) {
+   GtkWidget *p_child = gtk_widget_get_first_child(p_flow);
+   while (p_child != NULL) {
+      g_ptr_array_add(p_cells, p_child);
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+}
+
 static char *
 load_bytes(const char *c_path, gsize *pu_len) {
    char   *c_data = NULL;
@@ -236,6 +248,109 @@ load_bytes(const char *c_path, gsize *pu_len) {
    g_assert_true(g_file_get_contents(c_path, &c_data, pu_len, &p_err));
    g_assert_no_error(p_err);
    return (c_data);
+}
+
+/* The gallery grid must EXACTLY fill the window's width, and must not resize
+ * itself while nothing is happening.
+ *
+ * Both halves are user-reported defects from the same cause. The layout used
+ * to be driven by a per-frame GtkTickCallback that measured the gallery window
+ * and pushed computed pixel size requests onto the scroll area and every
+ * picture. Its arithmetic subtracted fixed guesses for chrome (-48/-96 on the
+ * window, -24/-48 per cell) that did not match the real widgets, so a strip of
+ * the window was always left over; and because it recomputed on ANY change of
+ * window size, a single pixel of jitter resized every thumbnail even though
+ * the user never touched the window. The cells now expand into the grid
+ * through GTK's own layout, so both properties hold by construction -- and
+ * regress together if anyone reintroduces measure-then-resize. */
+static void
+test_preview_grid_fills_window_and_is_stable(void) {
+   Settings *p_cfg = settings_new();
+   settings_set_enhance_preview_thumbnails(p_cfg, TRUE);
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-enhance-grid-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "plain.jpg");
+   char        *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GgazeWindow *p_win  = new_window();
+   ggaze_window_open(p_win, p_file);
+   gtk_window_set_default_size(GTK_WINDOW(p_win), 900, 700);
+   gtk_window_present(GTK_WINDOW(p_win));
+   wait_for_load(p_win);
+
+   fire(p_win, "win.enhance");
+   GtkWindow *p_gallery = find_transient_window(GTK_WINDOW(p_win));
+   g_assert_nonnull(p_gallery);
+   GtkWidget *p_flow =
+      find_widget_type(GTK_WIDGET(p_gallery), GTK_TYPE_FLOW_BOX);
+   g_assert_nonnull(p_flow);
+   for (guint u = 0; u < 3000 && gtk_widget_get_width(p_flow) == 0; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpint(gtk_widget_get_width(p_flow), >, 0);
+
+   /* 9 cells (original + 8 presets) laid out as a fixed 3-wide grid. */
+   GPtrArray *p_cells = g_ptr_array_new();
+   collect_cells(p_flow, p_cells);
+   g_assert_cmpuint(p_cells->len, ==, 9);
+   guint u_cols = gtk_flow_box_get_max_children_per_line(GTK_FLOW_BOX(p_flow));
+   g_assert_cmpuint(u_cols, ==, 3);
+   g_assert_cmpuint(
+      gtk_flow_box_get_min_children_per_line(GTK_FLOW_BOX(p_flow)), ==, u_cols);
+
+   /* FITS, part 1: a row of cells plus its spacing covers the flow box, give
+    * or take the widget's own CSS padding. Compared as a fraction rather than
+    * an exact figure because that padding is the theme's to choose (18px of
+    * 874 when this was written); what must never return is a leftover strip on
+    * the scale of a whole column. */
+   int i_flow_w  = gtk_widget_get_width(p_flow);
+   int i_spacing = (int)gtk_flow_box_get_column_spacing(GTK_FLOW_BOX(p_flow));
+   int i_row_w   = i_spacing * (int)(u_cols - 1);
+   for (guint u = 0; u < u_cols; u++) {
+      i_row_w +=
+         gtk_widget_get_width(GTK_WIDGET(g_ptr_array_index(p_cells, u)));
+   }
+   g_assert_cmpint(i_row_w * 100, >=, i_flow_w * 90);
+
+   /* FITS, part 2, and the assertion that actually pins the fix: the BUTTON
+    * fills its cell. That is what was wrong -- the buttons were laid out
+    * GTK_ALIGN_START, so each sat at its natural width inside a wider cell and
+    * left the visible gap down the right of every thumbnail. Checking the
+    * cells alone would never have caught it, because homogeneous cells were
+    * already equal to each other. */
+   for (guint u = 0; u < p_cells->len; u++) {
+      GtkWidget *p_cell = GTK_WIDGET(g_ptr_array_index(p_cells, u));
+      GtkWidget *p_btn  = gtk_widget_get_first_child(p_cell);
+      g_assert_nonnull(p_btn);
+      g_assert_cmpint(gtk_widget_get_width(p_btn) * 100, >=,
+                      gtk_widget_get_width(p_cell) * 90);
+   }
+
+   /* STABLE: nothing is touched, so nothing may move. A surviving
+    * measure-then-resize loop shows up here as a changed width. */
+   int i_cell0 =
+      gtk_widget_get_width(GTK_WIDGET(g_ptr_array_index(p_cells, 0)));
+   for (guint u = 0; u < 5; u++) {
+      ggtest_drain_main(120);
+      g_assert_cmpint(
+         gtk_widget_get_width(GTK_WIDGET(g_ptr_array_index(p_cells, 0))), ==,
+         i_cell0);
+   }
+   g_ptr_array_unref(p_cells);
+
+   fire(p_win, "win.enhance"); /* close */
+   g_object_unref(p_gallery);
+   ggtest_drain_main(300);
+   g_settings_reset(settings_get_gsettings(p_cfg),
+                    "enhance-preview-thumbnails");
+   settings_delete(p_cfg);
+   g_object_unref(p_file);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   g_free(c_path);
+   ggtest_drain_main(300);
+   cleanup_temp_dir(c_dir);
 }
 
 static void
@@ -2331,6 +2446,8 @@ static void
 add_feature_tests(void) {
    g_test_add_func("/enhance_flow/preview_thumbnail_window",
                    test_preview_thumbnail_window);
+   g_test_add_func("/enhance_flow/preview_grid_fills_window_and_is_stable",
+                   test_preview_grid_fills_window_and_is_stable);
    g_test_add_func("/enhance_flow/apply_is_async_and_original_untouched",
                    test_apply_is_async_and_original_untouched);
    g_test_add_func("/enhance_flow/toggle_off_resets_to_original",

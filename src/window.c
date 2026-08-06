@@ -116,64 +116,62 @@ struct _GgazeWindow {
    GtkWidget    *p_original_pic;    /* optional Original preview picture */
    GtkWidget    *p_enhance_gallery; /* responsive preview flow box */
    GtkWidget    *p_enhance_scroll;  /* gallery viewport sized to the window */
-   int           i_enhance_gallery_width;  /* last gallery allocation */
-   int           i_enhance_gallery_height; /* avoids redundant resize work */
-   GCancellable *p_preview_cancel; /* separate thumbnail-preview request */
-   guint         u_preview_gen;    /* invalidates stale gallery completions */
-   GdkTexture   *p_enhance_tex;    /* last-applied modified texture, cached
-                                    * so hold-Space can restore it without a
-                                    * GEGL recompute */
-   GCancellable *p_enhance_cancel; /* in-flight enhance-apply GTask */
-   guint         u_enhance_gen;    /* bumped on every apply/discard; a
-                                    * completion whose request predates the
-                                    * current value is stale and dropped
-                                    * (last-write-wins -- GEGL processing
-                                    * cannot be aborted mid-flight once
-                                    * started) */
-   gboolean b_hold_original;       /* TRUE while Space is held (hold-compare) */
-   gboolean b_save_prompt;         /* TRUE while the modal Save/Discard/Cancel
-                                    * prompt is outstanding, so a trigger the
-                                    * modal grab cannot swallow (Alt+F4 / the
-                                    * WM close button reach "close-request"
-                                    * without being input events, and a
-                                    * single-instance open arrives over D-Bus)
-                                    * cannot stack a second dialog on top of
-                                    * it, nor slip its continuation past the
-                                    * gate while that dialog is still up */
-   GCancellable *p_prompt_cancel;  /* the outstanding prompt's GCancellable
-                                    * (NULL when no prompt is up), handed to
-                                    * gtk_alert_dialog_choose so dispose can
-                                    * force the dialog's GTask to complete
-                                    * instead of leaving it (and the _SaveCtx
-                                    * it carries) hanging -- see
-                                    * _prompt_dispose. Exactly one prompt is
-                                    * ever outstanding (b_save_prompt), so this
-                                    * single slot always names THAT prompt */
-   gboolean b_prompt_quits;        /* TRUE while the outstanding prompt's OWN
-                                    * continuation is _proceed_quit, i.e.
-                                    * answering it in favour of proceeding
-                                    * closes the window. A queued request must
-                                    * then be dropped rather than retried into
-                                    * a window that is going away (round 4,
-                                    * finding r). Cleared with the slot in
-                                    * _save_prompt_flush */
-   _Request *p_pending;            /* the ONE request parked while the prompt
-                                    * above is outstanding (newest wins), so a
-                                    * second, different request is not silently
-                                    * swallowed: it is retried through the same
-                                    * gate once the prompt resolves in favour
-                                    * of proceeding, and dropped with a status
-                                    * line when it resolves to Cancel (round 3,
-                                    * finding i). NULL when nothing is parked */
-   GFile *p_enhance_file;          /* file the current mask/preview applies to
-                                    * (NULL = none); lets nav_changed_cb tell
-                                    * an actual navigation apart from a
-                                    * same-file rescan (e.g. the folder's
-                                    * GFileMonitor noticing the "-enhanced"
-                                    * copy win.enhance-save just wrote next
-                                    * to the original) so a save doesn't
-                                    * silently discard its own still-active
-                                    * preview */
+   GCancellable *p_preview_cancel;  /* separate thumbnail-preview request */
+   guint         u_preview_gen;     /* invalidates stale gallery completions */
+   GdkTexture   *p_enhance_tex;     /* last-applied modified texture, cached
+                                     * so hold-Space can restore it without a
+                                     * GEGL recompute */
+   GCancellable *p_enhance_cancel;  /* in-flight enhance-apply GTask */
+   guint         u_enhance_gen;     /* bumped on every apply/discard; a
+                                     * completion whose request predates the
+                                     * current value is stale and dropped
+                                     * (last-write-wins -- GEGL processing
+                                     * cannot be aborted mid-flight once
+                                     * started) */
+   gboolean b_hold_original;      /* TRUE while Space is held (hold-compare) */
+   gboolean b_save_prompt;        /* TRUE while the modal Save/Discard/Cancel
+                                   * prompt is outstanding, so a trigger the
+                                   * modal grab cannot swallow (Alt+F4 / the
+                                   * WM close button reach "close-request"
+                                   * without being input events, and a
+                                   * single-instance open arrives over D-Bus)
+                                   * cannot stack a second dialog on top of
+                                   * it, nor slip its continuation past the
+                                   * gate while that dialog is still up */
+   GCancellable *p_prompt_cancel; /* the outstanding prompt's GCancellable
+                                   * (NULL when no prompt is up), handed to
+                                   * gtk_alert_dialog_choose so dispose can
+                                   * force the dialog's GTask to complete
+                                   * instead of leaving it (and the _SaveCtx
+                                   * it carries) hanging -- see
+                                   * _prompt_dispose. Exactly one prompt is
+                                   * ever outstanding (b_save_prompt), so this
+                                   * single slot always names THAT prompt */
+   gboolean b_prompt_quits;       /* TRUE while the outstanding prompt's OWN
+                                   * continuation is _proceed_quit, i.e.
+                                   * answering it in favour of proceeding
+                                   * closes the window. A queued request must
+                                   * then be dropped rather than retried into
+                                   * a window that is going away (round 4,
+                                   * finding r). Cleared with the slot in
+                                   * _save_prompt_flush */
+   _Request *p_pending;           /* the ONE request parked while the prompt
+                                   * above is outstanding (newest wins), so a
+                                   * second, different request is not silently
+                                   * swallowed: it is retried through the same
+                                   * gate once the prompt resolves in favour
+                                   * of proceeding, and dropped with a status
+                                   * line when it resolves to Cancel (round 3,
+                                   * finding i). NULL when nothing is parked */
+   GFile *p_enhance_file;         /* file the current mask/preview applies to
+                                   * (NULL = none); lets nav_changed_cb tell
+                                   * an actual navigation apart from a
+                                   * same-file rescan (e.g. the folder's
+                                   * GFileMonitor noticing the "-enhanced"
+                                   * copy win.enhance-save just wrote next
+                                   * to the original) so a save doesn't
+                                   * silently discard its own still-active
+                                   * preview */
 #endif
 };
 
@@ -2491,11 +2489,9 @@ _enhance_destroy(GgazeWindow *p_win) {
       p_win->p_enhance_btns[i] = NULL;
       p_win->p_enhance_pics[i] = NULL;
    }
-   p_win->p_original_pic           = NULL;
-   p_win->p_enhance_gallery        = NULL;
-   p_win->p_enhance_scroll         = NULL;
-   p_win->i_enhance_gallery_width  = 0;
-   p_win->i_enhance_gallery_height = 0;
+   p_win->p_original_pic    = NULL;
+   p_win->p_enhance_gallery = NULL;
+   p_win->p_enhance_scroll  = NULL;
    if (GTK_IS_WINDOW(p_ui)) {
       gtk_window_destroy(GTK_WINDOW(p_ui));
    } else {
@@ -2564,76 +2560,48 @@ _enhance_build_title(GgazeWindow *p_win, GtkWidget *p_box) {
    g_free(c_title);
 }
 
-/* Append one toggle row per preset (capped at the 8-bit mask's width) plus
- * the "0 Original" reset row and the "s" save hint, wiring each preset row's
- * hotkey + current highlight. Split out of _enhance_build_box (30-line
- * convention). */
+/* Lock the gallery to a square-ish grid: 3 columns for the usual 9 cells
+ * (original + 8 presets). Fixing min == max is what makes the grid EXACTLY
+ * tile the width -- a homogeneous GtkFlowBox divides its allocation among
+ * exactly that many columns, so the cells always add up to the full window
+ * with no leftover strip, at any window size.
+ *
+ * This replaced a per-frame GtkTickCallback that measured the window and
+ * pushed explicit pixel size requests onto the scroll area and every picture.
+ * That approach was wrong twice over. It recomputed on ANY change in window
+ * size, so a single pixel of jitter (a compositor animation, fractional
+ * scaling) visibly resized every thumbnail even though the user had not
+ * touched the window; and it derived the SCROLL's size request from the
+ * window's own size, which raises the toplevel's minimum and so fed back into
+ * the very measurement it was reacting to. Letting GTK's layout do the fitting
+ * removes both: nothing here reacts to a size, so nothing can oscillate. */
+/* A preview picture claims the whole cell: expand in both directions, and keep
+ * a small floor so a cell can never collapse to nothing before the texture
+ * arrives (a GtkPicture with no paintable measures zero). CONTENT_FIT_CONTAIN
+ * on top of this is what keeps the image's aspect ratio inside the cell, so no
+ * caller needs to compute a width/height pair by hand. */
 static void
-_enhance_resize_gallery(GgazeWindow *p_win, int i_width, int i_height) {
-   if (p_win->p_enhance_gallery == NULL || p_win->p_enhance_scroll == NULL) {
+_enhance_expand_preview(GtkWidget *p_pic) {
+   gtk_widget_set_hexpand(p_pic, TRUE);
+   gtk_widget_set_vexpand(p_pic, TRUE);
+   gtk_widget_set_halign(p_pic, GTK_ALIGN_FILL);
+   gtk_widget_set_valign(p_pic, GTK_ALIGN_FILL);
+   gtk_widget_set_size_request(p_pic, 96, 64);
+}
+
+static void
+_enhance_apply_grid_columns(GgazeWindow *p_win, int i_items) {
+   if (p_win->p_enhance_gallery == NULL) {
       return;
    }
-   int i_gallery_width  = MAX(280, i_width - 48);
-   int i_gallery_height = MAX(220, i_height - 96);
-   int i_items          = p_win->p_original_pic != NULL ? 1 : 0;
-   for (guint i = 0; i < G_N_ELEMENTS(p_win->p_enhance_pics); i++) {
-      i_items += p_win->p_enhance_pics[i] != NULL ? 1 : 0;
+   int i_columns = 1;
+   while (i_columns * i_columns < MAX(1, i_items)) {
+      i_columns++;
    }
-   int i_columns        = 1;
-   int i_picture_width  = 32;
-   int i_picture_height = 24;
-   int i_best_area      = 0;
-   for (int i_cols = 1; i_cols <= MAX(1, i_items); i_cols++) {
-      int i_rows        = (i_items + i_cols - 1) / i_cols;
-      int i_cell_width  = (i_gallery_width - (i_cols - 1) * 4) / i_cols - 24;
-      int i_cell_height = (i_gallery_height - (i_rows - 1) * 4) / i_rows - 48;
-      if (i_cell_width <= 0 || i_cell_height <= 0) {
-         continue;
-      }
-      int i_candidate_width =
-         MIN(512, MIN(i_cell_width, i_cell_height * 3 / 2));
-      int i_candidate_height = MIN(i_cell_height, i_candidate_width * 2 / 3);
-      int i_area             = i_candidate_width * i_candidate_height;
-      if (i_area > i_best_area) {
-         i_best_area      = i_area;
-         i_columns        = i_cols;
-         i_picture_width  = i_candidate_width;
-         i_picture_height = i_candidate_height;
-      }
-   }
-   gtk_widget_set_size_request(p_win->p_enhance_scroll, i_gallery_width,
-                               i_gallery_height);
    gtk_flow_box_set_min_children_per_line(
       GTK_FLOW_BOX(p_win->p_enhance_gallery), (guint)i_columns);
    gtk_flow_box_set_max_children_per_line(
       GTK_FLOW_BOX(p_win->p_enhance_gallery), (guint)i_columns);
-   for (guint i = 0; i < G_N_ELEMENTS(p_win->p_enhance_pics); i++) {
-      if (p_win->p_enhance_pics[i] != NULL) {
-         gtk_widget_set_size_request(p_win->p_enhance_pics[i], i_picture_width,
-                                     i_picture_height);
-      }
-   }
-   if (p_win->p_original_pic != NULL) {
-      gtk_widget_set_size_request(p_win->p_original_pic, i_picture_width,
-                                  i_picture_height);
-   }
-}
-
-static gboolean
-_enhance_gallery_tick_cb(GtkWidget *p_window, GdkFrameClock *p_clock,
-                         gpointer p_data) {
-   (void)p_clock;
-   GgazeWindow *p_win    = GGAZE_WINDOW(p_data);
-   int          i_width  = gtk_widget_get_width(p_window);
-   int          i_height = gtk_widget_get_height(p_window);
-   if (i_width > 0 && i_height > 0 &&
-       (i_width != p_win->i_enhance_gallery_width ||
-        i_height != p_win->i_enhance_gallery_height)) {
-      p_win->i_enhance_gallery_width  = i_width;
-      p_win->i_enhance_gallery_height = i_height;
-      _enhance_resize_gallery(p_win, i_width, i_height);
-   }
-   return (G_SOURCE_CONTINUE);
 }
 
 static GtkWidget *
@@ -2644,6 +2612,7 @@ _enhance_original_button(GgazeWindow *p_win, gboolean b_previews) {
       GtkWidget *p_pic = gtk_picture_new();
       GtkWidget *p_lbl = gtk_label_new("0  Original");
       gtk_picture_set_content_fit(GTK_PICTURE(p_pic), GTK_CONTENT_FIT_CONTAIN);
+      _enhance_expand_preview(p_pic);
       gtk_widget_set_halign(p_lbl, GTK_ALIGN_CENTER);
       gtk_box_append(GTK_BOX(p_box), p_pic);
       gtk_box_append(GTK_BOX(p_box), p_lbl);
@@ -2652,7 +2621,9 @@ _enhance_original_button(GgazeWindow *p_win, gboolean b_previews) {
    } else {
       gtk_button_set_label(GTK_BUTTON(p_btn), "0  Original");
    }
-   gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
+   /* Preview cells FILL their share of the grid; the compact popover keeps the
+    * left-aligned list shape a vertical menu wants. */
+   gtk_widget_set_halign(p_btn, b_previews ? GTK_ALIGN_FILL : GTK_ALIGN_START);
    g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER(-1));
    g_signal_connect_swapped(p_btn, "clicked", G_CALLBACK(_enhance_row_toggle),
                             p_win);
@@ -2672,9 +2643,17 @@ _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
                                       GTK_SELECTION_NONE);
       gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(p_gallery), 4);
       gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(p_gallery), 4);
+      gtk_widget_set_hexpand(p_gallery, TRUE);
+      gtk_widget_set_vexpand(p_gallery, TRUE);
       GtkWidget *p_scroll = gtk_scrolled_window_new();
       gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(p_scroll),
                                      GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+      /* The scroll area takes ALL the leftover room in the window, and takes
+       * it from GTK's layout rather than from a size request computed off the
+       * window's own dimensions -- which is what previously coupled the
+       * gallery's size back to itself. */
+      gtk_widget_set_hexpand(p_scroll, TRUE);
+      gtk_widget_set_vexpand(p_scroll, TRUE);
       gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(p_scroll), p_gallery);
       gtk_box_append(GTK_BOX(p_box), p_scroll);
       p_win->p_enhance_gallery = p_gallery;
@@ -2699,9 +2678,9 @@ _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
          GtkWidget *p_row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
          GtkWidget *p_pic = gtk_picture_new();
          GtkWidget *p_lbl = gtk_label_new(c_lbl);
-         gtk_widget_set_size_request(p_pic, 128, 80);
          gtk_picture_set_content_fit(GTK_PICTURE(p_pic),
                                      GTK_CONTENT_FIT_CONTAIN);
+         _enhance_expand_preview(p_pic);
          gtk_widget_set_halign(p_lbl, GTK_ALIGN_CENTER);
          gtk_box_append(GTK_BOX(p_row), p_pic);
          gtk_box_append(GTK_BOX(p_row), p_lbl);
@@ -2710,7 +2689,8 @@ _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
       } else {
          gtk_button_set_label(GTK_BUTTON(p_btn), c_lbl);
       }
-      gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
+      gtk_widget_set_halign(p_btn,
+                            b_previews ? GTK_ALIGN_FILL : GTK_ALIGN_START);
       g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER((gint)i));
       g_signal_connect_swapped(p_btn, "clicked",
                                G_CALLBACK(_enhance_row_toggle), p_win);
@@ -2727,6 +2707,14 @@ _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
    }
    if (!b_previews) {
       gtk_box_append(GTK_BOX(p_box), p_btn0);
+   }
+
+   if (b_previews) {
+      /* Now that every cell exists, fix the column count once. The item count
+       * cannot change while the gallery is open (the pictures are all created
+       * here; only their paintables arrive later), so there is nothing to
+       * recompute afterwards. */
+      _enhance_apply_grid_columns(p_win, (int)u_n + 1);
    }
 
    GtkWidget *p_hint = gtk_label_new("s  Save enhanced copy");
@@ -2818,8 +2806,6 @@ _enhance_build_gallery_window(GgazeWindow *p_win, const GPtrArray *p_presets) {
                         _enhance_build_box(p_win, p_presets));
    g_signal_connect(p_window, "close-request",
                     G_CALLBACK(_enhance_window_close_cb), p_win);
-   gtk_widget_add_tick_callback(p_window, _enhance_gallery_tick_cb, p_win,
-                                NULL);
    return (p_window);
 }
 
@@ -2862,13 +2848,9 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
                     p_win);
    gtk_widget_add_controller(p_ui, p_kc);
    p_win->p_enhance_ui = p_ui;
-   int i_width         = gtk_widget_get_width(GTK_WIDGET(p_win));
-   int i_height        = gtk_widget_get_height(GTK_WIDGET(p_win));
-   if (i_width <= 0 || i_height <= 0) {
-      i_width  = 800;
-      i_height = 600;
-   }
-   _enhance_resize_gallery(p_win, i_width, i_height);
+   /* No initial sizing pass: the cells expand into whatever the gallery
+    * window's layout gives them, so they are correct from the first frame and
+    * stay correct through every later resize without anything measuring. */
    _enhance_start_previews(p_win, p_presets);
    if (b_previews) {
       gtk_window_present(GTK_WINDOW(p_ui));

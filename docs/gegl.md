@@ -33,9 +33,17 @@ editing remains a non-goal.
   whole preview outright. Applying the chain runs off the GTK main thread (a
   GTask worker; last-write-wins if superseded before it finishes).
 - By default `a` opens a separate, resizable gallery of bounded previews for
-  all eight presets. It can be maximized to use the whole screen and reflows to
-  choose the largest cards that keep every enhancer plus the Original reset
-  card visible at once. Each preset is shown independently on the current
+  all eight presets. It can be maximized to use the whole screen. The nine
+  cards (Original + eight presets) sit in a fixed square-ish grid — 3×3 — whose
+  cells **expand to fill the window exactly** at any size, so the cards grow
+  and shrink with the window and never leave an unused strip beside them.
+  That fit comes from GTK's own layout: the cells expand, and each card fills
+  its cell. Nothing measures the window and pushes pixel sizes back into it.
+  Do not reintroduce such a pass (a tick callback or size-allocate handler that
+  sets size requests from the window's dimensions): it made every thumbnail
+  visibly resize whenever the window size changed by even a pixel, and it fed
+  the gallery's own size back into the measurement it reacted to.
+  Each preset is shown independently on the current
   original and all previews are generated as one cancellable background batch.
   Preferences can disable thumbnails and restore the compact popover text list
   on slower systems.
