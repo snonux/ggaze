@@ -87,6 +87,42 @@ drain_main(guint u_ms) {
  * toplevel list and only destroy() takes the entry back out (it drops that
  * reference too, so the window still finalizes). Full rationale in
  * tests/helpers/gtk_helpers.h, "window teardown". */
+/* The first GtkFlowBox reachable below p_root (the grid nests it under a
+ * GtkScrolledWindow -> GtkViewport), or NULL. */
+static GtkWidget *
+find_flow_box(GtkWidget *p_root) {
+   for (GtkWidget *p_ch = gtk_widget_get_first_child(p_root); p_ch != NULL;
+        p_ch            = gtk_widget_get_next_sibling(p_ch)) {
+      if (GTK_IS_FLOW_BOX(p_ch)) {
+         return (p_ch);
+      }
+      GtkWidget *p_inner = find_flow_box(p_ch);
+      if (p_inner != NULL) {
+         return (p_inner);
+      }
+   }
+   return (NULL);
+}
+
+/* Borrowed pointer to the box widget of the grid cell whose file equals
+ * p_target, or NULL if no such cell is present. The box is the child of the
+ * GtkFlowBoxChild and carries the "ggaze-removed" / "ggaze-marked" classes. */
+static GtkWidget *
+grid_cell_box(GgazeGrid *p_grid, GFile *p_target) {
+   GtkWidget *p_flow  = find_flow_box(GTK_WIDGET(p_grid));
+   GtkWidget *p_child = gtk_widget_get_first_child(p_flow);
+   while (p_child != NULL) {
+      GFile     *p_f = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
+      GtkWidget *p_box =
+         gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(p_child));
+      if (p_f != NULL && p_box != NULL && g_file_equal(p_f, p_target)) {
+         return (p_box);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (NULL);
+}
+
 static GgazeWindow *
 new_window(void) {
    return (GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL)));
@@ -139,10 +175,23 @@ test_grid_cull_temp(void) {
    drain_main(500);
    g_assert_true(g_file_query_exists(p_trash, NULL)); /* .Trash created */
 
+   /* The trashed cell stays in the grid (dimmed, not removed): count is
+    * unchanged and the cell carries the "ggaze-removed" class. Before the
+    * fix the in-place "changed" handler only refreshed mark badges, so the
+    * cell was never dimmed -- it stayed full-opacity but unselectable. */
+   g_assert_cmpint(ggaze_grid_get_count(p_grid), ==, 3);
+   GtkWidget *p_box = grid_cell_box(p_grid, p_plain);
+   g_assert_nonnull(p_box);
+   g_assert_true(gtk_widget_has_css_class(p_box, "ggaze-removed"));
+
    /* Undo (u). */
    gtk_widget_activate_action(GTK_WIDGET(p_win), "win.undo", NULL);
    drain_main(500);
    g_assert_true(g_file_query_exists(p_plain, NULL)); /* file restored */
+   /* The restored cell is un-dimmed in place. */
+   p_box = grid_cell_box(p_grid, p_plain);
+   g_assert_nonnull(p_box);
+   g_assert_false(gtk_widget_has_css_class(p_box, "ggaze-removed"));
    g_object_unref(p_plain);
 
    g_object_unref(p_trash);

@@ -24,17 +24,18 @@ typedef struct {
 static const char *CELL_DATA_KEY = "ggaze-cell-data";
 
 struct _GgazeGrid {
-   GtkWidget           parent_instance;
-   Navigator          *p_nav;
-   Thumbnail          *p_thumb;
-   GtkWidget          *p_flow;     /* GtkFlowBox */
-   GtkWidget          *p_scrolled; /* GtkScrolledWindow */
-   int                 i_size;
-   gboolean            b_hide_trashed;
-   guint               u_nav_handler;
-   guint               u_last_count; /* navigator count at last full refresh */
-   guint               u_visible_idle; /* queued viewport thumbnail scan */
-   GCancellable       *p_cancel;  /* cancels pending thumbnails on dispose */
+   GtkWidget     parent_instance;
+   Navigator    *p_nav;
+   Thumbnail    *p_thumb;
+   GtkWidget    *p_flow;     /* GtkFlowBox */
+   GtkWidget    *p_scrolled; /* GtkScrolledWindow */
+   int           i_size;
+   gboolean      b_hide_trashed;
+   guint         u_nav_handler;
+   guint         u_last_count;    /* navigator count at last full refresh */
+   guint         u_last_removed;  /* removed (dimmed) count at last refresh */
+   guint         u_visible_idle;  /* queued viewport thumbnail scan */
+   GCancellable *p_cancel;        /* cancels pending thumbnails on dispose */
    GgazeGridSelectFunc fn_select; /* selection gate hook, or NULL */
    gpointer            p_select_data; /* fn_select's user data */
 };
@@ -530,7 +531,8 @@ ggaze_grid_refresh(GgazeGrid *p_grid) {
       GtkWidget *p_child = _make_cell(p_grid, p_file);
       gtk_flow_box_append(GTK_FLOW_BOX(p_grid->p_flow), p_child);
    }
-   p_grid->u_last_count = u_n;
+   p_grid->u_last_count   = u_n;
+   p_grid->u_last_removed = navigator_get_removed_count(p_grid->p_nav);
    _select_current(p_grid);
 }
 
@@ -559,6 +561,34 @@ ggaze_grid_refresh_mark_badges(GgazeGrid *p_grid) {
    }
 }
 
+/* Walk every cell and sync its dimmed/removed appearance to the
+ * navigator's removed set in place (no rebuild), so a `d`/`D` trash or `u`
+ * undo that changes only the removed set — not the listing count — still
+ * dims or un-dims the right cell. Mirrors ggaze_grid_refresh_mark_badges for
+ * the "ggaze-removed" class + opacity instead of the mark badge. */
+static void
+_refresh_removed_state(GgazeGrid *p_grid) {
+   if (p_grid->p_nav == NULL) {
+      return;
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
+   while (p_child != NULL) {
+      GFile     *p_f = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
+      GtkWidget *p_box =
+         gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(p_child));
+      if (p_f != NULL && p_box != NULL) {
+         if (navigator_is_removed(p_grid->p_nav, p_f)) {
+            gtk_widget_set_opacity(p_box, 0.35);
+            gtk_widget_add_css_class(p_box, "ggaze-removed");
+         } else {
+            gtk_widget_set_opacity(p_box, 1.0);
+            gtk_widget_remove_css_class(p_box, "ggaze-removed");
+         }
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+}
+
 static void
 _on_nav_changed(Navigator *p_nav, gpointer p_data) {
    (void)p_nav;
@@ -566,16 +596,22 @@ _on_nav_changed(Navigator *p_nav, gpointer p_data) {
    if (p_grid->p_nav == NULL) {
       return;
    }
-   /* Only a structural change (files added/removed via rescan/trash/move)
-    * needs a full rebuild. A mere current/mark change just moves the
-    * selection and refreshes badges in place — rebuilding on every
+   guint u_count   = navigator_get_count(p_grid->p_nav);
+   guint u_removed = navigator_get_removed_count(p_grid->p_nav);
+   /* A change in the file listing (files added/removed on disk) always
+    * needs a full rebuild. So does a removed-set change while trashed items
+    * are hidden, because those cells must physically leave the flowbox. A
+    * mere current/mark change — or a trash/undo while dimming (not hiding)
+    * — only needs an in-place badge + dim refresh; rebuilding on every
     * navigation keypress would recreate every GtkPicture and blank the grid
     * while each cell re-requested its thumbnail. */
-   if (navigator_get_count(p_grid->p_nav) != p_grid->u_last_count) {
+   if (u_count != p_grid->u_last_count ||
+       (p_grid->b_hide_trashed && u_removed != p_grid->u_last_removed)) {
       ggaze_grid_refresh(p_grid);
       return;
    }
    ggaze_grid_refresh_mark_badges(p_grid);
+   _refresh_removed_state(p_grid);
    _select_current(p_grid);
 }
 
