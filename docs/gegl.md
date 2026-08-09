@@ -189,6 +189,12 @@ unit-testable. The synchronous API (`enhancer_load`/`enhancer_apply_chain`/
 wrapper below composes; `window.c` calls the async form so GEGL's CPU-heavy
 processing runs in a `GTask` worker, off the GTK main thread (tu0).
 
+`enhancer_load` does NOT use `gegl:load` (which ignores EXIF Orientation):
+it loads through ggaze's own orientation-aware loader (`loader_load`, every
+backend honors Orientation per decision #26) and copies the upright RGBA8
+pixels into a `GeglBuffer`, so the live preview and the A-menu per-preset
+preview thumbnails render upright for portrait phone JPEGs etc.
+
 ```c
 const GPtrArray *enhancer_get_presets(Enhancer *p_e);
 GeglBuffer      *enhancer_apply_chain(Enhancer *p_e, GeglBuffer *p_in,
@@ -207,7 +213,8 @@ GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, GError **p_err);
 ```
 
 Viewer integration: when a preset is active, the decoded pixels are imported
-into a `GeglBuffer` (GEGL GdkPixbuf-source op / babl), the enhancer processes
+into a `GeglBuffer` (via the orientation-aware loader + babl; see
+`enhancer_load` above), the enhancer processes
 it, and the output buffer is rendered back to a `GdkTexture` for display.
 This path is heavier, so it is strictly on-demand and off the main thread;
 the window compares a generation counter on completion so a superseded

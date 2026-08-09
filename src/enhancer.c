@@ -6,6 +6,8 @@
 #include <glib/gstdio.h>
 #include <string.h>
 
+#include "loader/loader.h" /* orientation-aware load -> upright texture */
+
 struct Enhancer {
    GPtrArray *p_presets;
 };
@@ -337,14 +339,16 @@ enhancer_export_chain(Enhancer *e, GeglBuffer *p_in, const GPtrArray *p_presets,
 
 #if GGAZE_HAVE_GEGL
 
-GeglBuffer *
-enhancer_load(GFile *p_file, GError **p_err) {
-   g_return_val_if_fail(p_file != NULL, NULL);
+/* Plain gegl:load into a GeglBuffer (no EXIF orientation). Used as the
+ * fallback in enhancer_load when the loader's texture is not the RGBA8 layout
+ * the fast path handles (no backend produces such a texture today). */
+static GeglBuffer *
+_enhancer_load_gegl(GFile *p_file, GError **p_err) {
    char *c_path = g_file_get_path(p_file);
    if (c_path == NULL) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
                   "enhancer: non-local load path");
-      return NULL;
+      return (NULL);
    }
    GeglBuffer *p_buf   = NULL;
    GeglNode   *p_graph = gegl_node_new();
@@ -359,10 +363,58 @@ enhancer_load(GFile *p_file, GError **p_err) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
                   "enhancer: failed to load %s", c_path);
       g_free(c_path);
-      return NULL;
+      return (NULL);
    }
    g_free(c_path);
-   return p_buf;
+   return (p_buf);
+}
+
+GeglBuffer *
+enhancer_load(GFile *p_file, GError **p_err) {
+   g_return_val_if_fail(p_file != NULL, NULL);
+   /* Load via ggaze's own loader so the EXIF Orientation every backend honors
+    * (decision #26) is applied -- gegl:load does NOT auto-rotate, so the
+    * enhance live preview and the A-menu per-preset preview thumbnails would
+    * otherwise render un-rotated for images whose stored orientation is not
+    * 1 (portrait phone JPEGs, rot6.jpg, ...). The loader returns an upright
+    * GdkTexture (RGBA8) for any supported format; copy its pixels into a
+    * GeglBuffer for the GEGL preset chain. */
+   GError     *p_load_err = NULL;
+   GdkTexture *p_tex      = loader_load(p_file, NULL, &p_load_err);
+   if (p_tex == NULL) {
+      g_propagate_error(p_err, p_load_err);
+      return (NULL);
+   }
+   int             i_w   = gdk_texture_get_width(p_tex);
+   int             i_h   = gdk_texture_get_height(p_tex);
+   GdkMemoryFormat e_fmt = gdk_texture_get_format(p_tex);
+   GeglBuffer     *p_buf = NULL;
+   if (i_w > 0 && i_h > 0 && e_fmt == GDK_MEMORY_R8G8B8A8) {
+      const Babl   *p_fmt    = babl_format("R'G'B'A u8");
+      gint          i_stride = i_w * 4;
+      gpointer      p_data   = g_malloc((gsize)i_stride * (gsize)i_h);
+      GeglRectangle rect     = {0, 0, i_w, i_h};
+      gdk_texture_download(p_tex, p_data, (gsize)i_stride);
+      p_buf = gegl_buffer_new(&rect, p_fmt);
+      gegl_buffer_set(p_buf, &rect, 0, p_fmt, p_data, i_stride);
+      g_free(p_data);
+   }
+   g_object_unref(p_tex);
+   if (p_buf != NULL) {
+      return (p_buf);
+   }
+   /* Empty or non-RGBA8 texture (no backend produces the latter today):
+    * fall back to gegl:load -- un-rotated, but channel-correct. Warn once so a
+    * future backend that emits a different layout does not silently
+    * reintroduce the orientation bug this function exists to fix. */
+   static gboolean b_warned = FALSE;
+   if (!b_warned) {
+      b_warned = TRUE;
+      g_warning("enhancer: texture is not RGBA8 (format %d); falling back "
+                "to gegl:load without EXIF orientation",
+                (gint)e_fmt);
+   }
+   return (_enhancer_load_gegl(p_file, p_err));
 }
 
 GdkTexture *

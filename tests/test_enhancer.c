@@ -134,11 +134,42 @@ test_load_and_to_texture(void) {
    g_object_unref(p_file);
 }
 
-/* /enhancer/export_format: apply Auto-fix and export to .png, .jpg and .webp,
- * asserting the file signatures AND the content type (ju0 — never write JPEG
- * into a .png). Asserts success when the saver op is installed (the core
- * jpg/png savers always are); skips honestly (not silently) if an op is
- * genuinely missing. */
+/* /enhancer/load_orientation: a JPEG whose EXIF Orientation is not 1 must be
+ * loaded upright. rot6.jpg is stored 8x4 with Orientation 6 (rotate 90 CW),
+ * so the upright buffer is 4 wide x 8 tall. Before the fix enhancer_load used
+ * gegl:load, which does NOT honor EXIF orientation, so the buffer came back
+ * 8x4 (un-rotated) and the A-menu preview thumbnails rendered sideways. */
+static void
+test_load_orientation(void) {
+   const gchar *c_fx = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_fx);
+   char  *c_path = g_build_filename(c_fx, "rot6.jpg", NULL);
+   GFile *p_file = g_file_new_for_path(c_path);
+   g_free(c_path);
+
+   GError     *p_err = NULL;
+   GeglBuffer *p_buf = enhancer_load(p_file, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_buf);
+   /* stored is 8x4; upright (orientation 6) swaps to 4x8. */
+   g_assert_cmpint(gegl_buffer_get_width(p_buf), ==, 4);
+   g_assert_cmpint(gegl_buffer_get_height(p_buf), ==, 8);
+
+   GdkTexture *p_tex = enhancer_buffer_to_texture(p_buf, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 4);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 8);
+
+   g_object_unref(p_tex);
+   g_object_unref(p_buf);
+   g_object_unref(p_file);
+}
+
+/* /enhancer/export_format: apply Auto-fix and export to .png, .jpg and
+ * .webp, asserting the file signatures AND the content type (ju0 — never
+ * write JPEG into a .png). Asserts success when the saver op is installed
+ * (the core jpg/png savers always are); skips honestly (not silently) if an
+ * op is genuinely missing. */
 static void
 test_export_format(void) {
    const gchar *c_fx = g_getenv("GGAZE_FIXTURES_DIR");
@@ -552,6 +583,48 @@ test_preview_thumbnails(void) {
    g_free(c_path);
 }
 
+/* /enhancer/preview_orientation: the A-menu per-preset preview thumbnails
+ * must be upright too. rot6.jpg is stored 8x4 (landscape) with Orientation 6
+ * (upright portrait 4x8). The fixture is tiny so the max-512px downscale is
+ * a no-op, and the original (index 0) and every rendered preset preview must
+ * come back 4x8 (portrait) -- without orientation they would be 8x4
+ * (landscape). */
+static void
+test_preview_orientation(void) {
+   const gchar  *c_fx   = g_getenv("GGAZE_FIXTURES_DIR");
+   char         *c_path = g_build_filename(c_fx, "rot6.jpg", NULL);
+   GFile        *p_file = g_file_new_for_path(c_path);
+   Enhancer     *p_e    = enhancer_new();
+   PreviewResult result = {.p_loop = g_main_loop_new(NULL, FALSE)};
+   enhancer_preview_thumbnails_async(p_e, p_file, enhancer_get_presets(p_e),
+                                     NULL, preview_done_cb, &result);
+   g_main_loop_run(result.p_loop);
+   g_assert_no_error(result.p_err);
+   g_assert_nonnull(result.p_result);
+   /* The original (index 0) must be the upright portrait (4x8), not the
+    * stored landscape (8x4). */
+   GdkTexture *p_orig = g_ptr_array_index(result.p_result, 0);
+   g_assert_nonnull(p_orig);
+   g_assert_cmpint(gdk_texture_get_width(p_orig), ==, 4);
+   g_assert_cmpint(gdk_texture_get_height(p_orig), ==, 8);
+   /* Every rendered preset preview is likewise upright (portrait 4x8). */
+   guint u_rendered = 0;
+   for (guint i = 1; i < result.p_result->len; i++) {
+      GdkTexture *p_tex = g_ptr_array_index(result.p_result, i);
+      if (p_tex != NULL) {
+         u_rendered++;
+         g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 4);
+         g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 8);
+      }
+   }
+   g_assert_cmpuint(u_rendered, >, 0);
+   g_ptr_array_unref(result.p_result);
+   g_main_loop_unref(result.p_loop);
+   enhancer_delete(p_e);
+   g_object_unref(p_file);
+   g_free(c_path);
+}
+
 int
 main(int argc, char **argv) {
    gegl_init(&argc, &argv);
@@ -559,6 +632,7 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer/builtin_presets", test_builtin_presets);
    g_test_add_func("/enhancer/export", test_export);
    g_test_add_func("/enhancer/load_and_to_texture", test_load_and_to_texture);
+   g_test_add_func("/enhancer/load_orientation", test_load_orientation);
    g_test_add_func("/enhancer/export_format", test_export_format);
    g_test_add_func("/enhancer/export_real_success", test_export_real_success);
    g_test_add_func("/enhancer/export_stale_dest", test_export_stale_dest);
@@ -566,5 +640,6 @@ main(int argc, char **argv) {
                    test_export_reject_unsupported);
    g_test_add_func("/enhancer/apply_chain", test_apply_chain);
    g_test_add_func("/enhancer/preview_thumbnails", test_preview_thumbnails);
+   g_test_add_func("/enhancer/preview_orientation", test_preview_orientation);
    return g_test_run();
 }

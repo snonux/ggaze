@@ -50,8 +50,10 @@ gboolean enhancer_export_chain(Enhancer *p_e, GeglBuffer *p_in,
                                GFile *p_out, GError **p_err);
 
 #if GGAZE_HAVE_GEGL
-/* Load a file into a GeglBuffer via the gegl:load op. Returns a new buffer
- * (caller unrefs) or NULL with p_err set. */
+/* Load a file into a GeglBuffer, upright (EXIF Orientation applied). Loads
+ * through ggaze's own orientation-aware loader (not gegl:load, which does
+ * not auto-rotate) and copies the upright RGBA8 pixels into a GeglBuffer.
+ * Returns a new buffer (caller unrefs) or NULL with p_err set. */
 GeglBuffer *enhancer_load(GFile *p_file, GError **p_err);
 
 /* Convert a GeglBuffer to a GdkTexture for preview (RGBA8 bytes). Returns a
