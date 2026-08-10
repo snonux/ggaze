@@ -1,5 +1,6 @@
 /* enhancer.c — GEGL quick-enhance presets (optional, feature-gated). */
 #include "enhancer.h"
+#include "enhancer-gegl.h"
 #include "ggaze-config.h"
 
 #include <glib.h>

@@ -1,8 +1,8 @@
 /* test_enhancer.c — GEGL enhance unit test (gated on HAVE_GEGL). */
 #include "enhancer.h"
+#include "enhancer-gegl.h"
 #include <glib.h>
 #include <glib/gstdio.h>
-#include <gegl.h>
 #include <unistd.h>
 
 /* Query the platform content type for p_path; return a non-NULL string

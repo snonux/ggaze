@@ -38,6 +38,7 @@
 #include "viewer.h"
 #if GGAZE_HAVE_GEGL
 #include "enhancer.h"
+#include "enhancer-gegl.h"
 #endif
 
 /* Which of trash/move most recently succeeded, so `u` (win.undo) knows which
