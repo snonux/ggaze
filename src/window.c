@@ -35,6 +35,7 @@
 #include "texturecache.h"
 #include "thumbnail.h"
 #include "trash.h"
+#include "undo.h"
 #include "viewer.h"
 #if GGAZE_HAVE_GEGL
 #include "enhancer.h"
@@ -45,11 +46,8 @@
  * engine's undo to prefer when both could theoretically still undo (decision
  * P: one unified undo, no explicit shared module — window.c already owns
  * both Trash and Mover, so it is the natural place to track the ordering). */
-typedef enum {
-   GGAZE_LAST_NONE = 0,
-   GGAZE_LAST_TRASH,
-   GGAZE_LAST_MOVE
-} GgazeLastDestructive;
+/* unified-undo arbitration (Trash vs Mover) moved to undo.c; the window owns
+ * an Undo* and records/resets/chooses through it. */
 
 /* One request handed to _maybe_save_then: the continuation to run once the
  * (possible) Save/Discard/Cancel prompt resolves, the data it acts on, and the
@@ -81,8 +79,8 @@ struct _GgazeWindow {
    PopupList *p_run_script_pop; /* `!` run-script popover (NULL when none) */
    PopupList *p_move_pop;       /* `m` move-to-destination popover (NULL when
                                  * none) */
-   GgazeLastDestructive e_last_destructive; /* trash vs move, for win.undo */
-   GtkWidget           *p_viewer;           /* GgazeViewer — the large view */
+   Undo         *p_undo;        /* unified-undo coordinator (Trash vs Mover) */
+   GtkWidget    *p_viewer;      /* GgazeViewer — the large view */
    GgazeGrid    *p_grid;      /* the thumbnail grid (the "grid" stack child) */
    int           i_grid_size; /* current thumbnail size (64-512, decision T) */
    GtkWidget    *p_overlay; /* GtkOverlay wrapping the stack (for info label) */
@@ -1359,7 +1357,7 @@ _do_trash_now(GgazeWindow *p_win, GFile *p_target) {
       if (b_was_current) {
          navigator_next(p_win->p_nav); /* advance; emits changed */
       }
-      p_win->e_last_destructive = GGAZE_LAST_TRASH; /* for unified win.undo */
+      undo_record_trash(p_win->p_undo); /* for unified win.undo */
    } else {
       g_warning("ggaze: trash failed: %s", p_err->message);
       g_clear_error(&p_err);
@@ -1735,7 +1733,7 @@ _undo_trash(GgazeWindow *p_win) {
    if (trash_restore_last(p_win->p_trash, &p_err)) {
       navigator_rescan(p_win->p_nav); /* re-list; restored file un-removed */
       _show_status(p_win, "Restored from Trash");
-      p_win->e_last_destructive = GGAZE_LAST_NONE;
+      undo_reset(p_win->p_undo);
    } else {
       g_clear_error(&p_err);
    }
@@ -1755,7 +1753,7 @@ _undo_move(GgazeWindow *p_win) {
          navigator_rescan(p_win->p_nav);
       }
       _show_status(p_win, "Move undone");
-      p_win->e_last_destructive = GGAZE_LAST_NONE;
+      undo_reset(p_win->p_undo);
    } else {
       if (p_err != NULL) {
          g_warning("ggaze: move undo failed: %s", p_err->message);
@@ -1766,14 +1764,15 @@ _undo_move(GgazeWindow *p_win) {
 
 /* `u`: undo the last destructive action, whichever of trash/move happened
  * most recently (decision P: one unified undo). Reopening a folder resets
- * BOTH engines' undo state and e_last_destructive together (ggaze_window_open
- * clears p_trash and calls mover_clear_last), so a stale record from a folder
- * the user is no longer looking at can never be the preferred branch below.
- * The fallback branches below instead serve the legitimate WITHIN-session
- * case: e.g. move a file, then trash a file (trash is now preferred), undo
- * once (undoes the trash, resets e_last_destructive to NONE) -- the move is
- * still undoable in the CURRENT folder, so a second `u` should undo that
- * too rather than silently do nothing. */
+ * BOTH engines' undo state and the Undo coordinator's record together
+ * (ggaze_window_open clears p_trash and calls mover_clear_last +
+ * undo_reset), so a stale record from a folder the user is no longer looking
+ * at can never be the preferred branch below. The fallback branches in
+ * undo_choose() instead serve the legitimate WITHIN-session case: e.g. move
+ * a file, then trash a file (trash is now preferred), undo once (undoes the
+ * trash, resets the record to NONE) -- the move is still undoable in the
+ * CURRENT folder, so a second `u` should undo that too rather than silently
+ * do nothing. */
 static void
 _action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -1786,14 +1785,15 @@ _action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       p_win->p_trash != NULL && trash_can_undo(p_win->p_trash);
    gboolean b_move_ok =
       p_win->p_mover != NULL && mover_can_undo(p_win->p_mover);
-   if (p_win->e_last_destructive == GGAZE_LAST_MOVE && b_move_ok) {
+   switch (undo_choose(p_win->p_undo, b_trash_ok, b_move_ok)) {
+   case GGAZE_UNDO_MOVE:
       _undo_move(p_win);
-   } else if (p_win->e_last_destructive == GGAZE_LAST_TRASH && b_trash_ok) {
+      break;
+   case GGAZE_UNDO_TRASH:
       _undo_trash(p_win);
-   } else if (b_move_ok) {
-      _undo_move(p_win);
-   } else if (b_trash_ok) {
-      _undo_trash(p_win);
+      break;
+   default:
+      break; /* neither engine can undo */
    }
 }
 
@@ -3606,7 +3606,7 @@ _move_captured(GgazeWindow *p_win, guint u_idx, GList *p_files) {
    gboolean b_ok          = mover_move(p_win->p_mover, p_files, p_dest, &p_err);
    guint    u_moved       = _move_mark_removed(p_win, p_files);
    if (u_moved > 0) {
-      p_win->e_last_destructive = GGAZE_LAST_MOVE;
+      undo_record_move(p_win->p_undo);
    }
    /* Advance only when one of the moved files really was the current one,
     * exactly as _do_trash_now and _do_delete_files do: the targets are
@@ -4285,6 +4285,7 @@ ggaze_window_dispose(GObject *p_obj) {
    g_clear_pointer(&p_win->p_runner, runner_delete);
    g_clear_pointer(&p_win->p_opener, opener_delete);
    g_clear_pointer(&p_win->p_mover, mover_delete);
+   g_clear_pointer(&p_win->p_undo, undo_delete);
    g_clear_pointer(&p_win->p_settings, settings_delete);
 #if GGAZE_HAVE_GEGL
    g_clear_pointer(&p_win->p_enhancer, enhancer_delete);
@@ -4381,6 +4382,7 @@ _init_engines_and_settings(GgazeWindow *p_win) {
    p_win->p_mover           = mover_new();
    p_win->p_opener          = opener_new();
    p_win->p_runner          = runner_new();
+   p_win->p_undo            = undo_new();
    if (p_win->p_settings != NULL) {
       p_win->i_grid_size =
          CLAMP(settings_get_thumbnail_size(p_win->p_settings), 64, 512);
@@ -4539,7 +4541,7 @@ _open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
    p_win->p_nav = navigator_new(p_dir, e_sort, b_wrap, b_hide_raw);
    g_clear_pointer(&p_win->p_trash, trash_delete);
    mover_clear_last(p_win->p_mover);
-   p_win->e_last_destructive = GGAZE_LAST_NONE;
+   undo_reset(p_win->p_undo);
    g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(nav_changed_cb), p_win);
    if (p_start != NULL) {
       navigator_set_current_file(p_win->p_nav, p_start);

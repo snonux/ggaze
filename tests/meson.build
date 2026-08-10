@@ -174,6 +174,16 @@ test_navigator = executable(
 )
 test('navigator', test_navigator, suite : 'unit', env : fixtures_env)
 
+test_undo = executable(
+   'test_undo',
+   ['test_undo.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('undo', test_undo, suite : 'unit', env : fixtures_env)
+
 test_trash = executable(
    'test_trash',
    ['test_trash.c', ggaze_conf_h],

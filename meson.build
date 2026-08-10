@@ -63,6 +63,7 @@ ggaze_src = files(
       'src/shortcuts.c',
       'src/popup_list.c',
       'src/texturecache.c',
+      'src/undo.c',
       'src/thumbnail.c',
       'src/trash.c',
       'src/gridview.c',
