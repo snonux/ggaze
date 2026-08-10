@@ -1,6 +1,8 @@
 /* mover.c — configurable move destinations with undo. */
 #include "mover.h"
 
+#include "pathutil.h"
+
 struct Mover {
    GPtrArray *p_dests;    /* MoverDest* (owned) */
    GPtrArray *p_last_src; /* GFile* (owned, for undo) */
@@ -58,68 +60,12 @@ mover_get_dests(Mover *m) {
    return m->p_dests;
 }
 
-/* Refuse a pre-existing move destination that is not a real directory.
- * Queried with G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS so a symlink is reported
- * as a symlink (type G_FILE_TYPE_SYMBOLIC_LINK) instead of being resolved
- * and stat'd through its target. Unlike trash.c's single hidden .Trash
- * folder, mover destinations (MoverDest) are user-configured, arbitrary
- * paths -- once wired into the UI, a destination directory replaced by a
- * symlink (attacker or leftover corruption) would otherwise be silently
- * followed, moving every selected file wherever the link points. As in
- * trash.c's _trash_dir_is_safe(), the only safe response to a symlink or
- * other non-directory (e.g. a plain file) is to fail with a clear GError --
- * never auto-delete/replace the offending path ourselves, which would be
- * its own TOCTOU hazard. Note: a narrow TOCTOU window still remains between
- * this check and the g_file_move() calls below (something could replace
- * the directory in between); fully closing that would need
- * openat()/O_NOFOLLOW/renameat(), out of scope here -- same residual risk
- * documented for trash.c's identical fix (au0). */
-static gboolean
-_mover_dest_is_safe(GFile *p_ddir, GError **p_err) {
-   GFileInfo *p_info =
-      g_file_query_info(p_ddir, "standard::type",
-                        G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, p_err);
-   if (p_info == NULL) {
-      return FALSE;
-   }
-   GFileType e_type = g_file_info_get_file_type(p_info);
-   g_object_unref(p_info);
-   if (e_type != G_FILE_TYPE_DIRECTORY) {
-      char *c_path = g_file_get_path(p_ddir);
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_DIRECTORY,
-                  "refusing to move into '%s': existing path is not a real "
-                  "directory (found a symlink or other non-directory)",
-                  c_path != NULL ? c_path : "?");
-      g_free(c_path);
-      return FALSE;
-   }
-   return TRUE;
-}
-
-/* Ensure the destination directory exists (lazily), mirroring trash.c's
- * _ensure_trash_dir(). If g_file_make_directory_with_parents() reports
- * G_IO_ERROR_EXISTS, something is already at that path -- verify via
- * _mover_dest_is_safe() that it is a genuine directory before treating it
- * as usable, rather than blindly assuming success as before. */
-static gboolean
-_ensure_mover_dest_dir(GFile *p_ddir, GError **p_err) {
-   gboolean b_ok = g_file_make_directory_with_parents(p_ddir, NULL, p_err);
-   if (!b_ok) {
-      if (p_err != NULL &&
-          g_error_matches(*p_err, G_IO_ERROR, G_IO_ERROR_EXISTS)) {
-         g_clear_error(p_err);
-         b_ok = _mover_dest_is_safe(p_ddir, p_err);
-      }
-   }
-   return b_ok;
-}
-
 gboolean
 mover_move(Mover *m, GList *p_files, const MoverDest *p_dest, GError **p_err) {
    g_return_val_if_fail(m != NULL, FALSE);
    g_return_val_if_fail(p_dest != NULL, FALSE);
    GFile *p_ddir = g_file_new_for_path(p_dest->c_path);
-   if (!_ensure_mover_dest_dir(p_ddir, p_err)) {
+   if (!pathutil_ensure_dir(p_ddir, p_err)) {
       g_object_unref(p_ddir);
       return FALSE;
    }
@@ -131,21 +77,23 @@ mover_move(Mover *m, GList *p_files, const MoverDest *p_dest, GError **p_err) {
    for (GList *it = p_files; it != NULL; it = it->next) {
       GFile *src  = G_FILE(it->data);
       char  *base = g_file_get_basename(src);
-      GFile *dst  = g_file_get_child(p_ddir, base);
+      /* Suffix on the stem (before the extension): a.jpg -> a-1.jpg. */
+      const char *c_d = strrchr(base, '.');
+      char       *c_s =
+         (c_d && c_d != base) ? g_strndup(base, c_d - base) : g_strdup(base);
+      const char *c_e     = (c_d && c_d != base) ? c_d : "";
+      char       *c_first = g_strdup_printf("%s%s", c_s, c_e);
+      char       *c_fmt   = g_strdup_printf("%s-%%u%s", c_s, c_e);
+      GFile      *dst     = pathutil_unique_child(p_ddir, c_first, c_fmt, 1);
+      g_free(c_fmt);
+      g_free(c_first);
+      g_free(c_s);
       g_free(base);
-      for (guint n = 1; g_file_query_exists(dst, NULL); n++) {
-         g_object_unref(dst);
-         /* Suffix on the stem (before the extension): a.jpg -> a-1.jpg */
-         char       *c_b = g_file_get_basename(src);
-         const char *c_d = strrchr(c_b, '.');
-         char       *c_s =
-            (c_d && c_d != c_b) ? g_strndup(c_b, c_d - c_b) : g_strdup(c_b);
-         const char *c_e = (c_d && c_d != c_b) ? c_d : "";
-         char       *nb  = g_strdup_printf("%s-%u%s", c_s, n, c_e);
-         g_free(c_s);
-         g_free(c_b);
-         dst = g_file_get_child(p_ddir, nb);
-         g_free(nb);
+      if (dst == NULL) {
+         g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_TOO_MANY_OPEN_FILES,
+                     "could not find a non-colliding move destination");
+         g_object_unref(p_ddir);
+         return FALSE;
       }
       if (!g_file_move(src, dst, G_FILE_COPY_NOFOLLOW_SYMLINKS, NULL, NULL,
                        NULL, &e)) {

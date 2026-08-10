@@ -10,6 +10,8 @@
 
 #include "trash.h"
 
+#include "pathutil.h"
+
 struct Trash {
    GFile *p_dir;      /* the shoot dir; .Trash = p_dir/.Trash */
    GFile *p_last_src; /* original path of the last binned file */
@@ -19,75 +21,6 @@ struct Trash {
 static GFile *
 _trash_dir(Trash *p_t) {
    return (g_file_get_child(p_t->p_dir, ".Trash"));
-}
-
-/* Refuse a pre-existing .Trash that is not a real directory. Queried with
- * G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS so a symlink is reported as a symlink
- * (type G_FILE_TYPE_SYMBOLIC_LINK) instead of being resolved and stat'd
- * through its target: if we followed it here, an attacker (or leftover
- * corruption) that replaced <shoot>/.Trash with a symlink could redirect
- * trash_bin()'s moves anywhere on disk, silently, and a later change/removal
- * of that link would strand trash_restore_last()'s undo. The only safe
- * response to a symlink or other non-directory (e.g. a plain file) is to
- * fail with a clear GError -- not to delete/replace it ourselves, which
- * would be its own TOCTOU hazard. */
-static gboolean
-_trash_dir_is_safe(GFile *p_td, GError **p_err) {
-   GFileInfo *p_info = g_file_query_info(
-      p_td, "standard::type", G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, p_err);
-   if (p_info == NULL) {
-      return (FALSE);
-   }
-   GFileType e_type = g_file_info_get_file_type(p_info);
-   g_object_unref(p_info);
-   if (e_type != G_FILE_TYPE_DIRECTORY) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_DIRECTORY,
-                  "refusing to use .Trash: existing path is not a real "
-                  "directory (found a symlink or other non-directory)");
-      return (FALSE);
-   }
-   return (TRUE);
-}
-
-/* Ensure .Trash exists (lazily). If g_file_make_directory_with_parents()
- * reports G_IO_ERROR_EXISTS, something is already at that path -- verify via
- * _trash_dir_is_safe() that it is a genuine directory before treating it as
- * usable, rather than blindly assuming success as before (see that helper's
- * comment for the symlink-following hazard this closes). */
-static gboolean
-_ensure_trash_dir(Trash *p_t, GError **p_err) {
-   GFile   *p_td = _trash_dir(p_t);
-   gboolean b_ok = g_file_make_directory_with_parents(p_td, NULL, p_err);
-   if (!b_ok) {
-      if (p_err != NULL &&
-          g_error_matches(*p_err, G_IO_ERROR, G_IO_ERROR_EXISTS)) {
-         g_clear_error(p_err);
-         b_ok = _trash_dir_is_safe(p_td, p_err);
-      }
-   }
-   g_object_unref(p_td);
-   return (b_ok);
-}
-
-/* Find a non-colliding name in .Trash for c_basename. Caller frees the path. */
-static char *
-_unique_trash_name(Trash *p_t, const char *c_basename) {
-   GFile *p_td   = _trash_dir(p_t);
-   char  *c_name = g_strdup(c_basename);
-   for (guint u_n = 1; u_n < 100000; u_n++) {
-      GFile *p_candidate = g_file_get_child(p_td, c_name);
-      if (!g_file_query_exists(p_candidate, NULL)) {
-         g_object_unref(p_candidate);
-         g_object_unref(p_td);
-         return (c_name); /* the basename is the unique name */
-      }
-      g_object_unref(p_candidate);
-      g_free(c_name);
-      c_name = g_strdup_printf("%s-%u", c_basename, u_n);
-   }
-   g_free(c_name);
-   g_object_unref(p_td);
-   return (NULL);
 }
 
 Trash *
@@ -115,21 +48,22 @@ gboolean
 trash_bin(Trash *p_t, GFile *p_file, GError **p_err) {
    g_return_val_if_fail(p_t != NULL, FALSE);
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
-   if (!_ensure_trash_dir(p_t, p_err)) {
+   GFile *p_td = _trash_dir(p_t);
+   if (!pathutil_ensure_dir(p_td, p_err)) {
+      g_object_unref(p_td);
       return (FALSE);
    }
-   char *c_base = g_file_get_basename(p_file);
-   char *c_name = _unique_trash_name(p_t, c_base);
+   char  *c_base = g_file_get_basename(p_file);
+   char  *c_fmt  = g_strdup_printf("%s-%%u", c_base);
+   GFile *p_dst  = pathutil_unique_child(p_td, c_base, c_fmt, 1);
+   g_free(c_fmt);
    g_free(c_base);
-   if (c_name == NULL) {
+   g_object_unref(p_td);
+   if (p_dst == NULL) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_TOO_MANY_OPEN_FILES,
                   "could not find a non-colliding trash name");
       return (FALSE);
    }
-   GFile *p_td  = _trash_dir(p_t);
-   GFile *p_dst = g_file_get_child(p_td, c_name);
-   g_free(c_name);
-   g_object_unref(p_td);
 
    gboolean b_ok = g_file_move(p_file, p_dst, G_FILE_COPY_NOFOLLOW_SYMLINKS,
                                NULL, NULL, NULL, p_err);

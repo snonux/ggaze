@@ -71,6 +71,7 @@ ggaze_src = files(
       'src/delete-confirm.c',
       'src/mover.c',
       'src/opener.c',
+      'src/pathutil.c',
       'src/runner.c',
       'src/settings.c',
       'src/prefs.c',

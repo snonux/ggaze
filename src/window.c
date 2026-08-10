@@ -28,6 +28,7 @@
 #include "mover.h"
 #include "navigator.h"
 #include "opener.h"
+#include "pathutil.h"
 #include "popup_list.h"
 #include "prefs.h"
 #include "runner.h"
@@ -563,15 +564,11 @@ _enhance_split_name(const char *c_base, char **pc_stem, const char **pc_ext) {
  * existing file. */
 static GFile *
 _enhance_unique_dest(GFile *p_dir, const char *c_stem, const char *c_ext) {
-   char  *c_name = g_strdup_printf("%s-enhanced%s", c_stem, c_ext);
-   GFile *p_out  = g_file_get_child(p_dir, c_name);
-   g_free(c_name);
-   for (guint n = 1; g_file_query_exists(p_out, NULL); n++) {
-      g_object_unref(p_out);
-      c_name = g_strdup_printf("%s-enhanced-%u%s", c_stem, n, c_ext);
-      p_out  = g_file_get_child(p_dir, c_name);
-      g_free(c_name);
-   }
+   char  *c_first = g_strdup_printf("%s-enhanced%s", c_stem, c_ext);
+   char  *c_fmt   = g_strdup_printf("%s-enhanced-%%u%s", c_stem, c_ext);
+   GFile *p_out   = pathutil_unique_child(p_dir, c_first, c_fmt, 1);
+   g_free(c_fmt);
+   g_free(c_first);
    return (p_out);
 }
 

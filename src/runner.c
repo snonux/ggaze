@@ -1,6 +1,7 @@
 /* runner.c — async shell script runner with %f/%d expansion + injection guard.
  */
 #include "runner.h"
+#include "pathutil.h"
 
 struct Runner {
    GPtrArray *p_scripts;
@@ -59,26 +60,6 @@ _shell_quote(const char *c_path) {
    return g_shell_quote(c_path);
 }
 
-/* Replace all occurrences of c_old with c_new in c_str. Caller frees. */
-static char *
-_str_replace(const char *c_str, const char *c_old, const char *c_new) {
-   if (c_str == NULL || c_old == NULL || c_new == NULL)
-      return NULL;
-   GString    *p_out     = g_string_new(NULL);
-   const char *p         = c_str;
-   gsize       u_old_len = strlen(c_old);
-   while (*p) {
-      if (strncmp(p, c_old, u_old_len) == 0) {
-         g_string_append(p_out, c_new);
-         p += u_old_len;
-      } else {
-         g_string_append_c(p_out, *p);
-         p++;
-      }
-   }
-   return g_string_free(p_out, FALSE);
-}
-
 static char *
 _expand(const char *c_cmd, GFile *p_file, GFile *p_dir) {
    char *c_fpath = p_file ? g_file_get_path(p_file) : g_strdup("");
@@ -87,8 +68,8 @@ _expand(const char *c_cmd, GFile *p_file, GFile *p_dir) {
    char *c_dq    = _shell_quote(c_dpath);
    g_free(c_fpath);
    g_free(c_dpath);
-   char *r1 = _str_replace(c_cmd, "%f", c_fq);
-   char *r2 = _str_replace(r1 ? r1 : c_cmd, "%d", c_dq);
+   char *r1 = pathutil_str_replace(c_cmd, "%f", c_fq);
+   char *r2 = pathutil_str_replace(r1 ? r1 : c_cmd, "%d", c_dq);
    g_free(r1);
    g_free(c_fq);
    g_free(c_dq);

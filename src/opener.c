@@ -1,6 +1,7 @@
 /* opener.c — launch external programs with %f expansion. Detached GSubprocess.
  */
 #include "opener.h"
+#include "pathutil.h"
 
 struct Opener {
    GPtrArray *p_progs; /* OpenerProg* */
@@ -51,26 +52,6 @@ opener_get_progs(Opener *o) {
    return o ? o->p_progs : NULL;
 }
 
-/* Replace all occurrences of c_old with c_new in c_str. Caller frees. */
-static char *
-_str_replace(const char *c_str, const char *c_old, const char *c_new) {
-   if (c_str == NULL || c_old == NULL || c_new == NULL)
-      return NULL;
-   GString    *p_out     = g_string_new(NULL);
-   const char *p         = c_str;
-   gsize       u_old_len = strlen(c_old);
-   while (*p) {
-      if (strncmp(p, c_old, u_old_len) == 0) {
-         g_string_append(p_out, c_new);
-         p += u_old_len;
-      } else {
-         g_string_append_c(p_out, *p);
-         p++;
-      }
-   }
-   return g_string_free(p_out, FALSE);
-}
-
 /* Expand %f → the file path inside an already-parsed argv.
  *
  * The command template is parsed with g_shell_parse_argv FIRST, so quotes,
@@ -107,7 +88,7 @@ _expand_command(const char *c_cmd, GFile *p_file, GError **p_err) {
          g_free(argv[i]);
          argv[i] = g_strdup(c_path);
       } else if (strstr(argv[i], "%f")) {
-         char *r = _str_replace(argv[i], "%f", c_path);
+         char *r = pathutil_str_replace(argv[i], "%f", c_path);
          if (r) {
             g_free(argv[i]);
             argv[i] = r;
