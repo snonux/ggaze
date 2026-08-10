@@ -127,6 +127,22 @@ fire(GgazeWindow *p_win, const char *c_action) {
    gtk_widget_activate_action(GTK_WIDGET(p_win), c_action, NULL);
 }
 
+/* _show_info gathers the info off the main thread (a GTask) and applies it
+ * when it lands, so the info label is not visible the instant win.info is
+ * fired. Drain the main loop until the overlay label appears (the decode is
+ * fast for the tiny fixtures, but the round-trip still needs the loop to run).
+ */
+static void
+wait_for_info(GgazeWindow *p_win) {
+   GtkWidget *p_lbl = ggaze_window_get_info_label(p_win);
+   for (guint u = 0; u < 3000 && !gtk_widget_get_visible(p_lbl); u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(gtk_widget_get_visible(p_lbl));
+   drain_main(50);
+}
+
 static void
 test_stack_has_two_views(void) {
    GgazeWindow *p_win = new_window();
@@ -191,7 +207,7 @@ test_info_hides_on_navigation(void) {
 
    fire(p_win, "win.info");
    GtkWidget *p_lbl = ggaze_window_get_info_label(p_win);
-   g_assert_true(gtk_widget_get_visible(p_lbl));
+   wait_for_info(p_win);
    g_assert_nonnull(
       g_strstr_len(gtk_label_get_text(GTK_LABEL(p_lbl)), -1, "6×3"));
 
@@ -238,7 +254,7 @@ test_info_hides_on_reopen(void) {
 
    fire(p_win, "win.info");
    GtkWidget *p_lbl = ggaze_window_get_info_label(p_win);
-   g_assert_true(gtk_widget_get_visible(p_lbl));
+   wait_for_info(p_win);
 
    char  *c_p1 = g_build_filename(c_dir2, "rot6.jpg", NULL);
    GFile *p_f1 = g_file_new_for_path(c_p1);

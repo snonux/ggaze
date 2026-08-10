@@ -85,9 +85,10 @@ struct _GgazeWindow {
    GgazeGrid    *p_grid;      /* the thumbnail grid (the "grid" stack child) */
    int           i_grid_size; /* current thumbnail size (64-512, decision T) */
    GtkWidget    *p_overlay; /* GtkOverlay wrapping the stack (for info label) */
-   GtkWidget    *p_info_lbl;  /* info overlay label (auto-hides) */
-   guint         u_info_hide; /* info auto-hide timeout id (0=none) */
-   guint         u_slideshow; /* slideshow timeout id (0=off) */
+   GtkWidget    *p_info_lbl;    /* info overlay label (auto-hides) */
+   guint         u_info_hide;   /* info auto-hide timeout id (0=none) */
+   GCancellable *p_info_cancel; /* outstanding async info_new() decode */
+   guint         u_slideshow;   /* slideshow timeout id (0=off) */
    gboolean      b_fullscreen;
    guint         u_hdr_hide;      /* fullscreen header auto-hide timeout */
    gboolean      b_disposed;      /* set in dispose; async callbacks check it */
@@ -184,15 +185,18 @@ struct _GgazeWindow {
 G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
 
 /* --- forward decls ------------------------------------------------------- */
-static void     _load_current(GgazeWindow *p_win);
-static void     _prefetch(GgazeWindow *p_win);
-static void     _show_texture(GgazeWindow *p_win, GdkTexture *p_tex);
-static void     _update_header(GgazeWindow *p_win);
-static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
-static void     _show_info(GgazeWindow *p_win);
-static void     _hide_info(GgazeWindow *p_win);
-static void     _dismiss_info_for_nav(GgazeWindow *p_win);
-static void     _show_status(GgazeWindow *p_win, const char *c_msg);
+static void _load_current(GgazeWindow *p_win);
+static void _prefetch(GgazeWindow *p_win);
+static void _show_texture(GgazeWindow *p_win, GdkTexture *p_tex);
+static void _update_header(GgazeWindow *p_win);
+static void _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
+static void _show_info(GgazeWindow *p_win);
+static void _info_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
+                         GCancellable *p_cancel);
+static void _info_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data);
+static void _hide_info(GgazeWindow *p_win);
+static void _dismiss_info_for_nav(GgazeWindow *p_win);
+static void _show_status(GgazeWindow *p_win, const char *c_msg);
 static gboolean _slideshow_tick(gpointer p_data);
 static void     _apply_viewer_prefs(GgazeWindow *p_win);
 static void     _load_engine_lists(GgazeWindow *p_win);
@@ -2928,14 +2932,85 @@ _show_info(GgazeWindow *p_win) {
    if (p_cur == NULL) {
       return;
    }
-   GgazeInfo *p_info = info_new(p_cur);
+   /* info_new() decodes the image for its dimensions (gdk_pixbuf_new_from_
+    * file) and reads EXIF; running that synchronously on the GTK main thread
+    * froze the whole UI on large non-JPEG images (PNG/TIFF/WebP -- only
+    * JPEG had a header-dimension guard). Run it in a GTask worker and apply
+    * the result on the main thread when it lands. Navigation and a second
+    * `i` cancel any in-flight request, so a stale result never lands on a
+    * different current file (last-write-wins via cancellation). */
+   g_cancellable_cancel(p_win->p_info_cancel);
+   g_clear_object(&p_win->p_info_cancel);
+   p_win->p_info_cancel = g_cancellable_new();
+   GTask *p_task        = g_task_new(G_OBJECT(p_win), p_win->p_info_cancel,
+                                     _info_done_cb, g_object_ref(p_win));
+   g_task_set_task_data(p_task, g_object_ref(p_cur), g_object_unref);
+   g_task_run_in_thread(p_task, _info_thread);
+   g_object_unref(p_task);
+}
+
+/* Cancel any in-flight async info decode (navigation / dispose / a new `i`).
+ * The cancelled task's completion callback is a no-op (g_task_propagate_
+ * pointer returns NULL on cancel), so the label is left to the caller to
+ * hide (or to a fresh _show_info to repopulate). */
+static void
+_info_cancel_async(GgazeWindow *p_win) {
+   if (p_win->p_info_cancel != NULL) {
+      g_cancellable_cancel(p_win->p_info_cancel);
+      g_clear_object(&p_win->p_info_cancel);
+   }
+}
+
+/* GTask worker (off the main thread): build the GgazeInfo for the captured
+ * file. Touches no GtkWidget, so it is safe off-thread. */
+static void
+_info_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
+             GCancellable *p_cancel) {
+   (void)p_src;
+   GFile     *p_file = (GFile *)p_task_data;
+   GgazeInfo *p_info = info_new(p_file);
    if (p_info == NULL) {
+      g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                              "info: gather failed");
       return;
+   }
+   /* If superseded (navigation / a new `i` / dispose) cancelled the request,
+    * free the result HERE rather than returning it: the completion callback is
+    * a no-op on cancel and may not run before the main loop drains (e.g. in
+    * tests), so returning it would leak the GgazeInfo when the task never
+    * finalizes. The decode itself is not interruptible, so a request that is
+    * cancelled mid-decode still finishes the decode and then drops the result
+    * here. */
+   if (g_cancellable_is_cancelled(p_cancel)) {
+      info_delete(p_info);
+      g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                              "info: cancelled");
+      return;
+   }
+   g_task_return_pointer(p_task, p_info, (GDestroyNotify)info_delete);
+}
+
+/* GTask completion (main thread): apply the result iff the request was not
+ * superseded (cancelled) and the window is still alive. Holds an owned
+ * window ref so a window closed mid-decode does not dangle. */
+static void
+_info_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   g_object_unref(p_win); /* the ref taken in _show_info */
+   if (p_win->b_disposed) {
+      return;
+   }
+   GError    *p_err  = NULL;
+   GgazeInfo *p_info = g_task_propagate_pointer(G_TASK(p_res), &p_err);
+   g_clear_error(&p_err);
+   if (p_info == NULL) {
+      return; /* cancelled or gather failed: leave the label as-is */
    }
    char *c_text = info_format(p_info);
    gtk_label_set_text(GTK_LABEL(p_win->p_info_lbl), c_text);
    g_free(c_text);
-   info_delete(p_info);
+   info_delete(p_info); /* propagate transferred ownership to us */
    gtk_widget_set_visible(p_win->p_info_lbl, TRUE);
    _info_cancel_timer(p_win);
    p_win->u_info_hide = g_timeout_add_seconds(5, _info_hide_tick, p_win);
@@ -2962,6 +3037,7 @@ _hide_info(GgazeWindow *p_win) {
  */
 static void
 _dismiss_info_for_nav(GgazeWindow *p_win) {
+   _info_cancel_async(p_win);
    _info_cancel_timer(p_win);
    _hide_info(p_win);
 }
@@ -4195,6 +4271,9 @@ ggaze_window_dispose(GObject *p_obj) {
    }
    _info_cancel_timer(p_win); /* just cancels the pending timer, no widget
                                   touch -- safe to call during dispose */
+   _info_cancel_async(p_win); /* cancel an in-flight info decode so its
+                               * completion callback no-ops instead of touching
+                               * the destroyed label */
    if (p_win->u_hdr_hide != 0) {
       g_source_remove(p_win->u_hdr_hide);
       p_win->u_hdr_hide = 0;
