@@ -25,6 +25,7 @@
 
 #include "viewer.h"
 #include "window.h"
+#include "shortcuts.h"
 
 #include <gdk/gdk.h>
 #include <gio/gio.h>
@@ -378,6 +379,41 @@ test_shortcut_full_table_registered(void) {
    drain_main(200);
 }
 
+/* Count the GtkShortcutsShortcut widgets that are direct children of a
+ * GtkShortcutsGroup -- i.e. the merged help rows shortcuts_build_help actually
+ * added, independent of GtkShortcutsWindow's internal search-view duplication
+ * (which otherwise double-counts). */
+static guint
+count_help_rows(GtkWidget *p_root) {
+   guint u_n = 0;
+   for (GtkWidget *p_ch = gtk_widget_get_first_child(p_root); p_ch != NULL;
+        p_ch            = gtk_widget_get_next_sibling(p_ch)) {
+      if (GTK_IS_SHORTCUTS_GROUP(p_ch)) {
+         for (GtkWidget *p_r = gtk_widget_get_first_child(p_ch); p_r != NULL;
+              p_r            = gtk_widget_get_next_sibling(p_r)) {
+            if (GTK_IS_SHORTCUTS_SHORTCUT(p_r)) {
+               u_n++;
+            }
+         }
+      }
+      u_n += count_help_rows(p_ch);
+   }
+   return (u_n);
+}
+
+static void
+test_help_window_from_table(void) {
+   GtkShortcutsWindow *p_w = shortcuts_build_help(NULL);
+   g_assert_nonnull(p_w);
+   g_assert_true(GTK_IS_SHORTCUTS_WINDOW(p_w));
+   /* 30 merged rows: the 43 SHORTCUTS[] rows collapse by merging shared titles
+    * within a group (h+Left, l+Right, j+Down, k+Up, plus+equal,
+    * minus+underscore, and enhance 1..8 -> one row each) down to 30. */
+   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 30);
+   gtk_window_destroy(GTK_WINDOW(p_w));
+   drain_main(200);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -397,5 +433,7 @@ main(int i_argc, char **c_argv) {
                    test_shortcut_keypath_toggle_and_back);
    g_test_add_func("/shortcut/full_table_registered",
                    test_shortcut_full_table_registered);
+   g_test_add_func("/shortcut/help_window_from_table",
+                   test_help_window_from_table);
    return (g_test_run());
 }

@@ -21,6 +21,12 @@ G_BEGIN_DECLS
  * installed on p_widget's GActionMap by the caller. */
 void shortcuts_install(GtkWidget *p_widget);
 
+/* Build the "?" keyboard-shortcuts help window from the same SHORTCUTS[] table
+ * that shortcuts_install() binds, so the help never drifts from the live
+ * keybindings. Returns a new GtkShortcutsWindow (modal, transient for
+ * p_parent which may be NULL); the caller presents it. */
+GtkShortcutsWindow *shortcuts_build_help(GtkWindow *p_parent);
+
 G_END_DECLS
 
 #endif /* GGAZE_SHORTCUTS_H */
