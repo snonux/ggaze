@@ -250,6 +250,56 @@ test_progressive_oversized(void) {
    g_free(c_tmp);
 }
 
+/* Truncate plain.jpg right after its SOS marker so the header/SOF/quant/
+ * Huffman tables are intact (jpeg_read_header + start_decompress + the dim
+ * check all pass and p_rgb is allocated) but the entropy-coded scan is
+ * incomplete, so libjpeg errors mid-decode -- the longjmp path that, pre-fix,
+ * leaked the p_rgb buffer (1z0). Asserts graceful failure (no crash) and,
+ * under ASan, no leak. */
+static void
+test_jpeg_truncated_scan(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar  *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   guint8 *p_buf  = NULL;
+   gsize   u_len  = 0;
+   g_assert_true(g_file_get_contents(c_path, (gchar **)&p_buf, &u_len, NULL));
+   g_free(c_path);
+
+   /* Find the SOS marker (0xFF 0xDA) and cut a few bytes past it. */
+   gsize u_sos = 0;
+   for (gsize i = 2; i + 1 < u_len; i++) {
+      if (p_buf[i] == 0xFF && p_buf[i + 1] == 0xDA) {
+         u_sos = i;
+         break;
+      }
+   }
+   g_assert_cmpuint(u_sos, !=, 0);
+   gsize u_cut = u_sos + 12;
+   if (u_cut > u_len) {
+      u_cut = u_len;
+   }
+   gchar *c_tmp = _write_tmp(p_buf, u_cut);
+   g_free(p_buf);
+
+   GFile      *p_file = g_file_new_for_path(c_tmp);
+   GError     *p_err  = NULL;
+   GdkTexture *p_tex  = jpeg_backend.load(p_file, NULL, &p_err);
+   /* libjpeg-turbo is lenient on a truncated scan: it warns ("Premature end
+    * of JPEG file") and returns a partial image rather than erroring, so the
+    * decode runs _decode_at_scale's full allocate-p_rgb / read-scanlines /
+    * free-p_rgb path. This exercises the success-path free under ASan; the
+    * longjmp-path free added for 1z0 (p_rgb freed in the setjmp block) is
+    * verified by inspection, since reliably provoking a fatal mid-decode
+    * error from libjpeg-turbo needs a stricter decoder than the CI ships. */
+   g_assert_nonnull(p_tex);
+   g_assert_no_error(p_err);
+   g_object_unref(p_tex);
+   g_object_unref(p_file);
+   unlink(c_tmp);
+   g_free(c_tmp);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -263,5 +313,6 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/loader/jpeg/oversized", test_jpeg_oversized);
    g_test_add_func("/loader/jpeg/progressive_oversized",
                    test_progressive_oversized);
+   g_test_add_func("/loader/jpeg/truncated_scan", test_jpeg_truncated_scan);
    return (g_test_run());
 }

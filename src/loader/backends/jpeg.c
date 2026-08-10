@@ -143,8 +143,14 @@ _decode_at_scale(const guint8 *p_data, gsize u_len, int i_denom, int *p_w,
    struct _jerr_jmp              jerr;
    cinfo.err           = jpeg_std_error(&jerr.pub);
    jerr.pub.error_exit = _jerr_exit;
+   /* p_rgb is allocated after setjmp and freed on the success path; on a
+    * libjpeg longjmp during decode it must be freed here too, so it is
+    * volatile (read after longjmp) and starts NULL (g_free(NULL) is safe on
+    * the initial setjmp entry). */
+   guint8 *volatile p_rgb = NULL;
    if (setjmp(jerr.buf)) {
       jpeg_destroy_decompress(&cinfo);
+      g_free((gpointer)p_rgb);
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED, "jpeg: decode error");
       return (FALSE);
    }
@@ -164,7 +170,7 @@ _decode_at_scale(const guint8 *p_data, gsize u_len, int i_denom, int *p_w,
       jpeg_destroy_decompress(&cinfo);
       return (FALSE);
    }
-   guint8 *p_rgb = g_malloc(u_rgb_len);
+   p_rgb = g_malloc(u_rgb_len);
 
    while (cinfo.output_scanline < (JDIMENSION)i_h) {
       guint8 *p_rows[1] = {p_rgb + (gsize)cinfo.output_scanline * u_rowstride};
@@ -176,8 +182,9 @@ _decode_at_scale(const guint8 *p_data, gsize u_len, int i_denom, int *p_w,
    gsize u_pixels = (gsize)i_w * (gsize)i_h;
    *pp_pixels     = _rgb_to_rgba(p_rgb, u_pixels, u_rgba_len);
    g_free(p_rgb);
-   *p_w = i_w;
-   *p_h = i_h;
+   p_rgb = NULL;
+   *p_w  = i_w;
+   *p_h  = i_h;
    return (TRUE);
 }
 
