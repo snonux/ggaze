@@ -41,14 +41,14 @@ cleanup_dir(char *d) {
 
 static void
 test_move_and_undo(void) {
-   char     *src_dir = make_tmp_dir();
-   char     *dst_dir = make_tmp_dir();
-   GFile    *a       = write_file(src_dir, "a.jpg");
-   GFile    *b       = write_file(src_dir, "b.jpg");
-   Mover    *m       = mover_new();
-   MoverDest dest    = {"dst", dst_dir};
-   GList    *files   = g_list_prepend(g_list_prepend(NULL, a), b);
-   GError   *e       = NULL;
+   char        *src_dir = make_tmp_dir();
+   char        *dst_dir = make_tmp_dir();
+   GFile       *a       = write_file(src_dir, "a.jpg");
+   GFile       *b       = write_file(src_dir, "b.jpg");
+   Mover       *m       = mover_new();
+   SettingsPair dest    = {"dst", dst_dir};
+   GList       *files   = g_list_prepend(g_list_prepend(NULL, a), b);
+   GError      *e       = NULL;
    g_assert_true(mover_move(m, files, &dest, &e));
    g_assert_no_error(e);
    g_assert_false(g_file_query_exists(a, NULL));
@@ -68,14 +68,14 @@ test_move_and_undo(void) {
 
 static void
 test_collision(void) {
-   char     *src_dir = make_tmp_dir();
-   char     *dst_dir = make_tmp_dir();
-   GFile    *a       = write_file(src_dir, "a.jpg");
-   GFile    *p_dst_a = write_file(dst_dir, "a.jpg");
-   Mover    *m       = mover_new();
-   MoverDest dest    = {"dst", dst_dir};
-   GList    *files   = g_list_prepend(NULL, a);
-   GError   *e       = NULL;
+   char        *src_dir = make_tmp_dir();
+   char        *dst_dir = make_tmp_dir();
+   GFile       *a       = write_file(src_dir, "a.jpg");
+   GFile       *p_dst_a = write_file(dst_dir, "a.jpg");
+   Mover       *m       = mover_new();
+   SettingsPair dest    = {"dst", dst_dir};
+   GList       *files   = g_list_prepend(NULL, a);
+   GError      *e       = NULL;
    g_assert_true(mover_move(m, files, &dest, &e));
    GFile *p_dd = g_file_new_for_path(dst_dir);
    GFile *p_a1 = g_file_get_child(p_dd, "a-1.jpg");
@@ -107,10 +107,10 @@ test_move_rejects_symlink_dest(void) {
    g_assert_no_error(link_err);
    g_object_unref(link_file);
 
-   Mover    *m     = mover_new();
-   MoverDest dest  = {"dst", link_path};
-   GList    *files = g_list_prepend(NULL, a);
-   GError   *e     = NULL;
+   Mover       *m     = mover_new();
+   SettingsPair dest  = {"dst", link_path};
+   GList       *files = g_list_prepend(NULL, a);
+   GError      *e     = NULL;
    g_assert_false(mover_move(m, files, &dest, &e));
    g_assert_error(e, G_IO_ERROR, G_IO_ERROR_NOT_DIRECTORY);
    g_clear_error(&e);
@@ -152,10 +152,10 @@ test_move_rejects_regular_file_dest(void) {
    g_file_replace_contents(dst_file, "x", 1, NULL, FALSE,
                            G_FILE_CREATE_REPLACE_DESTINATION, NULL, NULL, NULL);
 
-   Mover    *m     = mover_new();
-   MoverDest dest  = {"dst", dst_path};
-   GList    *files = g_list_prepend(NULL, a);
-   GError   *e     = NULL;
+   Mover       *m     = mover_new();
+   SettingsPair dest  = {"dst", dst_path};
+   GList       *files = g_list_prepend(NULL, a);
+   GError      *e     = NULL;
    g_assert_false(mover_move(m, files, &dest, &e));
    g_assert_error(e, G_IO_ERROR, G_IO_ERROR_NOT_DIRECTORY);
    g_clear_error(&e);
@@ -177,10 +177,10 @@ test_move_accepts_preexisting_real_dir(void) {
    char  *dst_dir = make_tmp_dir(); /* already a real dir before the move */
    GFile *a       = write_file(src_dir, "a.jpg");
 
-   Mover    *m     = mover_new();
-   MoverDest dest  = {"dst", dst_dir};
-   GList    *files = g_list_prepend(NULL, a);
-   GError   *e     = NULL;
+   Mover       *m     = mover_new();
+   SettingsPair dest  = {"dst", dst_dir};
+   GList       *files = g_list_prepend(NULL, a);
+   GError      *e     = NULL;
    g_assert_true(mover_move(m, files, &dest, &e));
    g_assert_no_error(e);
    g_assert_false(g_file_query_exists(a, NULL));

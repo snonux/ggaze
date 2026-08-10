@@ -4,23 +4,13 @@
 #include "pathutil.h"
 
 struct Opener {
-   GPtrArray *p_progs; /* OpenerProg* */
+   GPtrArray *p_progs; /* SettingsPair* */
 };
-
-static void
-_prog_free(gpointer p) {
-   OpenerProg *d = (OpenerProg *)p;
-   if (d) {
-      g_free(d->c_name);
-      g_free(d->c_command);
-      g_free(d);
-   }
-}
 
 Opener *
 opener_new(void) {
    Opener *o  = g_new0(Opener, 1);
-   o->p_progs = g_ptr_array_new_with_free_func(_prog_free);
+   o->p_progs = g_ptr_array_new_with_free_func(settings_pair_free);
    return o;
 }
 
@@ -39,10 +29,10 @@ opener_set_progs(Opener *o, const GPtrArray *p) {
    if (!p)
       return;
    for (guint i = 0; i < p->len; i++) {
-      const OpenerProg *src = g_ptr_array_index((GPtrArray *)p, i);
-      OpenerProg       *np  = g_new(OpenerProg, 1);
-      np->c_name            = g_strdup(src->c_name);
-      np->c_command         = g_strdup(src->c_command);
+      const SettingsPair *src = g_ptr_array_index((GPtrArray *)p, i);
+      SettingsPair       *np  = g_new(SettingsPair, 1);
+      np->c_name              = g_strdup(src->c_name);
+      np->c_value             = g_strdup(src->c_value);
       g_ptr_array_add(o->p_progs, np);
    }
 }
@@ -100,12 +90,12 @@ _expand_command(const char *c_cmd, GFile *p_file, GError **p_err) {
 }
 
 gboolean
-opener_launch(Opener *o, GFile *p_file, const OpenerProg *p_prog,
+opener_launch(Opener *o, GFile *p_file, const SettingsPair *p_prog,
               GError **p_err) {
    (void)o;
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
    g_return_val_if_fail(p_prog, FALSE);
-   char **argv = _expand_command(p_prog->c_command, p_file, p_err);
+   char **argv = _expand_command(p_prog->c_value, p_file, p_err);
    if (argv == NULL)
       return FALSE;
    GSubprocess *p_sub = g_subprocess_newv((const char *const *)argv,

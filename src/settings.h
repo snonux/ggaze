@@ -48,17 +48,7 @@ typedef enum {
    GGAZE_SCROLL_NAVIGATE
 } GgazeScrollBehavior;
 
-/* One ordered (name, value) pair from an a(ss) settings key. The value is a
- * path for destinations, a command for editors/scripts, or a GEGL graph for
- * enhance-presets. Both strings are owned by the pair. */
-typedef struct {
-   char *c_name;
-   char *c_value;
-} SettingsPair;
-
-/* Free a SettingsPair (g_free-safe: NULL is a no-op). Suitable as a
- * GPtrArray free func. */
-void settings_pair_free(gpointer p);
+#include "settings-pair.h"
 
 typedef struct Settings Settings;
 

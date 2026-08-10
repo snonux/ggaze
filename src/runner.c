@@ -7,20 +7,10 @@ struct Runner {
    GPtrArray *p_scripts;
 };
 
-static void
-_script_free(gpointer p) {
-   RunnerScript *d = (RunnerScript *)p;
-   if (d) {
-      g_free(d->c_name);
-      g_free(d->c_command);
-      g_free(d);
-   }
-}
-
 Runner *
 runner_new(void) {
    Runner *r    = g_new0(Runner, 1);
-   r->p_scripts = g_ptr_array_new_with_free_func(_script_free);
+   r->p_scripts = g_ptr_array_new_with_free_func(settings_pair_free);
    return r;
 }
 
@@ -39,10 +29,10 @@ runner_set_scripts(Runner *r, const GPtrArray *p) {
    if (!p)
       return;
    for (guint i = 0; i < p->len; i++) {
-      const RunnerScript *src = g_ptr_array_index((GPtrArray *)p, i);
-      RunnerScript       *ns  = g_new(RunnerScript, 1);
+      const SettingsPair *src = g_ptr_array_index((GPtrArray *)p, i);
+      SettingsPair       *ns  = g_new(SettingsPair, 1);
       ns->c_name              = g_strdup(src->c_name);
-      ns->c_command           = g_strdup(src->c_command);
+      ns->c_value             = g_strdup(src->c_value);
       g_ptr_array_add(r->p_scripts, ns);
    }
 }
@@ -77,11 +67,11 @@ _expand(const char *c_cmd, GFile *p_file, GFile *p_dir) {
 }
 
 gboolean
-runner_run(Runner *r, GFile *p_file, GFile *p_dir, const RunnerScript *p_script,
+runner_run(Runner *r, GFile *p_file, GFile *p_dir, const SettingsPair *p_script,
            GAsyncReadyCallback p_cb, gpointer p_data, GError **p_err) {
    (void)r;
    g_return_val_if_fail(p_script, FALSE);
-   char *c_cmd = _expand(p_script->c_command, p_file, p_dir);
+   char *c_cmd = _expand(p_script->c_value, p_file, p_dir);
    if (c_cmd == NULL) {
       g_set_error(p_err, G_SHELL_ERROR, G_SHELL_ERROR_FAILED,
                   "runner: failed to expand script command");

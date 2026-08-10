@@ -72,10 +72,10 @@ cleanup_file(GFile *f) {
 
 static void
 test_launch_true(void) {
-   GFile     *f    = make_tmp_file();
-   Opener    *o    = opener_new();
-   OpenerProg prog = {"true", "true %f"};
-   GError    *e    = NULL;
+   GFile       *f    = make_tmp_file();
+   Opener      *o    = opener_new();
+   SettingsPair prog = {"true", "true %f"};
+   GError      *e    = NULL;
    g_assert_true(opener_launch(o, f, &prog, &e));
    g_assert_no_error(e);
    opener_delete(o);
@@ -84,10 +84,10 @@ test_launch_true(void) {
 
 static void
 test_launch_false(void) {
-   GFile     *f    = make_tmp_file();
-   Opener    *o    = opener_new();
-   OpenerProg prog = {"false", "false %f"};
-   GError    *e    = NULL;
+   GFile       *f    = make_tmp_file();
+   Opener      *o    = opener_new();
+   SettingsPair prog = {"false", "false %f"};
+   GError      *e    = NULL;
    g_assert_true(opener_launch(o, f, &prog, &e));
    g_assert_no_error(e);
    opener_delete(o);
@@ -96,10 +96,10 @@ test_launch_false(void) {
 
 static void
 test_weird_filename(void) {
-   GFile     *f    = make_weird_file();
-   Opener    *o    = opener_new();
-   OpenerProg prog = {"true", "true %f"};
-   GError    *e    = NULL;
+   GFile       *f    = make_weird_file();
+   Opener      *o    = opener_new();
+   SettingsPair prog = {"true", "true %f"};
+   GError      *e    = NULL;
    g_assert_true(opener_launch(o, f, &prog, &e));
    g_assert_no_error(e);
    opener_delete(o);
@@ -108,10 +108,10 @@ test_weird_filename(void) {
 
 static void
 test_quoted(void) {
-   GFile     *f    = make_tmp_file();
-   Opener    *o    = opener_new();
-   OpenerProg prog = {"sh -c 'true'", "sh -c 'true'"};
-   GError    *e    = NULL;
+   GFile       *f    = make_tmp_file();
+   Opener      *o    = opener_new();
+   SettingsPair prog = {"sh -c 'true'", "sh -c 'true'"};
+   GError      *e    = NULL;
    g_assert_true(opener_launch(o, f, &prog, &e));
    g_assert_no_error(e);
    opener_delete(o);
@@ -120,10 +120,10 @@ test_quoted(void) {
 
 static void
 test_quoted_with_pctf(void) {
-   GFile     *f    = make_tmp_file();
-   Opener    *o    = opener_new();
-   OpenerProg prog = {"sh -c 'true %f'", "sh -c 'true %f'"};
-   GError    *e    = NULL;
+   GFile       *f    = make_tmp_file();
+   Opener      *o    = opener_new();
+   SettingsPair prog = {"sh -c 'true %f'", "sh -c 'true %f'"};
+   GError      *e    = NULL;
    g_assert_true(opener_launch(o, f, &prog, &e));
    g_assert_no_error(e);
    opener_delete(o);
@@ -132,10 +132,10 @@ test_quoted_with_pctf(void) {
 
 static void
 test_escaped_spaces(void) {
-   GFile     *f    = make_tmp_file();
-   Opener    *o    = opener_new();
-   OpenerProg prog = {"escaped", "true a\\ b"};
-   GError    *e    = NULL;
+   GFile       *f    = make_tmp_file();
+   Opener      *o    = opener_new();
+   SettingsPair prog = {"escaped", "true a\\ b"};
+   GError      *e    = NULL;
    g_assert_true(opener_launch(o, f, &prog, &e));
    g_assert_no_error(e);
    opener_delete(o);
@@ -144,10 +144,10 @@ test_escaped_spaces(void) {
 
 static void
 test_option_flags(void) {
-   GFile     *f    = make_tmp_file();
-   Opener    *o    = opener_new();
-   OpenerProg prog = {"opts", "true -verbose %f"};
-   GError    *e    = NULL;
+   GFile       *f    = make_tmp_file();
+   Opener      *o    = opener_new();
+   SettingsPair prog = {"opts", "true -verbose %f"};
+   GError      *e    = NULL;
    g_assert_true(opener_launch(o, f, &prog, &e));
    g_assert_no_error(e);
    opener_delete(o);
@@ -156,10 +156,10 @@ test_option_flags(void) {
 
 static void
 test_weird_filename_quoted(void) {
-   GFile     *f    = make_weird_file();
-   Opener    *o    = opener_new();
-   OpenerProg prog = {"sh -c 'true %f'", "sh -c 'true %f'"};
-   GError    *e    = NULL;
+   GFile       *f    = make_weird_file();
+   Opener      *o    = opener_new();
+   SettingsPair prog = {"sh -c 'true %f'", "sh -c 'true %f'"};
+   GError      *e    = NULL;
    /* %f is substituted inside the already-parsed single argv element
     * `true %f` → `true /weird/path`, passed as ONE arg to `sh -c`. */
    g_assert_true(opener_launch(o, f, &prog, &e));
@@ -170,10 +170,10 @@ test_weird_filename_quoted(void) {
 
 static void
 test_malformed(void) {
-   GFile     *f    = make_tmp_file();
-   Opener    *o    = opener_new();
-   OpenerProg prog = {"bad", "sh -c 'echo hello"};
-   GError    *e    = NULL;
+   GFile       *f    = make_tmp_file();
+   Opener      *o    = opener_new();
+   SettingsPair prog = {"bad", "sh -c 'echo hello"};
+   GError      *e    = NULL;
    g_assert_false(opener_launch(o, f, &prog, &e));
    g_assert_nonnull(e);
    g_error_free(e);
@@ -183,10 +183,10 @@ test_malformed(void) {
 
 static void
 test_empty(void) {
-   GFile     *f    = make_tmp_file();
-   Opener    *o    = opener_new();
-   OpenerProg prog = {"empty", ""};
-   GError    *e    = NULL;
+   GFile       *f    = make_tmp_file();
+   Opener      *o    = opener_new();
+   SettingsPair prog = {"empty", ""};
+   GError      *e    = NULL;
    g_assert_false(opener_launch(o, f, &prog, &e));
    g_assert_nonnull(e);
    g_error_free(e);

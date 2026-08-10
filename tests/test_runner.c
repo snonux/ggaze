@@ -18,7 +18,7 @@ _done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
 
 static void
 run_and_wait(Runner *r, GFile *p_file, GFile *p_dir,
-             const RunnerScript *p_script) {
+             const SettingsPair *p_script) {
    g_exit_code = -99;
    g_loop      = g_main_loop_new(NULL, FALSE);
    GError *e   = NULL;
@@ -31,7 +31,7 @@ run_and_wait(Runner *r, GFile *p_file, GFile *p_dir,
 static void
 test_true_exit_zero(void) {
    Runner      *r = runner_new();
-   RunnerScript s = {"true", "true"};
+   SettingsPair s = {"true", "true"};
    GFile       *f = g_file_new_for_path("/tmp/nonexistent");
    run_and_wait(r, f, NULL, &s);
    g_assert_cmpint(g_exit_code, ==, 0);
@@ -42,7 +42,7 @@ test_true_exit_zero(void) {
 static void
 test_false_exit_nonzero(void) {
    Runner      *r = runner_new();
-   RunnerScript s = {"false", "false"};
+   SettingsPair s = {"false", "false"};
    GFile       *f = g_file_new_for_path("/tmp/nonexistent");
    run_and_wait(r, f, NULL, &s);
    g_assert_cmpint(g_exit_code, !=, 0);
@@ -66,7 +66,7 @@ test_injection_guard(void) {
    Runner *r = runner_new();
    /* true %f should succeed regardless of the filename (injection guard).
     * The single-quoted path is a valid argument to true. */
-   RunnerScript s = {"true", "true %f"};
+   SettingsPair s = {"true", "true %f"};
    run_and_wait(r, f, dd, &s);
    g_assert_cmpint(g_exit_code, ==, 0);
 
@@ -113,7 +113,7 @@ test_hostile_filename(void) {
    GFile *dd = g_file_new_for_path(d);
 
    Runner      *r = runner_new();
-   RunnerScript s = {"true", "true %f"};
+   SettingsPair s = {"true", "true %f"};
    run_and_wait(r, f, dd, &s);
    g_assert_cmpint(g_exit_code, ==, 0);
    /* The sentinel must NOT exist: the ';' was quoted, not executed. */
@@ -160,7 +160,7 @@ _run_and_check_output(const char *c_command, const char *c_expected) {
    char *cmd = g_strdup_printf(c_command, out_p);
 
    Runner      *r = runner_new();
-   RunnerScript s = {"obs", cmd};
+   SettingsPair s = {"obs", cmd};
    run_and_wait(r, NULL, dd, &s);
    g_assert_cmpint(g_exit_code, ==, 0);
 

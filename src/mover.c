@@ -4,25 +4,15 @@
 #include "pathutil.h"
 
 struct Mover {
-   GPtrArray *p_dests;    /* MoverDest* (owned) */
+   GPtrArray *p_dests;    /* SettingsPair* (owned) */
    GPtrArray *p_last_src; /* GFile* (owned, for undo) */
    GPtrArray *p_last_dst; /* GFile* (owned, for undo) */
 };
 
-static void
-_dest_free(gpointer p) {
-   MoverDest *d = (MoverDest *)p;
-   if (d != NULL) {
-      g_free(d->c_name);
-      g_free(d->c_path);
-      g_free(d);
-   }
-}
-
 Mover *
 mover_new(void) {
    Mover *m      = g_new0(Mover, 1);
-   m->p_dests    = g_ptr_array_new_with_free_func(_dest_free);
+   m->p_dests    = g_ptr_array_new_with_free_func(settings_pair_free);
    m->p_last_src = g_ptr_array_new_with_free_func(g_object_unref);
    m->p_last_dst = g_ptr_array_new_with_free_func(g_object_unref);
    return m;
@@ -44,11 +34,11 @@ mover_set_dests(Mover *m, const GPtrArray *p_dests) {
    g_ptr_array_set_size(m->p_dests, 0);
    if (p_dests != NULL) {
       for (guint i = 0; i < p_dests->len; i++) {
-         const MoverDest *d =
-            (const MoverDest *)g_ptr_array_index((GPtrArray *)p_dests, i);
-         MoverDest *nd = g_new(MoverDest, 1);
-         nd->c_name    = g_strdup(d->c_name);
-         nd->c_path    = g_strdup(d->c_path);
+         const SettingsPair *d =
+            (const SettingsPair *)g_ptr_array_index((GPtrArray *)p_dests, i);
+         SettingsPair *nd = g_new(SettingsPair, 1);
+         nd->c_name       = g_strdup(d->c_name);
+         nd->c_value      = g_strdup(d->c_value);
          g_ptr_array_add(m->p_dests, nd);
       }
    }
@@ -61,10 +51,11 @@ mover_get_dests(Mover *m) {
 }
 
 gboolean
-mover_move(Mover *m, GList *p_files, const MoverDest *p_dest, GError **p_err) {
+mover_move(Mover *m, GList *p_files, const SettingsPair *p_dest,
+           GError **p_err) {
    g_return_val_if_fail(m != NULL, FALSE);
    g_return_val_if_fail(p_dest != NULL, FALSE);
-   GFile *p_ddir = g_file_new_for_path(p_dest->c_path);
+   GFile *p_ddir = g_file_new_for_path(p_dest->c_value);
    if (!pathutil_ensure_dir(p_ddir, p_err)) {
       g_object_unref(p_ddir);
       return FALSE;

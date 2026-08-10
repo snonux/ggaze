@@ -2827,20 +2827,6 @@ _show_status(GgazeWindow *p_win, const char *c_msg) {
    p_win->u_info_hide = g_timeout_add_seconds(2, _info_hide_tick, p_win);
 }
 
-/* Free a temp (name, command) pair struct (OpenerProg / RunnerScript share
- * the same two-pointer layout). Used as a GPtrArray free func for the throw-
- * away arrays built while feeding settings into the engines. */
-static void
-_name_cmd_free(gpointer p) {
-   OpenerProg *d = (OpenerProg *)p;
-   if (d == NULL) {
-      return;
-   }
-   g_free(d->c_name);
-   g_free(d->c_command);
-   g_free(d);
-}
-
 #if GGAZE_HAVE_GEGL
 static void
 _preset_tmp_free(gpointer p) {
@@ -2885,31 +2871,14 @@ _load_engine_lists(GgazeWindow *p_win) {
       g_ptr_array_unref(p);
    }
    if (p_win->p_opener != NULL) {
-      GPtrArray *p  = settings_get_editors(p_win->p_settings);
-      GPtrArray *pp = g_ptr_array_new_with_free_func(_name_cmd_free);
-      for (guint i = 0; i < p->len; i++) {
-         const SettingsPair *pr = g_ptr_array_index(p, i);
-         OpenerProg         *np = g_new(OpenerProg, 1);
-         np->c_name             = g_strdup(pr->c_name);
-         np->c_command          = g_strdup(pr->c_value);
-         g_ptr_array_add(pp, np);
-      }
-      opener_set_progs(p_win->p_opener, pp);
-      g_ptr_array_unref(pp);
+      GPtrArray *p = settings_get_editors(p_win->p_settings);
+      opener_set_progs(p_win->p_opener, p); /* copies SettingsPair internally */
       g_ptr_array_unref(p);
    }
    if (p_win->p_runner != NULL) {
-      GPtrArray *p  = settings_get_scripts(p_win->p_settings);
-      GPtrArray *pp = g_ptr_array_new_with_free_func(_name_cmd_free);
-      for (guint i = 0; i < p->len; i++) {
-         const SettingsPair *pr = g_ptr_array_index(p, i);
-         RunnerScript       *np = g_new(RunnerScript, 1);
-         np->c_name             = g_strdup(pr->c_name);
-         np->c_command          = g_strdup(pr->c_value);
-         g_ptr_array_add(pp, np);
-      }
-      runner_set_scripts(p_win->p_runner, pp);
-      g_ptr_array_unref(pp);
+      GPtrArray *p = settings_get_scripts(p_win->p_settings);
+      runner_set_scripts(p_win->p_runner,
+                         p); /* copies SettingsPair internally */
       g_ptr_array_unref(p);
    }
 #if GGAZE_HAVE_GEGL
@@ -3024,7 +2993,7 @@ _open_ext_destroy(GgazeWindow *p_win) {
  * name. */
 static const char *
 _open_ext_name(const GPtrArray *p_progs, guint u_idx) {
-   const OpenerProg *p_pr = g_ptr_array_index((GPtrArray *)p_progs, u_idx);
+   const SettingsPair *p_pr = g_ptr_array_index((GPtrArray *)p_progs, u_idx);
    return (p_pr->c_name);
 }
 
@@ -3089,8 +3058,8 @@ ggaze_window_open_external_index(GgazeWindow *p_win, guint u_idx) {
    if (p_cur == NULL) {
       return (FALSE);
    }
-   const OpenerProg *p_prog = g_ptr_array_index((GPtrArray *)p_progs, u_idx);
-   GError           *p_err  = NULL;
+   const SettingsPair *p_prog = g_ptr_array_index((GPtrArray *)p_progs, u_idx);
+   GError             *p_err  = NULL;
    gboolean b_ok = opener_launch(p_win->p_opener, p_cur, p_prog, &p_err);
    if (!b_ok) {
       g_warning("ggaze: open-external '%s' failed: %s",
@@ -3205,7 +3174,7 @@ _run_script_destroy(GgazeWindow *p_win) {
 /* Row name for the run-script popover: the configured script's display name. */
 static const char *
 _run_script_name(const GPtrArray *p_scripts, guint u_idx) {
-   const RunnerScript *p_sc = g_ptr_array_index((GPtrArray *)p_scripts, u_idx);
+   const SettingsPair *p_sc = g_ptr_array_index((GPtrArray *)p_scripts, u_idx);
    return (p_sc->c_name);
 }
 
@@ -3266,7 +3235,7 @@ ggaze_window_run_script_index(GgazeWindow *p_win, guint u_idx) {
    if (p_dir == NULL) {
       return (FALSE);
    }
-   const RunnerScript *p_sc  = g_ptr_array_index((GPtrArray *)p_scripts, u_idx);
+   const SettingsPair *p_sc  = g_ptr_array_index((GPtrArray *)p_scripts, u_idx);
    _RunCtx            *p_ctx = g_new(_RunCtx, 1);
    p_ctx->p_win              = (GgazeWindow *)g_object_ref(p_win);
    p_ctx->p_dir              = (GFile *)g_object_ref(p_dir);
@@ -3329,7 +3298,7 @@ _move_mark_removed(GgazeWindow *p_win, GList *p_files) {
  * count of how many of the N requested actually moved before the error hit
  * a later one in the list ("Moved M of N files to X; then failed: ..."). */
 static void
-_move_report(GgazeWindow *p_win, const MoverDest *p_dest, gboolean b_ok,
+_move_report(GgazeWindow *p_win, const SettingsPair *p_dest, gboolean b_ok,
              guint u_moved, guint u_n, GError *p_err) {
    if (b_ok) {
       char *c_msg = g_strdup_printf("Moved %u file%s to %s", u_n,
@@ -3366,8 +3335,8 @@ _move_captured(GgazeWindow *p_win, guint u_idx, GList *p_files) {
    if (p_dests == NULL || u_idx >= p_dests->len) {
       return (FALSE);
    }
-   const MoverDest *p_dest = g_ptr_array_index((GPtrArray *)p_dests, u_idx);
-   guint            u_n    = g_list_length(p_files);
+   const SettingsPair *p_dest = g_ptr_array_index((GPtrArray *)p_dests, u_idx);
+   guint               u_n    = g_list_length(p_files);
    /* Asked BEFORE mover_move/_move_mark_removed run: navigator_mark_removed
     * emits "changed" and can move current (and invalidate the borrowed
     * pointer) as a side effect, so afterwards the answer is no longer the
@@ -3465,7 +3434,7 @@ _move_go(GgazeWindow *p_win, guint u_idx) {
 /* Row name for the move popover: the configured destination's display name. */
 static const char *
 _move_name(const GPtrArray *p_dests, guint u_idx) {
-   const MoverDest *p_d = g_ptr_array_index((GPtrArray *)p_dests, u_idx);
+   const SettingsPair *p_d = g_ptr_array_index((GPtrArray *)p_dests, u_idx);
    return (p_d->c_name);
 }
 
