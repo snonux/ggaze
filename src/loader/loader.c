@@ -29,6 +29,9 @@ extern const GgazeLoaderBackend avif_backend;
 #if GGAZE_HAVE_HEIF
 extern const GgazeLoaderBackend heif_backend;
 #endif
+#if GGAZE_HAVE_JPEG
+extern const GgazeLoaderBackend jpeg_backend;
+#endif
 static const GgazeLoaderBackend *BACKENDS[] = {
 #if GGAZE_HAVE_JXL
    &jxl_backend,
@@ -39,7 +42,11 @@ static const GgazeLoaderBackend *BACKENDS[] = {
 #if GGAZE_HAVE_HEIF
    &heif_backend,
 #endif
-   /* pixbuf fallback (PNG/JPEG/GIF/WebP/TIFF/ICO) — must be last. */
+#if GGAZE_HAVE_JPEG
+   &jpeg_backend,
+#endif
+   /* pixbuf fallback (PNG/GIF/WebP/TIFF/ICO + any JPEG when libjpeg is off)
+    * — must be last. */
    &pixbuf_backend,
 };
 
@@ -108,14 +115,6 @@ _load_task_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
       return;
    }
    gboolean b_found = FALSE;
-#if GGAZE_HAVE_JPEG
-   extern const GgazeLoaderBackend jpeg_backend;
-   if (detect_format(head, u_read) == GGAZE_FMT_JPEG && p_pair != NULL) {
-      p_tex = jpeg_backend.load_progressive(
-         (GFile *)p_src, p_cancel, p_pair->p_cb, p_pair->p_data, &p_err);
-      b_found = TRUE;
-   }
-#endif
    if (!b_found) {
       for (gsize u_i = 0; u_i < G_N_ELEMENTS(BACKENDS); u_i++) {
          if (BACKENDS[u_i]->can_load(head, u_read)) {

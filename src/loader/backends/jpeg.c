@@ -197,6 +197,10 @@ _make_texture(int i_w, int i_h, guint8 *p_pixels) {
    return (p_tex);
 }
 
+static gboolean    _jpeg_reject_if_oversized(const guint8 *p_buf, gsize u_len,
+                                             GError **p_err);
+static GdkTexture *_jpeg_full_decode_via_pixbuf(GFile *p_file, GError **p_err);
+
 static gboolean
 _jpeg_can_load(const guint8 *p_head, gsize u_len) {
    return (detect_format(p_head, u_len) == GGAZE_FMT_JPEG);
@@ -205,20 +209,24 @@ _jpeg_can_load(const guint8 *p_head, gsize u_len) {
 static GdkTexture *
 _jpeg_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    (void)p_cancel;
+   /* Sync load: the orientation-aware GdkPixbuf path the progressive backend
+    * uses for its full-decode phase, so a sync loader_load() of a JPEG (e.g.
+    * the GEGL enhancer) is upright (decision #26). The libjpeg
+    * _decode_at_scale() fast path is only used for the progressive low-res
+    * preview, which does not need orientation. Reject an oversized header
+    * before the GdkPixbuf call -- see _jpeg_load_progressive(). */
    gchar *c_buf = NULL;
    gsize  u_len = 0;
    if (!g_file_load_contents(p_file, NULL, &c_buf, &u_len, NULL, p_err)) {
       return (NULL);
    }
-   int     i_w, i_h;
-   guint8 *p_pixels = NULL;
-   if (!_decode_at_scale((const guint8 *)c_buf, u_len, 1, &i_w, &i_h, &p_pixels,
-                         p_err)) {
-      g_free(c_buf);
+   gboolean b_ok =
+      _jpeg_reject_if_oversized((const guint8 *)c_buf, u_len, p_err);
+   g_free(c_buf);
+   if (!b_ok) {
       return (NULL);
    }
-   g_free(c_buf);
-   return (_make_texture(i_w, i_h, p_pixels));
+   return (_jpeg_full_decode_via_pixbuf(p_file, p_err));
 }
 
 /* Reject p_buf/u_len (the full JPEG file, still in memory) if its declared
