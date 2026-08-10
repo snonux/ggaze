@@ -15,27 +15,28 @@
 #include <gio/gio.h>
 #include <glib.h>
 
+#include "ggaze-config.h"
 #include "detect.h"
 
 /* Registered backends, priority order (specific first, fallback LAST).
  * pixbuf_backend must remain last: it accepts GGAZE_FMT_UNKNOWN. */
-#ifdef HAVE_JXL
+#if GGAZE_HAVE_JXL
 extern const GgazeLoaderBackend jxl_backend;
 #endif
-#ifdef HAVE_AVIF
+#if GGAZE_HAVE_AVIF
 extern const GgazeLoaderBackend avif_backend;
 #endif
-#ifdef HAVE_HEIF
+#if GGAZE_HAVE_HEIF
 extern const GgazeLoaderBackend heif_backend;
 #endif
 static const GgazeLoaderBackend *BACKENDS[] = {
-#ifdef HAVE_JXL
+#if GGAZE_HAVE_JXL
    &jxl_backend,
 #endif
-#ifdef HAVE_AVIF
+#if GGAZE_HAVE_AVIF
    &avif_backend,
 #endif
-#ifdef HAVE_HEIF
+#if GGAZE_HAVE_HEIF
    &heif_backend,
 #endif
    /* pixbuf fallback (PNG/JPEG/GIF/WebP/TIFF/ICO) — must be last. */
@@ -107,7 +108,7 @@ _load_task_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
       return;
    }
    gboolean b_found = FALSE;
-#ifdef HAVE_JPEG
+#if GGAZE_HAVE_JPEG
    extern const GgazeLoaderBackend jpeg_backend;
    if (detect_format(head, u_read) == GGAZE_FMT_JPEG && p_pair != NULL) {
       p_tex = jpeg_backend.load_progressive(

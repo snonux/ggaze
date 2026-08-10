@@ -39,6 +39,7 @@ conf.set('GGAZE_HAVE_GEGL', gegl_dep.found() ? 1 : 0)
 conf.set('GGAZE_HAVE_JXL',  jxl_dep.found()  ? 1 : 0)
 conf.set('GGAZE_HAVE_AVIF', avif_dep.found() ? 1 : 0)
 conf.set('GGAZE_HAVE_HEIF', heif_dep.found() ? 1 : 0)
+conf.set('GGAZE_HAVE_JPEG', libjpeg_dep.found() ? 1 : 0)
 
 ggaze_conf_h = configure_file(
    input         : 'ggaze-config.h.in',
@@ -81,27 +82,22 @@ ggaze_extra_deps = []
 
 if jxl_dep.found()
    ggaze_src += files('src/loader/backends/jxl.c')
-   ggaze_c_args += '-DHAVE_JXL'
    ggaze_extra_deps += jxl_dep
 endif
 if avif_dep.found()
    ggaze_src += files('src/loader/backends/avif.c')
-   ggaze_c_args += '-DHAVE_AVIF'
    ggaze_extra_deps += avif_dep
 endif
 if heif_dep.found()
    ggaze_src += files('src/loader/backends/heif.c')
-   ggaze_c_args += '-DHAVE_HEIF'
    ggaze_extra_deps += heif_dep
 endif
 if libjpeg_dep.found()
    ggaze_src += files('src/loader/backends/jpeg.c')
-   ggaze_c_args += '-DHAVE_JPEG'
    ggaze_extra_deps += libjpeg_dep
 endif
 if gegl_dep.found()
    ggaze_src += files('src/enhancer.c')
-   ggaze_c_args += '-DHAVE_GEGL'
    ggaze_extra_deps += gegl_dep
 endif
 
