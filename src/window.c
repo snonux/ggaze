@@ -27,6 +27,7 @@
 #include "mover.h"
 #include "navigator.h"
 #include "opener.h"
+#include "popup_list.h"
 #include "prefs.h"
 #include "runner.h"
 #include "settings.h"
@@ -75,9 +76,9 @@ struct _GgazeWindow {
    Thumbnail    *p_thumb;           /* TMS thumbnail cache */
    Trash        *p_trash;           /* ./Trash bin for the current folder */
    GtkWidget    *p_stack;           /* GtkStack: grid / large (viewer) */
-   GtkWidget *p_open_ext_pop;   /* `e` open-external popover (NULL when none) */
-   GtkWidget *p_run_script_pop; /* `!` run-script popover (NULL when none) */
-   GtkWidget *p_move_pop;       /* `m` move-to-destination popover (NULL when
+   PopupList *p_open_ext_pop;   /* `e` open-external popover (NULL when none) */
+   PopupList *p_run_script_pop; /* `!` run-script popover (NULL when none) */
+   PopupList *p_move_pop;       /* `m` move-to-destination popover (NULL when
                                  * none) */
    GgazeLastDestructive e_last_destructive; /* trash vs move, for win.undo */
    GtkWidget           *p_viewer;           /* GgazeViewer — the large view */
@@ -199,11 +200,6 @@ static void     _open_ext_destroy(GgazeWindow *p_win);
 static void     _run_script_destroy(GgazeWindow *p_win);
 static void     _move_destroy(GgazeWindow *p_win);
 static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
-/* Shared by the enhance/open-external/run-script/move popovers (decision O):
- * auto-assigned hotkeys in list order (1-9, 0, a-z) and the keyval->index
- * mapping. Defined once, below, near their first historical use. */
-static char _popup_hotkey_char(guint u_idx);
-static gint _popup_key_to_index(guint u_keyval);
 
 /* POPOVER KEYBOARD FOCUS -- who focuses the first row (dw0).
  *
@@ -2337,7 +2333,7 @@ _enhance_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
       _enhance_discard(p_win);
       return (GDK_EVENT_STOP);
    }
-   gint i_idx = _popup_key_to_index(u_keyval);
+   gint i_idx = popup_list_key_to_index(u_keyval);
    if (i_idx < 0 || i_idx >= (gint)G_N_ELEMENTS(p_win->p_enhance_btns)) {
       return (GDK_EVENT_PROPAGATE);
    }
@@ -2539,11 +2535,8 @@ _enhance_build_rows(GgazeWindow *p_win, GtkWidget *p_box,
    }
    for (guint i = 0; i < u_n; i++) {
       const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_presets, i);
-      char                  c_hk = _popup_hotkey_char(i);
-      char                 *c_lbl =
-         g_strdup_printf("%c  %s", c_hk != 0 ? c_hk : ' ',
-                         p_pr->c_name != NULL ? p_pr->c_name : "(unnamed)");
-      GtkWidget *p_btn = gtk_button_new();
+      char                 *c_lbl = popup_list_row_label(i, p_pr->c_name);
+      GtkWidget            *p_btn = gtk_button_new();
       if (b_previews) {
          GtkWidget *p_row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
          GtkWidget *p_pic = gtk_picture_new();
@@ -3152,105 +3145,35 @@ _action_preferences(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * program").
  */
 
-/* Auto-assigned hotkey character for popup row index u_idx, in list order:
- * 1..9, then 0, then a..z. Returns 0 for an index beyond the 36-hotkey
- * range (such entries are shown without a hotkey and are click-only). Shared
- * by the open-external (`e`) and run-script (`!`) popovers (decision O). */
-static char
-_popup_hotkey_char(guint u_idx) {
-   if (u_idx < 9) {
-      return ((char)('1' + u_idx));
-   }
-   if (u_idx == 9) {
-      return ('0');
-   }
-   if (u_idx < 36) {
-      return ((char)('a' + (u_idx - 10)));
-   }
-   return (0);
-}
-
-/* Map a keyval to a popup row index (1-9 -> 0-8, 0 -> 9, a-z -> 10-35),
- * or -1 for any other key. Used by the open-external and run-script popover
- * key controllers. */
-static gint
-_popup_key_to_index(guint u_keyval) {
-   if (u_keyval >= GDK_KEY_1 && u_keyval <= GDK_KEY_9) {
-      return ((gint)(u_keyval - GDK_KEY_1));
-   }
-   if (u_keyval == GDK_KEY_0) {
-      return (9);
-   }
-   if (u_keyval >= GDK_KEY_a && u_keyval <= GDK_KEY_z) {
-      return ((gint)(10 + (u_keyval - GDK_KEY_a)));
-   }
-   return (-1);
-}
-
 /* Synchronously tear down the current open-external popover (unparent +
  * clear the field). Safe to call when none is open. The popover's "closed"
  * handler (autohide / outside-click dismissal) also routes here. */
 static void
 _open_ext_destroy(GgazeWindow *p_win) {
-   if (p_win->p_open_ext_pop == NULL) {
-      return;
-   }
-   GtkWidget *p_pop = p_win->p_open_ext_pop;
-   p_win->p_open_ext_pop =
-      NULL; /* first, so a re-entrant "closed" is a no-op */
-   gtk_widget_unparent(p_pop);
+   popup_list_destroy(&p_win->p_open_ext_pop);
 }
 
 /* "closed" (outside-click / autohide dismissal): tear down synchronously. */
-static void
-_open_ext_closed_cb(GtkPopover *p_pop, gpointer p_data) {
-   (void)p_pop;
-   _open_ext_destroy(GGAZE_WINDOW(p_data));
+/* Row name for the open-external popover: the configured editor's display
+ * name. */
+static const char *
+_open_ext_name(const GPtrArray *p_progs, guint u_idx) {
+   const OpenerProg *p_pr = g_ptr_array_index((GPtrArray *)p_progs, u_idx);
+   return (p_pr->c_name);
 }
 
-/* Row click (mouse): launch that editor on the original current file, then
+/* Row click / hotkey: launch that editor on the original current file, then
  * close the popover. */
 static void
-_open_ext_row_clicked_cb(GtkButton *p_btn, gpointer p_data) {
+_open_ext_activate(gpointer p_data, guint u_idx) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   guint u_idx = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(p_btn), "idx"));
    ggaze_window_open_external_index(p_win, u_idx);
    _open_ext_destroy(p_win);
 }
 
-/* Popover key controller: Esc cancels; a bare digit/letter hotkey launches
- * the matching editor on the original current file and closes the popover.
- * Modified keys (Ctrl+a, Shift+...) are propagated so they are not swallowed.
- */
-static gboolean
-_open_ext_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
-                         GdkModifierType e_state, gpointer p_data) {
-   (void)p_c;
-   (void)u_kc;
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (u_keyval == GDK_KEY_Escape) {
-      _open_ext_destroy(p_win);
-      return (GDK_EVENT_STOP);
-   }
-   if (e_state != 0) {
-      return (GDK_EVENT_PROPAGATE);
-   }
-   gint i_idx = _popup_key_to_index(u_keyval);
-   if (i_idx < 0) {
-      return (GDK_EVENT_PROPAGATE);
-   }
-   const GPtrArray *p_progs = opener_get_progs(p_win->p_opener);
-   if (p_progs == NULL || (guint)i_idx >= p_progs->len) {
-      return (GDK_EVENT_PROPAGATE); /* no editor bound to that hotkey */
-   }
-   ggaze_window_open_external_index(p_win, (guint)i_idx);
-   _open_ext_destroy(p_win);
-   return (GDK_EVENT_STOP);
-}
-
-/* Build and pop up the open-external popover listing the configured editors.
- * If no editors are configured, shows a single message row pointing at
- * Preferences (`,`) instead. */
+/* Build and pop up the open-external popover listing the configured editors
+ * (`e`). Toggles closed on a second press. If none are configured, the popup
+ * shows a single message row pointing at Preferences (`,`) instead. */
 static void
 _action_open_external(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -3264,76 +3187,25 @@ _action_open_external(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       _open_ext_destroy(p_win);
       return;
    }
-
    const GPtrArray *p_progs =
       p_win->p_opener != NULL ? opener_get_progs(p_win->p_opener) : NULL;
-   GtkWidget *p_pop = gtk_popover_new();
-   gtk_popover_set_position(GTK_POPOVER(p_pop), GTK_POS_TOP);
-   gtk_popover_set_pointing_to(GTK_POPOVER(p_pop),
-                               &(const GdkRectangle){0, 0, 1, 1});
-   g_signal_connect(GTK_POPOVER(p_pop), "closed",
-                    G_CALLBACK(_open_ext_closed_cb), p_win);
-   /* Key controller on the popover (capture phase): the popover is its own
-    * native / shortcut scope, so this sees the hotkeys without the parent
-    * window's GLOBAL shortcuts intercepting them. */
-   GtkEventController *p_kc = gtk_event_controller_key_new();
-   gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
-   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_open_ext_key_pressed_cb),
-                    p_win);
-   gtk_widget_add_controller(p_pop, p_kc);
-
-   GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-   gtk_widget_set_margin_start(p_box, 8);
-   gtk_widget_set_margin_end(p_box, 8);
-   gtk_widget_set_margin_top(p_box, 8);
-   gtk_widget_set_margin_bottom(p_box, 8);
-   gtk_popover_set_child(GTK_POPOVER(p_pop), p_box);
-
-   if (p_progs == NULL || p_progs->len == 0) {
-      GtkWidget *p_lbl =
-         gtk_label_new("No editors configured. Press , to open Preferences.");
-      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
-      gtk_box_append(GTK_BOX(p_box), p_lbl);
-   } else {
-      char *c_title = NULL;
-      {
-         GFile *p_cur = navigator_get_current(p_win->p_nav);
-         if (p_cur != NULL) {
-            char *c_name = g_file_get_basename(p_cur);
-            c_title      = g_strdup_printf("Open %s in:", c_name);
-            g_free(c_name);
-         }
-      }
-      GtkWidget *p_lbl = gtk_label_new(c_title != NULL ? c_title : "Open in:");
-      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
-      gtk_box_append(GTK_BOX(p_box), p_lbl);
-      g_free(c_title);
-
-      guint u_n = p_progs->len;
-      if (u_n > 36) {
-         u_n = 36; /* cap hotkeys at 1-9,0,a-z (decision O) */
-      }
-      for (guint i = 0; i < u_n; i++) {
-         const OpenerProg *p_pr = g_ptr_array_index((GPtrArray *)p_progs, i);
-         char              c_hk = _popup_hotkey_char(i);
-         char             *c_lbl =
-            g_strdup_printf("%c  %s", c_hk != 0 ? c_hk : ' ',
-                            p_pr->c_name != NULL ? p_pr->c_name : "(unnamed)");
-         GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
-         gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
-         g_object_set_data(G_OBJECT(p_btn), "idx", GUINT_TO_POINTER(i));
-         g_signal_connect(p_btn, "clicked",
-                          G_CALLBACK(_open_ext_row_clicked_cb), p_win);
-         gtk_box_append(GTK_BOX(p_box), p_btn);
-         g_free(c_lbl);
+   char *c_title = NULL;
+   {
+      GFile *p_cur = navigator_get_current(p_win->p_nav);
+      if (p_cur != NULL) {
+         char *c_name = g_file_get_basename(p_cur);
+         c_title      = g_strdup_printf("Open %s in:", c_name);
+         g_free(c_name);
       }
    }
-
-   gtk_widget_set_parent(p_pop, p_win->p_stack);
-   p_win->p_open_ext_pop = p_pop;
+   popup_list_new(p_win->p_stack, &p_win->p_open_ext_pop,
+                  c_title != NULL ? c_title : "Open in:",
+                  "No editors configured. Press , to open Preferences.",
+                  p_progs, _open_ext_name, _open_ext_activate, p_win);
+   g_free(c_title);
    /* Focuses the first editor row itself -- see "POPOVER KEYBOARD FOCUS"
     * near the top of this file. */
-   gtk_popover_popup(GTK_POPOVER(p_pop));
+   popup_list_popup(p_win->p_open_ext_pop);
 }
 
 /* Launch editor u_idx on the ORIGINAL current file. See window.h. */
@@ -3456,69 +3328,33 @@ _run_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    _run_ctx_free(p_ctx);
 }
 
-/* Synchronously tear down the current run-script popover (unparent + clear the
- * field). Safe to call when none is open. The popover's "closed" handler
- * (autohide / outside-click dismissal) also routes here. */
+/* Synchronously tear down the current run-script popover (unparent + clear
+ * the field). Safe to call when none is open; the popover's "closed" handler
+ * (autohide / outside-click) also routes here. */
 static void
 _run_script_destroy(GgazeWindow *p_win) {
-   if (p_win->p_run_script_pop == NULL) {
-      return;
-   }
-   GtkWidget *p_pop = p_win->p_run_script_pop;
-   p_win->p_run_script_pop =
-      NULL; /* first, so a re-entrant "closed" is a no-op */
-   gtk_widget_unparent(p_pop);
+   popup_list_destroy(&p_win->p_run_script_pop);
 }
 
-static void
-_run_script_closed_cb(GtkPopover *p_pop, gpointer p_data) {
-   (void)p_pop;
-   _run_script_destroy(GGAZE_WINDOW(p_data));
+/* Row name for the run-script popover: the configured script's display name. */
+static const char *
+_run_script_name(const GPtrArray *p_scripts, guint u_idx) {
+   const RunnerScript *p_sc = g_ptr_array_index((GPtrArray *)p_scripts, u_idx);
+   return (p_sc->c_name);
 }
 
-/* Row click (mouse): run that script on the original current file + folder,
+/* Row click / hotkey: run that script on the original current file + folder,
  * then close the popover. */
 static void
-_run_script_row_clicked_cb(GtkButton *p_btn, gpointer p_data) {
+_run_script_activate(gpointer p_data, guint u_idx) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   guint u_idx = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(p_btn), "idx"));
    ggaze_window_run_script_index(p_win, u_idx);
    _run_script_destroy(p_win);
 }
 
-/* Popover key controller: Esc cancels; a bare digit/letter hotkey runs the
- * matching script and closes the popover. Modified keys are propagated. */
-static gboolean
-_run_script_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval,
-                           guint u_kc, GdkModifierType e_state,
-                           gpointer p_data) {
-   (void)p_c;
-   (void)u_kc;
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (u_keyval == GDK_KEY_Escape) {
-      _run_script_destroy(p_win);
-      return (GDK_EVENT_STOP);
-   }
-   if (e_state != 0) {
-      return (GDK_EVENT_PROPAGATE);
-   }
-   gint i_idx = _popup_key_to_index(u_keyval);
-   if (i_idx < 0) {
-      return (GDK_EVENT_PROPAGATE);
-   }
-   const GPtrArray *p_scripts =
-      p_win->p_runner != NULL ? runner_get_scripts(p_win->p_runner) : NULL;
-   if (p_scripts == NULL || (guint)i_idx >= p_scripts->len) {
-      return (GDK_EVENT_PROPAGATE); /* no script bound to that hotkey */
-   }
-   ggaze_window_run_script_index(p_win, (guint)i_idx);
-   _run_script_destroy(p_win);
-   return (GDK_EVENT_STOP);
-}
-
-/* Build and pop up the run-script popover listing the configured scripts. If
- * none are configured, shows a single message row pointing at Preferences
- * (`,`) instead. */
+/* Build and pop up the run-script popover listing the configured scripts
+ * (`!`). Toggles closed on a second press. If none are configured, the popup
+ * shows a single message row pointing at Preferences (`,`) instead. */
 static void
 _action_run_script(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -3532,64 +3368,14 @@ _action_run_script(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       _run_script_destroy(p_win);
       return;
    }
-
    const GPtrArray *p_scripts =
       p_win->p_runner != NULL ? runner_get_scripts(p_win->p_runner) : NULL;
-   GtkWidget *p_pop = gtk_popover_new();
-   gtk_popover_set_position(GTK_POPOVER(p_pop), GTK_POS_TOP);
-   gtk_popover_set_pointing_to(GTK_POPOVER(p_pop),
-                               &(const GdkRectangle){0, 0, 1, 1});
-   g_signal_connect(GTK_POPOVER(p_pop), "closed",
-                    G_CALLBACK(_run_script_closed_cb), p_win);
-   GtkEventController *p_kc = gtk_event_controller_key_new();
-   gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
-   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_run_script_key_pressed_cb),
-                    p_win);
-   gtk_widget_add_controller(p_pop, p_kc);
-
-   GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-   gtk_widget_set_margin_start(p_box, 8);
-   gtk_widget_set_margin_end(p_box, 8);
-   gtk_widget_set_margin_top(p_box, 8);
-   gtk_widget_set_margin_bottom(p_box, 8);
-   gtk_popover_set_child(GTK_POPOVER(p_pop), p_box);
-
-   if (p_scripts == NULL || p_scripts->len == 0) {
-      GtkWidget *p_lbl =
-         gtk_label_new("No scripts configured. Press , to open Preferences.");
-      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
-      gtk_box_append(GTK_BOX(p_box), p_lbl);
-   } else {
-      GtkWidget *p_lbl = gtk_label_new("Run script:");
-      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
-      gtk_box_append(GTK_BOX(p_box), p_lbl);
-
-      guint u_n = p_scripts->len;
-      if (u_n > 36) {
-         u_n = 36; /* cap hotkeys at 1-9,0,a-z (decision O) */
-      }
-      for (guint i = 0; i < u_n; i++) {
-         const RunnerScript *p_sc =
-            g_ptr_array_index((GPtrArray *)p_scripts, i);
-         char  c_hk = _popup_hotkey_char(i);
-         char *c_lbl =
-            g_strdup_printf("%c  %s", c_hk != 0 ? c_hk : ' ',
-                            p_sc->c_name != NULL ? p_sc->c_name : "(unnamed)");
-         GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
-         gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
-         g_object_set_data(G_OBJECT(p_btn), "idx", GUINT_TO_POINTER(i));
-         g_signal_connect(p_btn, "clicked",
-                          G_CALLBACK(_run_script_row_clicked_cb), p_win);
-         gtk_box_append(GTK_BOX(p_box), p_btn);
-         g_free(c_lbl);
-      }
-   }
-
-   gtk_widget_set_parent(p_pop, p_win->p_stack);
-   p_win->p_run_script_pop = p_pop;
+   popup_list_new(p_win->p_stack, &p_win->p_run_script_pop, "Run script:",
+                  "No scripts configured. Press , to open Preferences.",
+                  p_scripts, _run_script_name, _run_script_activate, p_win);
    /* Focuses the first script row itself -- see "POPOVER KEYBOARD FOCUS"
     * near the top of this file. */
-   gtk_popover_popup(GTK_POPOVER(p_pop));
+   popup_list_popup(p_win->p_run_script_pop);
 }
 
 /* Run script u_idx (0-based, in the configured scripts list order) on the
@@ -3764,18 +3550,7 @@ ggaze_window_move_index(GgazeWindow *p_win, guint u_idx) {
  * field). Safe to call when none is open. */
 static void
 _move_destroy(GgazeWindow *p_win) {
-   if (p_win->p_move_pop == NULL) {
-      return;
-   }
-   GtkWidget *p_pop  = p_win->p_move_pop;
-   p_win->p_move_pop = NULL; /* first, so a re-entrant "closed" is a no-op */
-   gtk_widget_unparent(p_pop);
-}
-
-static void
-_move_closed_cb(GtkPopover *p_pop, gpointer p_data) {
-   (void)p_pop;
-   _move_destroy(GGAZE_WINDOW(p_data));
+   popup_list_destroy(&p_win->p_move_pop);
 }
 
 /* Captures the destination index AND the target set for the Save/Discard/
@@ -3821,87 +3596,20 @@ _move_go(GgazeWindow *p_win, guint u_idx) {
    _maybe_save_then(p_win, _proceed_move_idx, p_ctx, _move_idx_ctx_free);
 }
 
-/* Row click (mouse): move to that destination, then close the popover. */
+/* Row name for the move popover: the configured destination's display name. */
+static const char *
+_move_name(const GPtrArray *p_dests, guint u_idx) {
+   const MoverDest *p_d = g_ptr_array_index((GPtrArray *)p_dests, u_idx);
+   return (p_d->c_name);
+}
+
+/* Row click / hotkey: close the popover, then move to that destination,
+ * prompting Save/Discard/Cancel first if an unsaved enhance preview is
+ * active. The close runs BEFORE the prompt (see _move_go) so the popover is
+ * gone while the prompt is up. */
 static void
-_move_row_clicked_cb(GtkButton *p_btn, gpointer p_data) {
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   guint u_idx = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(p_btn), "idx"));
-   _move_go(p_win, u_idx);
-}
-
-/* Popover key controller: Esc cancels; a bare digit/letter hotkey moves to
- * the matching destination and closes the popover. Modified keys are
- * propagated so they are not swallowed. */
-static gboolean
-_move_key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
-                     GdkModifierType e_state, gpointer p_data) {
-   (void)p_c;
-   (void)u_kc;
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (u_keyval == GDK_KEY_Escape) {
-      _move_destroy(p_win);
-      return (GDK_EVENT_STOP);
-   }
-   if (e_state != 0) {
-      return (GDK_EVENT_PROPAGATE);
-   }
-   gint i_idx = _popup_key_to_index(u_keyval);
-   if (i_idx < 0) {
-      return (GDK_EVENT_PROPAGATE);
-   }
-   const GPtrArray *p_dests = mover_get_dests(p_win->p_mover);
-   if (p_dests == NULL || (guint)i_idx >= p_dests->len) {
-      return (GDK_EVENT_PROPAGATE); /* no destination bound to that hotkey */
-   }
-   _move_go(p_win, (guint)i_idx);
-   return (GDK_EVENT_STOP);
-}
-
-/* Build the popover's content box: a title label followed by one row per
- * destination (hotkey + name), or a single message row when none are
- * configured. Split out of _action_move to keep that under ~30 lines. */
-static GtkWidget *
-_move_build_box(GgazeWindow *p_win, const GPtrArray *p_dests, guint u_count) {
-   GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-   gtk_widget_set_margin_start(p_box, 8);
-   gtk_widget_set_margin_end(p_box, 8);
-   gtk_widget_set_margin_top(p_box, 8);
-   gtk_widget_set_margin_bottom(p_box, 8);
-
-   if (p_dests == NULL || p_dests->len == 0) {
-      GtkWidget *p_lbl = gtk_label_new(
-         "No destinations configured. Press , to open Preferences.");
-      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
-      gtk_box_append(GTK_BOX(p_box), p_lbl);
-      return (p_box);
-   }
-
-   char *c_title =
-      g_strdup_printf("Move %u image%s to:", u_count, u_count == 1 ? "" : "s");
-   GtkWidget *p_lbl = gtk_label_new(c_title);
-   gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
-   gtk_box_append(GTK_BOX(p_box), p_lbl);
-   g_free(c_title);
-
-   guint u_n = p_dests->len;
-   if (u_n > 36) {
-      u_n = 36; /* cap hotkeys at 1-9,0,a-z (decision O) */
-   }
-   for (guint i = 0; i < u_n; i++) {
-      const MoverDest *p_d  = g_ptr_array_index((GPtrArray *)p_dests, i);
-      char             c_hk = _popup_hotkey_char(i);
-      char            *c_lbl =
-         g_strdup_printf("%c  %s", c_hk != 0 ? c_hk : ' ',
-                         p_d->c_name != NULL ? p_d->c_name : "(unnamed)");
-      GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
-      gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
-      g_object_set_data(G_OBJECT(p_btn), "idx", GUINT_TO_POINTER(i));
-      g_signal_connect(p_btn, "clicked", G_CALLBACK(_move_row_clicked_cb),
-                       p_win);
-      gtk_box_append(GTK_BOX(p_box), p_btn);
-      g_free(c_lbl);
-   }
-   return (p_box);
+_move_activate(gpointer p_data, guint u_idx) {
+   _move_go(GGAZE_WINDOW(p_data), u_idx);
 }
 
 /* Build and pop up the move popover listing the configured destinations
@@ -3925,27 +3633,16 @@ _action_move(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       _show_status(p_win, "Nothing to move");
       return;
    }
-
    const GPtrArray *p_dests = mover_get_dests(p_win->p_mover);
-   GtkWidget       *p_pop   = gtk_popover_new();
-   gtk_popover_set_position(GTK_POPOVER(p_pop), GTK_POS_TOP);
-   gtk_popover_set_pointing_to(GTK_POPOVER(p_pop),
-                               &(const GdkRectangle){0, 0, 1, 1});
-   g_signal_connect(GTK_POPOVER(p_pop), "closed", G_CALLBACK(_move_closed_cb),
-                    p_win);
-   GtkEventController *p_kc = gtk_event_controller_key_new();
-   gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
-   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_move_key_pressed_cb),
-                    p_win);
-   gtk_widget_add_controller(p_pop, p_kc);
-
-   gtk_popover_set_child(GTK_POPOVER(p_pop),
-                         _move_build_box(p_win, p_dests, u_count));
-   gtk_widget_set_parent(p_pop, p_win->p_stack);
-   p_win->p_move_pop = p_pop;
+   char            *c_title =
+      g_strdup_printf("Move %u image%s to:", u_count, u_count == 1 ? "" : "s");
+   popup_list_new(p_win->p_stack, &p_win->p_move_pop, c_title,
+                  "No destinations configured. Press , to open Preferences.",
+                  p_dests, _move_name, _move_activate, p_win);
+   g_free(c_title);
    /* Focuses the first destination row itself -- see "POPOVER KEYBOARD
     * FOCUS" near the top of this file. */
-   gtk_popover_popup(GTK_POPOVER(p_pop));
+   popup_list_popup(p_win->p_move_pop);
 }
 
 static const GActionEntry ACTIONS[] = {
