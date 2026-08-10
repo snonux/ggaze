@@ -584,6 +584,59 @@ test_open_external_popup_really_maps(void) {
    reset_editors();
 }
 
+/* Preferences edits to the editors list apply live: with the popover's
+ * window already open and showing 3 editors, changing the editors setting
+ * (via a separate Settings wrapper sharing the memory backend) and re-
+ * firing `e` shows the new list WITHOUT a restart. Exercises the window's
+ * GSettings "changed::editors" handler re-running _load_engine_lists. */
+static void
+test_open_external_prefs_apply_live(void) {
+   reset_editors();
+   set_named_editors(3);
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-oe-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "plain.jpg", "plain.jpg");
+   char  *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   GFile *p_file = g_file_new_for_path(c_path);
+
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_file);
+   drain_main(200);
+
+   /* Baseline: 3 editors. */
+   fire(p_win, "win.open-external");
+   drain_main(200);
+   GtkPopover *p_pop = find_open_external_popover(p_win);
+   g_assert_nonnull(p_pop);
+   g_assert_cmpint(popover_button_count(p_pop), ==, 3);
+   fire(p_win, "win.open-external"); /* close */
+   drain_main(200);
+   g_assert_null(find_open_external_popover(p_win));
+
+   /* Change editors to 1 WITHOUT restarting the window. */
+   reset_editors();
+   set_named_editors(1);
+   drain_main(300); /* let changed::editors re-load the engine */
+
+   /* Re-fire: the popover now reflects the single editor, live. */
+   fire(p_win, "win.open-external");
+   drain_main(200);
+   p_pop = find_open_external_popover(p_win);
+   g_assert_nonnull(p_pop);
+   g_assert_cmpint(popover_button_count(p_pop), ==, 1);
+   g_assert_cmpstr(popover_button_label(p_pop, 0), ==, "1  GIMP");
+   fire(p_win, "win.open-external"); /* close */
+   drain_main(200);
+
+   g_object_unref(p_file);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(300);
+   g_free(c_path);
+   cleanup_temp_dir(c_dir);
+   reset_editors();
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -609,5 +662,7 @@ main(int i_argc, char **c_argv) {
                    test_open_external_popup_empty_message);
    g_test_add_func("/open_external/popup_really_maps",
                    test_open_external_popup_really_maps);
+   g_test_add_func("/open_external/prefs_apply_live",
+                   test_open_external_prefs_apply_live);
    return (g_test_run());
 }

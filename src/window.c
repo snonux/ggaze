@@ -3099,6 +3099,24 @@ _load_engine_lists(GgazeWindow *p_win) {
 #endif
 }
 
+/* GSettings is the single source of truth: a change to any of the engine
+ * list keys (destinations/editors/scripts/enhance-presets) or the viewer
+ * preference keys (background/scroll-behavior) re-applies live, so
+ * Preferences edits take effect immediately instead of on the next launch.
+ * The four list keys reload all engine lists (cheap; lists are small), and
+ * the two viewer keys re-apply background/scroll. Other keys (thumbnail-
+ * size, hide-trashed, sort, ...) are already applied at their own action/
+ * open sites and are not wired here to avoid churn on frequent writes like
+ * the +/- zoom. */
+static void
+_on_pref_changed(GSettings *p_gs, const char *c_key, gpointer p_data) {
+   (void)p_gs;
+   (void)c_key;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   _load_engine_lists(p_win);
+   _apply_viewer_prefs(p_win);
+}
+
 /* Scroll-wheel navigate (GGAZE_SCROLL_NAVIGATE): advance the navigator,
  * prompting Save/Discard/Cancel first if an unsaved (GEGL) enhance preview is
  * active, same as the h/l/g/G actions (_action_prev/next/first/last). */
@@ -4286,6 +4304,20 @@ _init_engines_and_settings(GgazeWindow *p_win) {
    if (p_win->p_settings != NULL) {
       p_win->i_grid_size =
          CLAMP(settings_get_thumbnail_size(p_win->p_settings), 64, 512);
+      /* Re-apply the engine lists + viewer prefs live when the user edits
+       * them in Preferences, instead of waiting for a restart. */
+      GSettings *p_gs = settings_get_gsettings(p_win->p_settings);
+      if (p_gs != NULL) {
+         static const char *KEYS[] = {
+            "destinations",    "editors",    "scripts",
+            "enhance-presets", "background", "scroll-behavior",
+         };
+         for (gsize i = 0; i < G_N_ELEMENTS(KEYS); i++) {
+            char *c_sig = g_strdup_printf("changed::%s", KEYS[i]);
+            g_signal_connect(p_gs, c_sig, G_CALLBACK(_on_pref_changed), p_win);
+            g_free(c_sig);
+         }
+      }
    }
 #if GGAZE_HAVE_GEGL
    _init_enhance_state(p_win); /* must run before _load_engine_lists below,
