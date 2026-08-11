@@ -101,7 +101,7 @@ if libjpeg_dep.found()
    ggaze_extra_deps += libjpeg_dep
 endif
 if gegl_dep.found()
-   ggaze_src += files('src/enhancer.c', 'src/enhance-ui.c')
+   ggaze_src += files('src/enhancer.c', 'src/enhance-ui.c', 'src/enhance-ctrl.c')
    ggaze_extra_deps += gegl_dep
 endif
 
