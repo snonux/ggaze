@@ -39,6 +39,7 @@ on. No library, no database, no sidecars.
 %files
 %{_bindir}/ggaze
 %{_datadir}/applications/org.buetow.ggaze.desktop
+%{_datadir}/icons/hicolor/scalable/apps/ggaze.svg
 %{_datadir}/glib-2.0/schemas/org.buetow.ggaze.gschema.xml
 %{_datadir}/metainfo/org.buetow.ggaze.metainfo.xml
 %{_mandir}/man1/ggaze.1*

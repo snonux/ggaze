@@ -15,6 +15,17 @@ and KISS — no library, no database, no sidecars. The layout nods to gthumb
 ggaze ~/Downloads/Camera/IMG_0001.jpg
 ```
 
+### Install on Fedora (local user + GNOME launcher)
+
+```sh
+./packaging/install-fedora.sh
+```
+
+Installs build deps (via `dnf`), builds, and installs into `~/.local` by
+default — including `org.buetow.ggaze.desktop` and the `ggaze` app icon so
+the app shows up in the GNOME Activities overview. Override with
+`PREFIX=/usr/local` (needs write access) or skip packages with `SKIP_DEPS=1`.
+
 Opens the folder as a thumbnail grid, `Enter` drops into the large view, and
 you flip through the shoot:
 
