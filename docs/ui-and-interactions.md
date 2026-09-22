@@ -92,7 +92,7 @@ drift from the live bindings.
 | `g` / `Home`   | first image |
 | `G` / `End`    | last image |
 | `Enter`        | grid → large (open highlighted) |
-| `Esc`          | one step back: cancel a crop/straighten tool → stop slideshow → close the enhance panel → discard the preview → leave fullscreen → clear marks → large → grid; in the grid a second `Esc` within 2 s quits |
+| `Esc`          | one step back: stop slideshow → cancel a crop/straighten tool → close the enhance panel → discard the preview → leave fullscreen → clear marks → large → grid; in the grid a second `Esc` within 2 s quits (the order `_action_back` in window.c implements) |
 | `t`            | toggle grid ↔ large |
 | `+` / `=`, `Ctrl++` | zoom in (large) / grow thumbnails (grid) |
 | `-` / `_`, `Ctrl+-` | zoom out (large) / shrink thumbnails (grid) |
@@ -278,7 +278,10 @@ Loaded lazily; never blocks display of the pixels.
   `0  Original`, then one per configurable preset with an auto-assigned
   hotkey (`1`, `2`, … capped at the mask's 8 slots), by default each with a
   small preview thumbnail of that preset applied alone (Preferences can turn
-  the thumbnails off for label-only cards). Under the cards: a state line
+  the thumbnails off for label-only cards; the cards and the Original card
+  always show the **untransformed** image — they are references for the
+  colour presets alone and ignore a crop, straighten or turn). Under the
+  cards: a state line
   that says whether the preview is unsaved, a **Save copy** button, and the
   key hint (`1-8` toggle · `0` original · `Space` hold to see the original ·
   `s / Ctrl+S` save · `Esc` close). Example:
@@ -319,8 +322,11 @@ Loaded lazily; never blocks display of the pixels.
   touched**. ggaze **never auto-saves**: an enhance preview is a live overlay
   only. A successful save marks the preview **saved**: it stays on screen
   (pressing `s` again exports another, separately-numbered copy), but it is
-  no longer dirty, so moving on does not prompt. Any further preset change
-  makes it unsaved again.
+  no longer dirty, so moving on does not prompt. What was saved is the exact
+  (presets, transform) combination: any change makes the preview unsaved,
+  and coming back to exactly that combination — a preset toggled off and
+  on, a tool cancelled back to it — makes it saved again, because that is
+  what the file on disk holds.
 - **Dirty state + prompt on navigate:** an active enhance preview that has
   not been exported since its last change is "dirty". Navigating to another image (`h`/`l`/`g`/`G`/scroll),
   picking a different image in the grid (double-click/Enter, middle-click
@@ -396,14 +402,26 @@ built in, all four report "GEGL not built in".
   - `Enter` applies (`gegl:crop`; a rectangle still covering the whole image
     removes the crop), `Esc` or `c` again cancels and restores. `Enter` is
     refused while the preview under the rectangle is still rendering.
+  - While the tool is open the image is shown **without** its crop so the
+    rectangle can be adjusted — but the crop already applied still counts:
+    `s` inside the tool exports the cropped copy and navigating away still
+    prompts for it. A saved crop stays saved through `c` / `Esc`.
 - **`R` → straighten tool:** level the horizon; a grid overlay helps.
   - Mouse: drag a line along the horizon; the image rotates to level it
     (the angle adds to the current one).
   - Keyboard: `h` / `-` nudge counter-clockwise, `l` / `+` clockwise, by
     0.5°, within ±45°; `A` toggles the auto-crop of the rotated corners
-    (default on, decision #35; off keeps the whole rotated bounding box).
-  - Every change renders live (`gegl:rotate` about the centre); `Enter`
-    keeps it, `Esc` or `R` again restores the angle the tool started with.
+    (default on, decision #35; off keeps the whole rotated bounding box —
+    the preview then shows **transparent** corners while a JPEG export gets
+    **black** ones, since JPEG has no alpha; a PNG export keeps them
+    transparent).
+  - Every change renders live (`gegl:rotate` about the centre); holding a
+    nudge key queues one re-render, not one per repeat. `Enter` keeps it,
+    `Esc` or `R` again restores the angle the tool started with. A crop
+    already applied follows the changing image (it stays over the same
+    content, anchored on the centre the straighten turns about); when
+    nothing of it is left at the new angle it is removed and the status
+    line says so (`Esc` brings it back with the old angle).
 - **`[` / `]` → rotate 90°:** one-shot, no overlay — `]` clockwise, `[`
   counterclockwise; repeat to reach 180°/270°, four presses are the original
   again. Non-destructive (`gegl:rotate`, an exact pixel permutation); a crop

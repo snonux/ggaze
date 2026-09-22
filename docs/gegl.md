@@ -26,7 +26,12 @@ editing remains a non-goal.
   mask's 8 slots). By default each card carries a bounded preview thumbnail
   of that preset applied *alone*, all generated as one cancellable background
   batch; Preferences can turn the thumbnails off, which leaves label-only
-  cards (no batch at all) for slower systems.
+  cards (no batch at all) for slower systems. The thumbnails and the
+  Original card ignore the geometric transform (crop / straighten / rotate):
+  they are per-preset colour references, rendered once per image from the
+  untransformed original, and re-rendering nine of them on every nudge
+  would cost more than it tells — the large view is where the composition
+  is judged. Documented as a deliberate limit, not an oversight.
 - Selecting a preset toggles a **GEGL graph** on/off and re-renders the
   viewer through the chain of every currently-enabled preset —
   non-destructively, and **layered**: multiple presets compose (e.g.
@@ -59,9 +64,12 @@ editing remains a non-goal.
   Original untouched. ggaze **never auto-saves** — the preview is a live
   overlay only. A successful save marks the preview **saved**: it stays on
   screen (pressing `s` again exports another numbered copy), but it is no
-  longer *dirty*, so moving on does not prompt for it. Any further preset
-  change makes it unsaved again, even one that lands back on the saved
-  combination. Moving to another image (large-view keys/scroll **or** any
+  longer *dirty*, so moving on does not prompt for it. The saved thing is
+  the exact (mask, transform) pair the export wrote: any change makes the
+  preview unsaved, and landing back on that pair (a preset toggled off and
+  on again, a crop/straighten tool cancelled back to it) makes it saved
+  again — the file on disk is that state whichever way it was reached.
+  Moving to another image (large-view keys/scroll **or** any
   grid/thumbnail selection), trashing/deleting/moving the current file,
   opening a different file/folder, or quitting (`q` **or** the window
   manager's close button / Alt+F4) with an **unsaved** preview prompts
@@ -174,18 +182,35 @@ which the enhancer appends to the chain after the colour presets in decision
   shot, no overlay; repeat for 180°/270°; an applied crop turns with the
   image (`croprect_rotate_quarter`).
 - **`R` — straighten**: `gegl:rotate` about the image centre, then a
-  `gegl:crop` to the analytic size — the largest inscribed rectangle
-  (`transform_autocrop_size`, auto-crop on) or the rotated bounding box
-  (`transform_rotated_size`, auto-crop off). GEGL pads a rotation's extent
-  by a pixel or two for the sampler; cropping to the analytic size is what
-  makes the preview exactly `transform_base_size` of the original, so the
-  crop tool can lay its rectangle out on that size before the preview has
-  rendered. Drag a horizon line or nudge (`h`/`l`, `-`/`+`) with a grid
-  overlay; every change renders live.
+  `gegl:crop` to the analytic size `transform_straighten_size` — the largest
+  inscribed rectangle inset by `TRANSFORM_AUTOCROP_INSET` (1 px) on every
+  side (auto-crop on) or the rotated bounding box (`transform_rotated_size`,
+  auto-crop off) — centred on the rotation centre, not on the rotated
+  node's bounding box. GEGL pads a rotation's extent asymmetrically for the
+  sampler, and the inscribed rectangle touches the rotated edges at its
+  corners where the default linear sampler blends with the transparent
+  abyss: without the inset and the centring the auto-crop kept corner
+  pixels with alpha 145–240, and a JPEG export (no alpha) differed from the
+  preview there. Cropping to the analytic size is also what makes the
+  preview exactly `transform_base_size` of the original, so the crop tool
+  can lay its rectangle out on that size before the preview has rendered;
+  `tests/test_enhancer.c` pins every auto-cropped pixel opaque at several
+  angles and the PNG export byte-identical to the preview. With auto-crop
+  off the corners are transparent in the preview and **black** in a JPEG
+  export. Drag a horizon line or nudge (`h`/`l`, `-`/`+`) with a grid
+  overlay; every change renders live, coalesced (at most one render in
+  flight plus one queued for the latest state, `enhance-ctrl.c`), and a
+  committed crop is re-anchored on the centre for the new base
+  (`transform_rebase_crop`) or dropped with a status line when nothing of it
+  is left.
 - **`c` — crop**: `gegl:crop` of the rectangle, intersected with the base
   image and snapped to whole pixels (`transform_effective_crop`). Interactive
   overlay (`tool-ctrl.c` draws it on the viewer's overlay hook); mouse drag or
-  keyboard; `Enter` applies.
+  keyboard; `Enter` applies. While the tool is open the base is shown
+  through a *preview override* (`enhance_ctrl_set_preview_transform`), not
+  a commit: the committed crop keeps counting as work, so `s` in the tool
+  exports it, navigation prompts for it, and a saved crop stays saved
+  through `c` / `Esc`.
 - GEGL's positive `degrees` turn the image counter-clockwise on screen
   (y down; measured with a 3×2 probe on gegl 0.4.72), so the enhancer negates
   the Transform's clockwise angles.
