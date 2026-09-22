@@ -170,8 +170,9 @@ Small card, top-left or bottom-right:
   is up: a decode landing under the card fills its plot in, hold-Space
   swaps the plot to the original's and back, and a preset landing replaces
   it with the new preview's (the old plot is cleared at once, the new one
-  is binned in the background). The text and the auto-hide timer are not
-  touched by any of that.
+  is binned in the background), and `t` to the grid under a card takes the
+  plot down while the text stays (`t` back fills it in again). The text and
+  the auto-hide timer are not touched by any of that.
 - shot number within the current burst group (once burst grouping lands)
 - color space (once color management lands)
 Loaded lazily; never blocks display of the pixels. The histogram is gathered

@@ -78,8 +78,10 @@ void info_overlay_toggle_for_file(InfoOverlay *p_io, GFile *p_file,
  * auto-hide timer is not touched, the text does not change); while the
  * card's own gather is still in flight, that gather restarts with p_tex.
  * A status line and a hidden card ignore it, as does a repeat of the texture
- * already plotted. window.c calls this from its one texture choke point, so
- * "histogram of the image on screen" holds for the card's whole lifetime. */
+ * already plotted. window.c calls this from its one texture choke point and
+ * from its view switch (the grid shows no picture, so `t` under a card
+ * passes NULL and `t` back passes the picture again), so "histogram of the
+ * image on screen" holds for the card's whole lifetime. */
 void info_overlay_texture_changed(InfoOverlay *p_io, GdkTexture *p_tex);
 
 /* Hide the label, cancel the timer and any in-flight request (navigation:

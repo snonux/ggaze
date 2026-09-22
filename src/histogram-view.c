@@ -49,12 +49,12 @@ _draw_channel(GtkSnapshot *p_snap, const Histogram *p_hist,
    for (guint u = 0; u < HISTOGRAM_BINS; u++) {
       guint32 u_count = p_hist->u_bins[e_ch][u];
       if (u_count == 0) {
-         continue;
+         continue; /* an empty bin appends no node at all */
       }
       float           f_bar_h = f_h * (float)u_count / (float)p_hist->u_peak;
-      graphene_rect_t rect    = GRAPHENE_RECT_INIT(
+      graphene_rect_t s_bar   = GRAPHENE_RECT_INIT(
          (float)u * f_bin_w, f_h - f_bar_h, f_bin_w, f_bar_h);
-      gtk_snapshot_append_color(p_snap, p_color, &rect);
+      gtk_snapshot_append_color(p_snap, p_color, &s_bar);
    }
 }
 
@@ -63,24 +63,29 @@ ggaze_histogram_view_snapshot(GtkWidget *p_widget, GtkSnapshot *p_snap) {
    GgazeHistogramView *p_view = GGAZE_HISTOGRAM_VIEW(p_widget);
    const Histogram    *p_hist = p_view->p_hist;
    if (p_hist == NULL || p_hist->u_peak == 0) {
-      return;
+      return; /* nothing to plot: not even the floor, the widget is hidden */
    }
    float f_w = (float)gtk_widget_get_width(p_widget);
    float f_h = (float)gtk_widget_get_height(p_widget);
-   /* A faint plot floor so an all-dark image still reads as "a histogram
-    * with everything piled left" rather than an empty gap in the card. */
-   const GdkRGBA   floor      = {1.0f, 1.0f, 1.0f, 0.12f};
-   graphene_rect_t floor_rect = GRAPHENE_RECT_INIT(0.f, 0.f, f_w, f_h);
-   gtk_snapshot_append_color(p_snap, &floor, &floor_rect);
+   /* Struct-by-value locals carry an s_ prefix here (viewer.c leaves its
+    * GdkRGBA / graphene values bare, which is fine as long as no name
+    * collides with libc -- the plot floor used to be called `floor`,
+    * hiding floor(3), so this file prefixes all of them consistently). */
+   /* A faint plot floor (one node under everything) so an all-dark image
+    * still reads as "a histogram with everything piled left" rather than an
+    * empty gap in the card. */
+   const GdkRGBA   s_floor_rgba = {1.0f, 1.0f, 1.0f, 0.12f};
+   graphene_rect_t s_floor_rect = GRAPHENE_RECT_INIT(0.f, 0.f, f_w, f_h);
+   gtk_snapshot_append_color(p_snap, &s_floor_rgba, &s_floor_rect);
    /* Luminance first (light grey, underneath), then the three primaries. */
-   const GdkRGBA lum = {0.9f, 0.9f, 0.9f, 0.35f};
-   const GdkRGBA red = {1.0f, 0.25f, 0.25f, 0.55f};
-   const GdkRGBA grn = {0.25f, 1.0f, 0.25f, 0.55f};
-   const GdkRGBA blu = {0.35f, 0.45f, 1.0f, 0.55f};
-   _draw_channel(p_snap, p_hist, HISTOGRAM_CHANNEL_LUM, &lum, f_w, f_h);
-   _draw_channel(p_snap, p_hist, HISTOGRAM_CHANNEL_R, &red, f_w, f_h);
-   _draw_channel(p_snap, p_hist, HISTOGRAM_CHANNEL_G, &grn, f_w, f_h);
-   _draw_channel(p_snap, p_hist, HISTOGRAM_CHANNEL_B, &blu, f_w, f_h);
+   const GdkRGBA s_lum = {0.9f, 0.9f, 0.9f, 0.35f};
+   const GdkRGBA s_red = {1.0f, 0.25f, 0.25f, 0.55f};
+   const GdkRGBA s_grn = {0.25f, 1.0f, 0.25f, 0.55f};
+   const GdkRGBA s_blu = {0.35f, 0.45f, 1.0f, 0.55f};
+   _draw_channel(p_snap, p_hist, HISTOGRAM_CHANNEL_LUM, &s_lum, f_w, f_h);
+   _draw_channel(p_snap, p_hist, HISTOGRAM_CHANNEL_R, &s_red, f_w, f_h);
+   _draw_channel(p_snap, p_hist, HISTOGRAM_CHANNEL_G, &s_grn, f_w, f_h);
+   _draw_channel(p_snap, p_hist, HISTOGRAM_CHANNEL_B, &s_blu, f_w, f_h);
 }
 
 static void

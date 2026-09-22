@@ -130,6 +130,7 @@ static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
 static void     _show_info(GgazeWindow *p_win);
 static void     _dismiss_info_for_nav(GgazeWindow *p_win);
 static void     _show_status(GgazeWindow *p_win, const char *c_msg);
+static void     _sync_info_plot(GgazeWindow *p_win);
 static gboolean _slideshow_tick(gpointer p_data);
 static void     _apply_viewer_prefs(GgazeWindow *p_win);
 static void     _load_engine_lists(GgazeWindow *p_win);
@@ -422,6 +423,15 @@ _set_view(GgazeWindow *p_win, GgazeViewMode e_view) {
     * beside the large view and hidden (not closed -- its state survives a
     * `t` round trip) with the grid or the empty page. */
    gtk_widget_set_visible(p_win->p_side_slot, e_view == GGAZE_VIEW_LARGE);
+   /* The info card may be up across the switch (`i`, then `t`), and its
+    * plot is about the large view's picture: leaving it for the grid or the
+    * empty page must take the plot down for the rest of the card's time
+    * (the grid card has no plot -- there is no picture on screen to judge),
+    * and coming back must fill it in again. Both fall out of one sync:
+    * _info_texture_for() says NULL outside the large view. Safe at init,
+    * where the overlay and the navigator may not exist yet: the sync is a
+    * no-op without either. */
+   _sync_info_plot(p_win);
 }
 
 /* TRUE iff a folder is open; otherwise says so (the keys that need a folder
@@ -1473,7 +1483,17 @@ _slideshow_tick(gpointer p_data) {
  * swaps in the preview of that same file. The displayed texture must be one
  * of those two to be plotted; anything else means "still decoding" -> no
  * plot, and _sync_info_plot() fills the plot in once the decode lands. The
- * grid never plots: there is no displayed texture to judge there. */
+ * grid never plots: there is no displayed texture to judge there.
+ *
+ * One consequence, accepted: while an enhance preview is up the cache
+ * entry for p_cur is the ORIGINAL the override maps to the preview, and the
+ * cache is a bounded LRU (texturecache.h, cap 4) that prefetch can evict
+ * from. Once the original is evicted, get_cached says NULL, the check fails
+ * and the card simply has no plot -- never a wrong one, which is the
+ * invariant that matters; a missing plot is a visible, harmless gap the
+ * next texture change (or `i` again after the original is re-cached) fills
+ * in, whereas plotting the preview on trust would reopen the mispairing
+ * this function exists to close. */
 static GdkTexture *
 _info_texture_for(GgazeWindow *p_win, GFile *p_cur) {
    if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
@@ -1509,17 +1529,18 @@ _show_info(GgazeWindow *p_win) {
                                 _info_texture_for(p_win, p_cur));
 }
 
-/* The picture changed (every path funnels through _show_texture): tell the
- * info overlay which texture it may plot now -- the displayed one when
- * _info_texture_for() vouches for it as the current file's, else NULL -- so
- * a card that is up follows hold-Space, a landing preset and a decode
- * landing under a card opened while it was in flight. The overlay ignores
- * the call unless a file card is up or being gathered, so this costs
- * nothing on the plain load path. */
+/* The picture changed (every path funnels through _show_texture) or the
+ * view did (_set_view): tell the info overlay which texture it may plot now
+ * -- the displayed one when _info_texture_for() vouches for it as the
+ * current file's, else NULL -- so a card that is up follows hold-Space, a
+ * landing preset, a decode landing under a card opened while it was in
+ * flight, and a `t` to the grid and back. The overlay ignores the call
+ * unless a file card is up or being gathered, so this costs nothing on the
+ * plain load path. */
 static void
 _sync_info_plot(GgazeWindow *p_win) {
    if (p_win->p_info == NULL) {
-      return; /* mid-teardown: no card to keep in step */
+      return; /* mid-teardown or still constructing: no card to keep in step */
    }
    GFile *p_cur =
       p_win->p_nav != NULL ? navigator_get_current(p_win->p_nav) : NULL;

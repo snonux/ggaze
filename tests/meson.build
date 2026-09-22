@@ -544,6 +544,22 @@ test_viewer = executable(
 )
 test('viewer', test_viewer, suite : 'integration', env : fixtures_env)
 
+# info_overlay: the InfoOverlay driven directly on a bare GtkOverlay (no
+# GgazeWindow), for the paths the window suites cannot reach -- a plot-only
+# refresh landing after a status line took the card, texture_changed(NULL),
+# the 5 s auto-hide timer (one real wait, hence the timeout), dispose -- and
+# the GgazeHistogramView draw path in a presented window (Xvfb in CI).
+test_info_overlay = executable(
+   'test_info_overlay',
+   ['test_info_overlay.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib,
+   install : false,
+)
+test('info_overlay', test_info_overlay, suite : 'integration',
+   env : fixtures_env, timeout : 60)
+
 test_open_and_show = executable(
    'test_open_and_show',
    ['test_open_and_show.c', ggaze_conf_h],

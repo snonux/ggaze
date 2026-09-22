@@ -21,10 +21,14 @@
  * left behind by `i` toggling the card off; test_info_no_plot_while_loading()
  * -- `i` during a texturecache-miss decode (the previous picture still on
  * screen) must not pair the new file's text with the old file's plot, and
- * the plot follows the decode once it lands under the card; and
+ * the plot follows the decode once it lands under the card;
  * test_status_clears_plot() -- a status line taking over the card carries no
- * plot under it. (The plot following hold-Space and a landing preset is the
- * GEGL lane's /enhance_flow/info_plots_preview.)
+ * plot under it; and test_toggle_view_follows_card() -- `t` to the grid
+ * takes the plot off a card that stays up, `t` back fills it in. (The plot
+ * following hold-Space and a landing preset is the GEGL lane's
+ * /enhance_flow/info_plots_preview; the overlay's own edge cases -- a
+ * dropped late plot, texture_changed(NULL), the auto-hide timer, dispose --
+ * and the plot widget's draw path are tests/test_info_overlay.c.)
  *
  * The window is built with g_object_new() (no "application" property): the
  * stack/header are constructed in ggaze_window_init, independent of the app
@@ -373,32 +377,6 @@ assert_no_plot(GgazeWindow *p_win) {
       ggaze_histogram_view_get_histogram(GGAZE_HISTOGRAM_VIEW(p_plot)));
 }
 
-/* Drain until the viewer shows a texture other than p_old with the given
- * dimensions (an async decode landed). wait_for_load() cannot serve here:
- * on a texturecache miss the viewer keeps the previous texture up, so
- * "non-NULL" is true throughout. The caller must hold its own ref on p_old:
- * with the cache cleared the viewer's ref is the last one, a progressive
- * partial replacing it frees it, and the final texture can then land at the
- * very same address -- which a bare pointer comparison mistakes for "not
- * changed". The dimensions tell the final texture from a partial. */
-static void
-wait_for_texture_change(GgazeWindow *p_win, GdkTexture *p_old, int i_w,
-                        int i_h) {
-   for (guint u = 0; u < 3000; u++) {
-      GdkTexture *p_tex = viewer_texture(p_win);
-      if (p_tex != NULL && p_tex != p_old &&
-          gdk_texture_get_width(p_tex) == i_w &&
-          gdk_texture_get_height(p_tex) == i_h) {
-         break;
-      }
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_true(viewer_texture(p_win) != p_old);
-   g_assert_cmpint(gdk_texture_get_width(viewer_texture(p_win)), ==, i_w);
-   drain_main(200);
-}
-
 /* Open a fresh two-image folder (A plain.jpg 6x3, B rot6.jpg 4x8 upright)
  * on a new window showing A. *pc_dir receives the temp dir to clean up. */
 static GgazeWindow *
@@ -517,6 +495,38 @@ test_status_clears_plot(void) {
    close_window_and_folder(p_win, c_dir);
 }
 
+/* Third review on 0c2: `t` with a file card up used to leave the large
+ * view's plot on the card over the grid for the rest of its 5 s, though the
+ * grid card has no plot (docs/ui-and-interactions.md). The view switch now
+ * syncs the plot like a texture change does: to the grid it goes down at
+ * once, the text stays; back to the large view it fills in again from the
+ * picture that is still on screen, without a second `i`. */
+static void
+test_toggle_view_follows_card(void) {
+   char        *c_dir = NULL;
+   GgazeWindow *p_win = open_two_image_folder(&c_dir);
+   GtkWidget   *p_lbl = ggaze_window_get_info_label(p_win);
+
+   show_info_expect_plot(p_win, 6 * 3);
+   fire(p_win, "win.toggle-view"); /* -> grid, card still up */
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "grid");
+   g_assert_true(gtk_widget_get_visible(p_lbl));
+   assert_no_plot(p_win);
+   drain_main(100); /* nothing lands later either */
+   assert_no_plot(p_win);
+
+   fire(p_win, "win.toggle-view"); /* -> large: the plot comes back */
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "large");
+   g_assert_true(gtk_widget_get_visible(p_lbl));
+   wait_for_plot(p_win, 6 * 3);
+
+   close_window_and_folder(p_win, c_dir);
+}
+
 /* tu0 requirement 8: every new enhance UI entry point must stay safe when
  * GEGL is not built in, and say so clearly rather than silently no-op'ing or
  * crashing. Built (and run) in BOTH lanes (unlike tests/test_enhance_flow.c,
@@ -608,6 +618,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/window/info_no_plot_while_loading",
                    test_info_no_plot_while_loading);
    g_test_add_func("/window/status_clears_plot", test_status_clears_plot);
+   g_test_add_func("/window/toggle_view_follows_card",
+                   test_toggle_view_follows_card);
    g_test_add_func("/window/enhance_a_is_safe_with_and_without_gegl",
                    test_enhance_a_is_safe_with_and_without_gegl);
    return (g_test_run());
