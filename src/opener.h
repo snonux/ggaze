@@ -27,6 +27,12 @@ const GPtrArray *opener_get_progs(Opener *p_o);
 
 /* Launch the program (p_prog->c_value) with %f expanded to the file's path.
  * Detached. Returns TRUE if the process was started. */
+/* Expand %f in c_cmd into an argv vector: the template is shell-parsed first,
+ * then %f is substituted into the parsed elements, so the path is always one
+ * argv value. Returns a NULL-terminated vector (g_strfreev) or NULL with
+ * p_err on a parse error. Public so tests can check the argv shape. */
+char **opener_expand_command(const char *c_cmd, GFile *p_file, GError **p_err);
+
 gboolean opener_launch(GFile *p_file, const SettingsPair *p_prog,
                        GError **p_err);
 

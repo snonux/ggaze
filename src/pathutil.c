@@ -1,4 +1,12 @@
-/* pathutil.c — shared path/string helpers (see pathutil.h). */
+/*:*
+ * ggaze — shared path helpers
+ *
+ * See pathutil.h: stem/extension split, symlink-safe directory checks and
+ * the one non-colliding child-name rule trash, move and enhance-save share.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
 #include "pathutil.h"
 
 #include <gio/gio.h>

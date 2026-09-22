@@ -1,5 +1,17 @@
-/* runner.c — async shell script runner with %f/%d expansion + injection guard.
- */
+/*:*
+ * ggaze — configurable shell scripts (`!`)
+ *
+ * Holds the ordered script list (SettingsPair: name + shell command with %f
+ * and %d) read from GSettings and runs one via /bin/sh -c as an async
+ * GSubprocess, reporting the exit status through a GAsyncReadyCallback. The
+ * placeholders are expanded in ONE left-to-right pass with g_shell_quote, so
+ * a hostile file or folder name can never escape its quotes. Plain-C,
+ * unit-testable.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
+
 #include "runner.h"
 
 #include <gio/gio.h>
@@ -7,34 +19,36 @@
 #include <string.h>
 
 struct Runner {
-   GPtrArray *p_scripts;
+   GPtrArray *p_scripts; /* SettingsPair* (owned) */
 };
 
 Runner *
 runner_new(void) {
-   Runner *r    = g_new0(Runner, 1);
-   r->p_scripts = g_ptr_array_new_with_free_func(settings_pair_free);
-   return r;
+   Runner *p_r    = g_new0(Runner, 1);
+   p_r->p_scripts = settings_pair_array_new();
+   return (p_r);
 }
 
 void
-runner_delete(Runner *r) {
-   if (!r)
+runner_delete(Runner *p_r) {
+   if (p_r == NULL) {
       return;
-   g_ptr_array_unref(r->p_scripts);
-   g_free(r);
+   }
+   g_ptr_array_unref(p_r->p_scripts);
+   g_free(p_r);
 }
 
 void
-runner_set_scripts(Runner *r, const GPtrArray *p) {
-   g_return_if_fail(r != NULL);
-   g_ptr_array_unref(r->p_scripts);
-   r->p_scripts = settings_pair_array_copy(p);
+runner_set_scripts(Runner *p_r, const GPtrArray *p_scripts) {
+   g_return_if_fail(p_r != NULL);
+   g_ptr_array_unref(p_r->p_scripts);
+   p_r->p_scripts = settings_pair_array_copy(p_scripts);
 }
 
 const GPtrArray *
-runner_get_scripts(Runner *r) {
-   return r ? r->p_scripts : NULL;
+runner_get_scripts(Runner *p_r) {
+   g_return_val_if_fail(p_r != NULL, NULL);
+   return (p_r->p_scripts);
 }
 
 /* Expand %f (file path) and %d (folder path) in c_cmd, each single-quoted
@@ -47,8 +61,8 @@ runner_get_scripts(Runner *r) {
  * "%"; any other "%x" is copied through unchanged. Caller frees. */
 static char *
 _expand(const char *c_cmd, GFile *p_file, GFile *p_dir) {
-   char *c_fpath = p_file ? g_file_get_path(p_file) : g_strdup("");
-   char *c_dpath = p_dir ? g_file_get_path(p_dir) : g_strdup("");
+   char *c_fpath = p_file != NULL ? g_file_get_path(p_file) : g_strdup("");
+   char *c_dpath = p_dir != NULL ? g_file_get_path(p_dir) : g_strdup("");
    char *c_fq    = g_shell_quote(c_fpath != NULL ? c_fpath : "");
    char *c_dq    = g_shell_quote(c_dpath != NULL ? c_dpath : "");
    g_free(c_fpath);
@@ -84,41 +98,40 @@ _expand(const char *c_cmd, GFile *p_file, GFile *p_dir) {
 }
 
 gboolean
-runner_run(Runner *r, GFile *p_file, GFile *p_dir, const SettingsPair *p_script,
-           GAsyncReadyCallback p_cb, gpointer p_data, GError **p_err) {
-   (void)r;
-   g_return_val_if_fail(p_script, FALSE);
+runner_run(Runner *p_r, GFile *p_file, GFile *p_dir,
+           const SettingsPair *p_script, GAsyncReadyCallback p_cb,
+           gpointer p_data, GError **p_err) {
+   g_return_val_if_fail(p_r != NULL, FALSE);
+   g_return_val_if_fail(p_script != NULL, FALSE);
    char *c_cmd = _expand(p_script->c_value, p_file, p_dir);
-   if (c_cmd == NULL) {
-      g_set_error(p_err, G_SHELL_ERROR, G_SHELL_ERROR_FAILED,
-                  "runner: failed to expand script command");
-      return FALSE;
-   }
    /* Pass the whole expanded command as a single argv element to sh -c so
     * that pipelines, redirections, && and multi-word arguments are parsed
     * by the shell as one script (not split by g_shell_parse_argv, which
     * would feed sh -c only the first word and treat the rest as $0/$1...).
     * %f/%d are already single-quoted by _expand, so paths stay safe. */
-   const char  *argv[] = {"/bin/sh", "-c", c_cmd, NULL};
-   GSubprocess *p_sub = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_NONE, p_err);
+   const char  *c_argv[] = {"/bin/sh", "-c", c_cmd, NULL};
+   GSubprocess *p_sub =
+      g_subprocess_newv(c_argv, G_SUBPROCESS_FLAGS_NONE, p_err);
    g_free(c_cmd);
-   if (p_sub == NULL)
-      return FALSE;
-   if (p_cb) {
+   if (p_sub == NULL) {
+      return (FALSE);
+   }
+   if (p_cb != NULL) {
       g_subprocess_wait_check_async(p_sub, NULL, p_cb, p_data);
    }
    g_object_unref(p_sub);
-   return TRUE;
+   return (TRUE);
 }
 
 int
 runner_run_finish(GAsyncResult *p_res, GError **p_err) {
    GSubprocess *p_sub = G_SUBPROCESS(g_async_result_get_source_object(p_res));
-   if (p_sub == NULL)
-      return -1;
-   gboolean ok    = g_subprocess_wait_check_finish(p_sub, p_res, p_err);
+   if (p_sub == NULL) {
+      return (-1);
+   }
+   gboolean b_ok  = g_subprocess_wait_check_finish(p_sub, p_res, p_err);
    int      i_ret = 0;
-   if (!ok) {
+   if (!b_ok) {
       /* Distinguish a normal non-zero exit (G_SPAWN_EXIT_ERROR) from a
        * launch/wait failure: report the real exit status in the former so
        * the UI can show "failed (exit N)". -1 means an error (no exit code).
@@ -133,5 +146,5 @@ runner_run_finish(GAsyncResult *p_res, GError **p_err) {
       }
    }
    g_object_unref(p_sub);
-   return i_ret;
+   return (i_ret);
 }

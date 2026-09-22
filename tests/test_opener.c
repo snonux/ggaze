@@ -1,17 +1,17 @@
-/* test_opener.c — %f expansion + launch with true/false.
+/*:*
+ * ggaze — opener unit test
  *
- * The argv-shape regression test (test_expand_weird_one_argv) calls
- * _expand_command directly. That function is non-static in opener.c (with the
- * `_` prefix retained to mark it as non-public) exactly so this test can
- * inspect the parsed argv; it is declared here via an extern prototype rather
- * than exposed in the public opener.h, to avoid public-header pollution. */
+ * %f expansion + launch with true/false. The argv-shape regression test
+ * (test_expand_weird_one_argv) calls opener_expand_command directly, which
+ * opener.h exposes for exactly this purpose.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
+
 #include "opener.h"
 #include <gio/gio.h>
 #include <glib.h>
-
-/* Non-static internal from opener.c (test-only accessor); see top-of-file
- * comment. */
-extern char **_expand_command(const char *c_cmd, GFile *p_file, GError **p_err);
 
 static GFile *
 make_tmp_file(void) {
@@ -198,12 +198,12 @@ test_empty(void) {
  * metacharacters) and an UNQUOTED %f template, the path must land in the
  * parsed argv as exactly ONE element — not split on the path's spaces. `true`
  * would ignore extra args, so a launch-only check cannot prove this; we
- * inspect the argv shape directly via _expand_command. */
+ * inspect the argv shape directly via opener_expand_command. */
 static void
 test_expand_weird_one_argv(void) {
    GFile  *f    = make_weird_file();
    GError *e    = NULL;
-   char  **argv = _expand_command("true %f", f, &e);
+   char  **argv = opener_expand_command("true %f", f, &e);
    g_assert_no_error(e);
    g_assert_nonnull(argv);
    /* argv = {"true", "<weird path>", NULL} — exactly three slots. */
@@ -224,7 +224,7 @@ static void
 test_expand_no_local_path(void) {
    GFile  *f    = g_file_new_for_uri("https://example.com/img.jpg");
    GError *e    = NULL;
-   char  **argv = _expand_command("editor %f", f, &e);
+   char  **argv = opener_expand_command("editor %f", f, &e);
    g_assert_null(argv);
    g_assert_nonnull(e);
    g_error_free(e);

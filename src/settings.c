@@ -1,4 +1,12 @@
-/* settings.c — GSettings wrapper (org.buetow.ggaze). */
+/*:*
+ * ggaze — GSettings wrapper (org.buetow.ggaze)
+ *
+ * See settings.h. Typed accessors over the schema's scalar keys and the
+ * validated a(ss) lists.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
 #include "settings.h"
 
 #include <glib.h>
@@ -19,17 +27,17 @@ static GPtrArray *
 _get_pairs(GSettings *p_gs, const char *c_key) {
    GPtrArray   *p_out = _new_pair_array();
    GVariant    *p_v   = g_settings_get_value(p_gs, c_key);
-   GVariantIter iter;
-   g_variant_iter_init(&iter, p_v);
+   GVariantIter t_iter;
+   g_variant_iter_init(&t_iter, p_v);
    const gchar *c_name;
    const gchar *c_value;
-   while (g_variant_iter_next(&iter, "(ss)", &c_name, &c_value)) {
+   while (g_variant_iter_next(&t_iter, "(ss)", &c_name, &c_value)) {
       g_ptr_array_add(p_out, settings_pair_new(c_name, c_value));
       g_free((gpointer)c_name);
       g_free((gpointer)c_value);
    }
    g_variant_unref(p_v);
-   return p_out;
+   return (p_out);
 }
 
 gboolean
@@ -70,7 +78,7 @@ _set_pairs(Settings *p_s, const char *c_key, const GPtrArray *p_pairs,
    GVariant *p_v = g_variant_builder_end(p_b);
    g_variant_builder_unref(p_b);
    g_settings_set_value(p_s->p_gs, c_key, p_v);
-   return u_ok;
+   return (u_ok);
 }
 
 Settings *
@@ -84,7 +92,7 @@ settings_new_for_gsettings(GSettings *p_gs) {
    g_return_val_if_fail(G_IS_SETTINGS(p_gs), NULL);
    Settings *p_s = g_new0(Settings, 1);
    p_s->p_gs     = p_gs; /* adopt the caller's ref */
-   return p_s;
+   return (p_s);
 }
 
 void
@@ -99,7 +107,7 @@ settings_delete(Settings *p_s) {
 GSettings *
 settings_get_gsettings(Settings *p_s) {
    g_return_val_if_fail(p_s != NULL, NULL);
-   return p_s->p_gs;
+   return (p_s->p_gs);
 }
 
 /* --- scalar keys --------------------------------------------------------- */

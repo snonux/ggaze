@@ -18,6 +18,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
@@ -64,6 +65,25 @@ void loader_load_async(GFile *p_file, GCancellable *p_cancel,
 
 /* Finish an async load; returns the GdkTexture (transfer full) or NULL. */
 GdkTexture *loader_load_finish(GAsyncResult *p_res, GError **p_err);
+
+/* Decode p_file to an upright GdkPixbuf no larger than i_max_px on either
+ * side (aspect kept), for the thumbnail cache. Formats GdkPixbuf knows take
+ * the fast at-scale path (a JPEG decodes at 1/8 straight from DCT); formats
+ * only a specific backend decodes (JXL/AVIF/HEIF) go through that backend's
+ * full decode and are scaled afterwards -- which is what keeps the grid from
+ * staying blank for exactly the formats the large view can show. The same
+ * oversized-JPEG guard the full path uses runs here, so a crafted header
+ * cannot stall the thumbnail pool. Caller unrefs. */
+GdkPixbuf *loader_load_pixbuf_scaled(GFile *p_file, int i_max_px,
+                                     GCancellable *p_cancel, GError **p_err);
+
+/* The STORED pixel dimensions of p_file (before EXIF orientation, as an
+ * EXIF card reports them) without decoding it when GdkPixbuf can parse the
+ * header, else -- for a format only a specific backend decodes (JXL/AVIF/
+ * HEIF) -- through that backend's decode, in which case they are the
+ * upright ones. FALSE when they cannot be determined. Callers gathering
+ * info for arbitrary files should run in a worker (the decode path). */
+gboolean loader_peek_dimensions(GFile *p_file, int *p_w, int *p_h);
 
 G_END_DECLS
 

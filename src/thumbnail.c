@@ -12,11 +12,9 @@
  * side was always correct, but the read side asked gdk-pixbuf for the wrong
  * option key and so judged *every* entry stale. See _thumb_option() below.
  *
- * JPEG-specific guard (mu0 review round 2): _generate() calls
- * gdk_pixbuf_new_from_file_at_scale() directly on the source file, bypassing
- * src/loader/loader.c entirely, so it did not inherit that module's
- * oversized-declared-header guard. See _thumb_reject_if_oversized_jpeg()
- * below.
+ * Decoding goes through loader_load_pixbuf_scaled(), so the thumbnail of a
+ * JXL/AVIF/HEIF file comes from the same backend the large view uses and the
+ * oversized-JPEG guard is the loader's, not a copy.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -29,7 +27,7 @@
 #include <gio/gio.h>
 #include <glib.h>
 
-#include "loader/detect.h"
+#include "loader/loader.h"
 #include "loader/pixbuf-util.h"
 
 #define GGAZE_TMS_NORMAL 128
@@ -147,41 +145,6 @@ _load_cached(GFile *p_file, const char *c_path, gint64 i_mtime) {
    return (p_tex);
 }
 
-/* Reject c_path if it is a JPEG whose declared header dimensions exceed
- * GGAZE_JPEG_MAX_SIDE/GGAZE_JPEG_MAX_PIXELS, before handing it to
- * gdk_pixbuf_new_from_file_at_scale(). _generate() runs in the (1-4 worker)
- * thumbnail GThreadPool, triggered per-cell just by scrolling a directory
- * into view (gridview.c's _on_pic_map) -- no click needed -- so a handful of
- * malicious files in one folder can otherwise stall the whole pool for ~28s
- * each (mu0 review round 2: GdkPixbuf/glycin pre-allocates a huge sparse
- * memfd off the declared size before its own internal cap rejects it).
- * Mirrors pixbuf.c's/jpeg.c's twin guards; on rejection sets *p_err exactly
- * as gdk_pixbuf_new_from_file_at_scale() itself would have on failure, so
- * _generate()'s caller needs no new failure-handling path.
- *
- * detect_jpeg_peek_dims_from_path() only scans a bounded prefix of c_path, so
- * it can come back GGAZE_JPEG_PEEK_INCONCLUSIVE (a filler marker segment
- * pushed the real SOF past the prefix) instead of a definite answer. That
- * case is rejected the same as an oversized header, not treated as "safe to
- * decode" -- otherwise a padded file bypasses this guard entirely and
- * reintroduces the same stall (mu0 review round 3). */
-static gboolean
-_thumb_reject_if_oversized_jpeg(const char *c_path, GError **p_err) {
-   guint32             u_w, u_h;
-   GgazeJpegPeekStatus e_status =
-      detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h);
-   if (e_status == GGAZE_JPEG_PEEK_NOT_JPEG) {
-      return (TRUE);
-   }
-   if (e_status == GGAZE_JPEG_PEEK_INCONCLUSIVE) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                  "jpeg: could not determine declared dimensions within the "
-                  "scanned header prefix; refusing to decode");
-      return (FALSE);
-   }
-   return (detect_jpeg_dims_within_bounds(u_w, u_h, p_err));
-}
-
 /* Best-effort write of p_use to c_cache_path as a TMS PNG (Thumb::URI/MTime/
  * Size). Failure to write is non-fatal -- the texture is still returned to
  * the caller even if the on-disk cache entry could not be created. Split out
@@ -204,29 +167,18 @@ _write_cache(GFile *p_file, GdkPixbuf *p_use, const char *c_cache_path,
    g_free(c_uri);
 }
 
-/* Decode the image at <= i_bucket px (preserving aspect), apply EXIF
- * orientation, and write a TMS PNG to c_cache_path. Returns the texture. */
+/* Decode the image at <= i_bucket px (preserving aspect) through the loader
+ * (so every format the large view shows gets a thumbnail, and the oversized-
+ * JPEG guard lives in one place), upright, and write a TMS PNG to
+ * c_cache_path. Returns the texture. */
 static GdkTexture *
 _generate(GFile *p_file, int i_bucket, const char *c_cache_path, gint64 i_mtime,
-          gint64 i_size, GError **p_err) {
-   char *c_path = g_file_get_path(p_file);
-   if (c_path == NULL) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                  "cannot thumbnail a non-local file");
+          gint64 i_size, GCancellable *p_cancel, GError **p_err) {
+   GdkPixbuf *p_use =
+      loader_load_pixbuf_scaled(p_file, i_bucket, p_cancel, p_err);
+   if (p_use == NULL) {
       return (NULL);
    }
-   if (!_thumb_reject_if_oversized_jpeg(c_path, p_err)) {
-      g_free(c_path);
-      return (NULL);
-   }
-   GdkPixbuf *p_pix = gdk_pixbuf_new_from_file_at_scale(c_path, i_bucket,
-                                                        i_bucket, TRUE, p_err);
-   g_free(c_path);
-   if (p_pix == NULL) {
-      return (NULL);
-   }
-   GdkPixbuf *p_use = pixbuf_util_upright(p_pix);
-   g_object_unref(p_pix);
 
    _write_cache(p_file, p_use, c_cache_path, i_mtime, i_size);
 
@@ -305,7 +257,7 @@ _thumb_run(GTask *p_task) {
          return;
       }
       p_tex = _generate(p_tt->p_file, p_tt->i_bucket, p_tt->c_cache_path,
-                        i_mtime, i_size, &p_err);
+                        i_mtime, i_size, p_cancel, &p_err);
    }
    if (p_tex == NULL) {
       g_task_return_error(p_task, p_err);

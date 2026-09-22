@@ -1,4 +1,11 @@
-/* undo.c — unified-undo arbitration (see undo.h). */
+/*:*
+ * ggaze — unified-undo arbitration
+ *
+ * See undo.h: which of trash / move a press of `u` undoes.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
 #include "undo.h"
 
 #include <glib.h>

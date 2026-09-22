@@ -1,4 +1,12 @@
-/* delete-confirm.c — bulk-delete confirm flow (see delete-confirm.h). */
+/*:*
+ * ggaze — bulk-delete confirm flow
+ *
+ * See delete-confirm.h. Owns the >1-target permanent-delete GtkAlertDialog,
+ * the targets captured at prompt time and the folder-identity re-check.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
 #include "delete-confirm.h"
 
 #include <gio/gio.h>

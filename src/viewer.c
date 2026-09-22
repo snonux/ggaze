@@ -258,8 +258,8 @@ ggaze_viewer_class_init(GgazeViewerClass *p_klass) {
 /* --- controllers ---------------------------------------------------------- */
 
 static void
-drag_begin_cb(GtkGestureDrag *p_gesture, gdouble d_x, gdouble d_y,
-              gpointer p_data) {
+_drag_begin_cb(GtkGestureDrag *p_gesture, gdouble d_x, gdouble d_y,
+               gpointer p_data) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_data);
    (void)p_gesture;
    (void)d_x;
@@ -269,8 +269,8 @@ drag_begin_cb(GtkGestureDrag *p_gesture, gdouble d_x, gdouble d_y,
 }
 
 static void
-drag_update_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
-               gpointer p_data) {
+_drag_update_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
+                gpointer p_data) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_data);
    (void)p_gesture;
    p_v->d_pan_x = p_v->d_drag_start_pan_x + d_dx;
@@ -280,7 +280,7 @@ drag_update_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
 
 /* The zoom centre for a scroll event: the pointer position translated into
  * widget space when the event carries one (finite), else the widget centre.
- * See the hx0 note in scroll_cb for why the fallback is mandatory. */
+ * See the hx0 note in _scroll_cb for why the fallback is mandatory. */
 static void
 _event_zoom_centre(GgazeViewer *p_v, GtkEventController *p_ctrl, gdouble *p_cx,
                    gdouble *p_cy) {
@@ -304,8 +304,8 @@ _event_zoom_centre(GgazeViewer *p_v, GtkEventController *p_ctrl, gdouble *p_cx,
 }
 
 static gboolean
-scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
-          gpointer p_data) {
+_scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
+           gpointer p_data) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_data);
    if (p_v->p_texture == NULL) {
       return (FALSE);
@@ -373,13 +373,13 @@ ggaze_viewer_init(GgazeViewer *p_v) {
 
    GtkGesture *p_drag = gtk_gesture_drag_new();
    gtk_widget_add_controller(GTK_WIDGET(p_v), GTK_EVENT_CONTROLLER(p_drag));
-   g_signal_connect(p_drag, "drag-begin", G_CALLBACK(drag_begin_cb), p_v);
-   g_signal_connect(p_drag, "drag-update", G_CALLBACK(drag_update_cb), p_v);
+   g_signal_connect(p_drag, "drag-begin", G_CALLBACK(_drag_begin_cb), p_v);
+   g_signal_connect(p_drag, "drag-update", G_CALLBACK(_drag_update_cb), p_v);
 
    GtkEventController *p_scroll =
       gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
    gtk_widget_add_controller(GTK_WIDGET(p_v), p_scroll);
-   g_signal_connect(p_scroll, "scroll", G_CALLBACK(scroll_cb), p_v);
+   g_signal_connect(p_scroll, "scroll", G_CALLBACK(_scroll_cb), p_v);
    /* No key controller here: every key (zoom, pan, 0 = fit toggle, arrows)
     * is bound in shortcuts.c's single table to a win.* action the window
     * routes to the public methods below. A second, focus-dependent binding

@@ -106,12 +106,13 @@ the CI-portable baseline; `./sample-images/` is a local supplement.
   config targets LLVM clang-format >=16 (Fedora 40 ships 18); it uses the
   cross-version key spellings (`UseTab`, `AlwaysBreakAfterReturnType`) so
   both the Fedora-40 CI toolchain and newer local builds accept it.
-- Header guards uppercase from filename (`NAVIGATOR_H`). `.c` includes: own
+- Header guards uppercase from filename with the project prefix
+  (`GGAZE_NAVIGATOR_H`). `.c` includes: own
   header first, blank line, system `<...>`, then project `"..."`.
 
 ## Optional features are OFF in the minimal CI lane
 
-`gegl`, `jxl`, `avif`, `heif` are meson `feature`s (default `auto`). The
+`gegl`, `jxl`, `avif`, `heif`, `jpeg` are meson `feature`s (default `auto`). The
 **minimal** CI lane forces all disabled and must stay green; the **gegl** lane
 forces `gegl=enabled`. Never break the minimal build when adding an optional
 backend — gate code with `GGAZE_HAVE_*` from `ggaze-config.h` and toast
@@ -126,7 +127,8 @@ backend — gate code with `GGAZE_HAVE_*` from `ggaze-config.h` and toast
 - Bounded `GdkTexture` LRU (cap 4) to bound memory.
 - Plain-C modules (`navigator`, `loader`, `detect`, `thumbnail`, `trash`,
   `mover`, `opener`, `runner`, `enhancer`, `info`, `texturecache`,
-  `clipboard`) own no GtkWidget and are unit-tested standalone.
+  `clipboard`, `viewload`, `pathutil`, `settings-pair`, `undo`) own no
+  GtkWidget and are unit-tested standalone.
 
 ## Memory (C has no GC)
 
@@ -139,25 +141,40 @@ the next milestone. See `docs/IMPLEMENTATION.md` "Memory-leak profiling".
 
 ```
 src/main.c            entry, CLI, GtkApplication
-src/app.{c,h}         GApplication, actions, single-instance
-src/window.{c,h}      GgazeWindow : GtkApplicationWindow (grid/large stack)
+src/app.{c,h}         GApplication, single-instance, open (files or folder)
+src/window.{c,h}      GgazeWindow : layout (header bar + menu, grid/large/empty stack) and action routing
+src/viewload.{c,h}    large-view load pipeline: texture LRU, one active load, prefetch, last-write-wins
+src/info-overlay.{c,h} EXIF card + status line over the stack (async info gather)
 src/viewer.{c,h}      GgazeViewer : GtkWidget (large canvas, zoom/pan)
-src/gridview.{c,h}    GgazeGrid (thumbnail overview)
-src/shortcuts.{c,h}    keybinding -> GAction map
-src/navigator.{c,h}   dir listing, sort/filter, marks, GFileMonitor
-src/trash.{c,h}       ./Trash bin + permanent delete + undo
-src/mover.{c,h}       configurable move destinations
+src/gridview.{c,h}    GgazeGrid (thumbnail overview; intent signals, no window action names)
+src/shortcuts.{c,h}   the ONE key table: bindings, ? help, header tooltips, menu labels
+src/popup_list.{c,h}  shared hotkey list popover (e / ! / m)
+src/save-gate.{c,h}   Save/Discard/Cancel prompt gate (async Save)
+src/delete-confirm.{c,h} >1-target permanent-delete confirm
+src/dialog-util.{c,h} alert-dialog toplevel lookup shared by the dialog modules
+src/navigator.{c,h}   dir listing, sort/filter, marks, GFileMonitor; "changed" carries GgazeNavChange flags
+src/trash.{c,h}       .Trash bin + permanent delete + restore + empty
+src/mover.{c,h}       configurable move destinations (undoable)
 src/opener.{c,h}      configurable external programs
-src/runner.{c,h}      configurable shell scripts (async /bin/sh -c)
-src/enhancer.{c,h}    optional GEGL quick-enhance + export copy
-src/clipboard.{c,h}   copy image/URIs to GdkClipboard
-src/thumbnail.{c,h}   freedesktop TMS cache
+src/runner.{c,h}      configurable shell scripts (async /bin/sh -c, single-pass %f/%d)
+src/undo.{c,h}        which of trash/move `u` undoes
+src/pathutil.{c,h}    stem/ext split, safe mkdir -p, non-colliding child names
+src/settings-pair.{c,h} the (name, value) pair of the a(ss) lists
+src/ggaze-enums.h     shared preference enums
+src/enhancer.{c,h}    optional GEGL presets (built-in table + user graphs), export naming
+src/enhancer-gegl.h   the GEGL buffer/texture/export operations (sync + async)
+src/enhance-ctrl.{c,h} optional enhance feature controller (mask, previews, gallery, async save)
+src/enhance-ui.{c,h}  optional pure enhance widget construction
+src/clipboard.{c,h}   image/png (displayed texture) or file-URI content providers
+src/thumbnail.{c,h}   freedesktop TMS cache (bounded pool)
+src/texturecache.{c,h} bounded LRU of decoded GdkTextures (mtime/size validated)
 src/settings.{c,h}    GSettings wrapper (org.buetow.ggaze)
+src/prefs.{c,h}       Preferences dialog (schema-driven enums, list editors)
 src/info.{c,h}        EXIF/dimensions gather (libexif)
-src/texturecache.{c,h} bounded LRU of decoded GdkTextures
-src/loader/loader.{c,h}   async load API
-src/loader/detect.{c,h}   content-sniff format detection
-src/loader/backends/       pixbuf.c jxl.c avif.c heif.c (jpeg.c M6)
+src/loader/loader.{c,h}   sync + async load API; sniff, dispatch, explicit pixbuf fallback
+src/loader/detect.{c,h}   content-sniff format detection + the one dimension cap
+src/loader/pixbuf-util.{c,h} GdkPixbuf -> upright GdkTexture
+src/loader/backends/       pixbuf.c jpeg.c jxl.c avif.c heif.c
 ```
 
 ## Design docs (read before touching a milestone)

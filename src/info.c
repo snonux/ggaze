@@ -1,14 +1,10 @@
 /*:*
  * ggaze — image info / EXIF gather
  *
- * Gathers file info (via GFileInfo + GdkPixbuf for dims) and EXIF tags (via
- * libexif) into a GgazeInfo struct. Plain-C, no GtkWidget.
- *
- * JPEG-specific guard (mu0 review round 2): _fill_dims() calls
- * gdk_pixbuf_new_from_file() directly on the source file, bypassing
- * src/loader/loader.c entirely -- and info_new() runs synchronously on the
- * GTK main thread (window.c's _show_info, the info keybinding), so an
- * unguarded stall here freezes the whole UI. See _fill_dims() below.
+ * Gathers file info (GFileInfo), pixel dimensions (through the loader, so
+ * every format the viewer shows is covered and the oversized-JPEG guard is
+ * the loader's) and EXIF tags (libexif) into a GgazeInfo struct. Plain-C,
+ * no GtkWidget; info-overlay.c runs it in a GTask worker.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -16,12 +12,11 @@
 
 #include "info.h"
 
-#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <libexif/exif-data.h>
 #include <libexif/exif-format.h>
 #include <libexif/exif-tag.h>
 
-#include "loader/detect.h"
+#include "loader/loader.h"
 
 static char *
 _dup_exif_value(ExifData *p_data, ExifTag e_tag) {
@@ -107,45 +102,19 @@ _fill_file_info(GgazeInfo *p_info, GFile *p_file) {
    g_object_unref(p_fi);
 }
 
-/* Dimensions via GdkPixbuf (without applying orientation). Peeks a JPEG's
- * declared header dimensions first (detect_jpeg_peek_dims_from_path(), no
- * decoder invoked) and skips the GdkPixbuf call entirely when oversized --
- * info_new() runs synchronously on the GTK main thread (window.c's
- * _show_info, bound to the info keybinding), so gdk_pixbuf_new_from_file()
- * stalling ~28s there (mu0 review round 2: GdkPixbuf/glycin pre-allocating
- * off the declared size before its own internal cap rejects it) freezes the
- * whole UI, not just a background worker.
- *
- * detect_jpeg_peek_dims_from_path() only scans a bounded prefix of c_path, so
- * GGAZE_JPEG_PEEK_INCONCLUSIVE (a filler marker segment pushed the real SOF
- * past the prefix) is treated the same as an oversized header -- skip the
- * GdkPixbuf call -- rather than as "safe to decode," or a padded file
- * bypasses this guard and reintroduces the same stall (mu0 review round 3).
- * Any other failure (missing/corrupt file, non-JPEG) falls through to
- * GdkPixbuf's own error, which is discarded exactly as before this guard:
- * info display simply omits dimensions (fields stay at their g_new0 zero)
- * rather than failing info_new() outright. */
+/* Dimensions through the loader: a header scan for the formats GdkPixbuf
+ * knows (no pixel decode), the matching backend's decode for JXL/AVIF/HEIF.
+ * info_new() runs in a GTask worker (info-overlay.c), so the decode path
+ * cannot freeze the UI. On failure the fields stay 0 and info_format says
+ * "Size unknown". */
 static void
-_fill_dims(GgazeInfo *p_info, const char *c_path) {
-   guint32             u_w, u_h;
-   GgazeJpegPeekStatus e_status =
-      detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h);
-   if (e_status == GGAZE_JPEG_PEEK_INCONCLUSIVE) {
-      return;
+_fill_dims(GgazeInfo *p_info, GFile *p_file) {
+   int i_w = 0;
+   int i_h = 0;
+   if (loader_peek_dimensions(p_file, &i_w, &i_h)) {
+      p_info->i_width  = i_w;
+      p_info->i_height = i_h;
    }
-   if (e_status == GGAZE_JPEG_PEEK_OK &&
-       !detect_jpeg_dims_within_bounds(u_w, u_h, NULL)) {
-      return;
-   }
-   GError    *p_err = NULL;
-   GdkPixbuf *p_pix = gdk_pixbuf_new_from_file(c_path, &p_err);
-   if (p_pix == NULL) {
-      g_clear_error(&p_err);
-      return;
-   }
-   p_info->i_width  = gdk_pixbuf_get_width(p_pix);
-   p_info->i_height = gdk_pixbuf_get_height(p_pix);
-   g_object_unref(p_pix);
 }
 
 /* EXIF via libexif: camera/lens/exposure fields + raw Orientation. No-op
@@ -179,7 +148,7 @@ info_new(GFile *p_file) {
 
    GgazeInfo *p_info = g_new0(GgazeInfo, 1);
    _fill_file_info(p_info, p_file);
-   _fill_dims(p_info, c_path);
+   _fill_dims(p_info, p_file);
    _fill_exif(p_info, c_path);
 
    g_free(c_path);

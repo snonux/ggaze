@@ -181,6 +181,21 @@ wait_for_file(const char *c_path) {
    g_assert_true(g_file_test(c_path, G_FILE_TEST_EXISTS));
 }
 
+/* Pump until the status line starts with c_prefix (up to 10 s): the export
+ * that a Save answer starts runs in a worker, and under load its failure
+ * report can land well after the dialog closed. */
+static void
+wait_for_status_prefix(GgazeWindow *p_win, const char *c_prefix) {
+   GtkLabel *p_lbl = GTK_LABEL(ggaze_window_get_info_label(p_win));
+   for (guint u = 0;
+        u < 10000 && !g_str_has_prefix(gtk_label_get_text(p_lbl), c_prefix);
+        u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(g_str_has_prefix(gtk_label_get_text(p_lbl), c_prefix));
+}
+
 static void
 fire(GgazeWindow *p_win, const char *c_action) {
    gtk_widget_activate_action(GTK_WIDGET(p_win), c_action, NULL);
@@ -1501,7 +1516,7 @@ test_failed_save_keeps_preview_and_aborts(void) {
    g_assert_cmpint(g_chmod(fx.c_dir, 0500), ==, 0); /* r-x: no new files */
    activate_other_cell(&fx);
    answer_prompt(&fx, "Save");
-   ggtest_drain_main(500); /* the export runs in a worker; let it fail */
+   wait_for_status_prefix(fx.p_win, "Enhance-save failed"); /* worker done */
    g_assert_cmpint(g_chmod(fx.c_dir, 0700), ==, 0); /* restore for cleanup */
 
    /* Nothing was written ... */
@@ -1934,7 +1949,7 @@ test_close_request_failed_save_keeps_window(void) {
    g_signal_emit_by_name(fx.p_win, "close-request", &b_stop);
    g_assert_true(b_stop);
    answer_prompt(&fx, "Save");
-   ggtest_drain_main(500); /* the export runs in a worker; let it fail */
+   wait_for_status_prefix(fx.p_win, "Enhance-save failed"); /* worker done */
    g_assert_cmpint(g_chmod(fx.c_dir, 0700), ==, 0); /* restore for cleanup */
 
    g_assert_true(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));

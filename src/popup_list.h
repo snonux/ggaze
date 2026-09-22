@@ -37,7 +37,7 @@ const char *popup_list_settings_pair_name(const GPtrArray *p_items,
                                           guint            u_idx);
 
 /* Fire the per-site action for index u_idx. The site is responsible for
- * closing the popover (popup_list_destroy on its stored field) in whatever
+ * closing the popover (popup_list_delete on its stored field) in whatever
  * order it needs -- e.g. move closes BEFORE prompting Save/Discard/Cancel,
  * open-external / run-script act THEN close. */
 typedef void (*PopupListActivateFn)(gpointer p_user_data, guint u_idx);
@@ -65,7 +65,7 @@ void popup_list_popup(PopupList *p_list);
 /* Synchronously tear the popover down: clear *pp_storage first (so a re-
  * entrant "closed" is a no-op), unparent the popover, free the PopupList.
  * Idempotent: a no-op when *pp_storage is NULL. */
-void popup_list_destroy(PopupList **pp_storage);
+void popup_list_delete(PopupList **pp_storage);
 
 /* Auto-assigned hotkey character for row index u_idx, in list order: 1..9,
  * then 0, then a..z. Returns 0 past the 36-hotkey range (such rows are shown

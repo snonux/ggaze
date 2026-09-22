@@ -26,6 +26,7 @@
 #include "clipboard.h"
 #include "gridview.h"
 #include "delete-confirm.h"
+#include "fileops.h"
 #include "info-overlay.h"
 #include "mover.h"
 #include "navigator.h"
@@ -81,6 +82,7 @@ struct _GgazeWindow {
    PopupList *p_move_pop;       /* `m` move-to-destination popover (NULL when
                                  * none) */
    Undo        *p_undo;         /* unified-undo coordinator (Trash vs Mover) */
+   FileOps     *p_fileops;      /* trash/delete/move/undo policy (fileops.h) */
    GtkWidget   *p_viewer;       /* GgazeViewer — the large view */
    GgazeGrid   *p_grid;      /* the thumbnail grid (the "grid" stack child) */
    int          i_grid_size; /* current thumbnail size (64-512, decision T) */
@@ -281,68 +283,12 @@ _proceed_grid_select(gpointer p_data) {
    return (G_SOURCE_REMOVE);
 }
 
-/* TRUE iff p_file is STILL an existing file in the folder p_win navigates
- * right now. The single-file counterpart of
- * ggaze_window_delete_targets_still_current, and the last thing checked before
- * a captured target is trashed or deleted.
- *
- * Two independent things can invalidate a target captured at key-press time,
- * and the guard covers both:
- *
- *   1. The FOLDER was replaced (single-instance open / drop). This leg is
- *      defence-in-depth only: since the one-prompt guard is checked before the
- *      "nothing is dirty" fast path (round 3, finding j), every folder-
- *      replacing path is QUEUED behind an outstanding prompt rather than
- *      executed, so it cannot fire today. It stays because what makes acting
- *      on a captured target safe is the invariant, not the current call graph.
- *   2. The FILE was removed externally while the prompt was up. This leg is
- *      live: the folder's GFileMonitor is a plain GSource that keeps firing
- *      behind the input-only modal grab. Without the existence check the
- *      target sailed past the guard and failed deep inside trash_bin /
- *      trash_permanently_delete with a bare g_warning and nothing on screen
- *      (round 4, finding u) -- so callers now report a refusal instead. */
-static gboolean
-_target_still_in_folder(GgazeWindow *p_win, GFile *p_file) {
-   if (p_win->p_nav == NULL || p_file == NULL) {
-      return (FALSE);
-   }
-   GFile   *p_dir    = navigator_get_dir(p_win->p_nav);
-   GFile   *p_parent = g_file_get_parent(p_file);
-   gboolean b_ok =
-      (p_dir != NULL && p_parent != NULL && g_file_equal(p_dir, p_parent));
-   g_clear_object(&p_parent);
-   return (b_ok && g_file_query_exists(p_file, NULL));
-}
-
-/* --- captured target SETS ------------------------------------------------
- *
- * The files a marks-or-current action (`D` delete, `m` move) acts on: every
- * marked file if any are marked, else just the current one
- * (docs/ui-and-interactions.md "Selection & moving").
- *
- * Deriving this ONCE, at key-press time, is the whole point: the
- * marks-vs-current DECISION is as perishable as navigator.current itself.
- * navigator.c's _relist() prunes marks whose file left the listing, and the
- * folder GFileMonitor that triggers it keeps firing behind the modal prompt,
- * so a mark set of 1 can shrink to 0 while the dialog is up -- after which a
- * re-derived "no marks" leg would act on the CURRENT file, one the user
- * neither marked nor chose (round 4, finding p).
- *
- * Transfer full: caller frees with g_list_free_full(..., g_object_unref), or
- * hands the list to _files_ctx_init. */
+/* The files a marks-or-current action (`D` delete, `m` move) acts on,
+ * captured ONCE at key-press time -- see fileops_capture_targets for why the
+ * decision itself is perishable. Transfer full. */
 static GList *
 _capture_targets(GgazeWindow *p_win) {
-   if (p_win->p_nav == NULL) {
-      return (NULL);
-   }
-   if (navigator_get_mark_count(p_win->p_nav) > 0) {
-      return (navigator_get_marks(p_win->p_nav)); /* transfer full */
-   }
-   GFile *p_cur = navigator_get_current(p_win->p_nav);
-   if (p_cur == NULL) {
-      return (NULL);
-   }
-   return (g_list_prepend(NULL, g_object_ref(p_cur)));
+   return (fileops_capture_targets(p_win->p_fileops));
 }
 
 /* A window + a captured target set, the multi-file counterpart of _FileCtx.
@@ -385,23 +331,6 @@ _files_ctx_free(gpointer p_data) {
    g_free(p_ctx);
 }
 
-/* TRUE iff navigator.current is one of p_files. Computed BEFORE anything is
- * removed, because navigator_mark_removed emits "changed" and can move
- * current (and invalidate the borrowed pointer) as a side effect. */
-static gboolean
-_files_include_current(GgazeWindow *p_win, GList *p_files) {
-   GFile *p_cur = navigator_get_current(p_win->p_nav);
-   if (p_cur == NULL) {
-      return (FALSE);
-   }
-   for (GList *p_it = p_files; p_it != NULL; p_it = p_it->next) {
-      if (g_file_equal(p_cur, G_FILE(p_it->data))) {
-         return (TRUE);
-      }
-   }
-   return (FALSE);
-}
-
 /* TRUE while the `D` >1-target delete-confirm dialog is outstanding.
  *
  * The cancellable slot IS the state -- there is no separate flag to drift out
@@ -440,7 +369,7 @@ _modal_dialog_outstanding(GgazeWindow *p_win) {
  * path (double-click/Enter, middle-click mark, j/k cursor move, toggle-to-
  * large sync), so an active unsaved GEGL enhance preview gets the same
  * Save/Discard/Cancel prompt as h/l/g/G/scroll/quit/d/D/m instead of being
- * silently discarded by nav_changed_cb before the window ever sees the click
+ * silently discarded by _nav_changed_cb before the window ever sees the click
  * (tu0 review round 2, issue 1). Mirrors navigator_set_current_file's own
  * contract (TRUE iff current changed synchronously); returns FALSE both for
  * a true no-op and when the change is deferred behind the dialog -- it
@@ -818,46 +747,11 @@ _action_open_folder(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 /* --- M7: trash / delete / undo / view toggle / resize ------------------- */
 
 /* Bin p_target (the file `d` was pressed on, captured then -- NOT a fresh read
- * of navigator.current, see _FileCtx) and advance past it. The cursor is only
- * advanced when the binned file really was the current one: after a prompt,
- * current may already have moved on by itself, and advancing again would skip
- * an image the user never looked at. */
+ * of navigator.current, see _FileCtx). The policy (still-in-folder guard,
+ * advance only if it was current, undo record, wording) is fileops'. */
 static void
 _do_trash_now(GgazeWindow *p_win, GFile *p_target) {
-   if (p_win->p_nav == NULL || p_win->p_trash == NULL || p_target == NULL) {
-      return;
-   }
-   if (!_target_still_in_folder(p_win, p_target)) {
-      /* Either the file was removed externally behind the prompt (the live
-       * case) or the folder was replaced (defence-in-depth) -- see
-       * _target_still_in_folder. Both mean "the thing `d` was pressed on is
-       * not there any more", which the user has to be told: this used to fail
-       * silently, or later, inside trash_bin (round 4, finding u). */
-      _show_status(p_win, "Nothing trashed \u2014 the file is gone");
-      return;
-   }
-   GFile   *p_cur         = navigator_get_current(p_win->p_nav);
-   gboolean b_was_current = (p_cur != NULL && g_file_equal(p_cur, p_target));
-   GError  *p_err         = NULL;
-   char    *c_name        = g_file_get_basename(p_target);
-   if (trash_bin(p_win->p_trash, p_target, &p_err)) {
-      navigator_mark_removed(p_win->p_nav, p_target); /* dim; emits changed */
-      if (b_was_current) {
-         navigator_next(p_win->p_nav); /* advance; emits changed */
-      }
-      undo_record_trash(p_win->p_undo); /* for unified win.undo */
-      char *c_msg = g_strdup_printf("Trashed %s \u2014 u to undo", c_name);
-      _show_status(p_win, c_msg);
-      g_free(c_msg);
-   } else {
-      char *c_msg = g_strdup_printf("Trash failed for %s: %s", c_name,
-                                    p_err != NULL ? p_err->message : "?");
-      g_warning("ggaze: %s", c_msg);
-      _show_status(p_win, c_msg);
-      g_free(c_msg);
-      g_clear_error(&p_err);
-   }
-   g_free(c_name);
+   fileops_trash(p_win->p_fileops, p_target);
 }
 
 static gboolean
@@ -899,61 +793,12 @@ ggaze_window_delete_targets_still_current(GgazeWindow *p_win, GFile *p_dir) {
          : FALSE);
 }
 
-/* Permanently delete each file in p_files (the captured target set). A NULL
- * list is a no-op rather than a bare cursor advance -- there is nothing to
- * skip past when nothing was deleted.
- *
- * The cursor is advanced only when one of the deleted files really was the
- * current one, exactly as _do_trash_now does: the targets are captured at
- * key-press time, so by the time a Save/Discard/Cancel prompt is answered
- * current may have moved on by itself, and advancing again would skip an
- * image the user never saw (round 4, finding q -- the same bug _do_trash_now
- * already fixed, left standing in the delete twin).
- *
- * A failure is reported on screen as well as logged: with the targets
- * captured earlier, an individual file can legitimately have vanished between
- * capture and delete, and that must not be a silent no-op (finding u). */
+/* Permanently delete each file in p_files (the captured target set); the
+ * cursor advances only when one of them really was current, and every
+ * outcome is reported -- fileops owns that policy. */
 static void
 _do_delete_files(GgazeWindow *p_win, GList *p_files) {
-   if (p_files == NULL) {
-      return;
-   }
-   gboolean b_was_current = _files_include_current(p_win, p_files);
-   guint    u_failed      = 0;
-   for (GList *p_it = p_files; p_it != NULL; p_it = p_it->next) {
-      GFile  *p_f   = G_FILE(p_it->data);
-      GError *p_err = NULL;
-      if (trash_permanently_delete(p_f, &p_err)) {
-         navigator_mark_removed(p_win->p_nav, p_f);
-      } else {
-         g_warning("ggaze: delete failed: %s", p_err->message);
-         g_clear_error(&p_err);
-         u_failed++;
-      }
-   }
-   guint u_done = g_list_length(p_files) - u_failed;
-   if (u_failed > 0) {
-      char *c_msg = g_strdup_printf("Delete failed for %u file%s", u_failed,
-                                    u_failed == 1 ? "" : "s");
-      _show_status(p_win, c_msg);
-      g_free(c_msg);
-   } else if (u_done == 1) {
-      char *c_name = g_file_get_basename(G_FILE(p_files->data));
-      char *c_msg = g_strdup_printf("Deleted %s permanently (no undo)", c_name);
-      _show_status(p_win, c_msg);
-      g_free(c_msg);
-      g_free(c_name);
-   } else {
-      char *c_msg =
-         g_strdup_printf("Deleted %u files permanently (no undo)", u_done);
-      _show_status(p_win, c_msg);
-      g_free(c_msg);
-   }
-   if (b_was_current) {
-      navigator_next(p_win->p_nav); /* skip removed entries -> next live (or
-                                     * park at -1 when none remain, which
-                                     * clears the viewer via "changed") */
-   }
+   fileops_delete_files(p_win->p_fileops, p_files);
 }
 
 /* Process a confirmed bulk-delete against the captured targets p_files
@@ -985,8 +830,9 @@ ggaze_window_delete_captured(GgazeWindow *p_win, GFile *p_dir, GList *p_files) {
  * protect. A 3-marks-to-1 pruning likewise slipped past the >1-mark confirm.
  *
  * More than one captured target still opens that confirm dialog; a single one
- * is checked against _target_still_in_folder first, so a target that vanished
- * behind the prompt is refused out loud rather than failing silently. */
+ * is checked against fileops_target_still_in_folder first, so a target that
+ * vanished behind the prompt is refused out loud rather than failing silently.
+ */
 static void
 _do_delete_now(GgazeWindow *p_win, GList *p_files) {
    if (p_win->p_nav == NULL || p_win->p_trash == NULL || p_files == NULL) {
@@ -996,8 +842,9 @@ _do_delete_now(GgazeWindow *p_win, GList *p_files) {
       delete_confirm_ask(p_win->p_delete_confirm, p_files);
       return;
    }
-   if (!_target_still_in_folder(p_win, G_FILE(p_files->data))) {
-      _show_status(p_win, "Nothing deleted — the file is gone");
+   if (!fileops_target_still_in_folder(p_win->p_fileops,
+                                       G_FILE(p_files->data))) {
+      _show_status(p_win, "Nothing deleted \u2014 the file is gone");
       return;
    }
    _do_delete_files(p_win, p_files);
@@ -1033,52 +880,6 @@ _action_delete(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
                              _files_ctx_free);
 }
 
-/* Undo the last trash (restore from ./Trash to its original path). On
- * success the navigator is rescanned so the restored file is un-dimmed (its
- * path reappears on disk, so _relist un-removes it) and the header/grid
- * refresh via "changed". */
-static void
-_undo_trash(GgazeWindow *p_win) {
-   GError *p_err = NULL;
-   if (trash_restore_last(p_win->p_trash, &p_err)) {
-      navigator_rescan(p_win->p_nav); /* re-list; restored file un-removed */
-      _show_status(p_win, "Restored from Trash");
-      undo_reset(p_win->p_undo);
-   } else {
-      char *c_msg = g_strdup_printf("Undo failed: %s",
-                                    p_err != NULL ? p_err->message : "?");
-      g_warning("ggaze: trash %s", c_msg);
-      _show_status(p_win, c_msg);
-      g_free(c_msg);
-      g_clear_error(&p_err);
-   }
-}
-
-/* Undo the last move (move the recorded set back to their original paths).
- * Same navigator-rescan approach as _undo_trash: the files reappear at their
- * original path in the (possibly different) folder they came from, so a
- * rescan of the CURRENTLY open folder only visibly restores them if that is
- * where they were moved from; either way the move itself is undone on disk.
- */
-static void
-_undo_move(GgazeWindow *p_win) {
-   GError *p_err = NULL;
-   if (mover_undo_last(p_win->p_mover, &p_err)) {
-      if (p_win->p_nav != NULL) {
-         navigator_rescan(p_win->p_nav);
-      }
-      _show_status(p_win, "Move undone");
-      undo_reset(p_win->p_undo);
-   } else {
-      char *c_msg = g_strdup_printf("Undo failed: %s",
-                                    p_err != NULL ? p_err->message : "?");
-      g_warning("ggaze: move %s", c_msg);
-      _show_status(p_win, c_msg);
-      g_free(c_msg);
-      g_clear_error(&p_err);
-   }
-}
-
 /* `u`: undo the last destructive action, whichever of trash/move happened
  * most recently (decision P: one unified undo). Reopening a folder resets
  * BOTH engines' undo state and the Undo coordinator's record together
@@ -1098,21 +899,7 @@ _action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (!_require_folder(p_win)) {
       return;
    }
-   gboolean b_trash_ok =
-      p_win->p_trash != NULL && trash_can_undo(p_win->p_trash);
-   gboolean b_move_ok =
-      p_win->p_mover != NULL && mover_can_undo(p_win->p_mover);
-   switch (undo_choose(p_win->p_undo, b_trash_ok, b_move_ok)) {
-   case GGAZE_UNDO_MOVE:
-      _undo_move(p_win);
-      break;
-   case GGAZE_UNDO_TRASH:
-      _undo_trash(p_win);
-      break;
-   default:
-      _show_status(p_win, "Nothing to undo");
-      break;
-   }
+   fileops_undo(p_win->p_fileops);
 }
 
 static void
@@ -1134,7 +921,7 @@ _action_toggle_view(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    /* Leaving the grid: sync navigator.current to the highlighted cell so the
     * large view opens the selected image. Since tu0 that sync goes through
     * _grid_select_gate, and its return value is meaningful (round 2, finding
-    * c): TRUE means current really moved, in which case nav_changed_cb has
+    * c): TRUE means current really moved, in which case _nav_changed_cb has
     * ALREADY run _load_current and repeating it here would only be a
     * redundant second paint. FALSE means either a no-op (the highlighted cell
     * is already current) or that a dirty enhance preview deferred the change
@@ -1683,7 +1470,7 @@ _show_info(GgazeWindow *p_win) {
 }
 
 /* Hide the info overlay because the current file changed: reached from
- * nav_changed_cb (the choke point every navigation path funnels through)
+ * _nav_changed_cb (the choke point every navigation path funnels through)
  * and from _open_now (which does not reliably emit "changed"). The card must
  * never keep showing a PREVIOUS file's data over the new one; a status line
  * shown right after re-shows the label with its own fresh timer. */
@@ -1854,7 +1641,7 @@ static void
 _open_ext_activate(gpointer p_data, guint u_idx) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    ggaze_window_open_external_index(p_win, u_idx);
-   popup_list_destroy(&p_win->p_open_ext_pop);
+   popup_list_delete(&p_win->p_open_ext_pop);
 }
 
 /* Build and pop up the open-external popover listing the configured editors
@@ -1870,7 +1657,7 @@ _action_open_external(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
    /* Toggle: a second `e` while the popover is up just closes it. */
    if (p_win->p_open_ext_pop != NULL) {
-      popup_list_destroy(&p_win->p_open_ext_pop);
+      popup_list_delete(&p_win->p_open_ext_pop);
       return;
    }
    const GPtrArray *p_progs =
@@ -2025,7 +1812,7 @@ static void
 _run_script_activate(gpointer p_data, guint u_idx) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    ggaze_window_run_script_index(p_win, u_idx);
-   popup_list_destroy(&p_win->p_run_script_pop);
+   popup_list_delete(&p_win->p_run_script_pop);
 }
 
 /* Build and pop up the run-script popover listing the configured scripts
@@ -2041,7 +1828,7 @@ _action_run_script(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
    /* Toggle: a second `!` while the popover is up just closes it. */
    if (p_win->p_run_script_pop != NULL) {
-      popup_list_destroy(&p_win->p_run_script_pop);
+      popup_list_delete(&p_win->p_run_script_pop);
       return;
    }
    const GPtrArray *p_scripts =
@@ -2115,94 +1902,13 @@ ggaze_window_run_script_index(GgazeWindow *p_win, guint u_idx) {
  * see _capture_targets, which is where that rule (and why it must be resolved
  * at key-press time) now lives for both. */
 
-/* After mover_move() returns (success or partial failure), mark every target
- * that actually left its original path as removed (dimmed; mirrors trash) so
- * the navigator/grid never show a file that is no longer where they think it
- * is. Checking disk state rather than trusting the overall return value
- * handles mover_move's partial-failure case (some files moved before an
- * error hit a later one in the list) correctly. Returns the count removed. */
-static guint
-_move_mark_removed(GgazeWindow *p_win, GList *p_files) {
-   guint u_removed = 0;
-   for (GList *p_it = p_files; p_it != NULL; p_it = p_it->next) {
-      GFile *p_f = G_FILE(p_it->data);
-      if (!g_file_query_exists(p_f, NULL)) {
-         navigator_mark_removed(p_win->p_nav, p_f); /* dim; emits changed */
-         u_removed++;
-      }
-   }
-   return (u_removed);
-}
-
-/* Report the outcome of a mover_move() call via _show_status (+ g_warning on
- * any failure): a clean success ("Moved N files to X"), a clean failure
- * ("Move to X failed: ..."), or — mover_move's partial-failure case — a
- * count of how many of the N requested actually moved before the error hit
- * a later one in the list ("Moved M of N files to X; then failed: ..."). */
-static void
-_move_report(GgazeWindow *p_win, const SettingsPair *p_dest, gboolean b_ok,
-             guint u_moved, guint u_n, GError *p_err) {
-   if (b_ok) {
-      char *c_msg = g_strdup_printf("Moved %u file%s to %s", u_n,
-                                    u_n == 1 ? "" : "s", p_dest->c_name);
-      _show_status(p_win, c_msg);
-      g_free(c_msg);
-      return;
-   }
-   g_warning("ggaze: move to '%s' failed: %s", p_dest->c_name,
-             p_err != NULL ? p_err->message : "(no detail)");
-   char *c_msg =
-      u_moved > 0
-         ? g_strdup_printf("Moved %u of %u files to %s; then failed: %s",
-                           u_moved, u_n, p_dest->c_name,
-                           p_err != NULL ? p_err->message : "(no detail)")
-         : g_strdup_printf("Move to %s failed: %s", p_dest->c_name,
-                           p_err != NULL ? p_err->message : "(no detail)");
-   _show_status(p_win, c_msg);
-   g_free(c_msg);
-}
-
 /* Move the target set p_files (borrowed; the caller frees) to destination
- * u_idx. Split out of ggaze_window_move_index so the `m` popup can CAPTURE its
- * targets when the row is clicked and still move exactly those once the
- * Save/Discard/Cancel prompt resolves -- re-deriving them at answer time would
- * move whatever the slideshow/GFileMonitor made current in the meantime
- * (round 3, finding h; the same discipline as _FileCtx and _DeleteCtx). */
+ * u_idx. Split out of ggaze_window_move_index so the `m` popup can CAPTURE
+ * its targets when the row is clicked and still move exactly those once the
+ * Save/Discard/Cancel prompt resolves. The policy is fileops'. */
 static gboolean
 _move_captured(GgazeWindow *p_win, guint u_idx, GList *p_files) {
-   if (p_win->p_nav == NULL || p_win->p_mover == NULL || p_files == NULL) {
-      return (FALSE);
-   }
-   const GPtrArray *p_dests = mover_get_dests(p_win->p_mover);
-   if (p_dests == NULL || u_idx >= p_dests->len) {
-      return (FALSE);
-   }
-   const SettingsPair *p_dest = g_ptr_array_index((GPtrArray *)p_dests, u_idx);
-   guint               u_n    = g_list_length(p_files);
-   /* Asked BEFORE mover_move/_move_mark_removed run: navigator_mark_removed
-    * emits "changed" and can move current (and invalidate the borrowed
-    * pointer) as a side effect, so afterwards the answer is no longer the
-    * one the user's key press was about. */
-   gboolean b_was_current = _files_include_current(p_win, p_files);
-   GError  *p_err         = NULL;
-   gboolean b_ok          = mover_move(p_win->p_mover, p_files, p_dest, &p_err);
-   guint    u_moved       = _move_mark_removed(p_win, p_files);
-   if (u_moved > 0) {
-      undo_record_move(p_win->p_undo);
-   }
-   /* Advance only when one of the moved files really was the current one,
-    * exactly as _do_trash_now and _do_delete_files do: the targets are
-    * captured at click time, so by the time a Save/Discard/Cancel prompt is
-    * answered current may have moved on by itself, and advancing anyway
-    * would take the user off the image they were looking at and skip the
-    * next one unseen (round 5, finding x -- the last member of the trio
-    * still carrying the bug the other two already fixed). */
-   if (u_moved > 0 && b_was_current) {
-      navigator_next(p_win->p_nav); /* advance past the moved set */
-   }
-   _move_report(p_win, p_dest, b_ok, u_moved, u_n, p_err);
-   g_clear_error(&p_err);
-   return (b_ok);
+   return (fileops_move(p_win->p_fileops, u_idx, p_files));
 }
 
 /* Move u_idx (0-based, in the configured destinations list order) — see
@@ -2259,7 +1965,7 @@ _move_idx_ctx_free(gpointer p_data) {
  * current decision has to be captured with them). */
 static void
 _move_go(GgazeWindow *p_win, guint u_idx) {
-   popup_list_destroy(&p_win->p_move_pop);
+   popup_list_delete(&p_win->p_move_pop);
    _MoveIdxCtx *p_ctx = g_new(_MoveIdxCtx, 1);
    _files_ctx_init(&p_ctx->t_base, p_win, _capture_targets(p_win));
    p_ctx->u_idx = u_idx;
@@ -2287,7 +1993,7 @@ _action_move(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       return;
    }
    if (p_win->p_move_pop != NULL) {
-      popup_list_destroy(&p_win->p_move_pop);
+      popup_list_delete(&p_win->p_move_pop);
       return;
    }
    GList *p_targets = _capture_targets(p_win);
@@ -2352,8 +2058,8 @@ static const GActionEntry ACTIONS[] = {
 /* --- drop target --------------------------------------------------------- */
 
 static gboolean
-drop_cb(GtkDropTarget *p_t, const GValue *p_val, gdouble d_x, gdouble d_y,
-        gpointer p_data) {
+_drop_cb(GtkDropTarget *p_t, const GValue *p_val, gdouble d_x, gdouble d_y,
+         gpointer p_data) {
    (void)p_t;
    (void)d_x;
    (void)d_y;
@@ -2398,7 +2104,7 @@ _drop_leave_cb(GtkDropTarget *p_t, gpointer p_data) {
 /* --- navigator changed -> reload ----------------------------------------- */
 
 static void
-nav_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
+_nav_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
    (void)p_nav;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    if ((u_flags & (GGAZE_NAV_CURSOR | GGAZE_NAV_LISTING)) == 0) {
@@ -2682,9 +2388,9 @@ ggaze_window_dispose(GObject *p_obj) {
       }
       g_clear_object(&p_win->p_nav);
    }
-   popup_list_destroy(&p_win->p_open_ext_pop);
-   popup_list_destroy(&p_win->p_run_script_pop);
-   popup_list_destroy(&p_win->p_move_pop);
+   popup_list_delete(&p_win->p_open_ext_pop);
+   popup_list_delete(&p_win->p_run_script_pop);
+   popup_list_delete(&p_win->p_move_pop);
    _delete_confirm_dispose(p_win);
    save_gate_dispose(p_win->p_save_gate);
 #if GGAZE_HAVE_GEGL
@@ -2696,11 +2402,13 @@ ggaze_window_dispose(GObject *p_obj) {
    }
    info_overlay_dispose(p_win->p_info); /* timer + in-flight decode; no
                                          * widget touch after this */
+   fileops_set_folder(p_win->p_fileops, NULL, NULL);
    g_clear_pointer(&p_win->p_trash, trash_delete);
    g_clear_pointer(&p_win->p_thumb, thumbnail_delete);
    g_clear_pointer(&p_win->p_runner, runner_delete);
    g_clear_pointer(&p_win->p_opener, opener_delete);
    g_clear_pointer(&p_win->p_mover, mover_delete);
+   g_clear_pointer(&p_win->p_fileops, fileops_delete);
    g_clear_pointer(&p_win->p_undo, undo_delete);
    g_clear_pointer(&p_win->p_settings, settings_delete);
    /* p_stack/p_viewer/p_grid are GtkWidgets parented to the window; GTK
@@ -2805,6 +2513,13 @@ _init_enhance_state(GgazeWindow *p_win) {
    gtk_widget_add_controller(GTK_WIDGET(p_win), p_space_kc);
 }
 #endif
+
+/* --- FileOps report op ---------------------------------------------------- */
+
+static void
+_fo_report(gpointer p_host, const char *c_msg) {
+   _show_status(GGAZE_WINDOW(p_host), c_msg);
+}
 
 /* --- DeleteConfirm host ops (window side of the bulk-delete flow) -------- */
 
@@ -2925,16 +2640,18 @@ _watch_pref_keys(GgazeWindow *p_win) {
  * GEGL enhancer when built in) fed from GSettings. */
 static void
 _init_engines_and_settings(GgazeWindow *p_win) {
-   p_win->p_viewload       = viewload_new(&_VIEWLOAD_OPS, p_win, 4);
-   p_win->p_thumb          = thumbnail_new();
-   p_win->p_trash          = NULL; /* created on open */
-   p_win->p_grid           = NULL; /* created on open */
-   p_win->i_grid_size      = 128;
-   p_win->p_settings       = settings_new();
-   p_win->p_mover          = mover_new();
-   p_win->p_opener         = opener_new();
-   p_win->p_runner         = runner_new();
-   p_win->p_undo           = undo_new();
+   p_win->p_viewload  = viewload_new(&_VIEWLOAD_OPS, p_win, 4);
+   p_win->p_thumb     = thumbnail_new();
+   p_win->p_trash     = NULL; /* created on open */
+   p_win->p_grid      = NULL; /* created on open */
+   p_win->i_grid_size = 128;
+   p_win->p_settings  = settings_new();
+   p_win->p_mover     = mover_new();
+   p_win->p_opener    = opener_new();
+   p_win->p_runner    = runner_new();
+   p_win->p_undo      = undo_new();
+   p_win->p_fileops =
+      fileops_new(p_win->p_mover, p_win->p_undo, _fo_report, p_win);
    p_win->p_delete_confirm = delete_confirm_new(&_DELETE_CONFIRM_OPS, p_win);
    p_win->p_save_gate      = save_gate_new(&_SAVE_GATE_OPS, p_win);
    if (p_win->p_settings != NULL) {
@@ -3143,7 +2860,7 @@ ggaze_window_init(GgazeWindow *p_win) {
    /* File/folder drag-and-drop (decision #27). */
    GtkDropTarget *p_drop =
       gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
-   g_signal_connect(p_drop, "drop", G_CALLBACK(drop_cb), p_win);
+   g_signal_connect(p_drop, "drop", G_CALLBACK(_drop_cb), p_win);
    g_signal_connect(p_drop, "enter", G_CALLBACK(_drop_enter_cb), p_win);
    g_signal_connect(p_drop, "leave", G_CALLBACK(_drop_leave_cb), p_win);
    gtk_widget_add_controller(GTK_WIDGET(p_win), GTK_EVENT_CONTROLLER(p_drop));
@@ -3177,6 +2894,7 @@ _open_reset_existing_nav(GgazeWindow *p_win) {
       ggaze_grid_detach(p_win->p_grid);
    }
    viewload_set_navigator(p_win->p_viewload, NULL);
+   fileops_set_folder(p_win->p_fileops, NULL, NULL);
    g_clear_object(&p_win->p_nav);
 }
 
@@ -3216,7 +2934,8 @@ _open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
    g_clear_pointer(&p_win->p_trash, trash_delete);
    mover_clear_last(p_win->p_mover);
    undo_reset(p_win->p_undo);
-   g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(nav_changed_cb), p_win);
+   g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(_nav_changed_cb),
+                    p_win);
    if (p_start != NULL) {
       navigator_set_current_file(p_win->p_nav, p_start);
    }
@@ -3276,7 +2995,8 @@ _open_rebuild_grid(GgazeWindow *p_win, gboolean b_hide_trashed) {
    }
    GFile *p_navdir = navigator_get_dir(p_win->p_nav);
    p_win->p_trash  = trash_new(p_navdir);
-   p_win->p_grid   = GGAZE_GRID(ggaze_grid_new(
+   fileops_set_folder(p_win->p_fileops, p_win->p_nav, p_win->p_trash);
+   p_win->p_grid = GGAZE_GRID(ggaze_grid_new(
       p_win->p_nav, p_win->p_thumb, p_win->i_grid_size, b_hide_trashed));
    g_signal_connect(p_win->p_grid, "activate", G_CALLBACK(_on_grid_activate),
                     p_win);

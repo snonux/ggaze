@@ -1,4 +1,12 @@
-/* save-gate.c — Save/Discard/Cancel prompt gate (see save-gate.h). */
+/*:*
+ * ggaze — Save/Discard/Cancel prompt gate
+ *
+ * See save-gate.h. The one-prompt-at-a-time state machine every continuation
+ * that would discard an unsaved enhance preview funnels through.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
 #include "save-gate.h"
 
 #include <gio/gio.h>

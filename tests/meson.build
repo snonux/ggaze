@@ -287,6 +287,18 @@ test_viewload = executable(
 )
 test('viewload', test_viewload, suite : 'unit', env : fixtures_env)
 
+# fileops: the trash / delete / move / undo policy over temp folders with a
+# fake report sink (no display).
+test_fileops = executable(
+   'test_fileops',
+   ['test_fileops.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('fileops', test_fileops, suite : 'unit', env : fixtures_env)
+
 # --- integration track (needs a display; CI uses xvfb-run) ---
 #
 # Lane determinism (1w0) -- why these tests are NOT pinned to a backend.

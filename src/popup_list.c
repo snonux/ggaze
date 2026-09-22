@@ -73,7 +73,7 @@ static void
 _on_closed(GtkPopover *p_pop, gpointer p_data) {
    (void)p_pop;
    PopupList *p_list = (PopupList *)p_data;
-   popup_list_destroy(p_list->pp_storage);
+   popup_list_delete(p_list->pp_storage);
 }
 
 /* Esc cancels; a bare digit/letter hotkey fires the matching row. Every other
@@ -91,7 +91,7 @@ _on_key_pressed(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
    (void)u_kc;
    PopupList *p_list = (PopupList *)p_data;
    if (u_keyval == GDK_KEY_Escape) {
-      popup_list_destroy(p_list->pp_storage);
+      popup_list_delete(p_list->pp_storage);
       return (GDK_EVENT_STOP);
    }
    if ((e_state & gtk_accelerator_get_default_mod_mask() & ~GDK_SHIFT_MASK) !=
@@ -193,7 +193,7 @@ popup_list_popup(PopupList *p_list) {
 }
 
 void
-popup_list_destroy(PopupList **pp_storage) {
+popup_list_delete(PopupList **pp_storage) {
    g_return_if_fail(pp_storage != NULL);
    PopupList *p_list = *pp_storage;
    if (p_list == NULL) {

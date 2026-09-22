@@ -372,8 +372,8 @@ _schedule_debounce(Navigator *p_nav) {
 }
 
 static void
-monitor_changed_cb(GFileMonitor *p_mon, GFile *p_other, GFile *p_src,
-                   GFileMonitorEvent e_ev, gpointer p_data) {
+_monitor_changed_cb(GFileMonitor *p_mon, GFile *p_other, GFile *p_src,
+                    GFileMonitorEvent e_ev, gpointer p_data) {
    (void)p_mon;
    (void)p_other;
    (void)p_src;
@@ -466,7 +466,7 @@ navigator_new(GFile *p_dir, GgazeSort e_sort, gboolean b_wrap,
       p_nav->p_dir, G_FILE_MONITOR_WATCH_MOVES, NULL, &p_err);
    if (p_nav->p_monitor != NULL) {
       g_signal_connect(p_nav->p_monitor, "changed",
-                       G_CALLBACK(monitor_changed_cb), p_nav);
+                       G_CALLBACK(_monitor_changed_cb), p_nav);
    } else {
       if (p_err != NULL) {
          g_warning("navigator: monitor failed: %s", p_err->message);

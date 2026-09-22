@@ -1,3 +1,14 @@
+/*:*
+ * ggaze — Enhance/GEGL UI orchestration controller
+ *
+ * See enhance-ctrl.h. The preset mask, the in-flight apply/preview/export
+ * requests, the cached enhanced texture, the hold-Space flag and the gallery
+ * window / compact popover live here; the window reaches it through a few
+ * action entry points and it reaches the window through EnhanceUIHostOps.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
 #include "enhance-ctrl.h"
 
 #include <glib.h>

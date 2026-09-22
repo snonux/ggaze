@@ -85,8 +85,8 @@ access, functions for non-trivial logic. Keep accessor macros side-effect-free.
 
 ## Headers
 
-- **Header guards** UPPERCASE, derived from filename:
-  `#ifndef NAVIGATOR_H` / `#define NAVIGATOR_H`.
+- **Header guards** UPPERCASE, project-prefixed, derived from filename:
+  `#ifndef GGAZE_NAVIGATOR_H` / `#define GGAZE_NAVIGATOR_H`.
 - **Header order** inside a header: guard, includes, macros, enums, structs,
   `new`/`delete`, then the rest.
 - **`.c` include order**: own header first, then system, then project headers.

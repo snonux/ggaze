@@ -11,11 +11,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
-#include "app.h"
-#include "ggaze-config.h"
-
 #include <glib.h>
 #include <gtk/gtk.h>
+
+#include "app.h"
+#include "ggaze-config.h"
 
 static const GOptionEntry GGAZE_OPTIONS[] = {
    {"version", '\0', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE, NULL,
@@ -24,7 +24,7 @@ static const GOptionEntry GGAZE_OPTIONS[] = {
 };
 
 static gint
-on_local_options(GApplication *p_app, GVariantDict *p_opts, gpointer p_data) {
+_on_local_options(GApplication *p_app, GVariantDict *p_opts, gpointer p_data) {
    (void)p_app;
    (void)p_data;
    gboolean b_version = FALSE;
@@ -41,8 +41,8 @@ main(int i_argc, char **c_argv) {
 
    GgazeApp *p_app = ggaze_app_new();
    g_application_add_main_option_entries(G_APPLICATION(p_app), GGAZE_OPTIONS);
-   g_signal_connect(p_app, "handle-local-options", G_CALLBACK(on_local_options),
-                    NULL);
+   g_signal_connect(p_app, "handle-local-options",
+                    G_CALLBACK(_on_local_options), NULL);
 
    int i_status = g_application_run(G_APPLICATION(p_app), i_argc, c_argv);
 

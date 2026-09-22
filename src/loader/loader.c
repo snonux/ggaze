@@ -22,6 +22,7 @@
 
 #include "detect.h"
 #include "ggaze-config.h"
+#include "pixbuf-util.h"
 
 /* Format-specific backends, priority order. */
 #if GGAZE_HAVE_JXL
@@ -168,4 +169,148 @@ GdkTexture *
 loader_load_finish(GAsyncResult *p_res, GError **p_err) {
    g_return_val_if_fail(G_IS_TASK(p_res), NULL);
    return ((GdkTexture *)g_task_propagate_pointer((GTask *)p_res, p_err));
+}
+
+/* --- scaled decode + dimension peek (thumbnail / info) ------------------- */
+
+/* TRUE iff a specific (non-pixbuf) backend claims p_file. On an unreadable
+ * file FALSE is returned and the pixbuf path reports the I/O error. */
+static gboolean
+_specific_backend_claims(GFile *p_file, GCancellable *p_cancel) {
+   guint8 head[GGAZE_SNIFF_LEN];
+   gssize i_read = _read_header(p_file, p_cancel, head, GGAZE_SNIFF_LEN, NULL);
+   return (i_read > 0 && _backend_for(head, (gsize)i_read) != &pixbuf_backend);
+}
+
+/* Reject c_path if it is a JPEG whose declared header dimensions exceed the
+ * caps, before any GdkPixbuf call sized off them (gdk-pixbuf/glycin
+ * pre-allocates off the declared size and stalls ~28 s before its own cap
+ * rejects the file). An inconclusive peek (a filler marker pushed the SOF
+ * past the scanned prefix) is rejected like an oversized header, or a
+ * padded file bypasses the guard. */
+static gboolean
+_reject_oversized_jpeg_path(const char *c_path, GError **p_err) {
+   guint32             u_w, u_h;
+   GgazeJpegPeekStatus e_status =
+      detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h);
+   if (e_status == GGAZE_JPEG_PEEK_NOT_JPEG) {
+      return (TRUE);
+   }
+   if (e_status == GGAZE_JPEG_PEEK_INCONCLUSIVE) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "jpeg: could not determine declared dimensions within the "
+                  "scanned header prefix; refusing to decode");
+      return (FALSE);
+   }
+   return (detect_jpeg_dims_within_bounds(u_w, u_h, p_err));
+}
+
+/* Full decode through the matching backend, then a pixbuf scaled to fit
+ * i_max_px (the texture is already upright). */
+static GdkPixbuf *
+_scaled_via_backend(GFile *p_file, int i_max_px, GCancellable *p_cancel,
+                    GError **p_err) {
+   GdkTexture *p_tex = loader_load(p_file, p_cancel, p_err);
+   if (p_tex == NULL) {
+      return (NULL);
+   }
+   int        i_w    = gdk_texture_get_width(p_tex);
+   int        i_h    = gdk_texture_get_height(p_tex);
+   gdouble    d_s    = MIN(1.0, (gdouble)i_max_px / (gdouble)MAX(i_w, i_h));
+   int        i_tw   = MAX(1, (int)(i_w * d_s));
+   int        i_th   = MAX(1, (int)(i_h * d_s));
+   GdkPixbuf *p_full = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, i_w, i_h);
+   gdk_texture_download(p_tex, gdk_pixbuf_get_pixels(p_full),
+                        (gsize)gdk_pixbuf_get_rowstride(p_full));
+   g_object_unref(p_tex);
+   /* gdk_texture_download writes premultiplied BGRA (CAIRO_FORMAT_ARGB32);
+    * swap to the RGBA GdkPixbuf expects, straight-alpha is close enough for
+    * a thumbnail of an opaque photo. */
+   guchar *p_px     = gdk_pixbuf_get_pixels(p_full);
+   gsize   u_stride = (gsize)gdk_pixbuf_get_rowstride(p_full);
+   for (int y = 0; y < i_h; y++) {
+      guchar *p_row = p_px + (gsize)y * u_stride;
+      for (int x = 0; x < i_w; x++) {
+         guchar u_b       = p_row[x * 4 + 0];
+         p_row[x * 4 + 0] = p_row[x * 4 + 2];
+         p_row[x * 4 + 2] = u_b;
+      }
+   }
+   GdkPixbuf *p_small =
+      (i_tw == i_w && i_th == i_h)
+         ? GDK_PIXBUF(g_object_ref(p_full))
+         : gdk_pixbuf_scale_simple(p_full, i_tw, i_th, GDK_INTERP_BILINEAR);
+   g_object_unref(p_full);
+   return (p_small);
+}
+
+GdkPixbuf *
+loader_load_pixbuf_scaled(GFile *p_file, int i_max_px, GCancellable *p_cancel,
+                          GError **p_err) {
+   g_return_val_if_fail(G_IS_FILE(p_file), NULL);
+   g_return_val_if_fail(i_max_px > 0, NULL);
+   if (_specific_backend_claims(p_file, p_cancel)) {
+      return (_scaled_via_backend(p_file, i_max_px, p_cancel, p_err));
+   }
+   char *c_path = g_file_get_path(p_file);
+   if (c_path == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "cannot scale a non-local file");
+      return (NULL);
+   }
+   if (!_reject_oversized_jpeg_path(c_path, p_err)) {
+      g_free(c_path);
+      return (NULL);
+   }
+   GdkPixbuf *p_pix = gdk_pixbuf_new_from_file_at_scale(c_path, i_max_px,
+                                                        i_max_px, TRUE, p_err);
+   g_free(c_path);
+   if (p_pix == NULL) {
+      return (NULL);
+   }
+   GdkPixbuf *p_up = pixbuf_util_upright(p_pix);
+   g_object_unref(p_pix);
+   return (p_up);
+}
+
+gboolean
+loader_peek_dimensions(GFile *p_file, int *p_w, int *p_h) {
+   g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
+   g_return_val_if_fail(p_w != NULL && p_h != NULL, FALSE);
+   char *c_path = g_file_get_path(p_file);
+   if (c_path == NULL) {
+      return (FALSE);
+   }
+   /* Header-only for anything GdkPixbuf can parse (the STORED dimensions,
+    * before orientation, which is what an EXIF card reports next to its
+    * Orientation line): no pixel decode, so no oversized-header stall. */
+   *p_w = 0;
+   *p_h = 0;
+   if (gdk_pixbuf_get_file_info(c_path, p_w, p_h) != NULL && *p_w > 0 &&
+       *p_h > 0) {
+      g_free(c_path);
+      /* A header the decoders would refuse (oversized) has no honest size
+       * to report: say unknown rather than echo a crafted 65500x65500. */
+      if (!detect_dims_within_bounds("info", (guint64)*p_w, (guint64)*p_h, NULL,
+                                     NULL)) {
+         *p_w = 0;
+         *p_h = 0;
+         return (FALSE);
+      }
+      return (TRUE);
+   }
+   g_free(c_path);
+   /* A format only a specific backend decodes (JXL/AVIF/HEIF without a
+    * system pixbuf loader): decode it there. */
+   if (!_specific_backend_claims(p_file, NULL)) {
+      return (FALSE);
+   }
+   GdkTexture *p_tex = loader_load(p_file, NULL, NULL);
+   if (p_tex == NULL) {
+      return (FALSE);
+   }
+   *p_w = gdk_texture_get_width(p_tex);
+   *p_h = gdk_texture_get_height(p_tex);
+   g_object_unref(p_tex);
+   return (TRUE);
 }

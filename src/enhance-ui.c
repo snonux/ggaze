@@ -1,3 +1,11 @@
+/*:*
+ * ggaze — enhance gallery/popover widget construction
+ *
+ * See enhance-ui.h. Pure widget building: no state, no signals, no GEGL.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
 #include "enhance-ui.h"
 
 #include <glib.h>
