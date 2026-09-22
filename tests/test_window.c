@@ -319,6 +319,35 @@ test_enhance_a_is_safe_with_and_without_gegl(void) {
    ggaze_window_set_hold_original(p_win, TRUE);
    ggaze_window_set_hold_original(p_win, FALSE);
    fire(p_win, "win.enhance-save");
+   /* wb2: the crop / straighten / rotate tools. Both lanes: the hooks are
+    * defined either way and a full turn (] then [) is the identity, so the
+    * window ends clean. */
+   fire(p_win, "win.rotate-cw");
+   fire(p_win, "win.rotate-ccw");
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+   g_assert_false(ggaze_window_tool_key(p_win, GDK_KEY_h, 0)); /* no tool */
+   ggaze_window_tool_drag(p_win, GGAZE_VIEWER_DRAG_BEGIN, 1.0, 1.0);
+   ggaze_window_tool_drag(p_win, GGAZE_VIEWER_DRAG_END, 2.0, 2.0);
+   fire(p_win, "win.crop");
+#if GGAZE_HAVE_GEGL
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_CROP);
+   fire(p_win, "win.back"); /* Esc: cancels the tool, nothing else */
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
+   fire(p_win, "win.straighten");
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   g_assert_true(ggaze_window_tool_key(p_win, GDK_KEY_Escape, 0));
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
+#else
+   /* Without GEGL every tool key reports itself unavailable, like `a`,
+    * and no tool can ever be active. */
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_nonnull(g_strstr_len(gtk_label_get_text(GTK_LABEL(p_lbl)), -1,
+                                 "GEGL not built in"));
+   fire(p_win, "win.straighten");
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_false(ggaze_window_tool_key(p_win, GDK_KEY_Return, 0));
+#endif
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
 
    g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));

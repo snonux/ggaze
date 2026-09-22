@@ -22,6 +22,8 @@
  *   - win.enhance-save exports a NEW file next to the original
  *     (<stem>-enhanced[-<n>].<ext>, collision-suffixed like mover.c), never
  *     overwriting the original or a pre-existing same-named export.
+ *   - wb2: the crop (c) / straighten (R) / rotate-90 ([ ]) tools on the same
+ *     preview graph -- see the "wb2" section before the registrations.
  *
  * The real Save/Discard/Cancel GtkAlertDialog IS driven here, button by
  * button. The older claim (inherited from tests/test_delete_safety.c) that
@@ -2617,6 +2619,573 @@ test_panel_persists_across_navigation(void) {
    fixture_teardown(&fx);
 }
 
+/* --- wb2: the crop / straighten / rotate-90 tools ------------------------
+ *
+ * All drive the real window actions (win.crop / win.straighten /
+ * win.rotate-cw / win.rotate-ccw), the tools' modal keys through the
+ * window's public ggaze_window_tool_key hook, and pointer drags through
+ * ggaze_window_tool_drag, and assert on what the viewer actually shows: the
+ * texture's size after the async apply lands, the title's transform suffix,
+ * the dirty flag, and the exported file. The shared fixtures are a few
+ * pixels across, so these use a generated 400x300 PNG: a quarter turn of a
+ * 6x3 image is visible, but a crop's 1%-step keyboard nudge is not. */
+
+#define TOOL_W 400
+#define TOOL_H 300
+
+/* A fresh folder holding one TOOL_W x TOOL_H PNG ("tool.png"). */
+static char *
+make_tool_dir(char **c_path_out) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-tool-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   GdkPixbuf *p_pix =
+      gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, TOOL_W, TOOL_H);
+   gdk_pixbuf_fill(p_pix, 0x336699ffu);
+   char *c_path = g_build_filename(c_dir, "tool.png", NULL);
+   g_assert_true(gdk_pixbuf_save(p_pix, c_path, "png", &p_err, NULL));
+   g_assert_no_error(p_err);
+   g_object_unref(p_pix);
+   *c_path_out = c_path;
+   return (c_dir);
+}
+
+/* Window on tool.png, optionally presented at 900x700 with a real
+ * allocation (the drag subtests map widget pixels to image pixels). */
+typedef struct {
+   char        *c_dir;
+   char        *c_path;
+   GgazeWindow *p_win;
+   GdkTexture  *p_orig; /* owned ref on the original texture */
+} ToolFx;
+
+static void
+tool_fx_open(ToolFx *p_fx, gboolean b_present) {
+   memset(p_fx, 0, sizeof(*p_fx));
+   p_fx->c_dir   = make_tool_dir(&p_fx->c_path);
+   GFile *p_file = g_file_new_for_path(p_fx->c_path);
+   p_fx->p_win   = new_window();
+   if (b_present) {
+      gtk_window_set_default_size(GTK_WINDOW(p_fx->p_win), 900, 700);
+      gtk_window_present(GTK_WINDOW(p_fx->p_win));
+   }
+   ggaze_window_open(p_fx->p_win, p_file);
+   g_object_unref(p_file);
+   wait_for_load(p_fx->p_win);
+   if (b_present) {
+      GtkWidget *p_v = gtk_stack_get_child_by_name(
+         ggaze_window_get_stack(p_fx->p_win), "large");
+      for (guint u = 0; u < 3000 && gtk_widget_get_width(p_v) == 0; u++) {
+         g_main_context_iteration(g_main_context_default(), FALSE);
+         g_usleep(1000);
+      }
+      g_assert_cmpint(gtk_widget_get_width(p_v), >, 0);
+   }
+   p_fx->p_orig = ref_viewer_texture(p_fx->p_win);
+   g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
+}
+
+static void
+tool_fx_close(ToolFx *p_fx) {
+   gtk_window_destroy(GTK_WINDOW(p_fx->p_win));
+   ggtest_drain_main(300);
+   g_clear_object(&p_fx->p_orig);
+   g_free(p_fx->c_path);
+   cleanup_temp_dir(p_fx->c_dir);
+}
+
+static void
+assert_texture_size(GgazeWindow *p_win, gint i_w, gint i_h) {
+   GdkTexture *p_tex = viewer_texture(p_win);
+   g_assert_nonnull(p_tex);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, i_w);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, i_h);
+}
+
+/* Fire c_action and wait for the async preview to replace the texture. */
+static void
+fire_and_wait(GgazeWindow *p_win, const char *c_action) {
+   GdkTexture *p_before = ref_viewer_texture(p_win);
+   fire(p_win, c_action);
+   wait_for_texture_change(p_win, p_before);
+   g_object_unref(p_before);
+}
+
+/* Press a modal tool key (no modifiers) and assert the tool consumed it. */
+static void
+tool_key(GgazeWindow *p_win, guint u_keyval) {
+   g_assert_true(ggaze_window_tool_key(p_win, u_keyval, 0));
+}
+
+/* Press a modal key that re-renders the preview, and wait for it. */
+static void
+tool_key_and_wait(GgazeWindow *p_win, guint u_keyval) {
+   GdkTexture *p_before = ref_viewer_texture(p_win);
+   tool_key(p_win, u_keyval);
+   wait_for_texture_change(p_win, p_before);
+   g_object_unref(p_before);
+}
+
+static const char *
+status_text(GgazeWindow *p_win) {
+   return (gtk_label_get_text(GTK_LABEL(ggaze_window_get_info_label(p_win))));
+}
+
+/* `]` turns the preview a quarter clockwise each press, the title says so,
+ * and the fourth press is the original again (not dirty, cache hit). */
+static void
+test_rotate_cw_repeats_to_the_original(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "90° CW"));
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   assert_texture_size(fx.p_win, TOOL_W, TOOL_H);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "180°"));
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "90° CCW"));
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "°"));
+   tool_fx_close(&fx);
+}
+
+/* `[` then `s`: the exported copy is the turned image, the original file is
+ * untouched, and the saved preview is no longer dirty. */
+static void
+test_rotate_ccw_save_exports_the_turned_copy(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   gsize u_len;
+   char *c_before = load_bytes(fx.c_path, &u_len);
+   fire_and_wait(fx.p_win, "win.rotate-ccw");
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   fire(fx.p_win, "win.enhance-save");
+   char *c_out = g_build_filename(fx.c_dir, "tool-enhanced.png", NULL);
+   wait_for_file(c_out);
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = gdk_texture_new_from_filename(c_out, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, TOOL_H);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, TOOL_W);
+   g_object_unref(p_tex);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win)); /* saved */
+   gsize u_after;
+   char *c_after = load_bytes(fx.c_path, &u_after);
+   g_assert_cmpuint(u_after, ==, u_len);
+   g_assert_cmpint(memcmp(c_before, c_after, u_len), ==, 0);
+   g_free(c_before);
+   g_free(c_after);
+   g_free(c_out);
+   tool_fx_close(&fx);
+}
+
+/* A preset and a turn compose in one preview and one export. */
+static void
+test_rotate_composes_with_a_preset(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.enhance-1");
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "Auto-fix"));
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "90° CW"));
+   fire(fx.p_win, "win.enhance-save");
+   char *c_out = g_build_filename(fx.c_dir, "tool-enhanced.png", NULL);
+   wait_for_file(c_out);
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = gdk_texture_new_from_filename(c_out, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, TOOL_H);
+   g_object_unref(p_tex);
+   g_free(c_out);
+   tool_fx_close(&fx);
+}
+
+/* A dirty turn is gated like a dirty preset: navigating away prompts,
+ * Cancel keeps the turned preview, Discard moves on with the original. */
+static void
+test_dirty_rotate_gates_navigation(void) {
+   DirtyFixture             fx      = {0};
+   static const char *const c_two[] = {"plain.jpg", "rot6.jpg", NULL};
+   fixture_open_clean(&fx, "ggaze-tool-gate-XXXXXX", c_two);
+   fx.p_orig = ref_viewer_texture(fx.p_win);
+   fire(fx.p_win, "win.rotate-cw");
+   wait_for_texture_change(fx.p_win, fx.p_orig);
+   fx.p_mod = ref_viewer_texture(fx.p_win);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   fx.u_ref = ((GObject *)fx.p_win)->ref_count;
+   fire(fx.p_win, "win.next");
+   answer_prompt(&fx, "Cancel");
+   assert_showing(fx.p_win, "plain.jpg");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);
+   assert_ref_settled(&fx);
+   fire(fx.p_win, "win.next");
+   answer_prompt(&fx, "Discard");
+   assert_showing(fx.p_win, "rot6.jpg");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "°"));
+   fixture_teardown(&fx);
+}
+
+/* `c` opens the crop tool over the unchanged image (the identity transform
+ * needs no re-render), H/K shrink the rectangle by 1% steps, Enter commits
+ * the crop and leaves the tool, and the preview is the cropped size. */
+static void
+test_crop_keys_then_enter_commits(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.crop");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Crop"));
+   for (guint u = 0; u < 10; u++) {
+      tool_key(fx.p_win, GDK_KEY_H); /* right edge in: 3 px per press */
+      tool_key(fx.p_win, GDK_KEY_K); /* bottom edge up */
+   }
+   /* h/l/j/k move the rectangle, so they are consumed: none of these may
+    * reach win.prev / win.next / the pan actions. */
+   tool_key(fx.p_win, GDK_KEY_l);
+   tool_key(fx.p_win, GDK_KEY_h);
+   tool_key(fx.p_win, GDK_KEY_j);
+   tool_key(fx.p_win, GDK_KEY_k);
+   g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_x, 0)); /* not ours */
+   g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_q, GDK_CONTROL_MASK));
+   GdkTexture *p_before = ref_viewer_texture(fx.p_win);
+   tool_key(fx.p_win, GDK_KEY_Return);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   /* Said at once; the landed preview's own hint replaces it later. */
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Cropped"));
+   wait_for_texture_change(fx.p_win, p_before);
+   g_object_unref(p_before);
+   assert_texture_size(fx.p_win, TOOL_W - 30, TOOL_H - 30);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "crop"));
+   tool_fx_close(&fx);
+}
+
+/* Esc in the crop tool restores what the tool started from; `c` again
+ * while it is active is the same cancel; the untouched rectangle commits
+ * as "no crop". */
+static void
+test_crop_esc_and_toggle_cancel(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.crop");
+   tool_key(fx.p_win, GDK_KEY_H);
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_cmpstr(status_text(fx.p_win), ==, "Crop cancelled");
+   fire(fx.p_win, "win.crop");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   fire(fx.p_win, "win.crop"); /* the toggle */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   fire(fx.p_win, "win.crop");
+   tool_key(fx.p_win, GDK_KEY_Return); /* the whole image: no crop */
+   ggtest_drain_main(100);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Crop removed"));
+   tool_fx_close(&fx);
+}
+
+/* 1-4 lock the aspect (largest such rectangle inside the current one,
+ * centred), 0 frees it, and Enter commits that shape. */
+static void
+test_crop_aspect_presets(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.crop");
+   tool_key(fx.p_win, GDK_KEY_1);
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_H); /* 300x300 square */
+   fire(fx.p_win, "win.crop"); /* re-opens on the committed rectangle ... */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   tool_key(fx.p_win, GDK_KEY_4); /* ... 16:9 inside the square: 300x168 */
+   tool_key(fx.p_win, GDK_KEY_0); /* free: keeps the shape */
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_texture_size(fx.p_win, TOOL_H, (gint)(TOOL_H * 9.0 / 16.0));
+   tool_fx_close(&fx);
+}
+
+/* A pointer drag on the presented window: the bottom-right corner dragged
+ * inward resizes, a drag inside moves; both in image pixels through the
+ * viewer's geometry. */
+static void
+test_crop_drag_resizes_and_moves(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop");
+   GgazeViewer *p_v = GGAZE_VIEWER(
+      gtk_stack_get_child_by_name(ggaze_window_get_stack(fx.p_win), "large"));
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   g_assert_cmpint(g.i_img_w, ==, TOOL_W);
+   gdouble d_s = g.d_scale;
+   /* Corner (400,300) -> (300,200): the rectangle becomes 300x200. */
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN,
+                          g.d_x + TOOL_W * d_s, g.d_y + TOOL_H * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_UPDATE, g.d_x + 300 * d_s,
+                          g.d_y + 200 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 300 * d_s,
+                          g.d_y + 200 * d_s);
+   /* Inside (150,100) -> (200,140): moved by (50,40); the size stays. */
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN, g.d_x + 150 * d_s,
+                          g.d_y + 100 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 200 * d_s,
+                          g.d_y + 140 * d_s);
+   /* A drag that starts outside the rectangle does nothing. */
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN, g.d_x + 390 * d_s,
+                          g.d_y + 290 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 100 * d_s,
+                          g.d_y + 100 * d_s);
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_texture_size(fx.p_win, 300, 200);
+   /* The pan gesture is back once the tool is gone: a drag now is a pan. */
+   gdouble d_px, d_py;
+   ggaze_viewer_get_pan(p_v, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 0.0);
+   tool_fx_close(&fx);
+}
+
+/* `R`: h/l nudge by half a degree and render live with the auto-crop
+ * (smaller than the image), A turns auto-crop off (the padded bounding box
+ * is larger), Enter keeps it, and the title names the angle. */
+static void
+test_straighten_nudge_and_autocrop(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.straighten");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Straighten 0.0"));
+   tool_key_and_wait(fx.p_win, GDK_KEY_l);
+   tool_key_and_wait(fx.p_win, GDK_KEY_l);
+   GdkTexture *p_tex = viewer_texture(fx.p_win);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), <, TOOL_W);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), <, TOOL_H);
+   g_assert_nonnull(
+      g_strstr_len(window_title(fx.p_win), -1, "straighten 1.0° CW"));
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Straighten 1.0"));
+   tool_key_and_wait(fx.p_win, GDK_KEY_A); /* auto-crop off */
+   p_tex = viewer_texture(fx.p_win);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), >, TOOL_W);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), >, TOOL_H);
+   tool_key_and_wait(fx.p_win, GDK_KEY_minus); /* back to 0.5 CW */
+   tool_key_and_wait(fx.p_win, GDK_KEY_minus);
+   tool_key_and_wait(fx.p_win, GDK_KEY_h); /* 0.5 CCW */
+   g_assert_nonnull(
+      g_strstr_len(window_title(fx.p_win), -1, "straighten 0.5° CCW"));
+   tool_key(fx.p_win, GDK_KEY_Return);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Straightened 0.5"));
+   fire(fx.p_win, "win.back"); /* Esc outside the tool discards the preview */
+   ggtest_drain_main(100);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   tool_fx_close(&fx);
+}
+
+/* Dragging along a horizon that slopes 10 degrees down to the right levels
+ * it: the image turns 10 degrees counter-clockwise. */
+static void
+test_straighten_horizon_drag_levels(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.straighten");
+   GgazeViewer *p_v = GGAZE_VIEWER(
+      gtk_stack_get_child_by_name(ggaze_window_get_stack(fx.p_win), "large"));
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   gdouble     d_s      = g.d_scale;
+   GdkTexture *p_before = ref_viewer_texture(fx.p_win);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN, g.d_x + 50 * d_s,
+                          g.d_y + 100 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_UPDATE, g.d_x + 100 * d_s,
+                          g.d_y + 110 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 150 * d_s,
+                          g.d_y + 117.63 * d_s);
+   wait_for_texture_change(fx.p_win, p_before);
+   g_object_unref(p_before);
+   g_assert_nonnull(
+      g_strstr_len(window_title(fx.p_win), -1, "straighten 10.0° CCW"));
+   /* A level line changes nothing (a zero angle is not a re-render). */
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN, g.d_x + 50 * d_s,
+                          g.d_y + 100 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 150 * d_s,
+                          g.d_y + 100 * d_s);
+   ggtest_drain_main(200);
+   g_assert_nonnull(
+      g_strstr_len(window_title(fx.p_win), -1, "straighten 10.0° CCW"));
+   tool_key(fx.p_win, GDK_KEY_Return);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   tool_fx_close(&fx);
+}
+
+/* Esc in the straighten tool restores the transform it started from -- here
+ * a quarter turn, which stays (and stays dirty). */
+static void
+test_straighten_esc_restores_the_turn(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   GdkTexture *p_turned = ref_viewer_texture(fx.p_win);
+   fire(fx.p_win, "win.straighten");
+   tool_key_and_wait(fx.p_win, GDK_KEY_l);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
+   GdkTexture *p_tilted = ref_viewer_texture(fx.p_win);
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   wait_for_texture_change(fx.p_win, p_tilted);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "90° CW"));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_object_unref(p_turned);
+   g_object_unref(p_tilted);
+   tool_fx_close(&fx);
+}
+
+/* While one tool is active the other tool's key, its action, and the
+ * quarter turns are refused (a turn under a laid-out rectangle would
+ * silently move it); the tool stays and the preview is untouched. */
+static void
+test_tool_refuses_switch_and_turn_while_active(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.crop");
+   fire(fx.p_win, "win.straighten");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Finish the"));
+   tool_key(fx.p_win, GDK_KEY_R);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   fire(fx.p_win, "win.rotate-cw");
+   tool_key(fx.p_win, GDK_KEY_bracketleft);
+   ggtest_drain_main(200);
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   fire(fx.p_win, "win.straighten");
+   fire(fx.p_win, "win.crop");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   tool_key(fx.p_win, GDK_KEY_c);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   tool_key(fx.p_win, GDK_KEY_R); /* the same tool's key cancels it */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   tool_fx_close(&fx);
+}
+
+/* Enter in the crop tool is refused while the base preview is still
+ * rendering (a rectangle laid out over a stale image must not commit), and
+ * accepted once it has landed. */
+static void
+test_crop_enter_refused_while_rendering(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.rotate-cw"); /* async: in flight until the loop runs */
+   fire(fx.p_win, "win.crop");
+   tool_key(fx.p_win, GDK_KEY_Return);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Preview still"));
+   wait_for_texture_change(fx.p_win, fx.p_orig);
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   tool_key(fx.p_win, GDK_KEY_H); /* now laid out on the turned base */
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   assert_texture_size(fx.p_win, TOOL_H - 3, TOOL_W);
+   tool_fx_close(&fx);
+}
+
+/* The crop turns with the image: a committed crop, then `]`, keeps
+ * covering the same pixels (its size swaps with the turn). */
+static void
+test_crop_turns_with_the_image(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.crop");
+   for (guint u = 0; u < 10; u++) {
+      tool_key(fx.p_win, GDK_KEY_H);
+   }
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_texture_size(fx.p_win, TOOL_W - 30, TOOL_H);
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W - 30);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "90° CW, crop"));
+   tool_fx_close(&fx);
+}
+
+/* A tool ends -- without committing -- when the image under it changes
+ * hands: navigation (clean: no prompt) and leaving the large view. From the
+ * grid, `c` first opens the highlighted image large. */
+static void
+test_tool_abandoned_on_navigation_and_view_change(void) {
+   DirtyFixture             fx      = {0};
+   static const char *const c_two[] = {"plain.jpg", "rot6.jpg", NULL};
+   fixture_open_clean(&fx, "ggaze-tool-abandon-XXXXXX", c_two);
+   fire(fx.p_win, "win.crop");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   fire(fx.p_win, "win.next"); /* not dirty: no prompt, straight through */
+   ggtest_drain_main(300);
+   assert_showing(fx.p_win, "rot6.jpg");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   fire(fx.p_win, "win.straighten");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   fire(fx.p_win, "win.toggle-view"); /* the grid: no canvas, no tool */
+   ggtest_drain_main(100);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   fire(fx.p_win, "win.crop"); /* from the grid: large first, then the tool */
+   ggtest_drain_main(100);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(fx.p_win)), ==,
+      "large");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   fixture_teardown(&fx);
+}
+
+static void
+add_tool_tests(void) {
+   g_test_add_func("/enhance_flow/rotate_cw_repeats_to_the_original",
+                   test_rotate_cw_repeats_to_the_original);
+   g_test_add_func("/enhance_flow/rotate_ccw_save_exports_the_turned_copy",
+                   test_rotate_ccw_save_exports_the_turned_copy);
+   g_test_add_func("/enhance_flow/rotate_composes_with_a_preset",
+                   test_rotate_composes_with_a_preset);
+   g_test_add_func("/enhance_flow/dirty_rotate_gates_navigation",
+                   test_dirty_rotate_gates_navigation);
+   g_test_add_func("/enhance_flow/crop_keys_then_enter_commits",
+                   test_crop_keys_then_enter_commits);
+   g_test_add_func("/enhance_flow/crop_esc_and_toggle_cancel",
+                   test_crop_esc_and_toggle_cancel);
+   g_test_add_func("/enhance_flow/crop_aspect_presets",
+                   test_crop_aspect_presets);
+   g_test_add_func("/enhance_flow/crop_drag_resizes_and_moves",
+                   test_crop_drag_resizes_and_moves);
+   g_test_add_func("/enhance_flow/straighten_nudge_and_autocrop",
+                   test_straighten_nudge_and_autocrop);
+   g_test_add_func("/enhance_flow/straighten_horizon_drag_levels",
+                   test_straighten_horizon_drag_levels);
+   g_test_add_func("/enhance_flow/straighten_esc_restores_the_turn",
+                   test_straighten_esc_restores_the_turn);
+   g_test_add_func("/enhance_flow/tool_refuses_switch_and_turn_while_active",
+                   test_tool_refuses_switch_and_turn_while_active);
+   g_test_add_func("/enhance_flow/crop_enter_refused_while_rendering",
+                   test_crop_enter_refused_while_rendering);
+   g_test_add_func("/enhance_flow/crop_turns_with_the_image",
+                   test_crop_turns_with_the_image);
+   g_test_add_func("/enhance_flow/tool_abandoned_on_navigation_and_view",
+                   test_tool_abandoned_on_navigation_and_view_change);
+}
+
 /* Registration split in two so neither function runs past the ~30-line
  * convention: the original feature coverage, and the round-2 subtests that
  * answer the real Save/Discard/Cancel prompt (see the file header). */
@@ -2794,5 +3363,6 @@ main(int i_argc, char **c_argv) {
    add_round5_tests();
    add_trash_cursor_tests();
    add_dispose_prompt_tests();
+   add_tool_tests();
    return (g_test_run());
 }
