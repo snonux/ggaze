@@ -182,6 +182,11 @@ test_show_then_follow_texture(void) {
 
    const Histogram *p_same = plot_of(&fx);
    info_overlay_texture_changed(fx.p_io, p_grn); /* already plotting it */
+   /* Checked BEFORE any drain: a re-bin clears the plot synchronously, so
+    * a non-NULL plot right here proves none started. The identity check
+    * after the drain alone would not -- a freed-and-reallocated Histogram
+    * could land on the same address. */
+   g_assert_nonnull(plot_of(&fx));
    drain_main(100);
    g_assert_true(plot_of(&fx) == p_same);
 
@@ -256,10 +261,19 @@ test_null_texture_clears_and_cancels(void) {
    fx_close(&fx);
 }
 
+/* Upper bound for the auto-hide wait below, in wall-clock time. The card is
+ * armed with g_timeout_add_seconds(5), and that API only promises a fire
+ * somewhere in a 4.75-5.75 s window: GLib rounds second-granularity
+ * timeouts to a shared 1 s grid (+-250 ms of slack) so they wake the
+ * process together. 7 s clears the late edge with margin; measured by the
+ * clock, not by iteration count, because a fixed number of ~1 ms
+ * iterations lasts a different real time on every host. */
+#define HIDE_WAIT_US (7 * G_USEC_PER_SEC)
+
 /* The auto-hide timer takes the file card down with its plot. The card
  * stays up for 5 s (info-overlay.h), so this subtest waits that long once,
  * deliberately: a test seam for the delay would put test-only state into
- * the module for one assertion, and 5.5 s in one integration binary is
+ * the module for one assertion, and ~5 s in one integration binary is
  * cheaper than that. Afterwards a texture change finds no card to follow. */
 static void
 test_timer_hides_card_and_plot(void) {
@@ -270,7 +284,9 @@ test_timer_hides_card_and_plot(void) {
    info_overlay_show_for_file(fx.p_io, fx.p_file, p_red);
    assert_solid_bins(wait_for_plot(&fx), 255, 0, 0);
 
-   for (guint u = 0; u < 5500 && gtk_widget_get_visible(label_of(&fx)); u++) {
+   const gint64 i_deadline = g_get_monotonic_time() + HIDE_WAIT_US;
+   while (gtk_widget_get_visible(label_of(&fx)) &&
+          g_get_monotonic_time() < i_deadline) {
       g_main_context_iteration(g_main_context_default(), FALSE);
       g_usleep(1000);
    }

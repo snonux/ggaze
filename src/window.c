@@ -428,9 +428,11 @@ _set_view(GgazeWindow *p_win, GgazeViewMode e_view) {
     * empty page must take the plot down for the rest of the card's time
     * (the grid card has no plot -- there is no picture on screen to judge),
     * and coming back must fill it in again. Both fall out of one sync:
-    * _info_texture_for() says NULL outside the large view. Safe at init,
-    * where the overlay and the navigator may not exist yet: the sync is a
-    * no-op without either. */
+    * _info_texture_for() says NULL outside the large view. Safe at init:
+    * the overlay always exists by now (_init_info_overlay runs before the
+    * first _set_view, in _init_stack_and_viewer), but the navigator is
+    * still NULL until a folder opens -- the sync passes NULL through in
+    * that case, which is exactly "nothing to plot". */
    _sync_info_plot(p_win);
 }
 
