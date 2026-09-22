@@ -16,48 +16,62 @@
 #include <glib.h>
 #include <limits.h>
 
-/* Byte offsets of R, G, B inside one pixel plus its size, per layout. The
- * premultiplied variants bin exactly like their straight siblings: the card
- * plots what is on screen, and a photo is opaque anyway. Returns FALSE for
- * every layout this table does not know (16-bit, float, grayscale, ...) so
- * the caller fails cleanly instead of reading garbage. */
+/* Compile-time GDK version gate: gdk.h carries GDK_MAJOR/MINOR_VERSION but
+ * no GTK_CHECK_VERSION, and this module deliberately includes no gtk.h. */
+#define HISTOGRAM_GDK_AT_LEAST(u_minor)                                        \
+   (GDK_MAJOR_VERSION > 4 ||                                                   \
+    (GDK_MAJOR_VERSION == 4 && GDK_MINOR_VERSION >= (u_minor)))
+
+/* Fill _layout()'s out-params and answer "known", so its table below stays
+ * one line per byte order. */
+static gboolean
+_layout_is(guint u_bpp, guint u_r, guint u_g, guint u_b, guint *p_bpp,
+           guint *p_r, guint *p_g, guint *p_b) {
+   *p_bpp = u_bpp;
+   *p_r   = u_r;
+   *p_g   = u_g;
+   *p_b   = u_b;
+   return (TRUE);
+}
+
+/* Byte offsets of R, G, B inside one pixel plus its size, for every 8-bit
+ * RGB(A)/BGR(A) layout GDK has. The premultiplied and the X8 (padding byte)
+ * variants bin exactly like their straight siblings: the card plots what is
+ * on screen, and a photo is opaque anyway. Returns FALSE for every layout
+ * this table does not know (16-bit, float, grayscale, YUV, ...) so the
+ * caller fails cleanly instead of reading garbage. */
 static gboolean
 _layout(GdkMemoryFormat e_format, guint *p_bpp, guint *p_r, guint *p_g,
         guint *p_b) {
    switch (e_format) {
    case GDK_MEMORY_R8G8B8A8:
    case GDK_MEMORY_R8G8B8A8_PREMULTIPLIED:
-      *p_bpp = 4;
-      *p_r   = 0;
-      *p_g   = 1;
-      *p_b   = 2;
-      return (TRUE);
+#if HISTOGRAM_GDK_AT_LEAST(14)
+   case GDK_MEMORY_R8G8B8X8:
+#endif
+      return (_layout_is(4, 0, 1, 2, p_bpp, p_r, p_g, p_b));
    case GDK_MEMORY_B8G8R8A8:
    case GDK_MEMORY_B8G8R8A8_PREMULTIPLIED:
-      *p_bpp = 4;
-      *p_r   = 2;
-      *p_g   = 1;
-      *p_b   = 0;
-      return (TRUE);
+#if HISTOGRAM_GDK_AT_LEAST(14)
+   case GDK_MEMORY_B8G8R8X8:
+#endif
+      return (_layout_is(4, 2, 1, 0, p_bpp, p_r, p_g, p_b));
    case GDK_MEMORY_A8R8G8B8:
    case GDK_MEMORY_A8R8G8B8_PREMULTIPLIED:
-      *p_bpp = 4;
-      *p_r   = 1;
-      *p_g   = 2;
-      *p_b   = 3;
-      return (TRUE);
+#if HISTOGRAM_GDK_AT_LEAST(14)
+   case GDK_MEMORY_X8R8G8B8:
+#endif
+      return (_layout_is(4, 1, 2, 3, p_bpp, p_r, p_g, p_b));
+   case GDK_MEMORY_A8B8G8R8:
+#if HISTOGRAM_GDK_AT_LEAST(14)
+   case GDK_MEMORY_A8B8G8R8_PREMULTIPLIED:
+   case GDK_MEMORY_X8B8G8R8:
+#endif
+      return (_layout_is(4, 3, 2, 1, p_bpp, p_r, p_g, p_b));
    case GDK_MEMORY_R8G8B8:
-      *p_bpp = 3;
-      *p_r   = 0;
-      *p_g   = 1;
-      *p_b   = 2;
-      return (TRUE);
+      return (_layout_is(3, 0, 1, 2, p_bpp, p_r, p_g, p_b));
    case GDK_MEMORY_B8G8R8:
-      *p_bpp = 3;
-      *p_r   = 2;
-      *p_g   = 1;
-      *p_b   = 0;
-      return (TRUE);
+      return (_layout_is(3, 2, 1, 0, p_bpp, p_r, p_g, p_b));
    default:
       return (FALSE);
    }
@@ -148,27 +162,34 @@ histogram_new_from_pixels(const guint8 *p_pixels, int i_width, int i_height,
    return (p_hist);
 }
 
-/* TRUE iff GDK hands back p_tex's own pixel bytes without a copy when asked
- * for layout e_fmt: gdk_texture_downloader_download_bytes() refs a
- * GdkMemoryTexture's bytes when the requested format is its native one
- * (verified in GTK 4.14, the CI toolchain, and 4.22) and, from 4.16 on, the
- * colour state matches too -- the sRGB default every ggaze texture carries.
- * Any other combination converts into a fresh g_malloc_n buffer inside GDK,
- * which aborts on failure; that case goes through _from_converted() so the
- * allocation is ours to size and to fail softly. */
+/* TRUE iff the binner can read layout e_fmt, which is exactly when GDK hands
+ * back a GdkMemoryTexture's own pixel bytes without a copy: _from_native()
+ * asks gdk_texture_downloader_download_bytes() for the texture's native
+ * format and (from 4.16 on, where textures carry one) its own colour state,
+ * and GDK then refs the texture's bytes instead of converting (verified in
+ * GTK 4.14, the CI toolchain, and 4.22). A layout the table does not know
+ * goes through _from_converted(), where the buffer is ours to size and to
+ * fail softly -- GDK's own conversion g_malloc_n's and aborts on failure. */
 static gboolean
-_native_bytes_shareable(GdkTexture *p_tex, GdkMemoryFormat e_fmt) {
+_native_bytes_shareable(GdkMemoryFormat e_fmt) {
    guint u_bpp, u_r, u_g, u_b;
-   (void)p_tex; /* only consulted from GDK 4.16 on (colour state) */
-   if (!_layout(e_fmt, &u_bpp, &u_r, &u_g, &u_b)) {
-      return (FALSE);
-   }
-#if GDK_MAJOR_VERSION > 4 || (GDK_MAJOR_VERSION == 4 && GDK_MINOR_VERSION >= 16)
-   return (gdk_color_state_equal(gdk_texture_get_color_state(p_tex),
-                                 gdk_color_state_get_srgb()));
-#else
-   return (TRUE);
+   return (_layout(e_fmt, &u_bpp, &u_r, &u_g, &u_b));
+}
+
+/* A downloader that asks for p_tex exactly as it is stored: its native
+ * layout and, on GDK >= 4.16, its own colour state, so a texture tagged
+ * with anything but sRGB (a wide-gamut JPEG some day) still comes back
+ * copy-free rather than converted through sRGB. The bins are of the pixel
+ * values as stored either way; the plot judges exposure, not colorimetry. */
+static GdkTextureDownloader *
+_native_downloader(GdkTexture *p_tex, GdkMemoryFormat e_fmt) {
+   GdkTextureDownloader *p_dl = gdk_texture_downloader_new(p_tex);
+   gdk_texture_downloader_set_format(p_dl, e_fmt);
+#if HISTOGRAM_GDK_AT_LEAST(16)
+   gdk_texture_downloader_set_color_state(p_dl,
+                                          gdk_texture_get_color_state(p_tex));
 #endif
+   return (p_dl);
 }
 
 /* Bin the texture straight out of its own bytes (no copy, so no size
@@ -176,16 +197,24 @@ _native_bytes_shareable(GdkTexture *p_tex, GdkMemoryFormat e_fmt) {
  * order GDK actually stores them. */
 static Histogram *
 _from_native(GdkTexture *p_tex, int i_w, int i_h, GdkMemoryFormat e_fmt) {
-   GdkTextureDownloader *p_dl = gdk_texture_downloader_new(p_tex);
-   gdk_texture_downloader_set_format(p_dl, e_fmt);
-   gsize   u_stride = 0;
-   GBytes *p_bytes  = gdk_texture_downloader_download_bytes(p_dl, &u_stride);
+   guint u_bpp, u_r, u_g, u_b;
+   if (!_layout(e_fmt, &u_bpp, &u_r, &u_g, &u_b)) {
+      return (NULL); /* unreachable: the caller checked, but never guess */
+   }
+   GdkTextureDownloader *p_dl     = _native_downloader(p_tex, e_fmt);
+   gsize                 u_stride = 0;
+   GBytes *p_bytes = gdk_texture_downloader_download_bytes(p_dl, &u_stride);
    gdk_texture_downloader_free(p_dl);
    gsize         u_len  = 0;
    const guint8 *p_px   = g_bytes_get_data(p_bytes, &u_len);
    Histogram    *p_hist = NULL;
-   /* Belt and braces: never read past the bytes GDK handed over. */
-   if (p_px != NULL && u_len >= u_stride * (gsize)i_h) {
+   /* Belt and braces: never read past the bytes GDK handed over. The last
+    * row need not be padded out to the stride -- GDK's legal minimum is
+    * (h-1) rows of stride plus one row of pixels, and that is exactly what
+    * the loader builds from a GdkPixbuf (pixbuf-util.c), so demanding
+    * stride * h here would refuse a padded-stride texture for no reason. */
+   gsize u_need = u_stride * (gsize)(i_h - 1) + (gsize)i_w * u_bpp;
+   if (p_px != NULL && u_len >= u_need) {
       p_hist = histogram_new_from_pixels(p_px, i_w, i_h, u_stride, e_fmt,
                                          histogram_step_for(i_w, i_h));
    }
@@ -237,7 +266,7 @@ histogram_new_from_texture_full(GdkTexture *p_tex,
       return (NULL);
    }
    GdkMemoryFormat e_fmt = gdk_texture_get_format(p_tex);
-   if (_native_bytes_shareable(p_tex, e_fmt)) {
+   if (_native_bytes_shareable(e_fmt)) {
       return (_from_native(p_tex, i_w, i_h, e_fmt));
    }
    return (_from_converted(p_tex, i_w, i_h, u_max_convert_pixels));

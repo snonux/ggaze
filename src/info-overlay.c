@@ -27,24 +27,33 @@ struct InfoOverlay {
    guint           u_hide;      /* auto-hide timeout id (0 = none) */
    GCancellable   *p_cancel;    /* outstanding async gather */
    GFile          *p_info_file; /* file the visible card describes, or NULL */
-   gboolean        b_disposed;  /* no widget touch after this */
+   /* File of the in-flight FULL gather (text + plot), or NULL: a texture
+    * change while it runs restarts it rather than racing it. */
+   GFile *p_pending;
+   /* Texture the plot shows or is being binned from, or NULL. A ref: the
+    * pointer must stay unique for the identity check in texture_changed. */
+   GdkTexture *p_plot_tex;
+   gboolean    b_disposed; /* no widget touch after this */
 };
 
-/* One `i` request: what the worker reads (file + the texture on screen for
- * it, may be NULL) and what it produces. Task data, so the task frees it
- * whether the completion runs or the loop drains first. */
+/* One request: what the worker reads (file + the texture on screen for it,
+ * may be NULL) and what it produces. b_hist_only is the texture-changed
+ * follow-up: the card's text stays, only the plot is rebuilt. Task data, so
+ * the task frees it whether the completion runs or the loop drains first. */
 typedef struct {
    GFile      *p_file;
-   GdkTexture *p_tex;  /* nullable */
-   GgazeInfo  *p_info; /* result, NULL until the worker ran */
-   Histogram  *p_hist; /* result, NULL without a texture */
+   GdkTexture *p_tex;       /* nullable */
+   gboolean    b_hist_only; /* skip info_new: plot refresh for a live card */
+   GgazeInfo  *p_info;      /* result, NULL until the worker ran / hist-only */
+   Histogram  *p_hist;      /* result, NULL without a texture */
 } InfoJob;
 
 static InfoJob *
-_infojob_new(GFile *p_file, GdkTexture *p_tex) {
-   InfoJob *p_job = g_new0(InfoJob, 1);
-   p_job->p_file  = g_object_ref(p_file);
-   p_job->p_tex   = p_tex != NULL ? g_object_ref(p_tex) : NULL;
+_infojob_new(GFile *p_file, GdkTexture *p_tex, gboolean b_hist_only) {
+   InfoJob *p_job     = g_new0(InfoJob, 1);
+   p_job->p_file      = g_object_ref(p_file);
+   p_job->p_tex       = p_tex != NULL ? g_object_ref(p_tex) : NULL;
+   p_job->b_hist_only = b_hist_only;
    return (p_job);
 }
 
@@ -68,6 +77,8 @@ _unref(InfoOverlay *p_io) {
    if (g_atomic_ref_count_dec(&p_io->u_refs)) {
       g_clear_object(&p_io->p_cancel);
       g_clear_object(&p_io->p_info_file);
+      g_clear_object(&p_io->p_pending);
+      g_clear_object(&p_io->p_plot_tex);
       g_free(p_io);
    }
 }
@@ -119,14 +130,17 @@ _cancel_timer(InfoOverlay *p_io) {
    }
 }
 
-/* Cancel any in-flight async gather (navigation / dispose / a new `i`).
- * The cancelled task's completion is a no-op. */
+/* Cancel any in-flight async gather (navigation / dispose / a new request).
+ * The cancelled task's completion is a no-op, and nothing is pending any
+ * more: a texture change after a dismissed `i` must not resurrect the
+ * dismissed card by restarting its gather. */
 static void
 _cancel_async(InfoOverlay *p_io) {
    if (p_io->p_cancel != NULL) {
       g_cancellable_cancel(p_io->p_cancel);
       g_clear_object(&p_io->p_cancel);
    }
+   g_clear_object(&p_io->p_pending);
 }
 
 /* Hand p_hist (transfer full, may be NULL) to the plot and show it iff there
@@ -149,6 +163,7 @@ _set_histogram(InfoOverlay *p_io, Histogram *p_hist) {
 static void
 _hide(InfoOverlay *p_io) {
    g_clear_object(&p_io->p_info_file);
+   g_clear_object(&p_io->p_plot_tex); /* the next card starts plot-free */
    if (!p_io->b_disposed) {
       gtk_widget_set_visible(p_io->p_box, FALSE);
       gtk_widget_set_visible(p_io->p_label, FALSE);
@@ -186,24 +201,27 @@ info_overlay_show_status(InfoOverlay *p_io, const char *c_msg) {
     * be read: 2 s + 1 s per 40 characters, capped at 8 s. */
    guint u_secs = (guint)CLAMP(2 + strlen(c_msg) / 40, 2, 8);
    g_clear_object(&p_io->p_info_file); /* a status is not a file card */
-   _set_histogram(p_io, NULL);         /* ... and carries no plot */
+   g_clear_object(&p_io->p_plot_tex);  /* ... carries no plot ... */
+   _set_histogram(p_io, NULL);         /* ... and texture changes skip it */
    _show_text(p_io, c_msg, u_secs);
 }
 
 /* GTask worker (off the main thread): fill the job's results -- the
- * GgazeInfo for the file and, when a texture came along, its histogram.
- * Touches no GtkWidget; the texture is immutable so reading it here is
- * safe. */
+ * GgazeInfo for the file (unless the job only refreshes the plot) and, when
+ * a texture came along, its histogram. Touches no GtkWidget; the texture is
+ * immutable so reading it here is safe. */
 static void
 _info_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
              GCancellable *p_cancel) {
    (void)p_src;
    InfoJob *p_job = (InfoJob *)p_task_data;
-   p_job->p_info  = info_new(p_job->p_file);
-   if (p_job->p_info == NULL) {
-      g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_FAILED,
-                              "info: gather failed");
-      return;
+   if (!p_job->b_hist_only) {
+      p_job->p_info = info_new(p_job->p_file);
+      if (p_job->p_info == NULL) {
+         g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                                 "info: gather failed");
+         return;
+      }
    }
    /* Skip the binning if superseded while the metadata was gathering: the
     * completion is a no-op on cancel and the job dies with the task. */
@@ -218,10 +236,33 @@ _info_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
    g_task_return_boolean(p_task, TRUE);
 }
 
+/* Apply a landed job to the card. A full gather shows its text (fresh
+ * auto-hide timer) and marks the card as p_file's; a plot-only refresh
+ * changes nothing but the plot, and only if the card still IS that file's
+ * -- the auto-hide timer may have taken the card down while the binning
+ * ran, and a plot must not come up on a hidden card. */
+static void
+_apply_job(InfoOverlay *p_io, InfoJob *p_job) {
+   if (!p_job->b_hist_only) {
+      char *c_text = info_format(p_job->p_info);
+      _show_text(p_io, c_text, 5);
+      g_free(c_text);
+      g_set_object(&p_io->p_info_file, p_job->p_file);
+   } else if (p_io->p_info_file == NULL ||
+              !g_file_equal(p_io->p_info_file, p_job->p_file)) {
+      return;
+   }
+   _set_histogram(p_io, g_steal_pointer(&p_job->p_hist));
+}
+
 /* GTask completion (main thread): apply the result iff not superseded and
- * the overlay is still live. p_data is the ref taken in show_for_file. The
+ * the overlay is still live. p_data is the ref taken in _start_job. The
  * histogram moves out of the job into the plot widget; the rest stays with
- * the job and is freed with the task. */
+ * the job and is freed with the task. The live request (its cancellable is
+ * the current one) is over either way, success or failure: a full gather
+ * that is done is no longer pending, so a later texture change refreshes
+ * the plot instead of restarting the text gather. A superseded request
+ * (cancelled: b_ok FALSE, another cancellable current) changes nothing. */
 static void
 _info_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
@@ -229,15 +270,42 @@ _info_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    GError      *p_err = NULL;
    gboolean     b_ok  = g_task_propagate_boolean(G_TASK(p_res), &p_err);
    g_clear_error(&p_err);
+   if (g_task_get_cancellable(G_TASK(p_res)) == p_io->p_cancel) {
+      g_clear_object(&p_io->p_pending);
+   }
    if (b_ok && !p_io->b_disposed) {
-      InfoJob *p_job  = (InfoJob *)g_task_get_task_data(G_TASK(p_res));
-      char    *c_text = info_format(p_job->p_info);
-      _show_text(p_io, c_text, 5);
-      g_free(c_text);
-      _set_histogram(p_io, g_steal_pointer(&p_job->p_hist));
-      g_set_object(&p_io->p_info_file, p_job->p_file);
+      _apply_job(p_io, (InfoJob *)g_task_get_task_data(G_TASK(p_res)));
    }
    _unref(p_io);
+}
+
+/* Start one async request (full gather or plot-only), superseding any in
+ * flight: the previous cancellable is cancelled, so its completion is a
+ * no-op and the last request issued is the one that lands (last-write-
+ * wins). p_tex becomes the texture the plot is for, whether or not it is
+ * NULL, so a repeat texture change for the same texture is recognised. A
+ * full gather is pending until its completion runs; a plot refresh never
+ * is (the card is already up). p_file is ref'd before the cancel, which
+ * drops the previous pending file it may well be. */
+static void
+_start_job(InfoOverlay *p_io, GFile *p_file, GdkTexture *p_tex,
+           gboolean b_hist_only) {
+   g_object_ref(p_file);
+   _cancel_async(p_io);
+   p_io->p_cancel = g_cancellable_new();
+   g_set_object(&p_io->p_plot_tex, p_tex);
+   if (!b_hist_only) {
+      g_set_object(&p_io->p_pending, p_file);
+   }
+   /* The overlay is not a GObject: the task's source object is NULL and the
+    * ref that keeps the struct alive for the callback is the plain refcount.
+    */
+   GTask *p_task = g_task_new(NULL, p_io->p_cancel, _info_done_cb, _ref(p_io));
+   g_task_set_task_data(p_task, _infojob_new(p_file, p_tex, b_hist_only),
+                        (GDestroyNotify)_infojob_delete);
+   g_task_run_in_thread(p_task, _info_thread);
+   g_object_unref(p_task);
+   g_object_unref(p_file);
 }
 
 void
@@ -249,16 +317,37 @@ info_overlay_show_for_file(InfoOverlay *p_io, GFile *p_file,
    if (p_io->b_disposed) {
       return;
    }
-   _cancel_async(p_io);
-   p_io->p_cancel = g_cancellable_new();
-   /* The overlay is not a GObject: the task's source object is NULL and the
-    * ref that keeps the struct alive for the callback is the plain refcount.
-    */
-   GTask *p_task = g_task_new(NULL, p_io->p_cancel, _info_done_cb, _ref(p_io));
-   g_task_set_task_data(p_task, _infojob_new(p_file, p_tex),
-                        (GDestroyNotify)_infojob_delete);
-   g_task_run_in_thread(p_task, _info_thread);
-   g_object_unref(p_task);
+   _start_job(p_io, p_file, p_tex, FALSE);
+}
+
+void
+info_overlay_texture_changed(InfoOverlay *p_io, GdkTexture *p_tex) {
+   g_return_if_fail(p_io != NULL);
+   g_return_if_fail(p_tex == NULL || GDK_IS_TEXTURE(p_tex));
+   if (p_io->b_disposed || p_tex == p_io->p_plot_tex) {
+      return; /* nothing to follow, or already plotting this very texture */
+   }
+   if (p_io->p_pending != NULL) {
+      /* The card's own gather is still running with the previous texture
+       * (or none): restart it with what is on screen now, so the card
+       * comes up plotting the picture it sits over. */
+      _start_job(p_io, p_io->p_pending, p_tex, FALSE);
+      return;
+   }
+   if (p_io->p_info_file == NULL) {
+      return; /* a status line or a hidden card has no plot to follow */
+   }
+   /* A live file card: drop the plot of the picture that is gone at once
+    * (never a stale plot under the new picture, not even for the binning's
+    * duration) and re-bin the new one off the main thread. The card's text
+    * and its auto-hide timer are untouched: the file is the same. */
+   _set_histogram(p_io, NULL);
+   if (p_tex == NULL) {
+      _cancel_async(p_io); /* an older binning must not land either */
+      g_clear_object(&p_io->p_plot_tex);
+      return;
+   }
+   _start_job(p_io, p_io->p_info_file, p_tex, TRUE);
 }
 
 void

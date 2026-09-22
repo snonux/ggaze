@@ -1467,13 +1467,13 @@ _slideshow_tick(gpointer p_data) {
  * it provably belongs to p_cur. The viewer alone cannot say whose pixels it
  * shows -- on a texturecache miss viewload keeps the PREVIOUS picture up
  * until the new decode lands (viewload_load_current), so during that window
- * `i` would pair the new file's EXIF with the old file's histogram, and the
- * card would keep that stale plot after the load landed. The mapping lives
- * in viewload's cache (the entry for p_cur is p_cur's decoded texture, or
- * NULL while still decoding) and in the enhance override, which swaps in the
- * preview of that same file. The displayed texture must be one of those two
- * to be plotted; anything else means "still decoding" -> no plot. The grid
- * never plots: there is no displayed texture to judge there. */
+ * `i` would pair the new file's EXIF with the old file's histogram. The
+ * mapping lives in viewload's cache (the entry for p_cur is p_cur's decoded
+ * texture, or NULL while still decoding) and in the enhance override, which
+ * swaps in the preview of that same file. The displayed texture must be one
+ * of those two to be plotted; anything else means "still decoding" -> no
+ * plot, and _sync_info_plot() fills the plot in once the decode lands. The
+ * grid never plots: there is no displayed texture to judge there. */
 static GdkTexture *
 _info_texture_for(GgazeWindow *p_win, GFile *p_cur) {
    if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
@@ -1507,6 +1507,24 @@ _show_info(GgazeWindow *p_win) {
    }
    info_overlay_toggle_for_file(p_win->p_info, p_cur,
                                 _info_texture_for(p_win, p_cur));
+}
+
+/* The picture changed (every path funnels through _show_texture): tell the
+ * info overlay which texture it may plot now -- the displayed one when
+ * _info_texture_for() vouches for it as the current file's, else NULL -- so
+ * a card that is up follows hold-Space, a landing preset and a decode
+ * landing under a card opened while it was in flight. The overlay ignores
+ * the call unless a file card is up or being gathered, so this costs
+ * nothing on the plain load path. */
+static void
+_sync_info_plot(GgazeWindow *p_win) {
+   if (p_win->p_info == NULL) {
+      return; /* mid-teardown: no card to keep in step */
+   }
+   GFile *p_cur =
+      p_win->p_nav != NULL ? navigator_get_current(p_win->p_nav) : NULL;
+   info_overlay_texture_changed(
+      p_win->p_info, p_cur != NULL ? _info_texture_for(p_win, p_cur) : NULL);
 }
 
 /* Hide the info overlay because the current file changed: reached from
@@ -2298,6 +2316,8 @@ _show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
    p_tex = enhance_ctrl_override_texture(p_win->p_enhance_ctrl, p_tex);
 #endif
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
+   /* After the override, so the card plots what is actually on screen. */
+   _sync_info_plot(p_win);
 }
 
 /* Show navigator.current through the ViewLoad pipeline (texture LRU, one

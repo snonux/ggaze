@@ -140,7 +140,7 @@ See [tech-stack.md](tech-stack.md).
 | M1  | Show one image (zoom/pan)    | not started | custom viewer widget, GdkPixbuf backend, EXIF orientation on load |
 | M2  | Walk the directory          | not started | navigator, `h`/`l` prev/next, folder arg + drag-drop open, `GFileMonitor` auto-refresh, wrap, header counter |
 | M3  | Responsive + prefetch       | not started | GTask decode, 2–3 slot LRU, cancel-in-flight |
-| M4  | Fullscreen + slideshow + info | done; histogram added (0c2) | `f`, `s`, `i` EXIF overlay; `i` card also plots an RGB/luminance histogram of the displayed texture (task 0c2: `histogram.{c,h}` plain-C binner + `histogram-view.{c,h}` snapshot widget, gathered in the info overlay's GTask; plot only when the texture provably belongs to the current file) |
+| M4  | Fullscreen + slideshow + info | not started | `f`, `s`, `i` EXIF overlay. Added later by task 0c2 (after M9; this row's status is not what changed): the `i` card also plots an RGB/luminance histogram of the displayed texture (`histogram.{c,h}` plain-C binner + `histogram-view.{c,h}` snapshot widget, gathered in the info overlay's GTask; plotted only when the texture provably belongs to the current file, and following the picture while the card is up) |
 | M5  | Modern formats             | not started | JXL/AVIF/HEIF backends, animated GIF/WebP |
 | M6  | Progressive low-res preview | not started | libjpeg-turbo early low-res scan |
 | M7  | Thumbnail cache + grid view | not started | TMS cache + `gridview`, dim trashed items |

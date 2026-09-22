@@ -68,6 +68,20 @@ void info_overlay_show_for_file(InfoOverlay *p_io, GFile *p_file,
 void info_overlay_toggle_for_file(InfoOverlay *p_io, GFile *p_file,
                                   GdkTexture *p_tex);
 
+/* The displayed texture changed under the card: p_tex is the texture now on
+ * screen, vouched for by the caller as the current file's exactly as for
+ * show_for_file (hold-Space showing the original, a landed enhance preview,
+ * a decode landing under a card opened while it was in flight), or NULL when
+ * the screen shows nothing the card may plot. While a file card is up its
+ * plot is cleared at once and p_tex re-binned asynchronously (a
+ * histogram-only request under the same cancel / last-write-wins rules; the
+ * auto-hide timer is not touched, the text does not change); while the
+ * card's own gather is still in flight, that gather restarts with p_tex.
+ * A status line and a hidden card ignore it, as does a repeat of the texture
+ * already plotted. window.c calls this from its one texture choke point, so
+ * "histogram of the image on screen" holds for the card's whole lifetime. */
+void info_overlay_texture_changed(InfoOverlay *p_io, GdkTexture *p_tex);
+
 /* Hide the label, cancel the timer and any in-flight request (navigation:
  * the previous file's card must never outlive the file it describes). */
 void info_overlay_dismiss(InfoOverlay *p_io);

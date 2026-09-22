@@ -20,9 +20,11 @@
  * the grid, a different plot after navigating to another image, and no plot
  * left behind by `i` toggling the card off; test_info_no_plot_while_loading()
  * -- `i` during a texturecache-miss decode (the previous picture still on
- * screen) must not pair the new file's text with the old file's plot; and
+ * screen) must not pair the new file's text with the old file's plot, and
+ * the plot follows the decode once it lands under the card; and
  * test_status_clears_plot() -- a status line taking over the card carries no
- * plot under it.
+ * plot under it. (The plot following hold-Space and a landing preset is the
+ * GEGL lane's /enhance_flow/info_plots_preview.)
  *
  * The window is built with g_object_new() (no "application" property): the
  * stack/header are constructed in ggaze_window_init, independent of the app
@@ -290,22 +292,59 @@ test_info_hides_on_reopen(void) {
    cleanup_temp_dir(c_dir2);
 }
 
-/* Fire `i`, wait for the card and return the plot's histogram, asserting the
- * plot is up and was built from exactly u_samples pixels (the fixtures are
- * small enough that every pixel is read, so the sample count IS the
- * dimensions and pins the plot to the image on screen). */
+/* Drain until the plot is up holding a histogram built from exactly
+ * u_samples pixels (the fixtures are small enough that every pixel is read,
+ * so the sample count IS the dimensions and pins the plot to the image on
+ * screen), and return it. The plot lands asynchronously: with the card's
+ * text for a fresh `i`, on its own for a texture change under the card. */
 static const Histogram *
-show_info_expect_plot(GgazeWindow *p_win, guint64 u_samples) {
-   GtkWidget *p_plot = ggaze_window_get_info_histogram(p_win);
-   fire(p_win, "win.info");
-   wait_for_info(p_win);
-   g_assert_true(gtk_widget_get_visible(p_plot));
-   const Histogram *p_hist =
-      ggaze_histogram_view_get_histogram(GGAZE_HISTOGRAM_VIEW(p_plot));
+wait_for_plot(GgazeWindow *p_win, guint64 u_samples) {
+   GtkWidget       *p_plot = ggaze_window_get_info_histogram(p_win);
+   const Histogram *p_hist = NULL;
+   for (guint u = 0; u < 3000; u++) {
+      p_hist = ggaze_histogram_view_get_histogram(GGAZE_HISTOGRAM_VIEW(p_plot));
+      if (p_hist != NULL && p_hist->u_samples == u_samples) {
+         break;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
    g_assert_nonnull(p_hist);
    g_assert_cmpuint(p_hist->u_samples, ==, u_samples);
    g_assert_cmpuint(p_hist->u_peak, >, 0);
+   g_assert_true(gtk_widget_get_visible(p_plot));
    return (p_hist);
+}
+
+/* Drain until the plot holds a histogram of u_samples pixels, asserting at
+ * every iteration on the way that it holds nothing else: no histogram at
+ * all (plot down) or the wanted one -- never another image's. Fails after
+ * 3 s. */
+static void
+wait_for_plot_never_other(GgazeWindow *p_win, guint64 u_samples) {
+   GtkWidget *p_plot = ggaze_window_get_info_histogram(p_win);
+   for (guint u = 0; u < 3000; u++) {
+      const Histogram *p_hist =
+         ggaze_histogram_view_get_histogram(GGAZE_HISTOGRAM_VIEW(p_plot));
+      if (p_hist != NULL) {
+         g_assert_cmpuint(p_hist->u_samples, ==, u_samples);
+         g_assert_true(gtk_widget_get_visible(p_plot));
+         return;
+      }
+      g_assert_false(gtk_widget_get_visible(p_plot));
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_not_reached(); /* no plot within 3 s */
+}
+
+/* Fire `i`, wait for the card and return its plot's histogram (see
+ * wait_for_plot for what u_samples pins down). */
+static const Histogram *
+show_info_expect_plot(GgazeWindow *p_win, guint64 u_samples) {
+   fire(p_win, "win.info");
+   wait_for_info(p_win);
+   return (wait_for_plot(p_win, u_samples));
 }
 
 /* From the grid there is no displayed texture to judge, so `i` brings the
@@ -424,9 +463,10 @@ test_info_shows_histogram(void) {
 /* Review finding on 0c2: on a texturecache miss viewload keeps the PREVIOUS
  * picture on screen until the new decode lands, so `i` fired in that window
  * used to pair B's EXIF text with A's histogram -- and kept it after B
- * landed. Now the card comes up without a plot while B is decoding, stays
- * plot-free once B lands (the card is not re-gathered by a load), and a
- * fresh `i` on the landed B plots B. */
+ * landed. Now the card comes up without a plot while B is decoding, and
+ * once B lands the plot follows the picture (second review: the card's plot
+ * tracks the displayed texture for as long as the card is up) -- B's own
+ * bins, without a second `i`. Toggling the card off and on plots B too. */
 static void
 test_info_no_plot_while_loading(void) {
    char        *c_dir = NULL;
@@ -438,16 +478,17 @@ test_info_no_plot_while_loading(void) {
    fire(p_win, "win.next");
    g_assert_true(viewer_texture(p_win) == p_a); /* A still up: the race */
    fire(p_win, "win.info");
-   wait_for_info(p_win);
-   /* B's text (rot6.jpg stores 8x4; the card prints stored dimensions,
-    * the texture lands upright as 4x8), and no plot of A under it. */
+   /* The card's text and B's decode both land within milliseconds and in
+    * either order, so the assertion is the invariant, not an instant: from
+    * here on the plot is NULL for as long as A is the picture, and B's
+    * (32 samples) once B landed -- A's (18) at no point in between. */
+   wait_for_plot_never_other(p_win, 4 * 8);
+   g_assert_true(viewer_texture(p_win) != p_a); /* B did land, upright */
+   g_assert_cmpint(gdk_texture_get_width(viewer_texture(p_win)), ==, 4);
+   /* B's text (rot6.jpg stores 8x4; the card prints stored dimensions). */
+   g_assert_true(gtk_widget_get_visible(p_lbl));
    g_assert_nonnull(
       g_strstr_len(gtk_label_get_text(GTK_LABEL(p_lbl)), -1, "8×4"));
-   assert_no_plot(p_win);
-
-   wait_for_texture_change(p_win, p_a, 4, 8); /* B lands, upright */
-   g_assert_true(gtk_widget_get_visible(p_lbl));
-   assert_no_plot(p_win); /* still not A's plot */
 
    fire(p_win, "win.info"); /* off ... */
    g_assert_false(gtk_widget_get_visible(p_lbl));

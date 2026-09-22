@@ -278,7 +278,13 @@ bounded memory.
   `test_histogram.c` (per-channel counts, layouts, stride, subsampling
   budget, rejected input).
 - Integration: `/window/info_shows_histogram` (plot for the image on screen,
-  none from the grid, a different plot after navigation).
+  none from the grid, a different plot after navigation),
+  `/window/info_no_plot_while_loading` (`i` during a cache-miss decode: the
+  new file's text without the old file's plot, and the plot filled in once
+  the decode lands), `/window/status_clears_plot` (a status line over the
+  card drops the plot); GEGL lane: `/enhance_flow/info_plots_preview` (the
+  plot equals the displayed texture's bins through preset -> hold-Space ->
+  release -> a second preset).
 
 **Acceptance:** `f`/`S`/`i` work; EXIF shows; `Esc` chain correct.
 

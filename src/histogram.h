@@ -64,8 +64,9 @@ typedef struct {
 Histogram *histogram_new(void);
 
 /* Bin an 8-bit pixel buffer. e_format selects the byte order; supported are
- * the 8-bit RGB(A)/BGR(A) layouts (premultiplied variants included -- alpha
- * is ignored, a photo is opaque). u_stride is the row pitch in bytes.
+ * all of GDK's 8-bit RGB(A)/BGR(A) layouts (premultiplied and X8-padded
+ * variants included -- alpha is ignored, a photo is opaque). u_stride is the
+ * row pitch in bytes; the last row may be as short as one row of pixels.
  * Every u_step-th pixel of every u_step-th row is read (0 means 1; anything
  * above INT_MAX is clamped to it, which still reads pixel (0,0)).
  * Returns NULL for a NULL buffer, a zero/negative dimension, a stride

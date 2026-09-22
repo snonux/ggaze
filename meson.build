@@ -17,7 +17,9 @@ project('ggaze', 'c',
 )
 
 # --- Always-required dependencies (the core viewer needs all of these) ---
-gtk4_dep       = dependency('gtk4')
+# >= 4.10: GdkTextureDownloader + gdk_texture_get_format (histogram.c reads a
+# texture's pixels in its native layout through them; both are 4.10 API).
+gtk4_dep       = dependency('gtk4', version : '>= 4.10')
 glib_dep       = dependency('glib-2.0')
 gio_dep        = dependency('gio-2.0')
 adwaita_dep    = dependency('libadwaita-1')

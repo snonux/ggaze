@@ -7,12 +7,14 @@
  * sampling budget. Single-primary pixels pin red and blue to their own
  * channels through every texture path (native RGBA, native premultiplied
  * BGRA -- GDK_MEMORY_DEFAULT on little-endian, which a straight-RGBA read
- * once swapped -- and the 16-bit / float conversion path). Negative cases:
- * NULL buffer, zero / negative dimensions, a too-short stride, an
- * unsupported pixel format, a step above INT_MAX, a NULL texture, a
- * converted texture over the copy budget. A non-memory texture (GL, dmabuf)
- * is not constructible without a display, so that refusal is inspected, not
- * run.
+ * once swapped -- and the 16-bit / float conversion path). A texture whose
+ * bytes are GDK's legal minimum (a padded stride, the last row unpadded --
+ * what the loader builds from a GdkPixbuf) is read natively and bins
+ * right. Negative cases: NULL buffer, zero / negative dimensions, a
+ * too-short stride, an unsupported pixel format, a step above INT_MAX, a
+ * NULL texture, a converted texture over the copy budget. A non-memory
+ * texture (GL, dmabuf) is not constructible without a display, so that
+ * refusal is inspected, not run.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -69,7 +71,9 @@ test_rgba8_bins_each_channel(void) {
    histogram_delete(p_hist);
 }
 
-/* The same four pixels in every other supported layout must bin the same. */
+/* The same four pixels in every other supported layout must bin the same:
+ * every 8-bit RGB(A)/BGR(A) byte order GDK has, premultiplied and (from
+ * GDK 4.14, where they exist) X8-padded variants included. */
 static void
 test_layouts_agree(void) {
    const guint8 c_rgb[12]  = {255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255};
@@ -78,6 +82,8 @@ test_layouts_agree(void) {
                               255, 0, 0,   255, 255, 255, 255, 255};
    const guint8 c_argb[16] = {255, 255, 0, 0,   255, 0,   255, 0,
                               255, 0,   0, 255, 255, 255, 255, 255};
+   const guint8 c_abgr[16] = {255, 0,   0, 255, 255, 0,   255, 0,
+                              255, 255, 0, 0,   255, 255, 255, 255};
    Histogram   *p_ref =
       histogram_new_from_pixels(RGBA_2X2, 2, 2, 8, GDK_MEMORY_R8G8B8A8, 1);
    struct {
@@ -91,7 +97,15 @@ test_layouts_agree(void) {
       {c_bgra, 8, GDK_MEMORY_B8G8R8A8_PREMULTIPLIED},
       {c_argb, 8, GDK_MEMORY_A8R8G8B8},
       {c_argb, 8, GDK_MEMORY_A8R8G8B8_PREMULTIPLIED},
+      {c_abgr, 8, GDK_MEMORY_A8B8G8R8},
       {RGBA_2X2, 8, GDK_MEMORY_R8G8B8A8_PREMULTIPLIED},
+#if GDK_MAJOR_VERSION > 4 || (GDK_MAJOR_VERSION == 4 && GDK_MINOR_VERSION >= 14)
+      {c_abgr, 8, GDK_MEMORY_A8B8G8R8_PREMULTIPLIED},
+      {RGBA_2X2, 8, GDK_MEMORY_R8G8B8X8}, /* the alpha byte is padding */
+      {c_bgra, 8, GDK_MEMORY_B8G8R8X8},
+      {c_argb, 8, GDK_MEMORY_X8R8G8B8},
+      {c_abgr, 8, GDK_MEMORY_X8B8G8R8},
+#endif
    };
    for (gsize u = 0; u < G_N_ELEMENTS(a_cases); u++) {
       Histogram *p_hist = histogram_new_from_pixels(
@@ -249,7 +263,9 @@ test_from_texture_downsamples(void) {
    guint8   *p_px = g_malloc0((gsize)i_w * i_h * 4);
    for (gsize u = 0; u < (gsize)i_w * i_h; u++) {
       p_px[u * 4 + 1] = 200; /* uniform mid-green ... */
-      p_px[u * 4 + 3] = 255; /* ... opaque: GDK's download premultiplies */
+      p_px[u * 4 + 3] = 255; /* ... opaque, like every loader texture (the
+                              * native read bins the bytes as stored; alpha
+                              * is not consulted either way) */
    }
    GdkTexture *p_tex = texture_from(p_px, (gsize)i_w * i_h * 4, i_w, i_h,
                                     GDK_MEMORY_R8G8B8A8, (gsize)i_w * 4);
@@ -356,6 +372,41 @@ test_from_texture_convert_budget(void) {
    g_object_unref(p_rgba);
 }
 
+/* GDK's legal minimum for a texture's bytes is (h-1) * stride + w * bpp:
+ * the last row need not be padded out to the stride, and that is exactly
+ * what the loader hands GDK for a GdkPixbuf with a padded rowstride
+ * (pixbuf-util.c). A 3x2 RGBA texture with stride 16 and 28 bytes must be
+ * read natively (a stride * h guard once refused it) and bin only the
+ * pixels: the 4 padding bytes of row 0 are 255s that would show up in the
+ * top bins if they were read. */
+static void
+test_from_texture_minimal_bytes(void) {
+   guint8 c_px[28];
+   memset(c_px, 255, sizeof(c_px));
+   const guint8 c_row0[12] = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255};
+   const guint8 c_row1[12] = {255, 255, 255, 255, 0,   0,
+                              0,   255, 128, 128, 128, 255};
+   memcpy(c_px, c_row0, 12);      /* red, green, blue, then 4 padding bytes */
+   memcpy(c_px + 16, c_row1, 12); /* white, black, mid-grey, no padding */
+   GdkTexture *p_tex =
+      texture_from(c_px, sizeof(c_px), 3, 2, GDK_MEMORY_R8G8B8A8, 16);
+   Histogram *p_hist = histogram_new_from_texture(p_tex);
+   g_assert_nonnull(p_hist);
+   g_assert_cmpuint(p_hist->u_samples, ==, 6);
+   g_assert_cmpuint(p_hist->u_step, ==, 1);
+   for (guint u_ch = HISTOGRAM_CHANNEL_R; u_ch <= HISTOGRAM_CHANNEL_B; u_ch++) {
+      /* each primary: 255 in its own pixel + white, 128 in grey, 0 in the
+       * other three; nothing from the padding */
+      g_assert_cmpuint(p_hist->u_bins[u_ch][BIN(255)], ==, 2);
+      g_assert_cmpuint(p_hist->u_bins[u_ch][BIN(128)], ==, 1);
+      g_assert_cmpuint(p_hist->u_bins[u_ch][BIN(0)], ==, 3);
+   }
+   g_assert_cmpuint(p_hist->u_bins[HISTOGRAM_CHANNEL_LUM][BIN(128)], ==, 1);
+   g_assert_cmpuint(p_hist->u_peak, ==, 3);
+   histogram_delete(p_hist);
+   g_object_unref(p_tex);
+}
+
 int
 main(int argc, char **argv) {
    g_test_init(&argc, &argv, NULL);
@@ -378,5 +429,7 @@ main(int argc, char **argv) {
                    test_texture_primaries_not_swapped);
    g_test_add_func("/histogram/from_texture_convert_budget",
                    test_from_texture_convert_budget);
+   g_test_add_func("/histogram/from_texture_minimal_bytes",
+                   test_from_texture_minimal_bytes);
    return (g_test_run());
 }

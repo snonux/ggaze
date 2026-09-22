@@ -19,6 +19,11 @@
  *     new image; Esc closes it first, `0` is its Original hotkey.
  *   - ggaze_window_set_hold_original() swaps the displayed texture to the
  *     (cached) original and back without touching u_enhance_mask.
+ *   - the `i` card's histogram follows the picture (0c2, second review):
+ *     it plots the preview, the original under hold-Space, the preview
+ *     again on release, and the next preset's preview when that lands --
+ *     bin-for-bin equal to histogram_new_from_texture() of the texture the
+ *     viewer shows at each step (test_info_plots_preview).
  *   - win.enhance-save exports a NEW file next to the original
  *     (<stem>-enhanced[-<n>].<ext>, collision-suffixed like mover.c), never
  *     overwriting the original or a pre-existing same-named export.
@@ -59,6 +64,8 @@
 #include "enhance-ui.h"
 #include "gridview.h"
 #include "gtk_helpers.h"
+#include "histogram-view.h"
+#include "histogram.h"
 #include "settings.h"
 #include "viewer.h"
 #include "window.h"
@@ -895,6 +902,99 @@ test_hold_space_compares_then_restores(void) {
    ggtest_drain_main(300);
    g_object_unref(p_orig_tex);
    g_object_unref(p_enhanced_tex);
+   cleanup_temp_dir(c_dir);
+}
+
+/* Drain until the `i` card's plot holds a histogram whose bins are those of
+ * p_tex, binned here through the same histogram_new_from_texture() the
+ * overlay's worker uses, and assert it is visible. The refresh is
+ * asynchronous (the old plot is cleared at once, the new one lands from a
+ * worker), hence the poll; 3 s is generous for a 6x3 fixture. */
+static void
+wait_for_plot_of(GgazeWindow *p_win, GdkTexture *p_tex) {
+   GgazeHistogramView *p_plot =
+      GGAZE_HISTOGRAM_VIEW(ggaze_window_get_info_histogram(p_win));
+   Histogram *p_want = histogram_new_from_texture(p_tex);
+   g_assert_nonnull(p_want);
+   const Histogram *p_got = NULL;
+   for (guint u = 0; u < 3000; u++) {
+      p_got = ggaze_histogram_view_get_histogram(p_plot);
+      if (p_got != NULL &&
+          memcmp(p_got->u_bins, p_want->u_bins, sizeof(p_want->u_bins)) == 0) {
+         break;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_nonnull(p_got);
+   g_assert_cmpmem(p_got->u_bins, sizeof(p_got->u_bins), p_want->u_bins,
+                   sizeof(p_want->u_bins));
+   g_assert_true(gtk_widget_get_visible(GTK_WIDGET(p_plot)));
+   histogram_delete(p_want);
+}
+
+/* The two textures must bin differently, or the follow-the-picture
+ * assertions below could pass on a plot that never moved. */
+static void
+assert_bins_differ(GdkTexture *p_a, GdkTexture *p_b) {
+   Histogram *p_ha = histogram_new_from_texture(p_a);
+   Histogram *p_hb = histogram_new_from_texture(p_b);
+   g_assert_nonnull(p_ha);
+   g_assert_nonnull(p_hb);
+   g_assert_cmpint(memcmp(p_ha->u_bins, p_hb->u_bins, sizeof(p_ha->u_bins)), !=,
+                   0);
+   histogram_delete(p_ha);
+   histogram_delete(p_hb);
+}
+
+/* 0c2 second review: the `i` card plots the image on screen for as long as
+ * it is up, not just the texture `i` was pressed over. Preset lands -> `i`
+ * plots the preview; hold-Space (original on screen) -> the original's
+ * bins; release -> the preview's again; a second preset landing -> the new
+ * preview's. Every step compares the plot bin-for-bin with the viewer's
+ * texture binned independently. */
+static void
+test_info_plots_preview(void) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-enhance-info-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "plain.jpg");
+   char        *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GgazeWindow *p_win  = new_window();
+   ggaze_window_open(p_win, p_file);
+   wait_for_load(p_win);
+
+   GdkTexture *p_orig = ref_viewer_texture(p_win);
+   fire(p_win, "win.enhance-1");
+   wait_for_texture_change(p_win, p_orig);
+   GdkTexture *p_mod = ref_viewer_texture(p_win);
+   g_assert_true(p_mod != p_orig);
+   assert_bins_differ(p_orig, p_mod);
+
+   fire(p_win, "win.info");
+   wait_for_plot_of(p_win, p_mod); /* the preview, not the file's pixels */
+
+   ggaze_window_set_hold_original(p_win, TRUE);
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   wait_for_plot_of(p_win, p_orig); /* follows hold-Space ... */
+   ggaze_window_set_hold_original(p_win, FALSE);
+   wait_for_plot_of(p_win, p_mod); /* ... and the release */
+
+   fire(p_win, "win.enhance-2"); /* a second preset lands on top */
+   wait_for_texture_change(p_win, p_mod);
+   GdkTexture *p_mod2 = ref_viewer_texture(p_win);
+   g_assert_true(p_mod2 != p_mod);
+   assert_bins_differ(p_mod, p_mod2);
+   wait_for_plot_of(p_win, p_mod2); /* follows the new preview */
+
+   g_object_unref(p_file);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   g_free(c_path);
+   ggtest_drain_main(300);
+   g_object_unref(p_orig);
+   g_object_unref(p_mod);
+   g_object_unref(p_mod2);
    cleanup_temp_dir(c_dir);
 }
 
@@ -2644,6 +2744,7 @@ add_feature_tests(void) {
                    test_hold_space_compares_then_restores);
    g_test_add_func("/enhance_flow/hold_flag_not_stuck_after_mask_cleared",
                    test_hold_flag_not_stuck_after_mask_cleared);
+   g_test_add_func("/enhance_flow/info_plots_preview", test_info_plots_preview);
    g_test_add_func("/enhance_flow/save_exports_collision_safe_copy",
                    test_save_exports_collision_safe_copy);
    g_test_add_func("/enhance_flow/navigate_when_not_dirty_is_immediate",
