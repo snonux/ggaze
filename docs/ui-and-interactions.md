@@ -414,13 +414,19 @@ built in, all four report "GEGL not built in".
     (default on, decision #35; off keeps the whole rotated bounding box —
     the preview then shows **transparent** corners while a JPEG export gets
     **black** ones, since JPEG has no alpha; a PNG export keeps them
-    transparent).
+    transparent). The auto-crop trims one extra pixel per side so every
+    kept pixel is opaque; that needs an image whose inscribed rectangle is
+    at least 3 px per side — straightening anything smaller (a 3×2 at 45°)
+    is not meaningful and may keep translucent edge pixels.
   - Every change renders live (`gegl:rotate` about the centre); holding a
     nudge key queues one re-render, not one per repeat. `Enter` keeps it,
     `Esc` or `R` again restores the angle the tool started with. A crop
-    already applied follows the changing image (it stays over the same
-    content, anchored on the centre the straighten turns about); when
-    nothing of it is left at the new angle it is removed and the status
+    already applied follows the changing image: its rectangle is kept whole
+    and re-centred on the centre the straighten turns about, and only the
+    part of it inside the straightened image is cropped (in the preview and
+    the export). So a rectangle touching the border is never eroded — nudge
+    away and back and the crop is exactly what it was. When nothing of it
+    lies inside the image at the new angle it is removed and the status
     line says so (`Esc` brings it back with the old angle).
 - **`[` / `]` → rotate 90°:** one-shot, no overlay — `]` clockwise, `[`
   counterclockwise; repeat to reach 180°/270°, four presses are the original

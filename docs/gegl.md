@@ -201,8 +201,15 @@ which the enhancer appends to the chain after the colour presets in decision
   overlay; every change renders live, coalesced (at most one render in
   flight plus one queued for the latest state, `enhance-ctrl.c`), and a
   committed crop is re-anchored on the centre for the new base
-  (`transform_rebase_crop`) or dropped with a status line when nothing of it
-  is left.
+  (`transform_rebase_crop`): the stored rectangle is only shifted, never
+  cut — the cut is `transform_effective_crop`'s at render and export time —
+  so a border-touching crop is not eroded by a straighten and back (0° → 5°
+  → 0° gives back the exact rectangle; `tests/test_transform.c` pins it),
+  and it is dropped with a status line when its effective crop on the new
+  base is empty. The inset's opacity guarantee needs an inscribed rectangle
+  of at least 2 × inset + 1 = 3 px per side; below that
+  `transform_straighten_size` floors at 1×1 inside the blend margin
+  (documented, not refused: a 3×2 image has nothing to straighten).
 - **`c` — crop**: `gegl:crop` of the rectangle, intersected with the base
   image and snapped to whole pixels (`transform_effective_crop`). Interactive
   overlay (`tool-ctrl.c` draws it on the viewer's overlay hook); mouse drag or
@@ -210,7 +217,12 @@ which the enhancer appends to the chain after the colour presets in decision
   through a *preview override* (`enhance_ctrl_set_preview_transform`), not
   a commit: the committed crop keeps counting as work, so `s` in the tool
   exports it, navigation prompts for it, and a saved crop stays saved
-  through `c` / `Esc`.
+  through `c` / `Esc`. Not a bug: with Denoise on, the pixels under the
+  crop rectangle differ slightly from the same pixels of the un-cropped
+  preview (measured ≤ 32/255 on 14 of 1200 px), because
+  `gegl:noise-reduction`'s output is region-dependent and the crop changes
+  the region GEGL computes; the preview and the export of one transform
+  still match exactly.
 - GEGL's positive `degrees` turn the image counter-clockwise on screen
   (y down; measured with a 3×2 probe on gegl 0.4.72), so the enhancer negates
   the Transform's clockwise angles.
