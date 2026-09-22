@@ -40,4 +40,13 @@ typedef enum {
    GGAZE_SCROLL_NAVIGATE
 } GgazeScrollBehavior;
 
+/* Which interactive GEGL tool has the large view (tool-ctrl.h). Lives here,
+ * not in the GEGL-only tool header, so window.h can report it in every
+ * build (always GGAZE_TOOL_NONE without GEGL). */
+typedef enum {
+   GGAZE_TOOL_NONE = 0,
+   GGAZE_TOOL_CROP,      /* `c`: the crop rectangle overlay */
+   GGAZE_TOOL_STRAIGHTEN /* `R`: the horizon / angle overlay */
+} GgazeTool;
+
 #endif /* GGAZE_ENUMS_H */
