@@ -5,6 +5,10 @@
  * (with Thumb::MTime), and that a second get hits the cache. Uses a temp
  * XDG_CACHE_HOME so the real cache is not polluted. No display needed.
  *
+ * The truncated-JXL / empty / garbage-JXL cases at the end prove the loader's
+ * decode gate (task tb2) sits in front of this public entry point too: the
+ * pool is a GTask worker that cannot be cancelled once glycin has the file.
+ *
  * Persistence (ix0) is covered by the _marker_ tests below. The older
  * "second get should hit the cache" assertion could not see the ix0 bug at
  * all: a regenerated thumbnail and a cached one are indistinguishable if you
@@ -28,6 +32,7 @@
 #include <unistd.h>
 #include <utime.h>
 
+#include "ggaze-config.h"
 #include "loader/detect.h"
 
 /* Dimensions of the marker PNG the persistence tests plant in the cache. Not
@@ -656,6 +661,79 @@ test_delete_completes_queued_requests(void) {
    g_object_unref(p_b);
 }
 
+/* Run thumbnail_get_async() on a temp file holding p_buf/u_len and expect
+ * it to FAIL: asserts no texture, a G_IO_ERROR within the 5 s budget, and
+ * returns the error code (the error itself is freed). The gate lives in
+ * the loader, but the thumbnail pool is a public entry point of its own
+ * (a GTask worker with no cancel once the decode starts), so it gets its
+ * own proof that the gate is in front of it (task tb2). */
+static gint
+_thumb_error_code_fast(const guint8 *p_buf, gsize u_len) {
+   gchar  *c_tmp = NULL;
+   GError *p_sub = NULL;
+   gint    i_fd  = g_file_open_tmp("ggaze-thumb-gate-XXXXXX", &c_tmp, &p_sub);
+   g_assert_no_error(p_sub);
+   g_assert_cmpint(i_fd, >=, 0);
+   g_assert_cmpint((glong)write(i_fd, p_buf, u_len), ==, (glong)u_len);
+   close(i_fd);
+
+   Thumbnail *p_t    = thumbnail_new();
+   GFile     *p_file = g_file_new_for_path(c_tmp);
+   GGAZE_RESULT      = NULL;
+   GGAZE_ERR         = NULL;
+   GGAZE_LOOP        = g_main_loop_new(NULL, FALSE);
+   gint64 i_start    = g_get_monotonic_time();
+   thumbnail_get_async(p_t, p_file, 128, NULL, _thumb_err_cb, NULL);
+   g_main_loop_run(GGAZE_LOOP);
+   g_main_loop_unref(GGAZE_LOOP);
+   GGAZE_LOOP     = NULL;
+   gdouble d_secs = (g_get_monotonic_time() - i_start) / 1e6;
+
+   g_assert_null(GGAZE_RESULT);
+   g_assert_nonnull(GGAZE_ERR);
+   g_assert_cmpuint(GGAZE_ERR->domain, ==, (guint)G_IO_ERROR);
+   gint i_code = GGAZE_ERR->code;
+   g_error_free(GGAZE_ERR);
+   GGAZE_ERR = NULL;
+   g_assert_cmpfloat(d_secs, <, 5.0);
+
+   thumbnail_delete(p_t);
+   g_object_unref(p_file);
+   unlink(c_tmp);
+   g_free(c_tmp);
+   return (i_code);
+}
+
+/* A 4-byte JXL signature: pre-fix this exact file went from the thumbnail
+ * pool straight into gdk_pixbuf_new_from_file_at_scale() and, on a glycin
+ * desktop, never came back. The length gate refuses it in every build. */
+static void
+test_truncated_jxl_fails_fast(void) {
+   const guint8 h[] = {0xFF, 0x0A, 0x10, 0x00};
+   g_assert_cmpint(_thumb_error_code_fast(h, G_N_ELEMENTS(h)), ==,
+                   G_IO_ERROR_INVALID_DATA);
+}
+
+/* An empty file is refused by the same sniff, before any decoder. */
+static void
+test_empty_file_fails_fast(void) {
+   g_assert_cmpint(_thumb_error_code_fast((const guint8 *)"", 0), ==,
+                   G_IO_ERROR_INVALID_DATA);
+}
+
+/* A JXL long enough to clear the gate but garbage: without libjxl the
+ * loader refuses every JXL (NOT_SUPPORTED) rather than let glycin-jxl hang
+ * the pool; with libjxl the backend fails it promptly on its own. */
+static void
+test_garbage_jxl_fails_fast(void) {
+   guint8 h[60]  = {0xFF, 0x0A};
+   gint   i_code = _thumb_error_code_fast(h, sizeof(h));
+   g_assert_cmpint(i_code, !=, G_IO_ERROR_INVALID_DATA);
+#if !GGAZE_HAVE_JXL
+   g_assert_cmpint(i_code, ==, G_IO_ERROR_NOT_SUPPORTED);
+#endif
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -691,6 +769,12 @@ main(int i_argc, char **c_argv) {
                    test_delete_completes_queued_requests);
    g_test_add_func("/thumbnail/padded_past_prefix_oversized_jpeg",
                    test_padded_past_prefix_oversized_jpeg);
+   g_test_add_func("/thumbnail/truncated_jxl_fails_fast",
+                   test_truncated_jxl_fails_fast);
+   g_test_add_func("/thumbnail/empty_file_fails_fast",
+                   test_empty_file_fails_fast);
+   g_test_add_func("/thumbnail/garbage_jxl_fails_fast",
+                   test_garbage_jxl_fails_fast);
 
    int i_ret = g_test_run();
 

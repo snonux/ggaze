@@ -13,13 +13,30 @@
  *
  * Before any backend -- or, on the thumbnail and info paths, any gdk-pixbuf
  * call that takes a path -- sees the file, the sniffed header goes through
- * detect_reject_truncated(): a file shorter than the smallest complete file
- * of its signature's format is refused with G_IO_ERROR_INVALID_DATA. This is
- * the dispatcher's job rather than the pixbuf backend's because all three
- * entry points share it and because it is a property of the bytes, not of
- * any decoder: on a glycin desktop gdk-pixbuf forwards such a file to a
- * sandboxed loader subprocess and the JXL one waits forever for the missing
- * bytes (task tb2), with no cancellable or timeout reachable from here.
+ * _sniff_header(), which refuses, in this order:
+ *
+ *   1. an empty file                       G_IO_ERROR_INVALID_DATA
+ *   2. a file shorter than the smallest complete file of its signature's
+ *      format (detect_reject_truncated())  G_IO_ERROR_INVALID_DATA
+ *   3. a JXL file when the jxl feature is off (any length)
+ *                                          G_IO_ERROR_NOT_SUPPORTED
+ *
+ * 1 and 2 are properties of the bytes and hold in every build, so they run
+ * first and a truncated file gets the same answer whatever is compiled in;
+ * 3 is a property of the build and only decides what happens to a file that
+ * could still be complete. All of it is the dispatcher's job rather than the
+ * pixbuf backend's because all three entry points share it. The reason for
+ * 2 and 3 is the same (task tb2): on a glycin desktop (Fedora >= 41)
+ * gdk-pixbuf forwards JXL/AVIF/HEIF to sandboxed loader subprocesses with
+ * no cancellable or timeout reachable from here, and glycin-jxl was measured
+ * to wait forever on EVERY garbage or truncated JXL it is fed -- 8 bytes,
+ * 60 bytes, a box-wrapped container alike -- through gdk_pixbuf_loader_close()
+ * and gdk_pixbuf_get_file_info() both. The length gate closes the truncated
+ * class; without libjxl the only bound on the rest is to never hand a JXL
+ * to gdk-pixbuf at all, so a valid JXL costs a "not built in" toast instead
+ * of a decode, and a garbage one costs nothing instead of a hung worker
+ * that can never be cancelled. glycin-avif/heif return promptly on bad
+ * input, so AVIF/HEIF stay on the fallback.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -63,12 +80,14 @@ static const GgazeLoaderBackend *BACKENDS[] = {
    NULL, /* sentinel: keeps the array non-empty in the minimal build */
 };
 
-/* Sniff buffer length; lives in detect.h so detect_reject_truncated() can
- * promise every minimum file length fits inside it. */
-#define GGAZE_SNIFF_LEN GGAZE_DETECT_SNIFF_LEN
-
-/* Read up to u_max header bytes. Returns the byte count (0 for an empty
- * file) or -1 with p_err set on an I/O failure. */
+/* Read the first u_max bytes of p_file, or all of it when it is shorter.
+ * Returns the byte count (0 for an empty file) or -1 with p_err set on an
+ * I/O failure. g_input_stream_read_all(), not a single read: a single read
+ * may return fewer bytes than are available on a FIFO, a pipe or a GVFS
+ * stream, and a short read here would make detect_reject_truncated() take
+ * a valid file delivered in two writes for a truncated one. Only EOF may
+ * end the header early, which is exactly what makes the byte count
+ * min(file length, u_max) and the gate's reasoning sound. */
 static gssize
 _read_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head, gsize u_max,
              GError **p_err) {
@@ -78,14 +97,15 @@ _read_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head, gsize u_max,
       g_propagate_error(p_err, p_sub);
       return (-1);
    }
-   gssize n = g_input_stream_read(G_INPUT_STREAM(p_in), p_head, u_max, p_cancel,
-                                  &p_sub);
+   gsize    u_read = 0;
+   gboolean b_ok = g_input_stream_read_all(G_INPUT_STREAM(p_in), p_head, u_max,
+                                           &u_read, p_cancel, &p_sub);
    g_object_unref(p_in);
-   if (n < 0) {
+   if (!b_ok) {
       g_propagate_error(p_err, p_sub);
       return (-1);
    }
-   return (n);
+   return ((gssize)u_read);
 }
 
 /* Pick the backend for the sniffed header: first specific match, else the
@@ -100,17 +120,41 @@ _backend_for(const guint8 *p_head, gsize u_len) {
    return (&pixbuf_backend);
 }
 
-/* Read the sniff header and refuse what no decoder should see: an empty
- * file (reported as G_IO_ERROR_INVALID_DATA rather than handed on -- the
- * sync path used to return NULL with NO error for it, which made downstream
- * g_task_return_error(NULL) callers hang their GTask forever) and a file
- * shorter than its signature's minimum (see the top-of-file comment).
- * Returns the byte count read into p_head, or -1 with p_err set. */
+/* Refuse a format this build has no decoder for and that the GdkPixbuf
+ * fallback must not be trusted with. Only JXL today, and only without the
+ * jxl feature: see the top-of-file comment for why a missing decode beats
+ * an uncancellable hang. Both JXL spellings (bare codestream and the
+ * box-wrapped container) sniff as GGAZE_FMT_JXL, so one check covers both.
+ * TRUE to proceed; FALSE with G_IO_ERROR_NOT_SUPPORTED (p_err may be NULL). */
+static gboolean
+_refuse_unbuilt_format(const guint8 *p_head, gsize u_len, GError **p_err) {
+#if GGAZE_HAVE_JXL
+   (void)p_head;
+   (void)u_len;
+   (void)p_err;
+   return (TRUE);
+#else
+   if (detect_format(p_head, u_len) != GGAZE_FMT_JXL) {
+      return (TRUE);
+   }
+   g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+               "JXL support is not built in (enable the jxl feature)");
+   return (FALSE);
+#endif
+}
+
+/* Read the sniff header and refuse what no decoder should see, in the
+ * order the top-of-file comment gives: an empty file (reported as
+ * G_IO_ERROR_INVALID_DATA rather than handed on -- the sync path used to
+ * return NULL with NO error for it, which made downstream
+ * g_task_return_error(NULL) callers hang their GTask forever), a file
+ * shorter than its signature's minimum, and a format the build cannot
+ * decode. Returns the byte count read into p_head, or -1 with p_err set. */
 static gssize
 _sniff_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head,
               GError **p_err) {
    gssize i_read =
-      _read_header(p_file, p_cancel, p_head, GGAZE_SNIFF_LEN, p_err);
+      _read_header(p_file, p_cancel, p_head, GGAZE_DETECT_SNIFF_LEN, p_err);
    if (i_read < 0) {
       return (-1);
    }
@@ -122,6 +166,9 @@ _sniff_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head,
    if (!detect_reject_truncated(p_head, (gsize)i_read, p_err)) {
       return (-1);
    }
+   if (!_refuse_unbuilt_format(p_head, (gsize)i_read, p_err)) {
+      return (-1);
+   }
    return (i_read);
 }
 
@@ -131,7 +178,7 @@ _sniff_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head,
 static GdkTexture *
 _dispatch(GFile *p_file, GCancellable *p_cancel, LoaderProgressCb p_progress,
           gpointer p_progress_data, GError **p_err) {
-   guint8 head[GGAZE_SNIFF_LEN];
+   guint8 head[GGAZE_DETECT_SNIFF_LEN];
    gssize i_read = _sniff_header(p_file, p_cancel, head, p_err);
    if (i_read < 0) {
       return (NULL);
@@ -279,7 +326,7 @@ loader_load_pixbuf_scaled(GFile *p_file, int i_max_px, GCancellable *p_cancel,
     * path-taking gdk_pixbuf_new_from_file_at_scale() below, which would
     * otherwise stall the thumbnail pool on a truncated JXL exactly like the
     * large view (task tb2). */
-   guint8 head[GGAZE_SNIFF_LEN];
+   guint8 head[GGAZE_DETECT_SNIFF_LEN];
    gssize i_read = _sniff_header(p_file, p_cancel, head, p_err);
    if (i_read < 0) {
       return (NULL);
@@ -314,7 +361,8 @@ loader_load_pixbuf_scaled(GFile *p_file, int i_max_px, GCancellable *p_cancel,
  * TRUE with *p_w and *p_h set when GdkPixbuf parsed a header whose size the
  * decoders would accept; a header they would refuse (oversized) has no
  * honest size to report, so it is FALSE rather than an echoed crafted
- * 65500x65500. */
+ * 65500x65500. On a glycin desktop this call spawns a sandboxed loader, so
+ * it is the LAST resort in loader_peek_dimensions(), never the first. */
 static gboolean
 _peek_via_pixbuf_header(const char *c_path, int *p_w, int *p_h) {
    *p_w = 0;
@@ -331,32 +379,35 @@ _peek_via_pixbuf_header(const char *c_path, int *p_w, int *p_h) {
    return (*p_w > 0);
 }
 
-gboolean
-loader_peek_dimensions(GFile *p_file, int *p_w, int *p_h) {
-   g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
-   g_return_val_if_fail(p_w != NULL && p_h != NULL, FALSE);
-   char *c_path = g_file_get_path(p_file);
-   if (c_path == NULL) {
+/* Decoder-free JPEG dimensions: the SOF scan detect.c already does for the
+ * oversized-header guard, no gdk-pixbuf (no glycin sandbox spawn) and no
+ * libjpeg (whose only way to learn a size is a full decode). FALSE when the
+ * SOF lies past the scanned prefix (the caller then falls back to the
+ * gdk-pixbuf header parse, which is bounded: it decodes no pixels and the
+ * cap check runs on its answer) or when the declared size is over the cap
+ * (no honest size to report, same as _peek_via_pixbuf_header()). */
+static gboolean
+_peek_via_jpeg_header(const char *c_path, int *p_w, int *p_h) {
+   guint32 u_w, u_h;
+   if (detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h) !=
+       GGAZE_JPEG_PEEK_OK) {
       return (FALSE);
    }
-   /* An empty or truncated file has no dimensions, and must not reach the
-    * path-taking gdk_pixbuf_get_file_info() (glycin stall, task tb2). */
-   guint8 head[GGAZE_SNIFF_LEN];
-   gssize i_read = _sniff_header(p_file, NULL, head, NULL);
-   if (i_read < 0) {
-      g_free(c_path);
+   if (!detect_jpeg_dims_within_bounds(u_w, u_h, NULL)) {
       return (FALSE);
    }
-   if (_peek_via_pixbuf_header(c_path, p_w, p_h)) {
-      g_free(c_path);
-      return (TRUE);
-   }
-   g_free(c_path);
-   /* A format only a specific backend decodes (JXL/AVIF/HEIF without a
-    * system pixbuf loader): decode it there. */
-   if (!_specific_backend_claims(head, (gsize)i_read)) {
-      return (FALSE);
-   }
+   *p_w = (int)u_w;
+   *p_h = (int)u_h;
+   return (TRUE);
+}
+
+/* Dimensions through the claiming backend's full decode (upright ones, the
+ * header comment says so): the only way to size a JXL/AVIF/HEIF without
+ * gdk-pixbuf, and the only acceptable one, because gdk_pixbuf_get_file_info()
+ * on such a file goes to a glycin loader that hangs on garbage JXL and pays
+ * a sandbox spawn on a valid one (task tb2). */
+static gboolean
+_peek_via_backend(GFile *p_file, int *p_w, int *p_h) {
    GdkTexture *p_tex = loader_load(p_file, NULL, NULL);
    if (p_tex == NULL) {
       return (FALSE);
@@ -365,4 +416,51 @@ loader_peek_dimensions(GFile *p_file, int *p_w, int *p_h) {
    *p_h = gdk_texture_get_height(p_tex);
    g_object_unref(p_tex);
    return (TRUE);
+}
+
+/* Route an already-sniffed (and gate-cleared) header to the cheapest SAFE
+ * size source, in this order:
+ *   - JPEG: the decoder-free SOF peek, whatever backends are built (the
+ *     jpeg backend's only way to learn a size is a full decode);
+ *   - a format a specific backend claims (JXL/AVIF/HEIF): that backend,
+ *     never gdk-pixbuf (see _peek_via_backend());
+ *   - everything else, and a JPEG whose SOF the bounded peek could not
+ *     reach: the gdk-pixbuf header parse.
+ * The previous order tried gdk-pixbuf FIRST and only fell back to a
+ * backend, which is what let a garbage JXL hang the info worker even in a
+ * build with libjxl. */
+static gboolean
+_peek_dims_sniffed(GFile *p_file, const char *c_path, const guint8 *p_head,
+                   gsize u_len, int *p_w, int *p_h) {
+   GgazeFormat e_format = detect_format(p_head, u_len);
+   if (e_format == GGAZE_FMT_JPEG) {
+      if (_peek_via_jpeg_header(c_path, p_w, p_h)) {
+         return (TRUE);
+      }
+   } else if (_specific_backend_claims(p_head, u_len)) {
+      return (_peek_via_backend(p_file, p_w, p_h));
+   }
+   return (_peek_via_pixbuf_header(c_path, p_w, p_h));
+}
+
+gboolean
+loader_peek_dimensions(GFile *p_file, int *p_w, int *p_h) {
+   g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
+   g_return_val_if_fail(p_w != NULL && p_h != NULL, FALSE);
+   /* No path, no gdk-pixbuf header parse and no info card worth a decode:
+    * decided before any I/O. */
+   char *c_path = g_file_get_path(p_file);
+   if (c_path == NULL) {
+      return (FALSE);
+   }
+   /* An empty, truncated or not-built-in file has no dimensions and must
+    * not reach any decoder (glycin stall, task tb2). */
+   guint8   head[GGAZE_DETECT_SNIFF_LEN];
+   gssize   i_read = _sniff_header(p_file, NULL, head, NULL);
+   gboolean b_ok   = FALSE;
+   if (i_read > 0) {
+      b_ok = _peek_dims_sniffed(p_file, c_path, head, (gsize)i_read, p_w, p_h);
+   }
+   g_free(c_path);
+   return (b_ok);
 }

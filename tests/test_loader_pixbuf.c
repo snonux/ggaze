@@ -26,6 +26,11 @@
  * this suite for minutes), so every entry point -- loader_load(),
  * loader_load_pixbuf_scaled(), loader_peek_dimensions() -- must refuse it
  * with G_IO_ERROR_INVALID_DATA before gdk-pixbuf sees it, within a budget.
+ * The gate runs before the build-dependent JXL refusal, so a truncated JXL
+ * gets INVALID_DATA in every build; only a JXL that clears the gate then
+ * differs by build (G_IO_ERROR_NOT_SUPPORTED without libjxl, libjxl's own
+ * verdict with it) -- test_garbage_jxl_fails_fast and
+ * test_tiny_images_load pin both outcomes.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -34,11 +39,21 @@
 #include "loader/loader.h"
 #include "loader/pixbuf-util.h"
 
+#include <fcntl.h>
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib/gstdio.h>
+#include <limits.h>
+#include <signal.h>
 #include <string.h>
+#include <sys/inotify.h>
+#include <sys/stat.h>
 #include <unistd.h>
+
+#include "ggaze-config.h"
+#include "loader/detect.h"
+#include "tiny_images.h"
 
 static GdkTexture *
 load_fixture(const gchar *c_name) {
@@ -175,8 +190,9 @@ test_corrupt_jpeg(void) {
    g_error_free(p_err);
 }
 
-/* One truncated signature per format the sniffer knows (the same vectors
- * tests/test_detect.c checks against detect_min_file_len()). Each must be
+/* One truncated vector per RULE in detect.c's table -- both TIFF byte
+ * orders, both JXL spellings, all five ISO BMFF brands -- the same vectors
+ * tests/test_detect.c checks against detect_min_file_len(). Each must be
  * refused as INVALID_DATA within a budget: pre-fix the JXL ones hung for
  * minutes on a glycin desktop, and the 5 s bound mirrors
  * test_oversized_jpeg's so a regression fails rather than merely slows. */
@@ -191,10 +207,16 @@ static const TruncatedVec TRUNCATED[] = {
    {"jxl container",
     {0, 0, 0, 0x0C, 'J', 'X', 'L', ' ', 0x0D, 0x0A, 0x87, 0x0A},
     12},
+   {"avif", {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'a', 'v', 'i', 'f'}, 12},
+   {"avis", {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'a', 'v', 'i', 's'}, 12},
+   {"heic", {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'c'}, 12},
+   {"heix", {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'x'}, 12},
+   {"mif1", {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'm', 'i', 'f', '1'}, 12},
    {"webp", {'R', 'I', 'F', 'F', 0x10, 0, 0, 0, 'W', 'E', 'B', 'P'}, 12},
    {"png", {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, 8},
    {"gif", {'G', 'I', 'F', '8', '9', 'a'}, 6},
-   {"tiff", {'I', 'I', 0x2A, 0x00}, 4},
+   {"tiff le", {'I', 'I', 0x2A, 0x00}, 4},
+   {"tiff be", {'M', 'M', 0x00, 0x2A}, 4},
    {"ico", {0x00, 0x00, 0x01, 0x00}, 4},
    {"jpeg", {0xFF, 0xD8, 0xFF}, 3},
 };
@@ -210,8 +232,10 @@ test_truncated_signatures(void) {
    }
 }
 
-/* A single byte carries no signature, so the gate imposes nothing and
- * gdk-pixbuf reports its own "unrecognised" error -- promptly. */
+/* A single byte carries no signature, so the gate imposes nothing -- the
+ * error must NOT be the gate's INVALID_DATA (nor the NOT_SUPPORTED of the
+ * build-dependent refusal) but gdk-pixbuf's own "unrecognised" verdict, and
+ * a prompt one. */
 static void
 test_one_byte_file(void) {
    const guint8 h[]     = {0xFF};
@@ -221,8 +245,308 @@ test_one_byte_file(void) {
    gdouble      d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
    g_assert_null(p_tex);
    g_assert_nonnull(p_err);
+   g_assert_false(g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA));
+   g_assert_false(g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED));
    g_error_free(p_err);
    g_assert_cmpfloat(d_secs, <, 5.0);
+}
+
+/* Push one buffer through all three entry points and assert each fails
+ * (NULL / FALSE) within the 5 s budget. Returns loader_load()'s error for
+ * the caller to inspect (caller frees). The peek has no error out-pointer,
+ * so the budget is the only thing that can catch a stall there. */
+static GError *
+_all_entry_points_fail_fast(const guint8 *p_buf, gsize u_len) {
+   gchar      *c_path  = write_tmp(p_buf, u_len);
+   GFile      *p_file  = g_file_new_for_path(c_path);
+   gint64      i_start = g_get_monotonic_time();
+   GError     *p_err   = NULL;
+   GdkTexture *p_tex   = loader_load(p_file, NULL, &p_err);
+   g_assert_null(p_tex);
+   g_assert_nonnull(p_err);
+   GError    *p_thumb_err = NULL;
+   GdkPixbuf *p_pix =
+      loader_load_pixbuf_scaled(p_file, 128, NULL, &p_thumb_err);
+   g_assert_null(p_pix);
+   g_assert_nonnull(p_thumb_err);
+   g_assert_cmpuint(p_thumb_err->domain, ==, p_err->domain);
+   g_assert_cmpint(p_thumb_err->code, ==, p_err->code);
+   g_error_free(p_thumb_err);
+   int i_w = -1, i_h = -1;
+   g_assert_false(loader_peek_dimensions(p_file, &i_w, &i_h));
+   gdouble d_secs = (g_get_monotonic_time() - i_start) / 1e6;
+   g_assert_cmpfloat(d_secs, <, 5.0);
+   g_object_unref(p_file);
+   unlink(c_path);
+   g_free(c_path);
+   return (p_err);
+}
+
+/* The user-facing hazard the length gate alone does not close: a JXL that
+ * is LONG enough but garbage. glycin-jxl was measured to wait forever on
+ * an 8-byte codestream, a 60-byte one and a box-wrapped container alike,
+ * through gdk_pixbuf_loader_close() and gdk_pixbuf_get_file_info() both.
+ * Without libjxl the dispatcher must refuse every JXL up front
+ * (G_IO_ERROR_NOT_SUPPORTED, "JXL support is not built in"); with libjxl
+ * the specific backend must get the file BEFORE any gdk-pixbuf call -- the
+ * old loader_peek_dimensions() asked gdk_pixbuf_get_file_info() first and
+ * hung the info worker even in the full build. Either way: all three entry
+ * points, all three shapes, within the budget. */
+static void
+test_garbage_jxl_fails_fast(void) {
+   guint8 cs8[8]   = {0xFF, 0x0A};
+   guint8 cs60[60] = {0xFF, 0x0A};
+   guint8 box[72]  = {0,    0,    0,    0x0C, 'J',  'X', 'L',  ' ', 0x0D,
+                      0x0A, 0x87, 0x0A, 0,    0,    0,   0x14, 'f', 't',
+                      'y',  'p',  'j',  'x',  'l',  ' ', 0,    0,   0,
+                      0,    'j',  'x',  'l',  ' ',  0,   0,    0,   0x28,
+                      'j',  'x',  'l',  'c',  0xFF, 0x0A};
+   const struct {
+      const char   *c_name;
+      const guint8 *p_buf;
+      gsize         u_len;
+   } vecs[] = {
+      {"8-byte codestream", cs8, sizeof(cs8)},
+      {"60-byte codestream", cs60, sizeof(cs60)},
+      {"72-byte container", box, sizeof(box)},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(vecs); u++) {
+      g_test_message("%s", vecs[u].c_name);
+      /* Every vector clears the length gate: that is the point. */
+      g_assert_true(
+         detect_reject_truncated(vecs[u].p_buf, vecs[u].u_len, NULL));
+      GError *p_err = _all_entry_points_fail_fast(vecs[u].p_buf, vecs[u].u_len);
+      g_assert_false(
+         g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA));
+#if GGAZE_HAVE_JXL
+      /* libjxl's own verdict, whatever it is: not the dispatcher's. */
+      g_assert_false(
+         g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED));
+#else
+      g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+      g_assert_nonnull(strstr(p_err->message, "JXL"));
+#endif
+      g_error_free(p_err);
+   }
+}
+
+/* Name of a gdk-pixbuf module ("webp", "tiff", ...) that is installed on
+ * this machine, so a vector whose module is missing (CI's fedora:40 image
+ * has no guarantee of webp-pixbuf-loader) is reported and skipped rather
+ * than failed. */
+static gboolean
+_pixbuf_module_available(const char *c_module) {
+   GSList  *p_formats = gdk_pixbuf_get_formats();
+   gboolean b_found   = FALSE;
+   for (GSList *p_l = p_formats; p_l != NULL; p_l = p_l->next) {
+      gchar *c_name = gdk_pixbuf_format_get_name((GdkPixbufFormat *)p_l->data);
+      b_found       = b_found || g_strcmp0(c_name, c_module) == 0;
+      g_free(c_name);
+   }
+   g_slist_free(p_formats);
+   return (b_found);
+}
+
+/* One TinyImage through loader_load(): 1x1 where this build decodes it. */
+static void
+_assert_tiny_image_loads(const TinyImage *p_t) {
+   gint64      i_start = g_get_monotonic_time();
+   GError     *p_err   = NULL;
+   GdkTexture *p_tex   = load_bytes(p_t->p_bytes, p_t->u_len, &p_err);
+   gdouble     d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
+   g_assert_cmpfloat(d_secs, <, 5.0);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_tex);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 1);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 1);
+   g_object_unref(p_tex);
+}
+
+/* The smallest real file of every format (tests/helpers/tiny_images.h)
+ * must get PAST the gate -- test_detect.c proves the gate accepts them;
+ * this proves the whole dispatcher does -- and decode as 1x1 wherever this
+ * build has a decoder: a JXL needs the jxl feature (without it the
+ * dispatcher refuses it as NOT_SUPPORTED, by design), the rest need their
+ * gdk-pixbuf module, which is skipped with a message when absent. */
+static void
+test_tiny_images_load(void) {
+   for (gsize u = 0; u < G_N_ELEMENTS(TINY_IMAGES); u++) {
+      const TinyImage *p_t = &TINY_IMAGES[u];
+      g_test_message("%s (%" G_GSIZE_FORMAT " bytes)", p_t->c_name, p_t->u_len);
+      if (p_t->b_needs_jxl) {
+#if GGAZE_HAVE_JXL
+         _assert_tiny_image_loads(p_t);
+#else
+         GError     *p_err = NULL;
+         GdkTexture *p_tex = load_bytes(p_t->p_bytes, p_t->u_len, &p_err);
+         g_assert_null(p_tex);
+         g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+         g_error_free(p_err);
+#endif
+      } else if (_pixbuf_module_available(p_t->c_pixbuf_module)) {
+         _assert_tiny_image_loads(p_t);
+      } else {
+         g_test_message("  no gdk-pixbuf module '%s' here; decode skipped",
+                        p_t->c_pixbuf_module);
+      }
+   }
+}
+
+/* Writer side of test_fifo_two_chunk_read(): serve exactly two reader
+ * sessions on the FIFO at p_data (the sniff and the backend's full read
+ * each open the file once), each time delivering the image as a 10-byte
+ * write, a pause, and the rest -- so a reader that takes the first read's
+ * result for the whole header sees a 10-byte "GIF". Closing after the
+ * second write is what gives the reader its EOF. */
+typedef struct {
+   const char   *c_fifo;
+   const guint8 *p_img;
+   gsize         u_len;
+   int           i_inotify; /* watches the FIFO for IN_CLOSE_NOWRITE */
+} FifoWriter;
+
+static void
+_fifo_serve_session(const FifoWriter *p_w) {
+   int i_fd = open(p_w->c_fifo, O_WRONLY);
+   g_assert_cmpint(i_fd, >=, 0);
+   g_assert_cmpint((glong)write(i_fd, p_w->p_img, 10), ==, 10);
+   g_usleep(50 * 1000);
+   g_assert_cmpint((glong)write(i_fd, p_w->p_img + 10, p_w->u_len - 10), ==,
+                   (glong)(p_w->u_len - 10));
+   close(i_fd);
+}
+
+/* Block until the reader has CLOSED its end of the FIFO. Without this the
+ * writer's next open(O_WRONLY) succeeds at once (a reader still exists),
+ * session two's bytes land in session one's pipe, and the backend's own
+ * open later blocks forever with no writer left -- observed with strace
+ * before this wait was added. The reader's close is exactly what inotify
+ * reports as IN_CLOSE_NOWRITE on the FIFO (the writer's own closes are
+ * IN_CLOSE_WRITE and are not watched). Linux-only, like the app. */
+static void
+_fifo_wait_reader_closed(const FifoWriter *p_w) {
+   guint8 buf[sizeof(struct inotify_event) + NAME_MAX + 1];
+   g_assert_cmpint((glong)read(p_w->i_inotify, buf, sizeof(buf)), >, 0);
+}
+
+static gpointer
+_fifo_writer_thread(gpointer p_data) {
+   const FifoWriter *p_w = (const FifoWriter *)p_data;
+   _fifo_serve_session(p_w);
+   _fifo_wait_reader_closed(p_w);
+   _fifo_serve_session(p_w);
+   return (NULL);
+}
+
+/* The header read must be min(file, 64) bytes, not "whatever the first
+ * read() returned": on a FIFO, a pipe or a GVFS stream a single read may
+ * return fewer bytes than the file holds, and the old single
+ * g_input_stream_read() then made detect_reject_truncated() refuse a valid
+ * file delivered in two writes as a "truncated GIF file: 10 bytes". A real
+ * FIFO written from a helper thread reproduces exactly that. The vector is
+ * the 43-byte GIF from tiny_images.h, chosen because it fits inside the
+ * 64-byte sniff: the sniff then drains the FIFO to EOF, so the backend's
+ * own open (session two) can never inherit bytes the sniff left behind --
+ * with a file longer than the sniff, the second open could race the
+ * writer's close and read the tail of session one instead. */
+static void
+test_fifo_two_chunk_read(void) {
+   if (!_pixbuf_module_available("gif")) {
+      g_test_skip("no gdk-pixbuf gif module here");
+      return;
+   }
+   FifoWriter w = {NULL, TINY_GIF, sizeof(TINY_GIF), -1};
+   g_assert_cmpuint(w.u_len, <=, GGAZE_DETECT_SNIFF_LEN);
+   g_assert_cmpuint(w.u_len, >, 10);
+
+   gchar *c_tmpdir = g_dir_make_tmp("ggaze-fifo-XXXXXX", NULL);
+   g_assert_nonnull(c_tmpdir);
+   gchar *c_fifo = g_build_filename(c_tmpdir, "tiny.gif.fifo", NULL);
+   g_assert_cmpint(mkfifo(c_fifo, 0600), ==, 0);
+   w.c_fifo    = c_fifo;
+   w.i_inotify = inotify_init1(IN_CLOEXEC);
+   g_assert_cmpint(w.i_inotify, >=, 0);
+   g_assert_cmpint(inotify_add_watch(w.i_inotify, c_fifo, IN_CLOSE_NOWRITE), >=,
+                   0);
+   /* Should the reader ever close early, the writer must see EPIPE, not
+    * take the whole test binary down with SIGPIPE. */
+   signal(SIGPIPE, SIG_IGN);
+   GThread *p_thread = g_thread_new("fifo-writer", _fifo_writer_thread, &w);
+
+   GFile      *p_file = g_file_new_for_path(c_fifo);
+   GError     *p_err  = NULL;
+   GdkTexture *p_tex  = loader_load(p_file, NULL, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_tex);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 1);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 1);
+   g_object_unref(p_tex);
+   g_object_unref(p_file);
+
+   g_thread_join(p_thread);
+   close(w.i_inotify);
+   unlink(c_fifo);
+   g_rmdir(c_tmpdir);
+   g_free(c_fifo);
+   g_free(c_tmpdir);
+}
+
+/* loader_load_async()/loader_load_finish(): the GTask wrapper the window
+ * uses, driven to completion on a main loop. A progress callback is passed
+ * so the ProgressPair path is exercised; the pixbuf backend has no
+ * progressive load, so it is never called. */
+static void
+_async_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   GAsyncResult **pp_out = (GAsyncResult **)p_data;
+   *pp_out               = g_object_ref(p_res);
+}
+
+static void
+_never_progress_cb(GdkTexture *p_partial, gpointer p_data) {
+   (void)p_partial;
+   (void)p_data;
+   g_assert_not_reached();
+}
+
+static GdkTexture *
+_load_async_sync(GFile *p_file, GError **p_err) {
+   GAsyncResult *p_res = NULL;
+   loader_load_async(p_file, NULL, _never_progress_cb, NULL, _async_done_cb,
+                     &p_res);
+   while (p_res == NULL) {
+      g_main_context_iteration(NULL, TRUE);
+   }
+   GdkTexture *p_tex = loader_load_finish(p_res, p_err);
+   g_object_unref(p_res);
+   return (p_tex);
+}
+
+static void
+test_load_async(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar      *c_path = g_build_filename(c_dir, "small.png", NULL);
+   GFile      *p_file = g_file_new_for_path(c_path);
+   GError     *p_err  = NULL;
+   GdkTexture *p_tex  = _load_async_sync(p_file, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_tex);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 5);
+   g_object_unref(p_tex);
+   g_object_unref(p_file);
+   g_free(c_path);
+
+   /* The failure path carries the sniff's error through the task. */
+   gchar *c_empty = write_tmp((const guint8 *)"", 0);
+   p_file         = g_file_new_for_path(c_empty);
+   p_tex          = _load_async_sync(p_file, &p_err);
+   g_assert_null(p_tex);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+   g_error_free(p_err);
+   g_object_unref(p_file);
+   unlink(c_empty);
+   g_free(c_empty);
 }
 
 /* The thumbnail (loader_load_pixbuf_scaled) and info (loader_peek_
@@ -403,7 +727,8 @@ test_pixbuf_util(void) {
  * hand gdk-pixbuf; decided before any I/O) and for a local file that clears
  * the truncation gate but that gdk-pixbuf cannot parse (64 bytes of text
  * carry no signature, so the gate imposes nothing and gdk-pixbuf's header
- * parse is what fails). */
+ * parse is what fails); loader_load_pixbuf_scaled() on the same text file
+ * fails with gdk-pixbuf's own error, not the gate's. */
 static void
 test_peek_dimensions_unknown_cases(void) {
    int    i_w = -1, i_h = -1;
@@ -416,6 +741,12 @@ test_peek_dimensions_unknown_cases(void) {
    gchar *c_path = write_tmp(text, sizeof(text));
    GFile *p_file = g_file_new_for_path(c_path);
    g_assert_false(loader_peek_dimensions(p_file, &i_w, &i_h));
+   GError    *p_err = NULL;
+   GdkPixbuf *p_pix = loader_load_pixbuf_scaled(p_file, 128, NULL, &p_err);
+   g_assert_null(p_pix);
+   g_assert_nonnull(p_err);
+   g_assert_false(g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA));
+   g_error_free(p_err);
    g_object_unref(p_file);
    unlink(c_path);
    g_free(c_path);
@@ -435,6 +766,12 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/loader/pixbuf/truncated_signatures",
                    test_truncated_signatures);
    g_test_add_func("/loader/pixbuf/one_byte_file", test_one_byte_file);
+   g_test_add_func("/loader/pixbuf/garbage_jxl_fails_fast",
+                   test_garbage_jxl_fails_fast);
+   g_test_add_func("/loader/pixbuf/tiny_images_load", test_tiny_images_load);
+   g_test_add_func("/loader/pixbuf/fifo_two_chunk_read",
+                   test_fifo_two_chunk_read);
+   g_test_add_func("/loader/pixbuf/load_async", test_load_async);
    g_test_add_func("/loader/pixbuf/truncated_thumbnail_and_peek",
                    test_truncated_thumbnail_and_peek);
    g_test_add_func("/loader/pixbuf/thumbnail_and_peek_still_work",

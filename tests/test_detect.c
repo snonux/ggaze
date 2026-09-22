@@ -4,7 +4,9 @@
  * Feeds magic-byte buffers to detect_format() and asserts the result. No I/O,
  * no display. Covers every format plus edge cases (empty, too-short, garbage),
  * the JPEG header peek, the shared dimension cap, and the per-signature
- * minimum file length behind detect_reject_truncated() (task tb2).
+ * minimum file length behind detect_reject_truncated() (task tb2): pinned
+ * per rule, and proven not to over-tighten against the smallest real 1x1
+ * file of every format (tests/helpers/tiny_images.h).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -16,6 +18,8 @@
 #include <glib.h>
 #include <string.h>
 #include <unistd.h>
+
+#include "tiny_images.h"
 
 /* Locate the baseline SOF0 marker (0xFF 0xC0) in a JPEG byte buffer and
  * overwrite its declared height/width with 65500 (0xFFDC), mirroring
@@ -336,41 +340,64 @@ test_jpeg_dims_within_bounds_null_err_ok(void) {
 }
 
 /* detect_min_file_len() / detect_reject_truncated() (task tb2): one
- * truncated signature per format, each shorter than its format's minimum
- * and each longer than the bare signature (so the bound really is stricter
- * than the sniff), plus the empty / 1-byte / garbage cases that carry no
- * constraint. The vectors are the same ones tests/test_loader_pixbuf.c
- * pushes through the loader. */
+ * truncated vector per RULE in detect.c's table -- both TIFF byte orders,
+ * both JXL spellings and all five ISO BMFF brands, not just one per
+ * format -- each shorter than its format's minimum and each longer than the
+ * bare signature (so the bound really is stricter than the sniff), with
+ * the minimum PINNED to the value detect.c documents, so a silent change to
+ * the table fails here. The vectors are the same ones
+ * tests/test_loader_pixbuf.c pushes through the loader. */
 typedef struct {
    const char *c_name;
    guint8      buf[12];
    gsize       u_len;
    GgazeFormat e_format;
+   gsize       u_min; /* the documented smallest complete file */
 } TruncatedVec;
 
 static const TruncatedVec TRUNCATED[] = {
-   {"jxl codestream", {0xFF, 0x0A, 0x10, 0x00}, 4, GGAZE_FMT_JXL},
+   {"jxl codestream", {0xFF, 0x0A, 0x10, 0x00}, 4, GGAZE_FMT_JXL, 8},
    {"jxl container",
     {0, 0, 0, 0x0C, 'J', 'X', 'L', ' ', 0x0D, 0x0A, 0x87, 0x0A},
     12,
-    GGAZE_FMT_JXL},
+    GGAZE_FMT_JXL,
+    44},
    {"avif",
     {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'a', 'v', 'i', 'f'},
     12,
-    GGAZE_FMT_AVIF},
-   {"heif",
+    GGAZE_FMT_AVIF,
+    36},
+   {"avis",
+    {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'a', 'v', 'i', 's'},
+    12,
+    GGAZE_FMT_AVIF,
+    36},
+   {"heic",
     {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'c'},
     12,
-    GGAZE_FMT_HEIF},
+    GGAZE_FMT_HEIF,
+    36},
+   {"heix",
+    {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'x'},
+    12,
+    GGAZE_FMT_HEIF,
+    36},
+   {"mif1",
+    {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'm', 'i', 'f', '1'},
+    12,
+    GGAZE_FMT_HEIF,
+    36},
    {"webp",
     {'R', 'I', 'F', 'F', 0x10, 0, 0, 0, 'W', 'E', 'B', 'P'},
     12,
-    GGAZE_FMT_WEBP},
-   {"png", {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, 8, GGAZE_FMT_PNG},
-   {"gif", {'G', 'I', 'F', '8', '9', 'a'}, 6, GGAZE_FMT_GIF},
-   {"tiff", {'I', 'I', 0x2A, 0x00}, 4, GGAZE_FMT_TIFF},
-   {"ico", {0x00, 0x00, 0x01, 0x00}, 4, GGAZE_FMT_ICO},
-   {"jpeg", {0xFF, 0xD8, 0xFF}, 3, GGAZE_FMT_JPEG},
+    GGAZE_FMT_WEBP,
+    20},
+   {"png", {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, 8, GGAZE_FMT_PNG, 33},
+   {"gif", {'G', 'I', 'F', '8', '9', 'a'}, 6, GGAZE_FMT_GIF, 13},
+   {"tiff le", {'I', 'I', 0x2A, 0x00}, 4, GGAZE_FMT_TIFF, 22},
+   {"tiff be", {'M', 'M', 0x00, 0x2A}, 4, GGAZE_FMT_TIFF, 22},
+   {"ico", {0x00, 0x00, 0x01, 0x00}, 4, GGAZE_FMT_ICO, 22},
+   {"jpeg", {0xFF, 0xD8, 0xFF}, 3, GGAZE_FMT_JPEG, 25},
 };
 
 static void
@@ -380,6 +407,7 @@ test_min_file_len_per_signature(void) {
       g_test_message("%s", p_v->c_name);
       g_assert_cmpint(detect_format(p_v->buf, p_v->u_len), ==, p_v->e_format);
       gsize u_min = detect_min_file_len(p_v->buf, p_v->u_len);
+      g_assert_cmpuint(u_min, ==, p_v->u_min);
       g_assert_cmpuint(u_min, >, p_v->u_len);
       /* The loader sniffs GGAZE_DETECT_SNIFF_LEN bytes; a minimum beyond
        * that could never be checked against the sniff buffer. */
@@ -439,14 +467,37 @@ test_min_file_len_unknown_is_zero(void) {
    g_assert_no_error(p_err);
 }
 
+/* The gate must not over-tighten: the smallest real 1x1 file of every
+ * format (tests/helpers/tiny_images.h, 36 to 159 bytes) sniffs as its
+ * format and passes through the same sniff-buffer view the loader takes.
+ * A minimum that crept above one of these sizes would turn away a valid
+ * file, which is the one failure mode a length gate must never have. */
+static void
+test_reject_truncated_accepts_tiny_images(void) {
+   for (gsize u = 0; u < G_N_ELEMENTS(TINY_IMAGES); u++) {
+      const TinyImage *p_t = &TINY_IMAGES[u];
+      g_test_message("%s (%" G_GSIZE_FORMAT " bytes)", p_t->c_name, p_t->u_len);
+      g_assert_cmpint(detect_format(p_t->p_bytes, p_t->u_len), ==,
+                      p_t->e_format);
+      gsize u_sniff = MIN(p_t->u_len, (gsize)GGAZE_DETECT_SNIFF_LEN);
+      g_assert_cmpuint(detect_min_file_len(p_t->p_bytes, u_sniff), <=,
+                       p_t->u_len);
+      GError *p_err = NULL;
+      g_assert_true(detect_reject_truncated(p_t->p_bytes, u_sniff, &p_err));
+      g_assert_no_error(p_err);
+   }
+}
+
 /* The committed fixtures are real files and must pass the gate through the
  * same sniff-buffer view the loader takes (first GGAZE_DETECT_SNIFF_LEN
- * bytes, or the whole file when shorter). */
+ * bytes, or the whole file when shorter) -- including the three formats
+ * whose decoders are optional, since the gate runs in every build. */
 static void
 test_reject_truncated_accepts_fixtures(void) {
    const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
    g_assert_nonnull(c_dir);
-   const char *c_names[] = {"plain.jpg", "rot6.jpg", "small.png", "rgba.png"};
+   const char *c_names[] = {"plain.jpg", "rot6.jpg",  "small.png", "rgba.png",
+                            "tiny.jxl",  "tiny.avif", "tiny.heic"};
    for (gsize u = 0; u < G_N_ELEMENTS(c_names); u++) {
       gchar  *c_path = g_build_filename(c_dir, c_names[u], NULL);
       guint8 *p_buf  = NULL;
@@ -496,9 +547,10 @@ test_dims_within_bounds(void) {
    g_assert_true(detect_dims_within_bounds("t", 10000, 10000, NULL, NULL));
 }
 
-int
-main(int i_argc, char **c_argv) {
-   g_test_init(&i_argc, &c_argv, NULL);
+/* Registration is split by theme so no function approaches the 50-line
+ * mark (c-best-practices). */
+static void
+_add_format_tests(void) {
    g_test_add_func("/detect/jpeg", test_jpeg);
    g_test_add_func("/detect/dims_within_bounds", test_dims_within_bounds);
    g_test_add_func("/detect/png", test_png);
@@ -513,6 +565,11 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/detect/heif", test_heif);
    g_test_add_func("/detect/unknown_garbage", test_unknown_garbage);
    g_test_add_func("/detect/empty_and_short", test_empty_and_short);
+   g_test_add_func("/detect/format_name", test_format_name);
+}
+
+static void
+_add_min_len_tests(void) {
    g_test_add_func("/detect/min_file_len/per_signature",
                    test_min_file_len_per_signature);
    g_test_add_func("/detect/min_file_len/jxl_container_exceeds_codestream",
@@ -521,9 +578,14 @@ main(int i_argc, char **c_argv) {
                    test_min_file_len_unknown_is_zero);
    g_test_add_func("/detect/reject_truncated/passes_at_minimum",
                    test_reject_truncated_passes_at_minimum);
+   g_test_add_func("/detect/reject_truncated/accepts_tiny_images",
+                   test_reject_truncated_accepts_tiny_images);
    g_test_add_func("/detect/reject_truncated/accepts_fixtures",
                    test_reject_truncated_accepts_fixtures);
-   g_test_add_func("/detect/format_name", test_format_name);
+}
+
+static void
+_add_jpeg_peek_tests(void) {
    g_test_add_func("/detect/jpeg_peek_dims/plain", test_jpeg_peek_dims_plain);
    g_test_add_func("/detect/jpeg_peek_dims/rotated_uses_raw_dims",
                    test_jpeg_peek_dims_rotated_uses_raw_dims);
@@ -550,5 +612,13 @@ main(int i_argc, char **c_argv) {
                    test_jpeg_dims_within_bounds_oversized_sets_error);
    g_test_add_func("/detect/jpeg_dims_within_bounds/null_err_ok",
                    test_jpeg_dims_within_bounds_null_err_ok);
+}
+
+int
+main(int i_argc, char **c_argv) {
+   g_test_init(&i_argc, &c_argv, NULL);
+   _add_format_tests();
+   _add_min_len_tests();
+   _add_jpeg_peek_tests();
    return (g_test_run());
 }

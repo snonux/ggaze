@@ -93,10 +93,12 @@ test('app', test_app,
    depends : ggaze_exe,
 )
 
+# test_detect and test_loader_pixbuf share tests/helpers/tiny_images.h (the
+# smallest real 1x1 file per format, as inline bytes) via test_helpers_inc.
 test_detect = executable(
    'test_detect',
    ['test_detect.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : [glib_dep],
    link_with : ggaze_lib,
    install : false,
@@ -106,7 +108,7 @@ test('detect', test_detect, suite : 'unit', env : fixtures_env)
 test_loader_pixbuf = executable(
    'test_loader_pixbuf',
    ['test_loader_pixbuf.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
    link_with : ggaze_lib,
    install : false,

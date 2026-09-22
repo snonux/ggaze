@@ -24,12 +24,14 @@
  * (JXL/AVIF/HEIF/...) to sandboxed loader subprocesses, and
  * gdk_pixbuf_loader_close() then blocks in gly_loader_load() with no
  * cancellable, timeout or partial-result path. The glycin-jxl loader was
- * measured to wait forever on a truncated or garbage codestream. The
- * dispatcher (loader.c) therefore refuses a file shorter than its
- * signature's minimum before this backend is reached; a JXL that is long
- * enough but still garbage remains a glycin-jxl defect this side can only
- * report upstream. The GCancellable is honoured at the two points it can
- * be: the read and the moment before the (uninterruptible) decode.
+ * measured to wait forever on a truncated or garbage codestream of any
+ * length. The dispatcher (loader.c) therefore refuses a file shorter than
+ * its signature's minimum before this backend is reached and, without the
+ * jxl feature, refuses every JXL outright (G_IO_ERROR_NOT_SUPPORTED): this
+ * backend never sees a JXL in any build, so the residual glycin-jxl defect
+ * costs a "not built in" message rather than a hung worker. The
+ * GCancellable is honoured at the two points it can be: the read and the
+ * moment before the (uninterruptible) decode.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
