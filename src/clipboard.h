@@ -1,17 +1,22 @@
 #ifndef GGAZE_CLIPBOARD_H
 #define GGAZE_CLIPBOARD_H
 
+/*:*
+ * ggaze — clipboard content providers
+ *
+ * What Ctrl+c offers: the displayed texture as image/png (no marks) or the
+ * marked files as text/uri-list + text/plain. The builders never touch the
+ * clipboard themselves. See clipboard.c.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
+
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
 
 G_BEGIN_DECLS
-
-/* Copy a single image as PNG pixels to the clipboard (decodes in a GTask). */
-void     clipboard_copy_image_async(GdkClipboard *p_clip, GFile *p_file,
-                                    GCancellable       *p_cancel,
-                                    GAsyncReadyCallback p_cb, gpointer p_data);
-gboolean clipboard_copy_image_finish(GAsyncResult *p_res, GError **p_err);
 
 /* Build (but do not set) a content provider offering p_tex's pixels as
  * image/png. The texture is already decoded, so the PNG encode

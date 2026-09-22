@@ -27,7 +27,7 @@ const GPtrArray *opener_get_progs(Opener *p_o);
 
 /* Launch the program (p_prog->c_value) with %f expanded to the file's path.
  * Detached. Returns TRUE if the process was started. */
-gboolean opener_launch(Opener *p_o, GFile *p_file, const SettingsPair *p_prog,
+gboolean opener_launch(GFile *p_file, const SettingsPair *p_prog,
                        GError **p_err);
 
 G_END_DECLS

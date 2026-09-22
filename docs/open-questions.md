@@ -52,7 +52,7 @@ locked in decision #37.
 - `d` moves the file to a local `<folder>/.Trash/` directory (created lazily,
   collision-suffixed), undoable with `u`. This is **not** the system trash.
 - `D` permanently deletes (unlink), no undo.
-- **Lean:** confirmed; `./Trash` lives with the shoot for easy inspection/emptying.
+- **Lean:** confirmed; `.Trash` lives with the shoot for easy inspection/emptying.
 
 ## J. Packaging targets
 - RPM first (Fedora native). Flatpak too? Copr repo?

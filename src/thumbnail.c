@@ -424,8 +424,7 @@ thumbnail_cache_path(GFile *p_file, int i_size) {
 }
 
 GdkTexture *
-thumbnail_get_finish(Thumbnail *p_t, GAsyncResult *p_res, GError **p_err) {
-   (void)p_t;
+thumbnail_get_finish(GAsyncResult *p_res, GError **p_err) {
    g_return_val_if_fail(G_IS_TASK(p_res), NULL);
    return ((GdkTexture *)g_task_propagate_pointer((GTask *)p_res, p_err));
 }

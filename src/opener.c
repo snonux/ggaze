@@ -84,9 +84,7 @@ _expand_command(const char *c_cmd, GFile *p_file, GError **p_err) {
 }
 
 gboolean
-opener_launch(Opener *o, GFile *p_file, const SettingsPair *p_prog,
-              GError **p_err) {
-   (void)o;
+opener_launch(GFile *p_file, const SettingsPair *p_prog, GError **p_err) {
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
    g_return_val_if_fail(p_prog, FALSE);
    char **argv = _expand_command(p_prog->c_value, p_file, p_err);

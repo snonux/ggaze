@@ -156,12 +156,15 @@ _fill_exif(GgazeInfo *p_info, const char *c_path) {
    if (p_exif == NULL) {
       return;
    }
-   p_info->c_camera      = _dup_camera(p_exif);
-   p_info->c_focal       = _dup_exif_value(p_exif, EXIF_TAG_FOCAL_LENGTH);
-   p_info->c_aperture    = _dup_exif_value(p_exif, EXIF_TAG_FNUMBER);
-   p_info->c_shutter     = _dup_exif_value(p_exif, EXIF_TAG_EXPOSURE_TIME);
-   p_info->c_iso         = _dup_exif_value(p_exif, EXIF_TAG_ISO_SPEED_RATINGS);
-   p_info->c_datetime    = _dup_exif_value(p_exif, EXIF_TAG_DATE_TIME_ORIGINAL);
+   p_info->c_camera   = _dup_camera(p_exif);
+   p_info->c_focal    = _dup_exif_value(p_exif, EXIF_TAG_FOCAL_LENGTH);
+   p_info->c_aperture = _dup_exif_value(p_exif, EXIF_TAG_FNUMBER);
+   p_info->c_shutter  = _dup_exif_value(p_exif, EXIF_TAG_EXPOSURE_TIME);
+   p_info->c_iso      = _dup_exif_value(p_exif, EXIF_TAG_ISO_SPEED_RATINGS);
+   p_info->c_datetime = _dup_exif_value(p_exif, EXIF_TAG_DATE_TIME_ORIGINAL);
+   /* Lens model (EXIF 2.3, tag 0xa434); libexif exposes it as a plain
+    * ASCII tag. The field was declared but never filled. */
+   p_info->c_lens        = _dup_exif_value(p_exif, EXIF_TAG_LENS_MODEL);
    p_info->i_orientation = _get_orientation(p_exif);
    exif_data_unref(p_exif);
 }
@@ -213,7 +216,12 @@ info_format(const GgazeInfo *p_info) {
       return (g_strdup(""));
    }
    GString *p_str = g_string_new(NULL);
-   g_string_append_printf(p_str, "%d×%d\n", p_info->i_width, p_info->i_height);
+   if (p_info->i_width > 0 && p_info->i_height > 0) {
+      g_string_append_printf(p_str, "%d×%d\n", p_info->i_width,
+                             p_info->i_height);
+   } else {
+      g_string_append(p_str, "Size unknown (not decodable)\n");
+   }
    _join(p_str, "Format", p_info->c_format);
    if (p_info->i_size > 0) {
       char *c_sz = g_format_size(p_info->i_size);

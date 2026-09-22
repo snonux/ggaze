@@ -53,7 +53,7 @@ ships with unit tests; overall coverage target ≥80% (gate in M10). Run the
 - Resizable thumbnails (`+`/`-`); grid reflows to fit the window; size
   persisted in GSettings `thumbnail-size`.
 - `Enter` → large view, `Esc` → grid; cursor stays in sync.
-- Dim-mark `./Trash`/deleted items; toggle to hide them.
+- Dim-mark `.Trash`/deleted items; toggle to hide them.
 
 ### M8 — Selection, move, open-external & scripts
 - Mark set in navigator: `v` toggle, `V` range, `Ctrl+a` all, `Esc` clear;
@@ -98,8 +98,8 @@ ships with unit tests; overall coverage target ≥80% (gate in M10). Run the
 - Man page `ggaze(1)`.
 - Settings: sort order, wrap, background, scroll behavior, slideshow delay,
   hide-trashed, destinations, editors, scripts, enhance-presets.
-- Trash: `d` → `./Trash` folder (local, undoable via `u`); `D` → permanent
-  `g_file_delete`. Menu action to empty `./Trash`.
+- Trash: `d` → `.Trash` folder (local, undoable via `u`); `D` → permanent
+  `g_file_delete`. Menu action to empty `.Trash`.
 - Persist & restore window geometry (GSettings width/height/maximized).
 - **Coverage gate**: ≥80% unit-test coverage on plain-C modules (gcov/lcov);
   fails the build/CI below that.

@@ -29,8 +29,8 @@ void   trash_delete(Trash *p_t); /* g_object_unref-style destructor */
  * move so trash_restore_last() can undo it. Returns TRUE on success. */
 gboolean trash_bin(Trash *p_t, GFile *p_file, GError **p_err);
 
-/* Permanently delete p_file (unlink). Not undoable. */
-gboolean trash_permanently_delete(Trash *p_t, GFile *p_file, GError **p_err);
+/* Permanently delete p_file (unlink). Not undoable; stateless (no Trash). */
+gboolean trash_permanently_delete(GFile *p_file, GError **p_err);
 
 /* Move the last binned file back to its original path. Returns FALSE if there
  * is nothing to undo. */

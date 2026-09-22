@@ -923,7 +923,7 @@ _do_delete_files(GgazeWindow *p_win, GList *p_files) {
    for (GList *p_it = p_files; p_it != NULL; p_it = p_it->next) {
       GFile  *p_f   = G_FILE(p_it->data);
       GError *p_err = NULL;
-      if (trash_permanently_delete(p_win->p_trash, p_f, &p_err)) {
+      if (trash_permanently_delete(p_f, &p_err)) {
          navigator_mark_removed(p_win->p_nav, p_f);
       } else {
          g_warning("ggaze: delete failed: %s", p_err->message);
@@ -1534,17 +1534,15 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 /* win.enhance-N (keys 1-8, always live -- not gated on the popover being
- * open): toggle preset N on/off (layered), then re-apply asynchronously. */
+ * open): toggle preset N on/off (layered), then re-apply asynchronously. The
+ * preset index rides on the action as data (_add_enhance_actions); nothing
+ * parses the action name. */
 static void
 _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_v;
-   GgazeWindow *p_win  = GGAZE_WINDOW(p_data);
-   const char  *c_name = g_action_get_name(G_ACTION(p_a));
-   if (!g_str_has_prefix(c_name, "enhance-")) {
-      return;
-   }
-   gint i_idx =
-      (gint)g_ascii_strtoll(c_name + strlen("enhance-"), NULL, 10) - 1;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   gint         i_idx =
+      GPOINTER_TO_INT(g_object_get_data(G_OBJECT(p_a), "ggaze-preset-idx"));
    if (!_require_folder(p_win)) {
       return;
    }
@@ -1914,7 +1912,7 @@ ggaze_window_open_external_index(GgazeWindow *p_win, guint u_idx) {
    }
    const SettingsPair *p_prog = g_ptr_array_index((GPtrArray *)p_progs, u_idx);
    GError             *p_err  = NULL;
-   gboolean b_ok = opener_launch(p_win->p_opener, p_cur, p_prog, &p_err);
+   gboolean            b_ok   = opener_launch(p_cur, p_prog, &p_err);
    if (!b_ok) {
       char *c_msg =
          g_strdup_printf("Could not open in %s: %s",
@@ -1984,7 +1982,7 @@ _run_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    _RunCtx     *p_ctx  = (_RunCtx *)p_data;
    GgazeWindow *p_win  = p_ctx->p_win;
    GError      *p_err  = NULL;
-   int          i_code = runner_run_finish(NULL, p_res, &p_err);
+   int          i_code = runner_run_finish(p_res, &p_err);
 
    /* Rescan only the folder the script ran against, and only if the window
     * is still alive and still navigates it. If the folder was replaced
@@ -2334,14 +2332,6 @@ static const GActionEntry ACTIONS[] = {
    {.name = "mark-range", .activate = _action_mark_range},
    {.name = "copy", .activate = _action_copy},
    {.name = "shortcuts", .activate = _action_shortcuts},
-   {.name = "enhance-1", .activate = _action_enhance_n},
-   {.name = "enhance-2", .activate = _action_enhance_n},
-   {.name = "enhance-3", .activate = _action_enhance_n},
-   {.name = "enhance-4", .activate = _action_enhance_n},
-   {.name = "enhance-5", .activate = _action_enhance_n},
-   {.name = "enhance-6", .activate = _action_enhance_n},
-   {.name = "enhance-7", .activate = _action_enhance_n},
-   {.name = "enhance-8", .activate = _action_enhance_n},
    {.name = "zoom-in", .activate = _action_zoom_in},
    {.name = "zoom-out", .activate = _action_zoom_out},
    {.name = "zoom-reset", .activate = _action_zoom_reset},
@@ -2597,32 +2587,35 @@ static const ViewLoadHostOps _VIEWLOAD_OPS = {
    .show_status   = _vl_show_status,
 };
 
-static void
-_update_header(GgazeWindow *p_win) {
+/* "<file> · n/total" (live images on both sides), or "<folder> · 0/N" when
+ * nothing is current, plus " · N marked" when marks exist. NULL without a
+ * folder. Caller frees. */
+static gchar *
+_title_for_nav(Navigator *p_nav) {
    gchar *c_title = NULL;
-   if (p_win->p_nav != NULL) {
-      GFile *p_cur       = navigator_get_current(p_win->p_nav);
-      guint  u_remaining = navigator_get_remaining(p_win->p_nav);
-      guint  u_total     = navigator_get_count(p_win->p_nav);
+   {
+      GFile *p_cur       = navigator_get_current(p_nav);
+      guint  u_remaining = navigator_get_remaining(p_nav);
+      guint  u_total     = navigator_get_count(p_nav);
       if (p_cur != NULL) {
          /* "n/total" over LIVE entries on both sides: the position among
           * the not-yet-trashed images over how many of those remain. The
           * old listing-index numerator overtook the denominator ("6/5")
           * as soon as anything was trashed. */
          char *c_name = g_file_get_basename(p_cur);
-         guint u_pos  = navigator_get_live_position(p_win->p_nav);
+         guint u_pos  = navigator_get_live_position(p_nav);
          c_title =
             g_strdup_printf("%s  \u00b7  %u/%u", c_name, u_pos, u_remaining);
          g_free(c_name);
       } else {
          /* Nothing current: keep the folder name and the count on screen
           * instead of a bare "ggaze". */
-         char *c_folder = g_file_get_basename(navigator_get_dir(p_win->p_nav));
+         char *c_folder = g_file_get_basename(navigator_get_dir(p_nav));
          c_title = g_strdup_printf("%s  \u00b7  0/%u", c_folder, u_total);
          g_free(c_folder);
       }
       /* Append the marked count so multi-selection is visible in the title. */
-      guint u_marks = navigator_get_mark_count(p_win->p_nav);
+      guint u_marks = navigator_get_mark_count(p_nav);
       if (u_marks > 0 && c_title != NULL) {
          char *c_tmp =
             g_strdup_printf("%s  \u00b7  %u marked", c_title, u_marks);
@@ -2630,6 +2623,12 @@ _update_header(GgazeWindow *p_win) {
          c_title = c_tmp;
       }
    }
+   return (c_title);
+}
+
+static void
+_update_header(GgazeWindow *p_win) {
+   gchar *c_title = p_win->p_nav != NULL ? _title_for_nav(p_win->p_nav) : NULL;
 #if GGAZE_HAVE_GEGL
    /* Append the enabled enhance preset names (comma-joined) when layered. */
    if (p_win->p_enhance_ctrl != NULL && c_title != NULL) {
@@ -2892,10 +2891,38 @@ static const SaveGateHostOps _SAVE_GATE_OPS = {
    .quit_continuation = _proceed_quit,
 };
 
-/* Cancellables, texture/thumbnail caches, per-folder trash/grid placeholders,
- * and the configured engines (mover/opener/runner, plus the GEGL enhancer
- * when built in) fed from GSettings. Split out of ggaze_window_init to keep
- * it under CLAUDE.md's 50-line hard limit (tu0 review round 2, issue 5). */
+/* Re-apply preferences live when the user edits them in Preferences instead
+ * of waiting for a restart: the engine lists + viewer prefs through
+ * _on_pref_changed, the folder-shaped keys through _on_folder_pref_changed.
+ */
+static void
+_watch_pref_keys(GgazeWindow *p_win) {
+   GSettings *p_gs = settings_get_gsettings(p_win->p_settings);
+   if (p_gs == NULL) {
+      return;
+   }
+   static const char *KEYS[] = {
+      "destinations",    "editors",    "scripts",
+      "enhance-presets", "background", "scroll-behavior",
+   };
+   for (gsize i = 0; i < G_N_ELEMENTS(KEYS); i++) {
+      char *c_sig = g_strdup_printf("changed::%s", KEYS[i]);
+      g_signal_connect(p_gs, c_sig, G_CALLBACK(_on_pref_changed), p_win);
+      g_free(c_sig);
+   }
+   static const char *FOLDER_KEYS[] = {
+      "sort", "wrap", "hide-raw-sidecars", "hide-trashed", "thumbnail-size",
+   };
+   for (gsize i = 0; i < G_N_ELEMENTS(FOLDER_KEYS); i++) {
+      char *c_sig = g_strdup_printf("changed::%s", FOLDER_KEYS[i]);
+      g_signal_connect(p_gs, c_sig, G_CALLBACK(_on_folder_pref_changed), p_win);
+      g_free(c_sig);
+   }
+}
+
+/* The view-load pipeline, thumbnail cache, per-folder trash/grid
+ * placeholders, and the configured engines (mover/opener/runner, plus the
+ * GEGL enhancer when built in) fed from GSettings. */
 static void
 _init_engines_and_settings(GgazeWindow *p_win) {
    p_win->p_viewload       = viewload_new(&_VIEWLOAD_OPS, p_win, 4);
@@ -2913,30 +2940,7 @@ _init_engines_and_settings(GgazeWindow *p_win) {
    if (p_win->p_settings != NULL) {
       p_win->i_grid_size =
          CLAMP(settings_get_thumbnail_size(p_win->p_settings), 64, 512);
-      /* Re-apply the engine lists + viewer prefs live when the user edits
-       * them in Preferences, instead of waiting for a restart. */
-      GSettings *p_gs = settings_get_gsettings(p_win->p_settings);
-      if (p_gs != NULL) {
-         static const char *KEYS[] = {
-            "destinations",    "editors",    "scripts",
-            "enhance-presets", "background", "scroll-behavior",
-         };
-         for (gsize i = 0; i < G_N_ELEMENTS(KEYS); i++) {
-            char *c_sig = g_strdup_printf("changed::%s", KEYS[i]);
-            g_signal_connect(p_gs, c_sig, G_CALLBACK(_on_pref_changed), p_win);
-            g_free(c_sig);
-         }
-         static const char *FOLDER_KEYS[] = {
-            "sort",         "wrap",           "hide-raw-sidecars",
-            "hide-trashed", "thumbnail-size",
-         };
-         for (gsize i = 0; i < G_N_ELEMENTS(FOLDER_KEYS); i++) {
-            char *c_sig = g_strdup_printf("changed::%s", FOLDER_KEYS[i]);
-            g_signal_connect(p_gs, c_sig, G_CALLBACK(_on_folder_pref_changed),
-                             p_win);
-            g_free(c_sig);
-         }
-      }
+      _watch_pref_keys(p_win);
    }
 #if GGAZE_HAVE_GEGL
    _init_enhance_state(p_win); /* must run before _load_engine_lists below,
@@ -3106,6 +3110,23 @@ _init_stack_and_viewer(GgazeWindow *p_win) {
    _set_view(p_win, GGAZE_VIEW_EMPTY);
 }
 
+/* One win.enhance-N action per addressable preset (1..GGAZE_ENHANCE_MAX_
+ * PRESETS), all sharing one handler that reads the index from the action's
+ * data -- so the cap lives in enhancer.h and no handler parses its name. */
+static void
+_add_enhance_actions(GgazeWindow *p_win) {
+   for (gint i = 0; i < GGAZE_ENHANCE_MAX_PRESETS; i++) {
+      char          *c_name = g_strdup_printf("enhance-%d", i + 1);
+      GSimpleAction *p_act  = g_simple_action_new(c_name, NULL);
+      g_object_set_data(G_OBJECT(p_act), "ggaze-preset-idx",
+                        GINT_TO_POINTER(i));
+      g_signal_connect(p_act, "activate", G_CALLBACK(_action_enhance_n), p_win);
+      g_action_map_add_action(G_ACTION_MAP(p_win), G_ACTION(p_act));
+      g_object_unref(p_act);
+      g_free(c_name);
+   }
+}
+
 static void
 ggaze_window_init(GgazeWindow *p_win) {
    _ensure_css();
@@ -3116,6 +3137,7 @@ ggaze_window_init(GgazeWindow *p_win) {
    /* Actions + keybindings (decision #10/#12). */
    g_action_map_add_action_entries(G_ACTION_MAP(p_win), ACTIONS,
                                    G_N_ELEMENTS(ACTIONS), p_win);
+   _add_enhance_actions(p_win);
    shortcuts_install(GTK_WIDGET(p_win));
 
    /* File/folder drag-and-drop (decision #27). */

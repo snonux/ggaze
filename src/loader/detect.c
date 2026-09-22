@@ -30,74 +30,88 @@
 #include <gio/gio.h>
 #include <string.h>
 
+/* One magic-number rule: u_len bytes of p_magic at p_offset identify
+ * e_format. Rules are tried in order; the first match wins. */
+typedef struct {
+   GgazeFormat   e_format;
+   gsize         u_offset;
+   gsize         u_len;
+   const guint8 *p_magic;
+} MagicRule;
+
+static const guint8 MAGIC_JPEG[] = {0xFF, 0xD8, 0xFF};
+static const guint8 MAGIC_PNG[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+static const guint8 MAGIC_GIF[] = {'G', 'I', 'F', '8'};
+static const guint8 MAGIC_RIFF[]    = {'R', 'I', 'F', 'F'};
+static const guint8 MAGIC_WEBP[]    = {'W', 'E', 'B', 'P'};
+static const guint8 MAGIC_TIFF_LE[] = {'I', 'I', 0x2A, 0x00};
+static const guint8 MAGIC_TIFF_BE[] = {'M', 'M', 0x00, 0x2A};
+static const guint8 MAGIC_ICO[]     = {0x00, 0x00, 0x01, 0x00};
+static const guint8 MAGIC_JXL_CS[]  = {0xFF, 0x0A};
+static const guint8 MAGIC_JXL_BOX[] = {0x00, 0x00, 0x00, 0x0C,
+                                       'J',  'X',  'L',  ' '};
+static const guint8 MAGIC_FTYP[]    = {'f', 't', 'y', 'p'};
+static const guint8 MAGIC_AVIF[]    = {'a', 'v', 'i', 'f'};
+static const guint8 MAGIC_AVIS[]    = {'a', 'v', 'i', 's'};
+static const guint8 MAGIC_HEIC[]    = {'h', 'e', 'i', 'c'};
+static const guint8 MAGIC_HEIX[]    = {'h', 'e', 'i', 'x'};
+static const guint8 MAGIC_MIF1[]    = {'m', 'i', 'f', '1'};
+
+/* Single-magic formats (WebP and the ISO BMFF brands need two checks and are
+ * handled after this table). */
+static const MagicRule MAGIC_RULES[] = {
+   {GGAZE_FMT_JPEG, 0, sizeof(MAGIC_JPEG), MAGIC_JPEG},
+   {GGAZE_FMT_PNG, 0, sizeof(MAGIC_PNG), MAGIC_PNG},
+   {GGAZE_FMT_GIF, 0, sizeof(MAGIC_GIF), MAGIC_GIF},
+   {GGAZE_FMT_TIFF, 0, sizeof(MAGIC_TIFF_LE), MAGIC_TIFF_LE},
+   {GGAZE_FMT_TIFF, 0, sizeof(MAGIC_TIFF_BE), MAGIC_TIFF_BE},
+   {GGAZE_FMT_ICO, 0, sizeof(MAGIC_ICO), MAGIC_ICO},
+   {GGAZE_FMT_JXL, 0, sizeof(MAGIC_JXL_CS), MAGIC_JXL_CS},
+   {GGAZE_FMT_JXL, 0, sizeof(MAGIC_JXL_BOX), MAGIC_JXL_BOX},
+};
+
+static gboolean
+_has_magic(const guint8 *p_head, gsize u_len, gsize u_offset,
+           const guint8 *p_magic, gsize u_magic_len) {
+   return (u_len >= u_offset + u_magic_len &&
+           memcmp(p_head + u_offset, p_magic, u_magic_len) == 0);
+}
+
+/* ISO BMFF (AVIF / HEIF): an "ftyp" box at offset 4 and the brand at 8. */
+static GgazeFormat
+_detect_bmff(const guint8 *p_head, gsize u_len) {
+   if (!_has_magic(p_head, u_len, 4, MAGIC_FTYP, 4)) {
+      return (GGAZE_FMT_UNKNOWN);
+   }
+   if (_has_magic(p_head, u_len, 8, MAGIC_AVIF, 4) ||
+       _has_magic(p_head, u_len, 8, MAGIC_AVIS, 4)) {
+      return (GGAZE_FMT_AVIF);
+   }
+   if (_has_magic(p_head, u_len, 8, MAGIC_HEIC, 4) ||
+       _has_magic(p_head, u_len, 8, MAGIC_HEIX, 4) ||
+       _has_magic(p_head, u_len, 8, MAGIC_MIF1, 4)) {
+      return (GGAZE_FMT_HEIF);
+   }
+   return (GGAZE_FMT_UNKNOWN);
+}
+
 GgazeFormat
 detect_format(const guint8 *p_head, gsize u_len) {
    if (p_head == NULL || u_len == 0) {
       return (GGAZE_FMT_UNKNOWN);
    }
-
-   /* JPEG: FF D8 FF */
-   if (u_len >= 3 && p_head[0] == 0xFF && p_head[1] == 0xD8 &&
-       p_head[2] == 0xFF) {
-      return (GGAZE_FMT_JPEG);
+   for (gsize u = 0; u < G_N_ELEMENTS(MAGIC_RULES); u++) {
+      const MagicRule *p_r = &MAGIC_RULES[u];
+      if (_has_magic(p_head, u_len, p_r->u_offset, p_r->p_magic, p_r->u_len)) {
+         return (p_r->e_format);
+      }
    }
-
-   /* PNG: 89 50 4E 47 0D 0A 1A 0A */
-   if (u_len >= 8 && p_head[0] == 0x89 && p_head[1] == 'P' &&
-       p_head[2] == 'N' && p_head[3] == 'G' && p_head[4] == 0x0D &&
-       p_head[5] == 0x0A && p_head[6] == 0x1A && p_head[7] == 0x0A) {
-      return (GGAZE_FMT_PNG);
-   }
-
-   /* GIF: "GIF8" */
-   if (u_len >= 4 && p_head[0] == 'G' && p_head[1] == 'I' && p_head[2] == 'F' &&
-       p_head[3] == '8') {
-      return (GGAZE_FMT_GIF);
-   }
-
    /* WebP: RIFF .... WEBP */
-   if (u_len >= 12 && memcmp(p_head, "RIFF", 4) == 0 &&
-       memcmp(p_head + 8, "WEBP", 4) == 0) {
+   if (_has_magic(p_head, u_len, 0, MAGIC_RIFF, 4) &&
+       _has_magic(p_head, u_len, 8, MAGIC_WEBP, 4)) {
       return (GGAZE_FMT_WEBP);
    }
-
-   /* TIFF: II 2A 00 (little) | MM 00 2A (big) */
-   if (u_len >= 4 && ((p_head[0] == 'I' && p_head[1] == 'I' &&
-                       p_head[2] == 0x2A && p_head[3] == 0x00) ||
-                      (p_head[0] == 'M' && p_head[1] == 'M' &&
-                       p_head[2] == 0x00 && p_head[3] == 0x2A))) {
-      return (GGAZE_FMT_TIFF);
-   }
-
-   /* ICO: 00 00 01 00 */
-   if (u_len >= 4 && p_head[0] == 0x00 && p_head[1] == 0x00 &&
-       p_head[2] == 0x01 && p_head[3] == 0x00) {
-      return (GGAZE_FMT_ICO);
-   }
-
-   /* JPEG XL: codestream FF 0A, or container 00 00 00 0C "JXL " */
-   if (u_len >= 2 && p_head[0] == 0xFF && p_head[1] == 0x0A) {
-      return (GGAZE_FMT_JXL);
-   }
-   if (u_len >= 12 && p_head[0] == 0x00 && p_head[1] == 0x00 &&
-       p_head[2] == 0x00 && p_head[3] == 0x0C &&
-       memcmp(p_head + 4, "JXL ", 4) == 0) {
-      return (GGAZE_FMT_JXL);
-   }
-
-   /* AVIF / HEIF: ISO BMFF ftyp box at offset 4; brand at offset 8. */
-   if (u_len >= 12 && memcmp(p_head + 4, "ftyp", 4) == 0) {
-      const guint8 *p_brand = p_head + 8;
-      if (memcmp(p_brand, "avif", 4) == 0 || memcmp(p_brand, "avis", 4) == 0) {
-         return (GGAZE_FMT_AVIF);
-      }
-      if (memcmp(p_brand, "heic", 4) == 0 || memcmp(p_brand, "heix", 4) == 0 ||
-          memcmp(p_brand, "mif1", 4) == 0) {
-         return (GGAZE_FMT_HEIF);
-      }
-   }
-
-   return (GGAZE_FMT_UNKNOWN);
+   return (_detect_bmff(p_head, u_len));
 }
 
 /* JPEG marker codes relevant to the SOF scan below. SOF0-SOF15 span

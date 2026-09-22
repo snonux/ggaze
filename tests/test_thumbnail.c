@@ -48,7 +48,7 @@ _thumb_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
    (void)p_data;
    GError *p_err = NULL;
-   GGAZE_RESULT  = thumbnail_get_finish(NULL, p_res, &p_err);
+   GGAZE_RESULT  = thumbnail_get_finish(p_res, &p_err);
    g_assert_no_error(p_err);
    g_main_loop_quit(GGAZE_LOOP);
 }
@@ -59,7 +59,7 @@ static void
 _thumb_err_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
    (void)p_data;
-   GGAZE_RESULT = thumbnail_get_finish(NULL, p_res, &GGAZE_ERR);
+   GGAZE_RESULT = thumbnail_get_finish(p_res, &GGAZE_ERR);
    g_main_loop_quit(GGAZE_LOOP);
 }
 
@@ -625,7 +625,7 @@ _count_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
    (void)p_data;
    GError     *p_err = NULL;
-   GdkTexture *p_tex = thumbnail_get_finish(NULL, p_res, &p_err);
+   GdkTexture *p_tex = thumbnail_get_finish(p_res, &p_err);
    if (p_tex != NULL) {
       g_object_unref(p_tex);
    } else {

@@ -6,8 +6,8 @@ cull the rejects, move on.** Think `feh` / `nsxiv` / `qiv`, but GNOME-native
 and KISS — no library, no database, no sidecars. The layout nods to gthumb
 (header bar, thumbnail grid, full-window viewer) without the weight.
 
-> **Status:** planning → skeleton. The design is complete in `docs/`; the
-> implementation is just starting. Not usable yet.
+> **Status:** usable for its core job (browse, cull, move, open externally,
+> run scripts, quick GEGL enhance). Crop/straighten/rotate are still planned.
 
 ## Quick start
 
@@ -29,28 +29,41 @@ the app shows up in the GNOME Activities overview. Override with
 Opens the folder as a thumbnail grid, `Enter` drops into the large view, and
 you flip through the shoot:
 
+Keyboard first: every action has a vi-style key and a traditional one
+(`?` shows the full, always-current table). The most used:
+
 | Key | Action |
 |-----|--------|
-| `h` / `l`, `←`/`→` | previous / next image |
-| `Enter` / `Esc`    | grid ↔ large view (`t` toggles) |
-| `+` / `-`          | zoom in / out (large) · grow / shrink thumbnails (grid) |
-| `0`               | zoom fit ↔ 100% (large) · reset thumbnail size (grid) |
-| `i`               | info overlay (EXIF) |
+| `h` / `l`, `←`/`→`, `PgUp`/`PgDn` | previous / next image |
+| `g` / `G`, `Home` / `End` | first / last image |
+| `Enter` / `Esc`    | grid → large / large → grid (`t` toggles; `Esc` twice in the grid quits) |
+| `j` / `k`, `↓`/`↑` | cursor row down / up (grid) · pan (large) |
+| `H` / `L`, `Shift+←`/`→` | pan left / right (large) |
+| `+` / `-`, `Ctrl+±` | zoom in / out (large) · grow / shrink thumbnails (grid) |
+| `0` / `Ctrl+0`     | zoom fit ↔ 100% (large) · reset thumbnail size (grid) |
+| `i`               | toggle info overlay (EXIF) |
 | `v` / `V` / `Ctrl+a` | mark / range-mark / mark all |
-| `d` / `D`          | trash to `./Trash` (undoable) / delete permanently |
-| `u`               | undo last `d` or `m` |
+| `d` / `Delete`     | trash to `.Trash` (undoable), then next |
+| `D` / `Shift+Delete` | delete permanently |
+| `u` / `Ctrl+z`     | undo last `d` or `m` |
+| `E`               | empty this folder's `.Trash` (asks first) |
 | `m`               | move marks → destination popup (`1`, `2`, …) |
 | `e`               | open in external program popup |
 | `!`               | run a shell script popup |
-| `a`               | quick GEGL enhance popup (optional) |
-| `c` / `R` / `[` / `]` | crop / straighten / rotate 90° (GEGL, optional) |
-| `s`               | save an enhanced/edited copy (original is never modified) |
+| `Ctrl+c`          | copy image (or marked files) to the clipboard |
+| `a`, `1`–`8`, `0`  | quick GEGL enhance chooser · toggle preset · original (optional) |
+| `s`               | save an enhanced copy (original is never modified) |
 | `Space` (hold)     | compare original vs modified |
-| `f` / `S`          | fullscreen / slideshow |
-| `o`               | open file/folder dialog |
+| `f` / `F11`        | fullscreen |
+| `S` / `F5`         | slideshow |
+| `o` / `O`          | open image / open folder dialog (`Ctrl+o`, `Ctrl+Shift+o`) |
 | `,`               | preferences |
-| `?`               | shortcuts overlay |
-| `q`               | quit |
+| `F10`             | main menu |
+| `?` / `F1`         | shortcuts overlay |
+| `q` / `Ctrl+q`     | quit |
+
+Crop / straighten / rotate (`c`, `R`, `[`, `]`) are planned, not yet
+implemented.
 
 Full keybindings and mouse/touch gestures: `docs/ui-and-interactions.md`.
 

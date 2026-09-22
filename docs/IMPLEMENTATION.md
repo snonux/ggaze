@@ -100,7 +100,7 @@ that cost a full investigation to learn, so they are written down here:
 | `test_walk_folder.c` | M2 | Folder arg → navigator listing; `h`/`l` action changes current; `GFileMonitor` add/delete propagates to navigator; wrap at ends. |
 | `test_responsive_nav.c` | M3 | Rapid `next` ×10: only the last `GdkTexture` is shown (last-write-wins invariant), UI thread not blocked (measured via a main-loop timer). |
 | `test_progressive_jpeg.c` | M6 | A progressive JPEG fires the partial-texture callback at increasing resolution before the final. |
-| `test_grid_cull.c` | M7 | Grid view shows N cells; `d` bins one into `./Trash`, cell dims; `u` restores; counter reflects remaining; `Enter`→large on the right cell. |
+| `test_grid_cull.c` | M7 | Grid view shows N cells; `d` bins one into `.Trash`, cell dims; `u` restores; counter reflects remaining; `Enter`→large on the right cell. |
 | `test_move_undo.c` | M8 | Mark 3 → `m`→dest2 → files gone from folder, present in dest; `u` moves back; collision suffixing. |
 | `test_runner_rescan.c` | M8 | `!` runs a script that writes a file into the dir; on exit the navigator rescans and the new file appears; injection-guard filename is single-quoted. |
 | `test_enhance_flow.c` | M9 (gated on `gegl`) | `a`→preset applies a preview off-thread (texture differs from raw); toggle-off restores the original; hold-`Space` compares and restores (incl. the flag not sticking when the mask is cleared mid-hold); `s` writes a collision-safe `-enhanced[-n].<ext>` with the original byte-identical (EXIF `Orientation=1` normalization is not implemented yet, so not asserted); a dirty preview blocks grid selection and native window close behind the Save/Discard/Cancel prompt — and the prompt itself is **answered** (`tests/helpers/gtk_helpers.h`): Cancel keeps the preview and releases the continuation, Discard/Save apply the deferred grid select / open / move, a **failed** Save (read-only folder) keeps the preview and aborts the continuation, repeated close-requests do not stack dialogs, and `t` `t` keeps a dirty preview on screen. |
@@ -315,7 +315,7 @@ bounded memory.
 - `src/gridview.c/.h` — `GgazeGrid` over navigator `GListModel`; lazy cell
   decode; `+`/`-` resize → `thumbnail-size`; reflow; mark badges; dim
   trashed/deleted; `Enter`/double-click → large; cursor sync both ways.
-- `src/trash.c/.h` — `./Trash` bin (lazy, collision suffix), restore-last,
+- `src/trash.c/.h` — `.Trash` bin (lazy, collision suffix), restore-last,
   permanent delete.
 - Window: `d`/`D`/`u`; `d` advances; `D` on **>1 marked** asks a confirm dialog; counter = remaining; `t` toggle.
 - That confirm dialog deletes on the **Delete** button alone. Every other
@@ -466,7 +466,7 @@ move/open/quit; minimal build reports "GEGL not built in" cleanly. `c`/`R`/
   triage via `agent-task-management`, fix all HIGH/MEDIUM.
 - **Keyboard-completeness audit:** visible hotkeys, mnemonics, `?` overlay,
   full dialog traversal.
-- Empty-`./Trash` menu action.
+- Empty-`.Trash` menu action.
 - Integration: `test_full_lifecycle.c` (the elevator-pitch session scripted).
 
 **Acceptance:** RPM builds/installs/registers; man page; coverage gate green;

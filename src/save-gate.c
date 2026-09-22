@@ -342,7 +342,8 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
  * then still resolves everything normally (measured: the answer arrives as the
  * pressed button, refcount back to the caller's own).
  *
- * Nothing in src/ calls gtk_window_destroy(), and the host's close-request
+ * The only gtk_window_destroy() in src/ is the enhance gallery's own close
+ * (enhance-ctrl.c), never the main window's, and the host's close-request
  * handler refuses a close while the prompt is outstanding, so no ggaze code
  * path reaches that state. What is left uncovered is a process that EXITS
  * under the dialog (SIGTERM, a session logout, ^C): dispose never runs at all
@@ -425,8 +426,9 @@ _save_prompt_queue(SaveGate *p_gate, const _Request *p_req) {
    }
    p_gate->p_pending  = g_new(_Request, 1);
    *p_gate->p_pending = *p_req;
-   p_gate->p_ops->show_status(p_gate->p_host,
-                              "Answer the Save/Discard/Cancel prompt first");
+   /* No status line here: the modal dialog covers the overlay, so it was
+    * never readable. What the user sees is the far side of the prompt --
+    * the request runs, or "Queued request dropped" (see _drop_pending). */
 }
 
 /* If an enhance preview is active (unsaved), ask Save / Discard / Cancel

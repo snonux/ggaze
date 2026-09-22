@@ -34,7 +34,7 @@ This folder contains **planning only**. No implementation yet.
 
 `ggaze ~/Downloads/Camera/IMG_0001.jpg` — opens instantly in a thumbnail
 grid of the folder, `Enter` into the large view, walk the shoot with `h`/`l` (or `←`/`→`),
-check EXIF with `i`, `d` to bin a reject into `./Trash`, `D` to delete it
+check EXIF with `i`, `d` to bin a reject into `.Trash`, `D` to delete it
 outright, `q` to leave.
 
 ## Command-line
@@ -47,7 +47,7 @@ outright, `q` to leave.
 
 - Desktop app, single main window with **two views**: a thumbnail grid
   (overview of the folder) and a large single-picture view.
-- Rejected pictures go into a `./Trash` folder beside the images (local,
+- Rejected pictures go into a `.Trash` folder beside the images (local,
   recoverable), not the system trash. `D` deletes permanently.
 - Opens a file **or** a folder (CLI arg or drag-and-drop); `ggaze dir/` → grid.
 - Primary platform: Fedora Linux / GNOME. Other GTK4 platforms are a bonus.

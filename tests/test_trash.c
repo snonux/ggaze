@@ -190,7 +190,7 @@ test_permanent_delete(void) {
    Trash  *p_t   = trash_new(p_dirf);
    GError *p_err = NULL;
 
-   g_assert_true(trash_permanently_delete(p_t, p_a, &p_err));
+   g_assert_true(trash_permanently_delete(p_a, &p_err));
    g_assert_no_error(p_err);
    g_assert_false(g_file_query_exists(p_a, NULL));
    g_assert_false(trash_can_undo(p_t)); /* permanent delete is not undoable */

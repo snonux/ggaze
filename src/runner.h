@@ -32,8 +32,8 @@ gboolean runner_run(Runner *p_r, GFile *p_file, GFile *p_dir,
                     const SettingsPair *p_script, GAsyncReadyCallback p_cb,
                     gpointer p_data, GError **p_err);
 
-/* Finish: returns the exit code, or -1 on error. */
-int runner_run_finish(Runner *p_r, GAsyncResult *p_res, GError **p_err);
+/* Finish: returns the exit code, or -1 on error. Stateless (no Runner). */
+int runner_run_finish(GAsyncResult *p_res, GError **p_err);
 
 G_END_DECLS
 

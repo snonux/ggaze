@@ -112,8 +112,7 @@ runner_run(Runner *r, GFile *p_file, GFile *p_dir, const SettingsPair *p_script,
 }
 
 int
-runner_run_finish(Runner *r, GAsyncResult *p_res, GError **p_err) {
-   (void)r;
+runner_run_finish(GAsyncResult *p_res, GError **p_err) {
    GSubprocess *p_sub = G_SUBPROCESS(g_async_result_get_source_object(p_res));
    if (p_sub == NULL)
       return -1;

@@ -13,7 +13,7 @@ _done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
    (void)p_data;
    GError *e   = NULL;
-   g_exit_code = runner_run_finish(NULL, p_res, &e);
+   g_exit_code = runner_run_finish(p_res, &e);
    g_clear_error(&e);
    g_main_loop_quit(g_loop);
 }

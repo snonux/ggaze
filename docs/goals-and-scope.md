@@ -20,7 +20,7 @@
    an option), filter by extension, **hide RAW sidecars by default** (toggle to
    reveal). The grid shows the whole folder at a glance.
 6. **Culling-friendly deletion.** `d` bins the current picture into a local
-   `./Trash` folder (recoverable, lives with the shoot); `D` deletes it
+   `.Trash` folder (recoverable, lives with the shoot); `D` deletes it
    permanently. The grid dim-marks trashed items so you can see progress.
 7. **Triage by moving.** Mark any number of pictures and send them to a
    configured destination folder with `m` → a quick popup whose entries each
@@ -95,7 +95,7 @@ shot, trash the rejects, and move on to editing the keepers elsewhere.
 
 Typical session: `ggaze ~/Downloads/Camera/IMG_0001.jpg` opens the folder as
 a thumbnail grid, `Enter` jumps into the large view, hold `l` (or `→`) to scrub forward,
-`d` to bin obvious misses into `./Trash` (or `D` to delete outright), `v` to
+`d` to bin obvious misses into `.Trash` (or `D` to delete outright), `v` to
 mark keepers, `m` then `1` to ship them to "irregular ninja", `i` when a
 frame is borderline, `e` to open a keeper in GIMP, `Esc` back to the
 grid, `q` to leave. No library, no

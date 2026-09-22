@@ -83,8 +83,7 @@ trash_bin(Trash *p_t, GFile *p_file, GError **p_err) {
 }
 
 gboolean
-trash_permanently_delete(Trash *p_t, GFile *p_file, GError **p_err) {
-   (void)p_t;
+trash_permanently_delete(GFile *p_file, GError **p_err) {
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
    return (g_file_delete(p_file, NULL, p_err));
 }

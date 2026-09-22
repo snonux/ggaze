@@ -115,6 +115,24 @@ _on_row_clicked(GtkButton *p_btn, gpointer p_data) {
 
 /* --- build --------------------------------------------------------------- */
 
+/* The title label plus one "<hotkey>  <name>" button per row. */
+static void
+_build_rows(PopupList *p_list, GtkWidget *p_box, const char *c_title,
+            const GPtrArray *p_items, PopupListNameFn p_name_fn) {
+   GtkWidget *p_lbl = gtk_label_new(c_title);
+   gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
+   gtk_box_append(GTK_BOX(p_box), p_lbl);
+   for (guint u = 0; u < p_list->u_count; u++) {
+      char      *c_lbl = popup_list_row_label(u, p_name_fn(p_items, u));
+      GtkWidget *p_btn = gtk_button_new_with_label(c_lbl);
+      gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
+      g_object_set_data(G_OBJECT(p_btn), "idx", GUINT_TO_POINTER(u));
+      g_signal_connect(p_btn, "clicked", G_CALLBACK(_on_row_clicked), p_list);
+      gtk_box_append(GTK_BOX(p_box), p_btn);
+      g_free(c_lbl);
+   }
+}
+
 PopupList *
 popup_list_new(GtkWidget *p_parent, PopupList **pp_storage, const char *c_title,
                const char *c_empty_msg, const GPtrArray *p_items,
@@ -160,21 +178,7 @@ popup_list_new(GtkWidget *p_parent, PopupList **pp_storage, const char *c_title,
       gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
       gtk_box_append(GTK_BOX(p_box), p_lbl);
    } else {
-      GtkWidget *p_lbl = gtk_label_new(c_title);
-      gtk_widget_set_halign(p_lbl, GTK_ALIGN_START);
-      gtk_box_append(GTK_BOX(p_box), p_lbl);
-
-      for (guint i = 0; i < p_list->u_count; i++) {
-         const char *c_name = p_name_fn(p_items, i);
-         char       *c_lbl  = popup_list_row_label(i, c_name);
-         GtkWidget  *p_btn  = gtk_button_new_with_label(c_lbl);
-         gtk_widget_set_halign(p_btn, GTK_ALIGN_START);
-         g_object_set_data(G_OBJECT(p_btn), "idx", GUINT_TO_POINTER(i));
-         g_signal_connect(p_btn, "clicked", G_CALLBACK(_on_row_clicked),
-                          p_list);
-         gtk_box_append(GTK_BOX(p_box), p_btn);
-         g_free(c_lbl);
-      }
+      _build_rows(p_list, p_box, c_title, p_items, p_name_fn);
    }
 
    gtk_widget_set_parent(p_list->p_pop, p_parent);

@@ -278,6 +278,31 @@ drag_update_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
    gtk_widget_queue_draw(GTK_WIDGET(p_v));
 }
 
+/* The zoom centre for a scroll event: the pointer position translated into
+ * widget space when the event carries one (finite), else the widget centre.
+ * See the hx0 note in scroll_cb for why the fallback is mandatory. */
+static void
+_event_zoom_centre(GgazeViewer *p_v, GtkEventController *p_ctrl, gdouble *p_cx,
+                   gdouble *p_cy) {
+   *p_cx             = (gdouble)gtk_widget_get_width(GTK_WIDGET(p_v)) / 2.0;
+   *p_cy             = (gdouble)gtk_widget_get_height(GTK_WIDGET(p_v)) / 2.0;
+   GdkEvent *p_event = gtk_event_controller_get_current_event(p_ctrl);
+   GtkRoot  *p_root  = gtk_widget_get_root(GTK_WIDGET(p_v));
+   gdouble   d_sx, d_sy;
+   if (p_event == NULL || p_root == NULL ||
+       !gdk_event_get_position(p_event, &d_sx, &d_sy)) {
+      return;
+   }
+   graphene_point_t pt_out;
+   if (gtk_widget_compute_point(GTK_WIDGET(p_root), GTK_WIDGET(p_v),
+                                &GRAPHENE_POINT_INIT((float)d_sx, (float)d_sy),
+                                &pt_out) &&
+       isfinite(pt_out.x) && isfinite(pt_out.y)) {
+      *p_cx = (gdouble)pt_out.x;
+      *p_cy = (gdouble)pt_out.y;
+   }
+}
+
 static gboolean
 scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
           gpointer p_data) {
@@ -307,23 +332,8 @@ scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
     * guards the translated result too: it is the invariant the pan/zoom state
     * depends on, and it is cheaper to enforce here than to reason about every
     * arithmetic path downstream. */
-   gdouble   d_cx = (gdouble)gtk_widget_get_width(GTK_WIDGET(p_v)) / 2.0;
-   gdouble   d_cy = (gdouble)gtk_widget_get_height(GTK_WIDGET(p_v)) / 2.0;
-   GdkEvent *p_event =
-      gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(p_scroll));
-   GtkRoot *p_root = gtk_widget_get_root(GTK_WIDGET(p_v));
-   gdouble  d_sx, d_sy;
-   if (p_event != NULL && p_root != NULL &&
-       gdk_event_get_position(p_event, &d_sx, &d_sy)) {
-      graphene_point_t pt_out;
-      if (gtk_widget_compute_point(
-             GTK_WIDGET(p_root), GTK_WIDGET(p_v),
-             &GRAPHENE_POINT_INIT((float)d_sx, (float)d_sy), &pt_out) &&
-          isfinite(pt_out.x) && isfinite(pt_out.y)) {
-         d_cx = (gdouble)pt_out.x;
-         d_cy = (gdouble)pt_out.y;
-      }
-   }
+   gdouble d_cx, d_cy;
+   _event_zoom_centre(p_v, GTK_EVENT_CONTROLLER(p_scroll), &d_cx, &d_cy);
 
    switch (p_v->e_scroll) {
    case GGAZE_SCROLL_PAN_WHEN_ZOOMED:

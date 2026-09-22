@@ -12,24 +12,40 @@ ggaze
 ├── window.{c,h}          # GgazeWindow : GtkApplicationWindow — owns the layout, switches grid/large
 ├── viewer.{c,h}          # GgazeViewer : GtkWidget — large single-image canvas, zoom/pan, displays a GdkTexture
 ├── gridview.{c,h}        # GgazeGrid : GtkGridView/FlowLayout — thumbnail overview of the folder
-├── trash.{c,h}          # ./Trash folder management + permanent delete; restore/undo
+├── trash.{c,h}          # .Trash folder management + permanent delete; restore/undo
 ├── mover.{c,h}          # configurable move destinations; move marked set into a dir (undoable)
 ├── opener.{c,h}         # configurable external programs; launch current image (GSubprocess)
 ├── runner.{c,h}          # configurable shell scripts; async run via /bin/sh -c, rescan on done
 ├── enhancer.{c,h}        # (optional) GEGL quick-enhance presets; non-destructive apply + export copy
-├── clipboard.{c,h}       # copy image (PNG) or file URIs to GdkClipboard (no state, helpers)
+├── clipboard.{c,h}       # image/png (displayed texture) or file-URI content providers (no state)
+├── viewload.{c,h}        # large-view load pipeline: texture LRU, one active load, prefetch, last-write-wins
+├── info-overlay.{c,h}    # EXIF card + status line over the stack (async info gather, auto-hide)
+├── save-gate.{c,h}       # Save/Discard/Cancel prompt gate every discarding continuation funnels through
+├── delete-confirm.{c,h}  # >1-target permanent-delete confirm (captured targets, folder re-check)
+├── dialog-util.{c,h}     # alert-dialog toplevel lookup shared by the two dialog modules
+├── enhance-ctrl.{c,h}    # (optional) enhance feature controller: mask, previews, gallery/popover, async save
+├── enhance-ui.{c,h}      # (optional) pure enhance gallery/popover widget construction
+├── popup_list.{c,h}      # shared hotkey list popover (e / ! / m)
+├── undo.{c,h}            # which of trash/move `u` undoes
+├── pathutil.{c,h}        # stem/ext split, safe mkdir -p, non-colliding child names
+├── settings-pair.{c,h}   # the (name, value) pair of the a(ss) settings lists
+├── ggaze-enums.h         # the shared preference enums (sort, background, scroll)
 ├── loader/
-│   ├── loader.{c,h}      # async load API: load(path, cancellable, ready_cb)
-│   ├── detect.{c,h}      # sniff format from contents (magic), not extension
+│   ├── loader.{c,h}      # sync + async load API; sniff, dispatch, explicit pixbuf fallback
+│   ├── detect.{c,h}      # sniff format from contents (magic), not extension; dimension caps
+│   ├── pixbuf-util.{c,h} # GdkPixbuf -> upright GdkTexture (shared by three decoders)
 │   └── backends/         # one file per format family, behind a backend struct
-│       ├── pixbuf.c      # fallback via GdkPixbuf (PNG/JPEG/GIF/WebP)
+│       ├── pixbuf.c      # fallback via GdkPixbuf (PNG/GIF/WebP/TIFF/ICO, JPEG without libjpeg)
+│       ├── jpeg.c        # libjpeg-turbo: progressive low-res preview + full decode
 │       ├── jxl.c         # libjxl
 │       ├── avif.c        # libavif
 │       └── heif.c        # libheif
-├── navigator.{c,h}       # directory listing, sort, filter, prev/next, wrap, recurse(opt)
-├── thumbnail.{c,h}      # freedesktop thumbnail cache (normal/large), shared/mutex
+├── navigator.{c,h}       # directory listing, sort, filter, prev/next, wrap, marks, monitor; "changed" carries flags
+├── thumbnail.{c,h}      # freedesktop thumbnail cache (normal/large/x-large), bounded pool
+├── texturecache.{c,h}   # bounded LRU of decoded textures, mtime/size-validated
 ├── settings.{c,h}       # GSettings schema wrapper
-└── shortcuts.{c,h}      # keybinding → GAction map (configurable later)
+├── prefs.{c,h}          # Preferences dialog
+└── shortcuts.{c,h}      # the ONE key table: bindings, ? help, header tooltips, menu labels
 ```
 
 ## Responsibilities
@@ -105,13 +121,14 @@ ggaze
   rotate tools add `gegl:crop`/`gegl:rotate`/`gegl:rotate-on-center` to the same
   graph via the enhancer. GEGL also backs color-managed decode/export (ICC).
   Owns no GTK state.
-- **clipboard** — stateless helpers that put content on the `GdkClipboard`:
-  `clipboard_copy_image(GdkClipboard *clip, GFile *file, GCancellable *,
-  GError **)` decodes the image in a `GTask` thread and sets a
-  `GdkContentProvider` for `image/png`; `clipboard_copy_uris(GdkClipboard
-  *clip, GList *files)` sets `text/uri-list` (+ `text/plain`). Single image →
-  pixels; marks → URIs. (Optionally union both providers so one file offers
-  PNG + URI.)
+- **clipboard** — stateless provider builders for the `GdkClipboard`:
+  `clipboard_build_texture_provider(GdkTexture *)` offers the DISPLAYED
+  texture as `image/png` (already decoded, so only the PNG encode runs, on
+  the caller's thread); `clipboard_build_uri_provider(GList *files)` offers
+  the marked files as `text/uri-list` + `text/plain`. The window picks one in
+  `ggaze_window_get_copy_provider` (marks → URIs, else pixels) and sets it;
+  the builders never touch the clipboard, so the decision is testable
+  without a clipboard round trip.
 - **thumbnail** — reads/writes `~/.cache/thumbnails/` per the freedesktop
   Thumbnail Managing Standard; shared so multiple windows don't re-decode.
   Also feeds the gridview cells.
@@ -232,11 +249,11 @@ GEGL disabled? → 'a' shows "GEGL not built in" toast
 ## Data flow (copy to clipboard)
 
 ```
-Ctrl+c → marks? clipboard_copy_uris(clip, marked_files)  [text/uri-list]
-       → no marks? clipboard_copy_image(clip, current, cancellable, &err)
-                  → decode in GTask → GdkPixbuf/Texture → PNG content provider
-                  → gdk_clipboard_set_content (main thread)
-       → toast: "Copied image" / "Copied N files"
+Ctrl+c → ggaze_window_get_copy_provider(win)
+         marks?    clipboard_build_uri_provider(marked_files) [text/uri-list + text/plain]
+         no marks? clipboard_build_texture_provider(viewer texture) [image/png]
+       → gdk_clipboard_set_content (main thread)
+       → status: "Copied image" / "Copied N files"
 ```
 
 Prefetch: when `navigator.current` changes, schedule `loader.load` for the

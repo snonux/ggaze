@@ -134,6 +134,62 @@ _build_original_button(gboolean b_previews, GtkWidget **p_pic_out) {
    return (p_btn);
 }
 
+/* The gallery flow box inside a scrolled window that takes ALL the leftover
+ * room in the window -- from GTK's layout, not from a size request computed
+ * off the window's own dimensions, which is what previously coupled the
+ * gallery's size back to itself. Returns the flow box. */
+static GtkWidget *
+_build_gallery(GtkWidget *p_box, EnhanceUIWidgets *p_out) {
+   GtkWidget *p_gallery = gtk_flow_box_new();
+   gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(p_gallery), TRUE);
+   gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(p_gallery), GTK_SELECTION_NONE);
+   gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(p_gallery), 4);
+   gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(p_gallery), 4);
+   gtk_widget_set_hexpand(p_gallery, TRUE);
+   gtk_widget_set_vexpand(p_gallery, TRUE);
+   GtkWidget *p_scroll = gtk_scrolled_window_new();
+   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(p_scroll),
+                                  GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+   gtk_widget_set_hexpand(p_scroll, TRUE);
+   gtk_widget_set_vexpand(p_scroll, TRUE);
+   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(p_scroll), p_gallery);
+   gtk_box_append(GTK_BOX(p_box), p_scroll);
+   p_out->p_gallery = p_gallery;
+   p_out->p_scroll  = p_scroll;
+   return (p_gallery);
+}
+
+/* One preset row (idx u_idx): a picture-over-label card in preview mode
+ * (its GtkPicture handed back via p_pic_out), a plain label button in
+ * compact mode. Highlighted when the preset is already enabled. */
+static GtkWidget *
+_build_preset_row(guint u_idx, const char *c_name, gboolean b_previews,
+                  gboolean b_on, GtkWidget **p_pic_out) {
+   char      *c_lbl = popup_list_row_label(u_idx, c_name);
+   GtkWidget *p_btn = gtk_button_new();
+   if (b_previews) {
+      GtkWidget *p_row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+      GtkWidget *p_pic = gtk_picture_new();
+      GtkWidget *p_lbl = gtk_label_new(c_lbl);
+      gtk_picture_set_content_fit(GTK_PICTURE(p_pic), GTK_CONTENT_FIT_CONTAIN);
+      enhance_ui_expand_preview(p_pic);
+      gtk_widget_set_halign(p_lbl, GTK_ALIGN_CENTER);
+      gtk_box_append(GTK_BOX(p_row), p_pic);
+      gtk_box_append(GTK_BOX(p_row), p_lbl);
+      gtk_button_set_child(GTK_BUTTON(p_btn), p_row);
+      *p_pic_out = p_pic;
+   } else {
+      gtk_button_set_label(GTK_BUTTON(p_btn), c_lbl);
+   }
+   gtk_widget_set_halign(p_btn, b_previews ? GTK_ALIGN_FILL : GTK_ALIGN_START);
+   g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER((gint)u_idx));
+   if (b_on) {
+      gtk_widget_add_css_class(p_btn, "ggaze-enhance-on");
+   }
+   g_free(c_lbl);
+   return (p_btn);
+}
+
 GtkWidget *
 enhance_ui_build_content(const GPtrArray *p_presets, const char *c_basename,
                          guint8 u_mask, gboolean b_previews,
@@ -159,30 +215,7 @@ enhance_ui_build_content(const GPtrArray *p_presets, const char *c_basename,
    gtk_widget_set_margin_bottom(p_box, 8);
    _build_title(c_basename, p_box);
 
-   GtkWidget *p_gallery = NULL;
-   if (b_previews) {
-      p_gallery = gtk_flow_box_new();
-      gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(p_gallery), TRUE);
-      gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(p_gallery),
-                                      GTK_SELECTION_NONE);
-      gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(p_gallery), 4);
-      gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(p_gallery), 4);
-      gtk_widget_set_hexpand(p_gallery, TRUE);
-      gtk_widget_set_vexpand(p_gallery, TRUE);
-      GtkWidget *p_scroll = gtk_scrolled_window_new();
-      gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(p_scroll),
-                                     GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-      /* The scroll area takes ALL the leftover room in the window, and takes
-       * it from GTK's layout rather than from a size request computed off the
-       * window's own dimensions -- which is what previously coupled the
-       * gallery's size back to itself. */
-      gtk_widget_set_hexpand(p_scroll, TRUE);
-      gtk_widget_set_vexpand(p_scroll, TRUE);
-      gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(p_scroll), p_gallery);
-      gtk_box_append(GTK_BOX(p_box), p_scroll);
-      p_out->p_gallery = p_gallery;
-      p_out->p_scroll  = p_scroll;
-   }
+   GtkWidget *p_gallery = b_previews ? _build_gallery(p_box, p_out) : NULL;
 
    GtkWidget *p_btn0 =
       _build_original_button(b_previews, &p_out->p_original_pic);
@@ -201,36 +234,15 @@ enhance_ui_build_content(const GPtrArray *p_presets, const char *c_basename,
    }
    for (guint i = 0; i < u_n; i++) {
       const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_presets, i);
-      char                 *c_lbl = popup_list_row_label(i, p_pr->c_name);
-      GtkWidget            *p_btn = gtk_button_new();
-      if (b_previews) {
-         GtkWidget *p_row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-         GtkWidget *p_pic = gtk_picture_new();
-         GtkWidget *p_lbl = gtk_label_new(c_lbl);
-         gtk_picture_set_content_fit(GTK_PICTURE(p_pic),
-                                     GTK_CONTENT_FIT_CONTAIN);
-         enhance_ui_expand_preview(p_pic);
-         gtk_widget_set_halign(p_lbl, GTK_ALIGN_CENTER);
-         gtk_box_append(GTK_BOX(p_row), p_pic);
-         gtk_box_append(GTK_BOX(p_row), p_lbl);
-         gtk_button_set_child(GTK_BUTTON(p_btn), p_row);
-         p_out->p_pics[i] = p_pic;
-      } else {
-         gtk_button_set_label(GTK_BUTTON(p_btn), c_lbl);
-      }
-      gtk_widget_set_halign(p_btn,
-                            b_previews ? GTK_ALIGN_FILL : GTK_ALIGN_START);
-      g_object_set_data(G_OBJECT(p_btn), "idx", GINT_TO_POINTER((gint)i));
-      if ((u_mask & (guint8)(1u << i)) != 0) {
-         gtk_widget_add_css_class(p_btn, "ggaze-enhance-on");
-      }
+      GtkWidget *p_btn = _build_preset_row(i, p_pr->c_name, b_previews,
+                                           (u_mask & (guint8)(1u << i)) != 0,
+                                           &p_out->p_pics[i]);
       if (b_previews) {
          gtk_flow_box_append(GTK_FLOW_BOX(p_gallery), p_btn);
       } else {
          gtk_box_append(GTK_BOX(p_box), p_btn);
       }
       p_out->p_btns[i] = p_btn;
-      g_free(c_lbl);
    }
    p_out->u_n_presets = u_n;
 

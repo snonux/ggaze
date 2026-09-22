@@ -175,7 +175,7 @@ _thumb_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       return;
    }
    GError     *p_err = NULL;
-   GdkTexture *p_tex = thumbnail_get_finish(NULL, p_res, &p_err);
+   GdkTexture *p_tex = thumbnail_get_finish(p_res, &p_err);
    if (p_tex != NULL) {
       /* Only apply if this request is still for this cell's file. */
       if (p_d->p_expected != NULL &&

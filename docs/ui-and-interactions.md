@@ -25,7 +25,7 @@ size) for those who want it — toggled in settings, hidden otherwise.
 - An overlay on top (auto-hide) carries the header bar — title = filename,
   subtitle = `n / total` (remaining) · `N marked` when marks exist.
 - Header bar actions (icons): prev, next, zoom-fit, zoom-100, toggle-grid,
-  open-file, slideshow, menu (sort, background, empty-`./Trash`, about).
+  open-file, slideshow, menu (sort, background, empty-`.Trash`, about).
 - No sidebar, no tree, no toolbar beyond the header bar.
 - Transparent background behind the image (configurable: black / dark / grey
   / checkered for transparency).
@@ -73,46 +73,53 @@ menu). Keyboard and mouse are equally first-class; neither is a fallback.
 Navigation is **vi-style plus cursor keys**: `h`/`l` and `←`/`→` move
 prev/next through the shoot; `j`/`k` and `↑`/`↓` pan when zoomed.
 
+Keyboard first: every action has a vi-style key (listed first) AND a
+traditional one, and `shortcuts.c`'s single table is what the `?` help, the
+header-bar tooltips and the main menu are built from, so none of them can
+drift from the live bindings.
+
 | Key            | Action |
 |----------------|--------|
-| `h` / `Left`   | previous image |
-| `l` / `Right`  | next image |
-| `j` / `Down`   | pan down (when zoomed) |
-| `k` / `Up`     | pan up (when zoomed) |
-| `H` / `L`      | pan left / right (when zoomed) |
-| `v`            | toggle mark on current image |
+| `h` / `Left` / `PageUp`   | previous image |
+| `l` / `Right` / `PageDown` | next image |
+| `j` / `Down`   | cursor down one row (grid) / pan down (large) |
+| `k` / `Up`     | cursor up one row (grid) / pan up (large) |
+| `H` / `L`, `Shift+Left` / `Shift+Right` | pan left / right (large) |
+| `v`            | toggle mark on the highlighted / current image |
 | `V`            | range-mark from last mark to current |
 | `Ctrl+a`       | mark all images |
 | `Ctrl+c`       | copy image (or marked files) to clipboard |
-| `g`            | first image |
-| `G`            | last image |
-| `Enter`        | grid → large (open selected) |
-| `Esc` / `Back` | context back: fullscreen → large → grid → quit |
+| `g` / `Home`   | first image |
+| `G` / `End`    | last image |
+| `Enter`        | grid → large (open highlighted) |
+| `Esc`          | one step back: stop slideshow → discard enhance preview → leave fullscreen → clear marks → large → grid; in the grid a second `Esc` within 2 s quits |
 | `t`            | toggle grid ↔ large |
-| `+` / `=`      | zoom in (large) / grow thumbnails (grid) |
-| `-` / `_`      | zoom out (large) / shrink thumbnails (grid) |
-| `0`            | zoom 100% / fit toggle (large) / reset thumbnail size (grid) |
-| `Space`        | hold to compare original vs modified (large) |
-| `f`            | toggle fullscreen |
-| `s`            | save enhanced copy (GEGL); no auto-save    |
-| `S`            | toggle slideshow                          |
+| `+` / `=`, `Ctrl++` | zoom in (large) / grow thumbnails (grid) |
+| `-` / `_`, `Ctrl+-` | zoom out (large) / shrink thumbnails (grid) |
+| `0`, `Ctrl+0`  | zoom fit ↔ 100% (large) / reset thumbnail size (grid) |
+| `Space`        | hold to compare original vs modified (large, enhance) |
+| `f` / `F11`    | toggle fullscreen |
+| `s`            | save enhanced copy (GEGL); no auto-save |
+| `S` / `F5`     | start / stop slideshow (large view; any navigation key stops it) |
 | `i`            | toggle info overlay |
-| `r`            | reload (re-read file from disk) |
-| `d`            | move to `./Trash` (confirm via toast), then next; undoable |
-| `D`            | delete permanently (no trash), then next; no undo |
+| `d` / `Delete` | move to `.Trash` (status line offers `u`), then next; undoable |
+| `D` / `Shift+Delete` | delete permanently (no trash), then next; no undo |
+| `E`            | empty this folder's `.Trash` (confirm dialog; no undo) |
 | `m`            | move marks (or current) → destination popup |
 | `e`            | open current image in an external program → popup |
 | `!`            | run a shell script → popup (e.g. `usbimport`) |
-| `a`            | quick enhance → preset popup (GEGL; non-destructive) |
-| `c`            | crop tool (GEGL; non-destructive, large view) |
-| `R`            | straighten tool (GEGL; non-destructive, large view) |
-| `[` / `]`      | rotate 90° CCW / CW (GEGL; non-destructive, one-shot) |
-| `u`            | undo last `d` / `m` (restore from `./Trash` or move back) |
-| `o`            | open file dialog |
-| `,`            | preferences (destinations, sort, background, …) |
-| `F10`           | open app menu (sort, background, empty `./Trash`, about) |
-| `?`            | shortcuts overlay |
-| `q`            | quit (exits fullscreen first) |
+| `a`            | quick enhance → gallery window / popover (GEGL) |
+| `1`–`8` / `0`  | toggle enhance preset N (layered, large view) / back to original |
+| `u` / `Ctrl+z` | undo last `d` / `m` (restore from `.Trash` or move back) |
+| `o` / `Ctrl+o` | open image dialog (image filter) |
+| `O` / `Ctrl+Shift+o` | open folder dialog |
+| `,` / `Ctrl+,` | preferences (destinations, editors, scripts, presets, sort, …) |
+| `F10`          | main menu (every action, with its keys) |
+| `?` / `F1`     | shortcuts overlay |
+| `q` / `Ctrl+q` | quit |
+
+Planned, not yet bound: `c` crop, `R` straighten, `[` / `]` rotate, `r`
+reload (the folder monitor reloads edited files automatically).
 
 `Esc` is *contextual back*: if there are marks, it clears them first; then in
 fullscreen it returns to large view, in large view it returns to the grid, in
@@ -160,7 +167,7 @@ Loaded lazily; never blocks display of the pixels.
 
 - Thumbnails load from the `thumbnail` cache (M7), decoding lazily as cells
   scroll into view; never block the grid on a full decode.
-- Trashed (`./Trash`) and permanently-deleted items stay listed but **dimmed**
+- Trashed (`.Trash`) and permanently-deleted items stay listed but **dimmed**
   with a small badge, so you can see culling progress at a glance. (Toggle to
   hide them entirely via a menu option / setting.)
 - `h`/`l`/`j`/`k`, arrow keys, `g`/`G`, click, and type-to-search (jump by
@@ -197,7 +204,7 @@ Loaded lazily; never blocks display of the pixels.
   mirroring trash — the navigator does not drop them and the grid does not
   remove their cells; the large view just advances past them and the counter
   updates.
-- **Undo**: `u` undoes the last `d` (restore from `./Trash`) **or** the last
+- **Undo**: `u` undoes the last `d` (restore from `.Trash`) **or** the last
   `m` (move the set back to their original paths), whichever happened more
   recently. One level of undo per engine to start. Reopening a folder gives
   both trash and move a fresh undo state for that folder, so `u` never reaches
@@ -425,7 +432,7 @@ buttons and their hotkeys:
 | Element            | Hotkey        |
 |--------------------|---------------|
 | prev / next        | `h` / `l`     |
-| zoom fit / 100%    | `Space` / `0` |
+| zoom fit / 100%    | `0`           |
 | zoom in / out      | `+` / `-`     |
 | toggle grid/large  | `t`           |
 | open file          | `o`           |
@@ -439,7 +446,7 @@ App menu (via `F10`) items — each reachable by mnemonic, by arrows + `Enter`,
 and by click: Copy, Move…, Open in…, Scripts…, Enhance…, Crop…, Straighten…,
 Rotate 90° CW/CCW, Save enhanced copy…, Show original, Trash, Delete, Sort (by
 name / capture time / size), background colour, hide-trashed toggle, empty
-`./Trash`, About, Preferences….
+`.Trash`, About, Preferences….
 The move popup and all dialogs (open, preferences, shortcuts overlay) are
 likewise fully operable by keyboard and by mouse.
 
@@ -475,5 +482,5 @@ If a user can't tell what a key or button does by looking, that's a bug.
   close goes through.
 - Counter in the header (`n / total`) reflects *remaining* images so you can
   see the folder shrinking as you cull.
-- `./Trash` lives with the shoot: easy to inspect, empty via the menu, or
+- `.Trash` lives with the shoot: easy to inspect, empty via the menu, or
   `rsync`/`rm -rf` from a shell. Never the system trash.

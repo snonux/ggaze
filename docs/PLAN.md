@@ -14,7 +14,7 @@ milestone in one place. Update it as we go.
 
 `ggaze ~/Downloads/Camera/IMG_0001.jpg` opens the folder as a thumbnail grid,
 `Enter` drops into the large view, `h`/`l` (or `←`/`→`) scrubs through the shoot, `i` shows
-EXIF, `d` bins a reject into `./Trash` (undoable), `D` deletes it outright, `v` marks
+EXIF, `d` bins a reject into `.Trash` (undoable), `D` deletes it outright, `v` marks
 keepers, `m` then `1` ships them to "irregular ninja", `e` opens a keeper in GIMP,
 `!` runs `usbimport` to pull new shots, `a` previews a quick GEGL auto-fix, `Esc` returns to the grid, `q` quits.
 No library, no database, no sidecars.
@@ -45,7 +45,7 @@ toggle. The cursor stays in sync across the switch.
 
 - `d` → move to `<folder>/.Trash/` (local, recoverable, undoable via `u`).
 - `D` → permanent delete (unlink, no undo).
-- `./Trash` lives with the shoot; empty it via the menu or from a shell.
+- `.Trash` lives with the shoot; empty it via the menu or from a shell.
 - Trashed/deleted items stay listed but dimmed (hide toggle in settings).
 
 ## Moving & marks
@@ -197,7 +197,7 @@ Decisions made during planning. Newest first.
 | 8 | 2026-07-12 | Follow the c-best-practices skill; conventions pinned in coding-conventions.md. | Consistent C style across the project. |
 | 7 | 2026-07-12 | vi-style nav (`h`/`l` prev/next) plus cursor keys (`←`/`→`); `j`/`k` pan when zoomed. | vi users + cursor fallback. |
 | 6 | 2026-07-12 | `D` permanently deletes; no undo.                                       | Fast path for obvious garbage.    |
-| 5 | 2026-07-12 | `d` moves to a local `./Trash` folder, not the system trash; undoable.   | Trash travels with the shoot; easy to inspect/empty. |
+| 5 | 2026-07-12 | `d` moves to a local `.Trash` folder, not the system trash; undoable.   | Trash travels with the shoot; easy to inspect/empty. |
 | 4 | 2026-07-12 | Two views: thumbnail grid + large single-picture, in one window.         | Overview + detail, both keyboard-driven. |
 | 3 | 2026-07-12 | Aim = quickly preview camera downloads and cull them.                    | Narrows scope to a culling viewer. |
 | 2 | 2026-07-12 | Stack: C + GTK4, native Fedora/GNOME look.                               | User requirement.                 |
