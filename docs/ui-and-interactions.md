@@ -156,9 +156,32 @@ Small card, top-left or bottom-right:
 - filename, dimensions, format, file size
 - EXIF: camera, lens, focal length, aperture, shutter, ISO, date taken,
   orientation (auto-applied on load)
+- **histogram** of the image on screen: red, green and blue as translucent
+  bars over a grey luminance (Rec.709) curve, 64 bins, one shared scale, for
+  judging exposure while culling. It is built from the *displayed* texture
+  (so an active enhance preview shows the preview's histogram), but only
+  when that texture provably belongs to the current file: from the grid, or
+  while a cache-miss decode is still in flight (the previous picture stays
+  up until the new one lands), the card comes up without a plot rather than
+  with another file's. The plot follows the picture for as long as the card
+  is up: a decode landing under the card fills its plot in, hold-Space
+  swaps the plot to the original's and back, and a preset landing replaces
+  it with the new preview's (the old plot is cleared at once, the new one
+  is binned in the background), and `t` to the grid under a card takes the
+  plot down while the text stays (`t` back fills it in again). The text and
+  the auto-hide timer are not touched by any of that.
 - color space (once color management lands)
-- a histogram for judging exposure (planned)
-Loaded lazily; never blocks display of the pixels.
+Loaded lazily; never blocks display of the pixels. The histogram is gathered
+in the same background task as the EXIF text, only once `i` is pressed. The
+binning itself is subsampled to at most 512×512 pixels, so that part costs
+the same for a 100-megapixel photo as for a small one; the pixels are read
+straight out of the decoded texture's own memory (no copy, whatever the
+size). Only a texture in a layout the binner cannot read (16-bit, float —
+nothing the loader produces today) is converted through a transient copy,
+which is capped at 32 megapixels (128 MiB) and skipped, plot-free, above
+that or when the copy cannot be allocated. Navigating away hides the card
+(and its plot) with the previous file; `i` on the new image shows the new
+image's histogram.
 
 ## Grid view behavior
 

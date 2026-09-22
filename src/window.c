@@ -130,6 +130,7 @@ static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
 static void     _show_info(GgazeWindow *p_win);
 static void     _dismiss_info_for_nav(GgazeWindow *p_win);
 static void     _show_status(GgazeWindow *p_win, const char *c_msg);
+static void     _sync_info_plot(GgazeWindow *p_win);
 static gboolean _slideshow_tick(gpointer p_data);
 static void     _apply_viewer_prefs(GgazeWindow *p_win);
 static void     _load_engine_lists(GgazeWindow *p_win);
@@ -422,6 +423,17 @@ _set_view(GgazeWindow *p_win, GgazeViewMode e_view) {
     * beside the large view and hidden (not closed -- its state survives a
     * `t` round trip) with the grid or the empty page. */
    gtk_widget_set_visible(p_win->p_side_slot, e_view == GGAZE_VIEW_LARGE);
+   /* The info card may be up across the switch (`i`, then `t`), and its
+    * plot is about the large view's picture: leaving it for the grid or the
+    * empty page must take the plot down for the rest of the card's time
+    * (the grid card has no plot -- there is no picture on screen to judge),
+    * and coming back must fill it in again. Both fall out of one sync:
+    * _info_texture_for() says NULL outside the large view. Safe at init:
+    * the overlay always exists by now (_init_info_overlay runs before the
+    * first _set_view, in _init_stack_and_viewer), but the navigator is
+    * still NULL until a folder opens -- the sync passes NULL through in
+    * that case, which is exactly "nothing to plot". */
+   _sync_info_plot(p_win);
 }
 
 /* TRUE iff a folder is open; otherwise says so (the keys that need a folder
@@ -1463,17 +1475,79 @@ _slideshow_tick(gpointer p_data) {
    return (G_SOURCE_CONTINUE);
 }
 
+/* The texture the card may plot for p_cur: the one on screen, but only when
+ * it provably belongs to p_cur. The viewer alone cannot say whose pixels it
+ * shows -- on a texturecache miss viewload keeps the PREVIOUS picture up
+ * until the new decode lands (viewload_load_current), so during that window
+ * `i` would pair the new file's EXIF with the old file's histogram. The
+ * mapping lives in viewload's cache (the entry for p_cur is p_cur's decoded
+ * texture, or NULL while still decoding) and in the enhance override, which
+ * swaps in the preview of that same file. The displayed texture must be one
+ * of those two to be plotted; anything else means "still decoding" -> no
+ * plot, and _sync_info_plot() fills the plot in once the decode lands. The
+ * grid never plots: there is no displayed texture to judge there.
+ *
+ * One consequence, accepted: while an enhance preview is up the cache
+ * entry for p_cur is the ORIGINAL the override maps to the preview, and the
+ * cache is a bounded LRU (texturecache.h, cap 4) that prefetch can evict
+ * from. Once the original is evicted, get_cached says NULL, the check fails
+ * and the card simply has no plot -- never a wrong one, which is the
+ * invariant that matters; a missing plot is a visible, harmless gap the
+ * next texture change (or `i` again after the original is re-cached) fills
+ * in, whereas plotting the preview on trust would reopen the mispairing
+ * this function exists to close. */
+static GdkTexture *
+_info_texture_for(GgazeWindow *p_win, GFile *p_cur) {
+   if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
+      return (NULL);
+   }
+   GdkTexture *p_shown =
+      ggaze_viewer_get_texture(GGAZE_VIEWER(p_win->p_viewer));
+   GdkTexture *p_owned = viewload_get_cached(p_win->p_viewload, p_cur);
+   if (p_shown == NULL || p_owned == NULL) {
+      return (NULL);
+   }
+#if GGAZE_HAVE_GEGL
+   p_owned = enhance_ctrl_override_texture(p_win->p_enhance_ctrl, p_owned);
+#endif
+   return (p_shown == p_owned ? p_shown : NULL);
+}
+
 /* `i`: toggle the EXIF/dimensions card for the current file (gathered
- * asynchronously by the InfoOverlay). */
+ * asynchronously by the InfoOverlay), with a histogram of the texture on
+ * screen when _info_texture_for() can vouch that it is the current file's
+ * (including an active enhance preview, which is the exposure the user is
+ * actually judging); otherwise the card comes up without a plot. */
 static void
 _show_info(GgazeWindow *p_win) {
    if (!_require_folder(p_win)) {
       return;
    }
    GFile *p_cur = navigator_get_current(p_win->p_nav);
-   if (p_cur != NULL) {
-      info_overlay_toggle_for_file(p_win->p_info, p_cur);
+   if (p_cur == NULL) {
+      return;
    }
+   info_overlay_toggle_for_file(p_win->p_info, p_cur,
+                                _info_texture_for(p_win, p_cur));
+}
+
+/* The picture changed (every path funnels through _show_texture) or the
+ * view did (_set_view): tell the info overlay which texture it may plot now
+ * -- the displayed one when _info_texture_for() vouches for it as the
+ * current file's, else NULL -- so a card that is up follows hold-Space, a
+ * landing preset, a decode landing under a card opened while it was in
+ * flight, and a `t` to the grid and back. The overlay ignores the call
+ * unless a file card is up or being gathered, so this costs nothing on the
+ * plain load path. */
+static void
+_sync_info_plot(GgazeWindow *p_win) {
+   if (p_win->p_info == NULL) {
+      return; /* mid-teardown or still constructing: no card to keep in step */
+   }
+   GFile *p_cur =
+      p_win->p_nav != NULL ? navigator_get_current(p_win->p_nav) : NULL;
+   info_overlay_texture_changed(
+      p_win->p_info, p_cur != NULL ? _info_texture_for(p_win, p_cur) : NULL);
 }
 
 /* Hide the info overlay because the current file changed: reached from
@@ -2265,6 +2339,8 @@ _show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
    p_tex = enhance_ctrl_override_texture(p_win->p_enhance_ctrl, p_tex);
 #endif
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
+   /* After the override, so the card plots what is actually on screen. */
+   _sync_info_plot(p_win);
 }
 
 /* Show navigator.current through the ViewLoad pipeline (texture LRU, one
@@ -3255,6 +3331,12 @@ GtkWidget *
 ggaze_window_get_info_label(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
    return (info_overlay_get_label(p_win->p_info));
+}
+
+GtkWidget *
+ggaze_window_get_info_histogram(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
+   return (info_overlay_get_histogram(p_win->p_info));
 }
 
 /* The content provider win.copy would set on the clipboard, without touching

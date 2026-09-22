@@ -209,8 +209,14 @@ _report_failure(ViewLoad *p_vl, GFile *p_file, const GError *p_err) {
    g_free(c_name);
 }
 
-/* Visible-load callback: show only if this is still the current file
- * (last-write-wins), then cache it and prefetch neighbours. */
+/* Visible-load callback: only if this is still the current file
+ * (last-write-wins), cache it, show it and prefetch neighbours. The cache
+ * put comes BEFORE the show on purpose: the host's show_texture consults
+ * viewload_get_cached() to decide whether the texture on screen provably
+ * belongs to navigator.current (window.c _info_texture_for, which feeds the
+ * info card's histogram), so the entry has to exist by the time the host
+ * sees the texture, or a decode landing under an open card could never be
+ * plotted. */
 static void
 _load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
@@ -226,8 +232,8 @@ _load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       g_clear_error(&p_err);
    } else {
       if (_is_current(p_vl, p_ctx->p_file)) {
-         p_vl->p_ops->show_texture(p_vl->p_host, p_tex);
          texturecache_put(p_vl->p_cache, p_ctx->p_file, p_tex);
+         p_vl->p_ops->show_texture(p_vl->p_host, p_tex);
          _prefetch(p_vl);
       }
       g_object_unref(p_tex);

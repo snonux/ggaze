@@ -41,7 +41,7 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `H` / `L`, `Shift+←`/`→` | pan left / right (large) |
 | `+` / `-`, `Ctrl+±` | zoom in / out (large) · grow / shrink thumbnails (grid) |
 | `0` / `Ctrl+0`     | zoom fit ↔ 100% (large) · reset thumbnail size (grid) |
-| `i`               | toggle info overlay (EXIF) |
+| `i`               | toggle info overlay (EXIF + RGB/luminance histogram) |
 | `v` / `V` / `Ctrl+a` | mark / range-mark / mark all |
 | `d` / `Delete`     | trash to `.Trash` (undoable), then next |
 | `D` / `Shift+Delete` | delete permanently |

@@ -24,8 +24,8 @@ ggaze has **two complementary test tracks**. Both run under `meson test`.
 ### Unit tests — `tests/test_<module>.c`
 
 - Target the **plain-C modules** (`detect`, `navigator`, `thumbnail`,
-  `trash`, `mover`, `opener`, `runner`, `enhancer`, `info`, `texturecache`,
-  `clipboard` helpers). No GTK display needed.
+  `trash`, `mover`, `opener`, `runner`, `enhancer`, `info`, `histogram`,
+  `texturecache`, `clipboard` helpers). No GTK display needed.
 - GLib `GTest` framework; per-module `a(ss)`/path/EXIF fixtures.
 - **Coverage gate ≥80%** on these modules (gcov/lcov), flipped to *fail* at
   M10, *warn* before.
@@ -268,9 +268,29 @@ bounded memory.
 - Slideshow (`S`), configurable delay; pause on manual key.
 - `src/info.c/.h` — plain-C EXIF gather via `libexif`; rendered as viewer
   overlay.
+- `src/histogram.c/.h` (task 0c2, landed after M9) — plain-C RGB/luminance
+  binner over the displayed `GdkTexture`, subsampled to a fixed pixel budget;
+  drawn on the card by `src/histogram-view.c/.h` (snapshot render nodes),
+  gathered in the info overlay's existing `GTask`.
 
 **Tests**
-- Unit: `test_info.c` (EXIF extraction + orientation tag).
+- Unit: `test_info.c` (EXIF extraction + orientation tag),
+  `test_histogram.c` (per-channel counts, layouts, stride, subsampling
+  budget, rejected input).
+- Integration: `/window/info_shows_histogram` (plot for the image on screen,
+  none from the grid, a different plot after navigation),
+  `/window/info_no_plot_while_loading` (`i` during a cache-miss decode: the
+  new file's text without the old file's plot, and the plot filled in once
+  the decode lands), `/window/status_clears_plot` (a status line over the
+  card drops the plot), `/window/toggle_view_follows_card` (`t` to the grid
+  takes the plot off a card that stays up, `t` back fills it in);
+  `test_info_overlay.c` (the overlay on a bare GtkOverlay: a plot landing
+  after a status line took the card is dropped, `texture_changed(NULL)`
+  clears and cancels, the auto-hide timer takes card and plot down, a
+  disposed overlay is inert, and the plot widget's measure/snapshot path in
+  a presented window); GEGL lane: `/enhance_flow/info_plots_preview` (the
+  plot equals the displayed texture's bins through preset -> hold-Space ->
+  release -> a second preset).
 
 **Acceptance:** `f`/`S`/`i` work; EXIF shows; `Esc` chain correct.
 
@@ -487,9 +507,9 @@ audit findings resolved; lifecycle integration green.
   - Run the full `meson test` suite under ASan (unit **and** integration) and
     assert zero leak reports for the plain-C modules (`navigator`, `loader`,
     `detect`, `thumbnail`, `trash`, `mover`, `opener`, `runner`, `enhancer`,
-    `info`, `texturecache`, `clipboard`) — every `type_new` must have a matching
-    `type_delete` and every `GTask`/`GSubprocess`/`GFileMonitor`/`GdkTexture`
-    must be unreffed;
+    `info`, `histogram`, `texturecache`, `clipboard`) — every `type_new` must
+    have a matching `type_delete` and every `GTask`/`GSubprocess`/
+    `GFileMonitor`/`GdkTexture` must be unreffed;
   - Run a scripted session (the elevator-pitch workflow from PLAN.md) under
     ASan — open a folder, walk, `d`/`u`, mark, `m`, `e`, `!`, `a`, `s`, quit —
     and assert no leak at exit;
