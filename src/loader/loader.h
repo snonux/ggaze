@@ -29,6 +29,8 @@
 #include <gio/gio.h>
 #include <glib.h>
 
+#include "detect.h"
+
 G_BEGIN_DECLS
 
 /* Optional progressive-load callback (called from the worker thread with a
@@ -87,6 +89,16 @@ GdkTexture *loader_load_finish(GAsyncResult *p_res, GError **p_err);
 GdkPixbuf *loader_load_pixbuf_scaled(GFile *p_file, int i_max_px,
                                      GCancellable *p_cancel, GError **p_err);
 
+/* The decode gate on its own -- the empty / truncated / not-built-in
+ * refusals every entry point above runs first -- for a caller that must
+ * hand a path to gdk-pixbuf itself (thumbnail.c reading a cache PNG that
+ * any other TMS app may have written). TRUE when a decoder may see the
+ * file, with the sniffed format in *p_format (may be NULL;
+ * GGAZE_FMT_UNKNOWN for bytes carrying no signature, which the gate does
+ * not constrain); FALSE with a G_IO_ERROR in p_err otherwise. */
+gboolean loader_sniff_file(GFile *p_file, GCancellable *p_cancel,
+                           GgazeFormat *p_format, GError **p_err);
+
 /* The STORED pixel dimensions of p_file (before EXIF orientation, as an
  * EXIF card reports them) from the cheapest safe source: a JPEG's SOF
  * header (decoder-free, every build), a specific backend's decode for the
@@ -95,8 +107,11 @@ GdkPixbuf *loader_load_pixbuf_scaled(GFile *p_file, int i_max_px,
  * backend claims, because on a glycin desktop that parse hangs on a garbage
  * JXL and spawns a sandbox for a valid one. FALSE when they cannot be
  * determined, including for an empty, truncated or not-built-in file (never
- * handed to gdk-pixbuf). Callers gathering info for arbitrary files should
- * run in a worker (the decode path). */
+ * handed to gdk-pixbuf) and for a JPEG whose declared size is over the cap
+ * or whose SOF lies past the scanned prefix (fails closed like the thumbnail
+ * path, without asking gdk-pixbuf). A JPEG declaring a zero side
+ * (DNL-deferred height) is never reported as sized. Callers gathering info
+ * for arbitrary files should run in a worker (the decode path). */
 gboolean loader_peek_dimensions(GFile *p_file, int *p_w, int *p_h);
 
 G_END_DECLS

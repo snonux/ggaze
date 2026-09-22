@@ -8,6 +8,10 @@
  * The truncated-JXL / empty / garbage-JXL cases at the end prove the loader's
  * decode gate (task tb2) sits in front of this public entry point too: the
  * pool is a GTask worker that cannot be cancelled once glycin has the file.
+ * The _entry_ variants plant the same bytes as a CACHE entry: the shared
+ * ~/.cache/thumbnails is written by every TMS app, so the cache read needs
+ * the gate as much as the source decode does, and only a PNG may be decoded
+ * from it at all.
  *
  * Persistence (ix0) is covered by the _marker_ tests below. The older
  * "second get should hit the cache" assertion could not see the ix0 bug at
@@ -248,6 +252,21 @@ test_different_bucket(void) {
    g_object_unref(p_file);
 }
 
+/* Write p_buf/u_len to a fresh temp file named after c_prefix; caller
+ * unlinks and g_frees the path. The three crafted-file tests and the gate
+ * helper all need exactly this. */
+static gchar *
+_write_tmp_bytes(const char *c_prefix, const guint8 *p_buf, gsize u_len) {
+   gchar  *c_tmp = NULL;
+   GError *p_sub = NULL;
+   gint    i_fd  = g_file_open_tmp(c_prefix, &c_tmp, &p_sub);
+   g_assert_no_error(p_sub);
+   g_assert_cmpint(i_fd, >=, 0);
+   g_assert_cmpint((glong)write(i_fd, p_buf, u_len), ==, (glong)u_len);
+   close(i_fd);
+   return (c_tmp);
+}
+
 /* Locate the baseline SOF0 marker (0xFF 0xC0) in a JPEG byte buffer and
  * overwrite its declared height/width with 65500 (0xFFDC), the largest value
  * libjpeg's own JPEG_MAX_DIMENSION check still accepts at header-read time.
@@ -283,14 +302,8 @@ test_oversized_jpeg(void) {
    g_assert_true(g_file_get_contents(c_src, &p_buf, &u_len, NULL));
    g_free(c_src);
    _patch_sof_dims_huge((guint8 *)p_buf, u_len);
-
-   gchar  *c_tmp = NULL;
-   GError *p_sub = NULL;
-   gint i_fd = g_file_open_tmp("ggaze-thumb-oversized-XXXXXX", &c_tmp, &p_sub);
-   g_assert_no_error(p_sub);
-   g_assert_cmpint(i_fd, >=, 0);
-   g_assert_cmpint((glong)write(i_fd, p_buf, u_len), ==, (glong)u_len);
-   close(i_fd);
+   gchar *c_tmp =
+      _write_tmp_bytes("ggaze-thumb-oversized-XXXXXX", (guint8 *)p_buf, u_len);
    g_free(p_buf);
 
    Thumbnail *p_t    = thumbnail_new();
@@ -371,16 +384,8 @@ test_padded_past_prefix_oversized_jpeg(void) {
       _build_padded_oversized_jpeg((guint8 *)p_buf, u_len, &u_padded_len);
    g_free(p_buf);
    g_assert_cmpuint(u_padded_len, >, GGAZE_JPEG_PEEK_LEN);
-
-   gchar  *c_tmp = NULL;
-   GError *p_sub = NULL;
-   gint    i_fd =
-      g_file_open_tmp("ggaze-thumb-padded-oversized-XXXXXX", &c_tmp, &p_sub);
-   g_assert_no_error(p_sub);
-   g_assert_cmpint(i_fd, >=, 0);
-   g_assert_cmpint((glong)write(i_fd, p_padded, u_padded_len), ==,
-                   (glong)u_padded_len);
-   close(i_fd);
+   gchar *c_tmp = _write_tmp_bytes("ggaze-thumb-padded-oversized-XXXXXX",
+                                   p_padded, u_padded_len);
    g_free(p_padded);
 
    Thumbnail *p_t    = thumbnail_new();
@@ -669,15 +674,8 @@ test_delete_completes_queued_requests(void) {
  * own proof that the gate is in front of it (task tb2). */
 static gint
 _thumb_error_code_fast(const guint8 *p_buf, gsize u_len) {
-   gchar  *c_tmp = NULL;
-   GError *p_sub = NULL;
-   gint    i_fd  = g_file_open_tmp("ggaze-thumb-gate-XXXXXX", &c_tmp, &p_sub);
-   g_assert_no_error(p_sub);
-   g_assert_cmpint(i_fd, >=, 0);
-   g_assert_cmpint((glong)write(i_fd, p_buf, u_len), ==, (glong)u_len);
-   close(i_fd);
-
-   Thumbnail *p_t    = thumbnail_new();
+   gchar     *c_tmp = _write_tmp_bytes("ggaze-thumb-gate-XXXXXX", p_buf, u_len);
+   Thumbnail *p_t   = thumbnail_new();
    GFile     *p_file = g_file_new_for_path(c_tmp);
    GGAZE_RESULT      = NULL;
    GGAZE_ERR         = NULL;
@@ -734,6 +732,165 @@ test_garbage_jxl_fails_fast(void) {
 #endif
 }
 
+/* Plant p_buf/u_len as the cache entry for p_file's 128 px bucket (creating
+ * the bucket directory), the way a foreign or torn writer would leave it.
+ * Deliberately NOT inspected with _cached_mtime() afterwards: that helper
+ * hands the path to gdk-pixbuf itself, which is exactly what these bytes
+ * must never reach. Returns the entry path (caller frees). */
+static char *
+_plant_entry(GFile *p_file, const guint8 *p_buf, gsize u_len) {
+   char *c_ent = thumbnail_cache_path(p_file, 128);
+   char *c_dir = g_path_get_dirname(c_ent);
+   g_assert_cmpint(g_mkdir_with_parents(c_dir, 0700), ==, 0);
+   g_free(c_dir);
+   g_assert_true(
+      g_file_set_contents(c_ent, (const gchar *)p_buf, (gssize)u_len, NULL));
+   return (c_ent);
+}
+
+/* A cache entry holding p_buf/u_len must be REGENERATED, fast: the request
+ * still yields a real (non-marker) thumbnail of the source within the 5 s
+ * budget, and the entry afterwards describes the source again. Pre-fix
+ * _load_cached() called gdk_pixbuf_new_from_file() on the entry with no
+ * gate, so a foreign corrupt entry sniffing as JXL reached glycin from the
+ * pool worker and hung it (task tb2). */
+static void
+_assert_entry_regenerated_fast(const guint8 *p_buf, gsize u_len) {
+   char  *c_tmp  = _copy_fixture_to_tmp("plain.jpg");
+   GFile *p_file = g_file_new_for_path(c_tmp);
+   char  *c_ent  = _plant_entry(p_file, p_buf, u_len);
+
+   gint64      i_start = g_get_monotonic_time();
+   GdkTexture *p_tex   = _get_thumb_fresh(p_file, 128);
+   gdouble     d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
+   g_assert_cmpfloat(d_secs, <, 5.0);
+   g_assert_nonnull(p_tex);
+   g_assert_false(_is_marker(p_tex));
+   g_assert_cmpint(gdk_texture_get_width(p_tex), <=, 128);
+   g_object_unref(p_tex);
+   g_assert_cmpint(_cached_mtime(c_ent), ==, _mtime_of(p_file));
+
+   g_free(c_ent);
+   g_object_unref(p_file);
+   unlink(c_tmp);
+   g_free(c_tmp);
+}
+
+/* An entry that is a 4-byte JXL signature: shorter than any JXL, refused by
+ * the length gate before gdk-pixbuf sees the path. */
+static void
+test_truncated_jxl_entry_regenerated(void) {
+   const guint8 h[] = {0xFF, 0x0A, 0x10, 0x00};
+   _assert_entry_regenerated_fast(h, G_N_ELEMENTS(h));
+}
+
+/* An entry that is a JXL long enough to clear the length gate but garbage:
+ * with libjxl built in the gate alone would let it through to gdk-pixbuf,
+ * which is why the cache read decodes PNG and nothing else. */
+static void
+test_garbage_jxl_entry_regenerated(void) {
+   guint8 h[60] = {0xFF, 0x0A};
+   _assert_entry_regenerated_fast(h, sizeof(h));
+}
+
+/* An entry that is a valid file of the wrong format (the 43-byte GIF from
+ * tiny_images.h): a TMS entry is a PNG by spec, so even a decodable
+ * non-PNG is treated as junk and regenerated rather than shown. */
+static void
+test_non_png_entry_regenerated(void) {
+   const guint8 gif[] = {0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01,
+                         0x00, 0xf0, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00,
+                         0x00, 0x21, 0xf9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+                         0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+                         0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b};
+   _assert_entry_regenerated_fast(gif, G_N_ELEMENTS(gif));
+}
+
+/* Registration is split by theme so no function approaches the 50-line
+ * mark (c-best-practices). */
+static void
+_add_cache_tests(void) {
+   g_test_add_func("/thumbnail/generate_and_cache", test_generate_and_cache);
+   g_test_add_func("/thumbnail/different_bucket", test_different_bucket);
+   g_test_add_func("/thumbnail/cache_survives_reopen",
+                   test_cache_survives_reopen);
+   g_test_add_func("/thumbnail/stale_entry_when_source_changes",
+                   test_stale_entry_when_source_changes);
+   g_test_add_func("/thumbnail/foreign_uri_entry_rejected",
+                   test_foreign_uri_entry_rejected);
+   g_test_add_func("/thumbnail/corrupt_entry_regenerated",
+                   test_corrupt_entry_regenerated);
+   g_test_add_func("/thumbnail/unreadable_entry_regenerated",
+                   test_unreadable_entry_regenerated);
+   g_test_add_func("/thumbnail/cache_dir_not_creatable",
+                   test_cache_dir_not_creatable);
+   g_test_add_func("/thumbnail/delete_completes_queued_requests",
+                   test_delete_completes_queued_requests);
+}
+
+static void
+_add_gate_tests(void) {
+   g_test_add_func("/thumbnail/oversized_jpeg", test_oversized_jpeg);
+   g_test_add_func("/thumbnail/padded_past_prefix_oversized_jpeg",
+                   test_padded_past_prefix_oversized_jpeg);
+   g_test_add_func("/thumbnail/truncated_jxl_fails_fast",
+                   test_truncated_jxl_fails_fast);
+   g_test_add_func("/thumbnail/empty_file_fails_fast",
+                   test_empty_file_fails_fast);
+   g_test_add_func("/thumbnail/garbage_jxl_fails_fast",
+                   test_garbage_jxl_fails_fast);
+   g_test_add_func("/thumbnail/truncated_jxl_entry_regenerated",
+                   test_truncated_jxl_entry_regenerated);
+   g_test_add_func("/thumbnail/garbage_jxl_entry_regenerated",
+                   test_garbage_jxl_entry_regenerated);
+   g_test_add_func("/thumbnail/non_png_entry_regenerated",
+                   test_non_png_entry_regenerated);
+}
+
+/* Delete every file in the bucket directory p_dir. */
+static void
+_remove_bucket_files(GFile *p_dir) {
+   GFileEnumerator *p_e = g_file_enumerate_children(
+      p_dir, "standard::name", G_FILE_QUERY_INFO_NONE, NULL, NULL);
+   if (p_e == NULL) {
+      return;
+   }
+   GFileInfo *p_info;
+   while ((p_info = g_file_enumerator_next_file(p_e, NULL, NULL)) != NULL) {
+      GFile *p_child = g_file_get_child(p_dir, g_file_info_get_name(p_info));
+      g_file_delete(p_child, NULL, NULL);
+      g_object_unref(p_child);
+      g_object_unref(p_info);
+   }
+   g_object_unref(p_e);
+}
+
+/* Remove the temp XDG_CACHE_HOME (best-effort, two levels: thumbnails/ and
+ * its bucket directories). */
+static void
+_remove_cache_dir(void) {
+   GFile           *p_cd = g_file_new_for_path(GGAZE_CACHE_DIR);
+   GFileEnumerator *p_e =
+      g_file_enumerate_children(p_cd, "standard::name,standard::type",
+                                G_FILE_QUERY_INFO_NONE, NULL, NULL);
+   if (p_e != NULL) {
+      GFileInfo *p_info;
+      while ((p_info = g_file_enumerator_next_file(p_e, NULL, NULL)) != NULL) {
+         GFile *p_child = g_file_get_child(p_cd, g_file_info_get_name(p_info));
+         if (g_file_info_get_file_type(p_info) == G_FILE_TYPE_DIRECTORY) {
+            _remove_bucket_files(p_child);
+         }
+         g_file_delete(p_child, NULL, NULL);
+         g_object_unref(p_child);
+         g_object_unref(p_info);
+      }
+      g_object_unref(p_e);
+   }
+   g_file_delete(p_cd, NULL, NULL);
+   g_object_unref(p_cd);
+   g_free(GGAZE_CACHE_DIR);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -750,67 +907,9 @@ main(int i_argc, char **c_argv) {
    g_assert_no_error(p_err);
    g_setenv("XDG_CACHE_HOME", GGAZE_CACHE_DIR, TRUE);
 
-   g_test_add_func("/thumbnail/generate_and_cache", test_generate_and_cache);
-   g_test_add_func("/thumbnail/different_bucket", test_different_bucket);
-   g_test_add_func("/thumbnail/cache_survives_reopen",
-                   test_cache_survives_reopen);
-   g_test_add_func("/thumbnail/stale_entry_when_source_changes",
-                   test_stale_entry_when_source_changes);
-   g_test_add_func("/thumbnail/foreign_uri_entry_rejected",
-                   test_foreign_uri_entry_rejected);
-   g_test_add_func("/thumbnail/corrupt_entry_regenerated",
-                   test_corrupt_entry_regenerated);
-   g_test_add_func("/thumbnail/unreadable_entry_regenerated",
-                   test_unreadable_entry_regenerated);
-   g_test_add_func("/thumbnail/cache_dir_not_creatable",
-                   test_cache_dir_not_creatable);
-   g_test_add_func("/thumbnail/oversized_jpeg", test_oversized_jpeg);
-   g_test_add_func("/thumbnail/delete_completes_queued_requests",
-                   test_delete_completes_queued_requests);
-   g_test_add_func("/thumbnail/padded_past_prefix_oversized_jpeg",
-                   test_padded_past_prefix_oversized_jpeg);
-   g_test_add_func("/thumbnail/truncated_jxl_fails_fast",
-                   test_truncated_jxl_fails_fast);
-   g_test_add_func("/thumbnail/empty_file_fails_fast",
-                   test_empty_file_fails_fast);
-   g_test_add_func("/thumbnail/garbage_jxl_fails_fast",
-                   test_garbage_jxl_fails_fast);
-
+   _add_cache_tests();
+   _add_gate_tests();
    int i_ret = g_test_run();
-
-   /* Cleanup the temp cache dir (best-effort recursive). */
-   GFile           *p_cd = g_file_new_for_path(GGAZE_CACHE_DIR);
-   GFileEnumerator *p_e =
-      g_file_enumerate_children(p_cd, "standard::name,standard::type",
-                                G_FILE_QUERY_INFO_NONE, NULL, NULL);
-   if (p_e != NULL) {
-      GFileInfo *p_info;
-      while ((p_info = g_file_enumerator_next_file(p_e, NULL, NULL)) != NULL) {
-         GFile *p_child = g_file_get_child(p_cd, g_file_info_get_name(p_info));
-         if (g_file_info_get_file_type(p_info) == G_FILE_TYPE_DIRECTORY) {
-            GFileEnumerator *p_e2 = g_file_enumerate_children(
-               p_child, "standard::name", G_FILE_QUERY_INFO_NONE, NULL, NULL);
-            if (p_e2 != NULL) {
-               GFileInfo *p_i2;
-               while ((p_i2 = g_file_enumerator_next_file(p_e2, NULL, NULL)) !=
-                      NULL) {
-                  GFile *p_c2 =
-                     g_file_get_child(p_child, g_file_info_get_name(p_i2));
-                  g_file_delete(p_c2, NULL, NULL);
-                  g_object_unref(p_c2);
-                  g_object_unref(p_i2);
-               }
-               g_object_unref(p_e2);
-            }
-         }
-         g_file_delete(p_child, NULL, NULL);
-         g_object_unref(p_child);
-         g_object_unref(p_info);
-      }
-      g_object_unref(p_e);
-   }
-   g_file_delete(p_cd, NULL, NULL);
-   g_object_unref(p_cd);
-   g_free(GGAZE_CACHE_DIR);
+   _remove_cache_dir();
    return (i_ret);
 }

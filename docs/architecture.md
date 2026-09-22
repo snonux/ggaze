@@ -89,11 +89,14 @@ ggaze
   the file to a sandboxed loader with no cancel or timeout, and `glycin-jxl`
   waits forever on any garbage JXL — an uncancellable hung worker is worse
   than a missing decode. `loader_peek_dimensions` sizes a JPEG from its SOF
-  header (decoder-free), a backend-claimed format through that backend, and
-  only the rest through `gdk_pixbuf_get_file_info`. Side effect: a missing
-  or unreadable file fails the thumbnail path as a `G_IO_ERROR` from the
-  sniff, no longer as gdk-pixbuf's `G_FILE_ERROR`. Details in
-  [tech-stack.md](tech-stack.md) "The decode gate".
+  header (decoder-free; an oversized or prefix-exceeding header fails
+  closed without asking gdk-pixbuf, a zero side is never reported), a
+  backend-claimed format through that backend, and only the rest through
+  `gdk_pixbuf_get_file_info`. `loader_sniff_file` exposes the gate alone
+  for the thumbnail cache read, which decodes a PNG entry only. Side
+  effect: a missing or unreadable file fails the thumbnail path as a
+  `G_IO_ERROR` from the sniff, no longer as gdk-pixbuf's `G_FILE_ERROR`.
+  Details in [tech-stack.md](tech-stack.md) "The decode gate".
 - **navigator** — given a starting file, lists the parent directory, filters
   to image MIME types, sorts (name/time/size), exposes `current/prev/next`.
   Also owns the **mark set** (multi-select): `navigator_toggle_mark`,

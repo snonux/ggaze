@@ -14,7 +14,9 @@
  *
  * Decoding goes through loader_load_pixbuf_scaled(), so the thumbnail of a
  * JXL/AVIF/HEIF file comes from the same backend the large view uses and the
- * oversized-JPEG guard is the loader's, not a copy.
+ * oversized-JPEG guard is the loader's, not a copy. The cache READ is
+ * guarded too: an entry is only handed to gdk-pixbuf after
+ * loader_sniff_file() says it is a PNG (see _load_cached()).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -122,10 +124,26 @@ _thumb_option(GdkPixbuf *p_pix, const char *c_key) {
  *
  * Any failure -- missing file, corrupt or unreadable PNG, mismatch -- returns
  * NULL, which makes the caller regenerate. A cache must never be able to turn
- * a displayable image into an error. */
+ * a displayable image into an error.
+ *
+ * The entry is sniffed before gdk-pixbuf gets its path, and only a PNG is
+ * decoded at all: a TMS entry is a PNG by spec, so anything else under our
+ * name is someone's junk (a foreign writer, a torn write, a mislabelled
+ * file), to be regenerated rather than decoded. The loader's length gate
+ * alone would not do -- a JXL longer than its minimum but garbage still
+ * hangs glycin-jxl forever (task tb2), and this pool worker cannot be
+ * cancelled once gdk_pixbuf_new_from_file() has the file. */
 static GdkTexture *
 _load_cached(GFile *p_file, const char *c_path, gint64 i_mtime) {
-   GError    *p_err = NULL;
+   GError     *p_err    = NULL;
+   GFile      *p_entry  = g_file_new_for_path(c_path);
+   GgazeFormat e_format = GGAZE_FMT_UNKNOWN;
+   gboolean    b_ok     = loader_sniff_file(p_entry, NULL, &e_format, &p_err);
+   g_object_unref(p_entry);
+   if (!b_ok || e_format != GGAZE_FMT_PNG) {
+      g_clear_error(&p_err);
+      return (NULL); /* not a PNG: never decoded, regenerated instead */
+   }
    GdkPixbuf *p_pix = gdk_pixbuf_new_from_file(c_path, &p_err);
    if (p_pix == NULL) {
       g_clear_error(&p_err);

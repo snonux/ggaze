@@ -12,8 +12,9 @@
  * own.
  *
  * Before any backend -- or, on the thumbnail and info paths, any gdk-pixbuf
- * call that takes a path -- sees the file, the sniffed header goes through
- * _sniff_header(), which refuses, in this order:
+ * call that takes a path, the thumbnail cache's own PNG read included (it
+ * calls loader_sniff_file(), the gate on its own) -- sees the file, the
+ * sniffed header goes through _sniff_header(), which refuses, in this order:
  *
  *   1. an empty file                       G_IO_ERROR_INVALID_DATA
  *   2. a file shorter than the smallest complete file of its signature's
@@ -38,6 +39,13 @@
  * that can never be cancelled. glycin-avif/heif return promptly on bad
  * input, so AVIF/HEIF stay on the fallback.
  *
+ * GGAZE_HAVE_ANY_BACKEND (ggaze-config.h) is 0 in the minimal build (every
+ * loader feature off, the lane CI's coverage gate measures): the backend
+ * table, the dispatch through a backend and the two thumbnail/info paths
+ * that only a claiming backend can take are compiled out there, so the
+ * minimal build carries no code that no input could ever reach. Each such
+ * block is a self-contained #if with the pixbuf fallback as its #else.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -51,6 +59,7 @@
 #include "ggaze-config.h"
 #include "pixbuf-util.h"
 
+#if GGAZE_HAVE_ANY_BACKEND
 /* Format-specific backends, priority order. */
 #if GGAZE_HAVE_JXL
 extern const GgazeLoaderBackend jxl_backend;
@@ -77,8 +86,9 @@ static const GgazeLoaderBackend *BACKENDS[] = {
 #if GGAZE_HAVE_JPEG
    &jpeg_backend,
 #endif
-   NULL, /* sentinel: keeps the array non-empty in the minimal build */
+   NULL, /* sentinel */
 };
+#endif
 
 /* Read the first u_max bytes of p_file, or all of it when it is shorter.
  * Returns the byte count (0 for an empty file) or -1 with p_err set on an
@@ -109,14 +119,19 @@ _read_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head, gsize u_max,
 }
 
 /* Pick the backend for the sniffed header: first specific match, else the
- * GdkPixbuf fallback. */
+ * GdkPixbuf fallback (the only one there is in the minimal build). */
 static const GgazeLoaderBackend *
 _backend_for(const guint8 *p_head, gsize u_len) {
+#if GGAZE_HAVE_ANY_BACKEND
    for (gsize u_i = 0; BACKENDS[u_i] != NULL; u_i++) {
       if (BACKENDS[u_i]->can_load(p_head, u_len)) {
          return (BACKENDS[u_i]);
       }
    }
+#else
+   (void)p_head;
+   (void)u_len;
+#endif
    return (&pixbuf_backend);
 }
 
@@ -184,11 +199,34 @@ _dispatch(GFile *p_file, GCancellable *p_cancel, LoaderProgressCb p_progress,
       return (NULL);
    }
    const GgazeLoaderBackend *p_be = _backend_for(head, (gsize)i_read);
+#if GGAZE_HAVE_ANY_BACKEND
    if (p_be->load_progressive != NULL && p_progress != NULL) {
       return (p_be->load_progressive(p_file, p_cancel, p_progress,
                                      p_progress_data, p_err));
    }
+#else
+   /* The pixbuf fallback has no progressive load, so the callback can never
+    * fire here; the async wrapper still accepts and carries it so the
+    * window's calling code is the same in every build. */
+   (void)p_progress;
+   (void)p_progress_data;
+#endif
    return (p_be->load(p_file, p_cancel, p_err));
+}
+
+gboolean
+loader_sniff_file(GFile *p_file, GCancellable *p_cancel, GgazeFormat *p_format,
+                  GError **p_err) {
+   g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
+   guint8 head[GGAZE_DETECT_SNIFF_LEN];
+   gssize i_read = _sniff_header(p_file, p_cancel, head, p_err);
+   if (i_read < 0) {
+      return (FALSE);
+   }
+   if (p_format != NULL) {
+      *p_format = detect_format(head, (gsize)i_read);
+   }
+   return (TRUE);
 }
 
 GdkTexture *
@@ -249,11 +287,13 @@ loader_load_finish(GAsyncResult *p_res, GError **p_err) {
 
 /* --- scaled decode + dimension peek (thumbnail / info) ------------------- */
 
+#if GGAZE_HAVE_ANY_BACKEND
 /* TRUE iff a specific (non-pixbuf) backend claims the sniffed header. */
 static gboolean
 _specific_backend_claims(const guint8 *p_head, gsize u_len) {
    return (_backend_for(p_head, u_len) != &pixbuf_backend);
 }
+#endif
 
 /* Reject c_path if it is a JPEG whose declared header dimensions exceed the
  * caps, before any GdkPixbuf call sized off them (gdk-pixbuf/glycin
@@ -278,6 +318,7 @@ _reject_oversized_jpeg_path(const char *c_path, GError **p_err) {
    return (detect_jpeg_dims_within_bounds(u_w, u_h, p_err));
 }
 
+#if GGAZE_HAVE_ANY_BACKEND
 /* Full decode through the matching backend, then a pixbuf scaled to fit
  * i_max_px (the texture is already upright). */
 static GdkPixbuf *
@@ -316,6 +357,7 @@ _scaled_via_backend(GFile *p_file, int i_max_px, GCancellable *p_cancel,
    g_object_unref(p_full);
    return (p_small);
 }
+#endif
 
 GdkPixbuf *
 loader_load_pixbuf_scaled(GFile *p_file, int i_max_px, GCancellable *p_cancel,
@@ -331,9 +373,11 @@ loader_load_pixbuf_scaled(GFile *p_file, int i_max_px, GCancellable *p_cancel,
    if (i_read < 0) {
       return (NULL);
    }
+#if GGAZE_HAVE_ANY_BACKEND
    if (_specific_backend_claims(head, (gsize)i_read)) {
       return (_scaled_via_backend(p_file, i_max_px, p_cancel, p_err));
    }
+#endif
    char *c_path = g_file_get_path(p_file);
    if (c_path == NULL) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -379,28 +423,59 @@ _peek_via_pixbuf_header(const char *c_path, int *p_w, int *p_h) {
    return (*p_w > 0);
 }
 
+/* What the decoder-free JPEG peek decided for loader_peek_dimensions():
+ * gdk-pixbuf's header parse is consulted for UNDECIDED only. */
+typedef enum {
+   JPEG_PEEK_SIZED,    /* p_w and p_h hold a size within the caps */
+   JPEG_PEEK_REFUSED,  /* oversized, or the SOF lies past the scanned
+                        * prefix: no size, and no gdk-pixbuf either */
+   JPEG_PEEK_UNDECIDED /* no SOF (malformed marker stream, SOS first) or a
+                        * zero side (DNL-deferred height): gdk-pixbuf's
+                        * header parse may still know */
+} JpegPeekVerdict;
+
 /* Decoder-free JPEG dimensions: the SOF scan detect.c already does for the
  * oversized-header guard, no gdk-pixbuf (no glycin sandbox spawn) and no
- * libjpeg (whose only way to learn a size is a full decode). FALSE when the
- * SOF lies past the scanned prefix (the caller then falls back to the
- * gdk-pixbuf header parse, which is bounded: it decodes no pixels and the
- * cap check runs on its answer) or when the declared size is over the cap
- * (no honest size to report, same as _peek_via_pixbuf_header()). */
-static gboolean
+ * libjpeg (whose only way to learn a size is a full decode). Three
+ * outcomes, because two of the peek's failures must NOT fall through:
+ *   - a declared size over the cap is REFUSED outright. There is no honest
+ *     size to report (same as _peek_via_pixbuf_header()), and asking
+ *     gdk-pixbuf would spawn a glycin sandbox only to reject its answer
+ *     again;
+ *   - a SOF past the scanned prefix (GGAZE_JPEG_PEEK_INCONCLUSIVE) is
+ *     REFUSED too: fail closed, exactly as loader_load_pixbuf_scaled() does
+ *     for the same file, so a padded JPEG the thumbnail refuses is not one
+ *     the info card sizes. That gdk-pixbuf's header parse decodes no pixels
+ *     does not make it free -- on a glycin desktop it is a sandbox spawn;
+ *   - a zero side is UNDECIDED, not SIZED: a DNL-deferred height of 0 is
+ *     legal JPEG that detect_jpeg_dims_within_bounds() deliberately lets
+ *     through, and reporting 0 as a dimension would have been TRUE with a
+ *     meaningless size. Malformed marker streams (GGAZE_JPEG_PEEK_NOT_JPEG)
+ *     are UNDECIDED for the same reason the scaled path lets them through:
+ *     the real parser produces the definitive verdict, at least as fast. */
+static JpegPeekVerdict
 _peek_via_jpeg_header(const char *c_path, int *p_w, int *p_h) {
-   guint32 u_w, u_h;
-   if (detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h) !=
-       GGAZE_JPEG_PEEK_OK) {
-      return (FALSE);
+   guint32             u_w, u_h;
+   GgazeJpegPeekStatus e_status =
+      detect_jpeg_peek_dims_from_path(c_path, &u_w, &u_h);
+   if (e_status == GGAZE_JPEG_PEEK_INCONCLUSIVE) {
+      return (JPEG_PEEK_REFUSED);
+   }
+   if (e_status != GGAZE_JPEG_PEEK_OK) {
+      return (JPEG_PEEK_UNDECIDED);
+   }
+   if (u_w == 0 || u_h == 0) {
+      return (JPEG_PEEK_UNDECIDED);
    }
    if (!detect_jpeg_dims_within_bounds(u_w, u_h, NULL)) {
-      return (FALSE);
+      return (JPEG_PEEK_REFUSED);
    }
    *p_w = (int)u_w;
    *p_h = (int)u_h;
-   return (TRUE);
+   return (JPEG_PEEK_SIZED);
 }
 
+#if GGAZE_HAVE_ANY_BACKEND
 /* Dimensions through the claiming backend's full decode (upright ones, the
  * header comment says so): the only way to size a JXL/AVIF/HEIF without
  * gdk-pixbuf, and the only acceptable one, because gdk_pixbuf_get_file_info()
@@ -417,15 +492,17 @@ _peek_via_backend(GFile *p_file, int *p_w, int *p_h) {
    g_object_unref(p_tex);
    return (TRUE);
 }
+#endif
 
 /* Route an already-sniffed (and gate-cleared) header to the cheapest SAFE
  * size source, in this order:
  *   - JPEG: the decoder-free SOF peek, whatever backends are built (the
- *     jpeg backend's only way to learn a size is a full decode);
+ *     jpeg backend's only way to learn a size is a full decode). It
+ *     decides for an oversized or prefix-exceeding header (FALSE, nothing
+ *     else asked) and defers only what it could not parse;
  *   - a format a specific backend claims (JXL/AVIF/HEIF): that backend,
  *     never gdk-pixbuf (see _peek_via_backend());
- *   - everything else, and a JPEG whose SOF the bounded peek could not
- *     reach: the gdk-pixbuf header parse.
+ *   - everything else: the gdk-pixbuf header parse.
  * The previous order tried gdk-pixbuf FIRST and only fell back to a
  * backend, which is what let a garbage JXL hang the info worker even in a
  * build with libjxl. */
@@ -434,12 +511,18 @@ _peek_dims_sniffed(GFile *p_file, const char *c_path, const guint8 *p_head,
                    gsize u_len, int *p_w, int *p_h) {
    GgazeFormat e_format = detect_format(p_head, u_len);
    if (e_format == GGAZE_FMT_JPEG) {
-      if (_peek_via_jpeg_header(c_path, p_w, p_h)) {
-         return (TRUE);
+      JpegPeekVerdict e_verdict = _peek_via_jpeg_header(c_path, p_w, p_h);
+      if (e_verdict != JPEG_PEEK_UNDECIDED) {
+         return (e_verdict == JPEG_PEEK_SIZED);
       }
-   } else if (_specific_backend_claims(p_head, u_len)) {
+   }
+#if GGAZE_HAVE_ANY_BACKEND
+   else if (_specific_backend_claims(p_head, u_len)) {
       return (_peek_via_backend(p_file, p_w, p_h));
    }
+#else
+   (void)p_file;
+#endif
    return (_peek_via_pixbuf_header(c_path, p_w, p_h));
 }
 

@@ -110,12 +110,37 @@ on the gdk-pixbuf fallback because their glycin loaders fail fast.
 
 **`loader_peek_dimensions()` order.** A JPEG's size comes from the
 decoder-free SOF scan in `detect.c` (no gdk-pixbuf, no libjpeg decode, every
-build); a format a specific backend claims (JXL/AVIF/HEIF) is sized by that
-backend's decode and *never* by `gdk_pixbuf_get_file_info()`, which on a
-glycin desktop hangs on garbage JXL and spawns a sandbox even for a valid
-one; only the rest (and a JPEG whose SOF lies past the 64 KB peek prefix)
-use the gdk-pixbuf header parse. The previous order asked gdk-pixbuf first,
-which hung the info worker on garbage JXL even in a build with libjxl.
+build), and that scan *decides* for two of its outcomes: a declared size
+over the cap and a SOF lying past the 64 KB peek prefix both fail closed
+(`FALSE`, gdk-pixbuf never asked -- the same verdict
+`loader_load_pixbuf_scaled()` gives the same file; a header parse that
+decodes no pixels is still a glycin sandbox spawn). A SOF declaring a zero
+side (a DNL-deferred height, legal JPEG) is never reported as a size; it
+and a malformed marker stream defer to gdk-pixbuf's header parse, whose own
+`> 0` check then answers. A format a specific backend claims
+(JXL/AVIF/HEIF) is sized by that backend's decode and *never* by
+`gdk_pixbuf_get_file_info()`, which on a glycin desktop hangs on garbage JXL
+and spawns a sandbox even for a valid one; only the rest use the gdk-pixbuf
+header parse. The previous order asked gdk-pixbuf first, which hung the
+info worker on garbage JXL even in a build with libjxl.
+`tests/test_loader_pixbuf.c` proves the "never asked" part by serving the
+file from a FIFO and counting opens: two (sniff + SOF peek) for an
+oversized header, three when the peek legitimately defers.
+
+**The thumbnail cache read is gated too.** `~/.cache/thumbnails` is shared
+with every TMS-compliant app, so an entry under ggaze's name is as
+untrusted as a source file: `thumbnail.c` runs `loader_sniff_file()` (the
+gate on its own) on the entry before `gdk_pixbuf_new_from_file()` gets its
+path, and decodes it only when the sniff says PNG -- a TMS entry is a PNG
+by spec, so anything else is junk to regenerate, not to decode. The length
+gate alone would not do here: a JXL longer than its minimum but garbage
+still hangs `glycin-jxl`, in a build with libjxl included.
+
+**Minimal build.** `GGAZE_HAVE_ANY_BACKEND` (derived in `ggaze-config.h`
+from the four `GGAZE_HAVE_*` loader flags) compiles the backend table, the
+progressive dispatch and the backend-only thumbnail/info paths out of a
+build with no loader feature, so the minimal CI lane carries no code that
+no input could reach and its coverage figure for `loader.c` is honest.
 
 **Error-domain change on the thumbnail path.** Because the sniff opens the
 file before gdk-pixbuf does, a missing or unreadable file now surfaces from

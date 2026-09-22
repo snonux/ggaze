@@ -45,9 +45,11 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/inotify.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -330,10 +332,8 @@ test_garbage_jxl_fails_fast(void) {
    }
 }
 
-/* Name of a gdk-pixbuf module ("webp", "tiff", ...) that is installed on
- * this machine, so a vector whose module is missing (CI's fedora:40 image
- * has no guarantee of webp-pixbuf-loader) is reported and skipped rather
- * than failed. */
+/* TRUE iff the gdk-pixbuf module c_module ("webp", "tiff", ...) is
+ * installed on this machine. */
 static gboolean
 _pixbuf_module_available(const char *c_module) {
    GSList  *p_formats = gdk_pixbuf_get_formats();
@@ -345,6 +345,43 @@ _pixbuf_module_available(const char *c_module) {
    }
    g_slist_free(p_formats);
    return (b_found);
+}
+
+/* The modules gdk-pixbuf2 itself ships on CI's fedora:40 (and on any
+ * desktop worth the name): a test that needs one of these and finds it
+ * missing has found a broken test machine, not an optional feature, and
+ * must FAIL rather than quietly skip -- a skipped FIFO test hid nothing
+ * for weeks only because the module was there. The escape hatch for a
+ * deliberately stripped box is GGAZE_TEST_ALLOW_MISSING_PIXBUF_LOADERS=1.
+ * webp/tiff/ico/jxl come from separate packages and stay optional. */
+static gboolean
+_pixbuf_module_is_core(const char *c_module) {
+   return (g_strcmp0(c_module, "png") == 0 || g_strcmp0(c_module, "gif") == 0 ||
+           g_strcmp0(c_module, "jpeg") == 0);
+}
+
+/* TRUE iff a decode through gdk-pixbuf module c_module may be asserted on
+ * this machine. A missing optional module is reported and skipped; a
+ * missing core module fails the current test (see _pixbuf_module_is_core())
+ * unless the opt-out variable is set, in which case it is skipped too. */
+static gboolean
+_pixbuf_module_usable(const char *c_module) {
+   if (_pixbuf_module_available(c_module)) {
+      return (TRUE);
+   }
+   if (_pixbuf_module_is_core(c_module) &&
+       g_strcmp0(g_getenv("GGAZE_TEST_ALLOW_MISSING_PIXBUF_LOADERS"), "1") !=
+          0) {
+      g_test_fail_printf(
+         "gdk-pixbuf module '%s' is missing; it ships with "
+         "gdk-pixbuf2 on fedora:40, so this is a broken test "
+         "machine (set GGAZE_TEST_ALLOW_MISSING_PIXBUF_LOADERS=1 "
+         "to skip instead)",
+         c_module);
+      return (FALSE);
+   }
+   g_test_message("  no gdk-pixbuf module '%s' here; decode skipped", c_module);
+   return (FALSE);
 }
 
 /* One TinyImage through loader_load(): 1x1 where this build decodes it. */
@@ -362,12 +399,26 @@ _assert_tiny_image_loads(const TinyImage *p_t) {
    g_object_unref(p_tex);
 }
 
+/* TRUE iff this build decodes p_t without a gdk-pixbuf module: the jpeg
+ * backend claims every JPEG, so the "jpeg" module is irrelevant with it. */
+static gboolean
+_tiny_image_has_own_backend(const TinyImage *p_t) {
+#if GGAZE_HAVE_JPEG
+   return (p_t->e_format == GGAZE_FMT_JPEG);
+#else
+   (void)p_t;
+   return (FALSE);
+#endif
+}
+
 /* The smallest real file of every format (tests/helpers/tiny_images.h)
  * must get PAST the gate -- test_detect.c proves the gate accepts them;
  * this proves the whole dispatcher does -- and decode as 1x1 wherever this
  * build has a decoder: a JXL needs the jxl feature (without it the
  * dispatcher refuses it as NOT_SUPPORTED, by design), the rest need their
- * gdk-pixbuf module, which is skipped with a message when absent. */
+ * gdk-pixbuf module. PNG/GIF/JPEG are required (a missing one fails the
+ * test, see _pixbuf_module_usable()); WebP/TIFF/ICO are skipped with a
+ * message when their optional module is absent. */
 static void
 test_tiny_images_load(void) {
    for (gsize u = 0; u < G_N_ELEMENTS(TINY_IMAGES); u++) {
@@ -383,59 +434,197 @@ test_tiny_images_load(void) {
          g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
          g_error_free(p_err);
 #endif
-      } else if (_pixbuf_module_available(p_t->c_pixbuf_module)) {
+      } else if (_tiny_image_has_own_backend(p_t) ||
+                 _pixbuf_module_usable(p_t->c_pixbuf_module)) {
          _assert_tiny_image_loads(p_t);
-      } else {
-         g_test_message("  no gdk-pixbuf module '%s' here; decode skipped",
-                        p_t->c_pixbuf_module);
       }
    }
 }
 
-/* Writer side of test_fifo_two_chunk_read(): serve exactly two reader
- * sessions on the FIFO at p_data (the sniff and the backend's full read
- * each open the file once), each time delivering the image as a 10-byte
- * write, a pause, and the rest -- so a reader that takes the first read's
- * result for the whole header sees a 10-byte "GIF". Closing after the
- * second write is what gives the reader its EOF. */
+/* --- FIFO harness ------------------------------------------------------- */
+
+/* A helper thread that serves a FIFO to the loader under test, one writer
+ * session per reader that opens it, and COUNTS those sessions. Two things
+ * are proven with it: that the header read copes with a file that arrives
+ * in two pieces (test_fifo_two_chunk_read), and how many times an entry
+ * point opens its file -- the sniff is one open, a backend's read or
+ * detect's SOF peek another, and a gdk-pixbuf call would be one more. The
+ * open count is the only proof from outside the loader that gdk-pixbuf was
+ * NOT consulted (test_oversized_jpeg_peek_skips_pixbuf).
+ *
+ * Every wait is bounded by one deadline (GGAZE_FIFO_BUDGET_US) so a broken
+ * loader fails a named assertion instead of meson's 30 s binary timeout:
+ * the writer never blocks in open() (it polls O_NONBLOCK), never blocks in
+ * read() on the inotify fd (poll() with the remaining budget) and, on its
+ * way out after a failure, opens and closes the FIFO once so a reader
+ * stuck in open() or read() sees EOF and the main thread's call returns.
+ * The first failure is recorded in c_failure for the main thread to
+ * assert on; the writer never aborts the process itself. */
+#define GGAZE_FIFO_BUDGET_US (5 * G_USEC_PER_SEC)
+
 typedef struct {
    const char   *c_fifo;
    const guint8 *p_img;
    gsize         u_len;
-   int           i_inotify; /* watches the FIFO for IN_CLOSE_NOWRITE */
+   gsize         u_first_chunk; /* 0: one write; else split after this */
+   int           i_inotify;     /* watches the FIFO for IN_CLOSE_NOWRITE */
+   gint64        i_deadline;    /* monotonic, every wait checks it */
+   gint          i_done;        /* atomic: main thread's call returned */
+   guint         u_opens;       /* reader sessions served */
+   const char   *c_failure;     /* first failure, NULL when none */
+   GThread      *p_thread;
+   gchar        *c_tmpdir;
 } FifoWriter;
 
+static gboolean
+_fifo_expired(const FifoWriter *p_w) {
+   return (g_get_monotonic_time() >= p_w->i_deadline);
+}
+
+/* Record the first failure and release a reader the loader may have
+ * blocked in open()/read(): an O_WRONLY|O_NONBLOCK open succeeds exactly
+ * when a reader is there, and closing it at once is that reader's EOF. */
 static void
-_fifo_serve_session(const FifoWriter *p_w) {
-   int i_fd = open(p_w->c_fifo, O_WRONLY);
-   g_assert_cmpint(i_fd, >=, 0);
-   g_assert_cmpint((glong)write(i_fd, p_w->p_img, 10), ==, 10);
-   g_usleep(50 * 1000);
-   g_assert_cmpint((glong)write(i_fd, p_w->p_img + 10, p_w->u_len - 10), ==,
-                   (glong)(p_w->u_len - 10));
-   close(i_fd);
+_fifo_fail(FifoWriter *p_w, const char *c_what) {
+   if (p_w->c_failure == NULL) {
+      p_w->c_failure = c_what;
+   }
+   int i_fd = open(p_w->c_fifo, O_WRONLY | O_NONBLOCK);
+   if (i_fd >= 0) {
+      close(i_fd);
+   }
+}
+
+/* Open the write end as soon as a reader shows up (ENXIO until then), or
+ * return -1 once the main thread is done or the budget is spent. */
+static int
+_fifo_open_writer(FifoWriter *p_w) {
+   while (!g_atomic_int_get(&p_w->i_done)) {
+      int i_fd = open(p_w->c_fifo, O_WRONLY | O_NONBLOCK);
+      if (i_fd >= 0) {
+         return (i_fd);
+      }
+      if (_fifo_expired(p_w)) {
+         _fifo_fail(p_w, "no reader opened the FIFO within the budget");
+         return (-1);
+      }
+      g_usleep(1000);
+   }
+   return (-1);
+}
+
+/* Block until the reader has consumed everything written so far (the pipe
+ * is empty: FIONREAD == 0), so the next write really is a SECOND chunk the
+ * reader's first read() cannot have merged in. A merged read would only
+ * make test_fifo_two_chunk_read less sensitive, never fail it; this keeps
+ * it sensitive. */
+static void
+_fifo_wait_drained(FifoWriter *p_w, int i_fd) {
+   int i_pending = 0;
+   do {
+      if (ioctl(i_fd, FIONREAD, &i_pending) != 0) {
+         _fifo_fail(p_w, "FIONREAD on the FIFO failed");
+         return;
+      }
+      if (i_pending > 0 && _fifo_expired(p_w)) {
+         _fifo_fail(p_w, "the reader never consumed the first chunk");
+         return;
+      }
+      if (i_pending > 0) {
+         g_usleep(1000);
+      }
+   } while (i_pending > 0);
 }
 
 /* Block until the reader has CLOSED its end of the FIFO. Without this the
- * writer's next open(O_WRONLY) succeeds at once (a reader still exists),
- * session two's bytes land in session one's pipe, and the backend's own
- * open later blocks forever with no writer left -- observed with strace
- * before this wait was added. The reader's close is exactly what inotify
- * reports as IN_CLOSE_NOWRITE on the FIFO (the writer's own closes are
+ * writer's next open succeeds at once (a reader still exists), the next
+ * session's bytes land in this session's pipe, and the loader's own next
+ * open later blocks with no writer left -- observed with strace before
+ * this wait was added. The reader's close is exactly what inotify reports
+ * as IN_CLOSE_NOWRITE on the FIFO (the writer's own closes are
  * IN_CLOSE_WRITE and are not watched). Linux-only, like the app. */
 static void
-_fifo_wait_reader_closed(const FifoWriter *p_w) {
-   guint8 buf[sizeof(struct inotify_event) + NAME_MAX + 1];
-   g_assert_cmpint((glong)read(p_w->i_inotify, buf, sizeof(buf)), >, 0);
+_fifo_wait_reader_closed(FifoWriter *p_w) {
+   guint8        buf[sizeof(struct inotify_event) + NAME_MAX + 1];
+   struct pollfd pfd     = {.fd = p_w->i_inotify, .events = POLLIN};
+   gint64        i_left  = p_w->i_deadline - g_get_monotonic_time();
+   int           i_ready = poll(&pfd, 1, (int)MAX(0, i_left / 1000));
+   if (i_ready <= 0 || read(p_w->i_inotify, buf, sizeof(buf)) <= 0) {
+      _fifo_fail(p_w, "the reader never closed the FIFO within the budget");
+   }
+}
+
+/* Deliver the image to the reader on i_fd: whole, or as u_first_chunk
+ * bytes, a wait until the reader has taken them, and the rest. Closing
+ * after the last write is what gives the reader its EOF. */
+static void
+_fifo_serve_session(FifoWriter *p_w, int i_fd) {
+   gsize u_first = (p_w->u_first_chunk > 0) ? p_w->u_first_chunk : p_w->u_len;
+   if ((gsize)write(i_fd, p_w->p_img, u_first) != u_first) {
+      _fifo_fail(p_w, "short write of the first chunk");
+   } else if (u_first < p_w->u_len) {
+      _fifo_wait_drained(p_w, i_fd);
+      gsize u_rest = p_w->u_len - u_first;
+      if ((gsize)write(i_fd, p_w->p_img + u_first, u_rest) != u_rest) {
+         _fifo_fail(p_w, "short write of the second chunk");
+      }
+   }
+   close(i_fd);
 }
 
 static gpointer
 _fifo_writer_thread(gpointer p_data) {
-   const FifoWriter *p_w = (const FifoWriter *)p_data;
-   _fifo_serve_session(p_w);
-   _fifo_wait_reader_closed(p_w);
-   _fifo_serve_session(p_w);
-   return (NULL);
+   FifoWriter *p_w = (FifoWriter *)p_data;
+   for (;;) {
+      int i_fd = _fifo_open_writer(p_w);
+      if (i_fd < 0) {
+         return (NULL);
+      }
+      p_w->u_opens++;
+      _fifo_serve_session(p_w, i_fd);
+      _fifo_wait_reader_closed(p_w);
+      if (p_w->c_failure != NULL) {
+         return (NULL);
+      }
+   }
+}
+
+/* Create the FIFO in a private temp dir, arm the inotify watch and start
+ * the writer. p_w must already carry p_img/u_len/u_first_chunk. */
+static void
+_fifo_start(FifoWriter *p_w) {
+   p_w->c_tmpdir = g_dir_make_tmp("ggaze-fifo-XXXXXX", NULL);
+   g_assert_nonnull(p_w->c_tmpdir);
+   p_w->c_fifo = g_build_filename(p_w->c_tmpdir, "image.fifo", NULL);
+   g_assert_cmpint(mkfifo(p_w->c_fifo, 0600), ==, 0);
+   p_w->i_inotify = inotify_init1(IN_CLOEXEC);
+   g_assert_cmpint(p_w->i_inotify, >=, 0);
+   g_assert_cmpint(
+      inotify_add_watch(p_w->i_inotify, p_w->c_fifo, IN_CLOSE_NOWRITE), >=, 0);
+   /* Should a reader ever close early, the writer must see EPIPE, not
+    * take the whole test binary down with SIGPIPE. */
+   signal(SIGPIPE, SIG_IGN);
+   p_w->i_deadline = g_get_monotonic_time() + GGAZE_FIFO_BUDGET_US;
+   p_w->i_done     = 0;
+   p_w->u_opens    = 0;
+   p_w->c_failure  = NULL;
+   p_w->p_thread   = g_thread_new("fifo-writer", _fifo_writer_thread, p_w);
+}
+
+/* Stop the writer (the call under test has returned), surface its first
+ * failure as a named assertion, and return how many reader sessions it
+ * served. */
+static guint
+_fifo_finish(FifoWriter *p_w) {
+   g_atomic_int_set(&p_w->i_done, 1);
+   g_thread_join(p_w->p_thread);
+   g_assert_cmpstr(p_w->c_failure, ==, NULL);
+   close(p_w->i_inotify);
+   unlink(p_w->c_fifo);
+   g_rmdir(p_w->c_tmpdir);
+   g_free((gchar *)p_w->c_fifo);
+   g_free(p_w->c_tmpdir);
+   return (p_w->u_opens);
 }
 
 /* The header read must be min(file, 64) bytes, not "whatever the first
@@ -443,52 +632,145 @@ _fifo_writer_thread(gpointer p_data) {
  * return fewer bytes than the file holds, and the old single
  * g_input_stream_read() then made detect_reject_truncated() refuse a valid
  * file delivered in two writes as a "truncated GIF file: 10 bytes". A real
- * FIFO written from a helper thread reproduces exactly that. The vector is
- * the 43-byte GIF from tiny_images.h, chosen because it fits inside the
+ * FIFO written from a helper thread reproduces exactly that, with the
+ * second write held back until the reader has taken the first. The vector
+ * is the 43-byte GIF from tiny_images.h, chosen because it fits inside the
  * 64-byte sniff: the sniff then drains the FIFO to EOF, so the backend's
  * own open (session two) can never inherit bytes the sniff left behind --
  * with a file longer than the sniff, the second open could race the
- * writer's close and read the tail of session one instead. */
+ * writer's close and read the tail of session one instead. Exactly two
+ * opens: the sniff and the pixbuf backend's read. */
 static void
 test_fifo_two_chunk_read(void) {
-   if (!_pixbuf_module_available("gif")) {
-      g_test_skip("no gdk-pixbuf gif module here");
+   if (!_pixbuf_module_usable("gif")) {
       return;
    }
-   FifoWriter w = {NULL, TINY_GIF, sizeof(TINY_GIF), -1};
+   FifoWriter w = {
+      .p_img = TINY_GIF, .u_len = sizeof(TINY_GIF), .u_first_chunk = 10};
    g_assert_cmpuint(w.u_len, <=, GGAZE_DETECT_SNIFF_LEN);
-   g_assert_cmpuint(w.u_len, >, 10);
+   g_assert_cmpuint(w.u_len, >, w.u_first_chunk);
+   _fifo_start(&w);
 
-   gchar *c_tmpdir = g_dir_make_tmp("ggaze-fifo-XXXXXX", NULL);
-   g_assert_nonnull(c_tmpdir);
-   gchar *c_fifo = g_build_filename(c_tmpdir, "tiny.gif.fifo", NULL);
-   g_assert_cmpint(mkfifo(c_fifo, 0600), ==, 0);
-   w.c_fifo    = c_fifo;
-   w.i_inotify = inotify_init1(IN_CLOEXEC);
-   g_assert_cmpint(w.i_inotify, >=, 0);
-   g_assert_cmpint(inotify_add_watch(w.i_inotify, c_fifo, IN_CLOSE_NOWRITE), >=,
-                   0);
-   /* Should the reader ever close early, the writer must see EPIPE, not
-    * take the whole test binary down with SIGPIPE. */
-   signal(SIGPIPE, SIG_IGN);
-   GThread *p_thread = g_thread_new("fifo-writer", _fifo_writer_thread, &w);
-
-   GFile      *p_file = g_file_new_for_path(c_fifo);
+   GFile      *p_file = g_file_new_for_path(w.c_fifo);
    GError     *p_err  = NULL;
    GdkTexture *p_tex  = loader_load(p_file, NULL, &p_err);
+   /* The loader's verdict first: on a regression it names the cause
+    * ("truncated GIF file: 10 bytes"), where the writer only sees the
+    * EPIPE of a reader that gave up after the first chunk. */
    g_assert_no_error(p_err);
    g_assert_nonnull(p_tex);
    g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 1);
    g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 1);
+   g_assert_cmpuint(_fifo_finish(&w), ==, 2);
    g_object_unref(p_tex);
    g_object_unref(p_file);
+}
 
-   g_thread_join(p_thread);
-   close(w.i_inotify);
-   unlink(c_fifo);
-   g_rmdir(c_tmpdir);
-   g_free(c_fifo);
-   g_free(c_tmpdir);
+/* A 64-byte JPEG -- SOI, one baseline SOF0 declaring u_h x u_w with three
+ * components, an SOS, zero fill -- for the peek tests below: it clears
+ * the 25-byte minimum, detect's SOF scan finds the frame header at offset
+ * 2, and gdk-pixbuf's header parse (should it be consulted) reports the
+ * same size. Fits one atomic pipe write, so a FIFO reader sees it whole. */
+static void
+_build_sof_jpeg(guint8 *p_out, guint16 u_w, guint16 u_h) {
+   const guint8 head[] = {0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0,    0,
+                          0,    0,    0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01,
+                          0x03, 0x11, 0x01, 0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01,
+                          0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00};
+   memset(p_out, 0, 64);
+   memcpy(p_out, head, sizeof(head));
+   p_out[7]  = (guint8)(u_h >> 8);
+   p_out[8]  = (guint8)(u_h & 0xFF);
+   p_out[9]  = (guint8)(u_w >> 8);
+   p_out[10] = (guint8)(u_w & 0xFF);
+}
+
+/* loader_peek_dimensions() on a FIFO serving p_jpg: returns the peek's
+ * verdict, stores the number of times the file was opened in *p_opens and
+ * asserts the budget. The sniff is open one and detect's SOF peek open
+ * two; gdk_pixbuf_get_file_info() would be a third. */
+static gboolean
+_peek_via_fifo(const guint8 *p_jpg, guint *p_opens) {
+   FifoWriter w = {.p_img = p_jpg, .u_len = 64, .u_first_chunk = 0};
+   _fifo_start(&w);
+   GFile   *p_file = g_file_new_for_path(w.c_fifo);
+   int      i_w = -1, i_h = -1;
+   gint64   i_start = g_get_monotonic_time();
+   gboolean b_ok    = loader_peek_dimensions(p_file, &i_w, &i_h);
+   gdouble  d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
+   *p_opens         = _fifo_finish(&w);
+   g_object_unref(p_file);
+   g_assert_cmpfloat(d_secs, <, 5.0);
+   return (b_ok);
+}
+
+/* A JPEG whose SOF declares 65500x65500 has no honest size, and the peek
+ * must say so WITHOUT asking gdk-pixbuf: the old code returned a plain
+ * FALSE for "oversized" and "SOF not in the prefix" alike and fell through
+ * to gdk_pixbuf_get_file_info() -- a glycin sandbox spawn on Fedora >= 41
+ * whose 65500x65500 answer was then rejected a second time. Two opens
+ * (sniff + SOF peek) prove the third call never happened; the zero-height
+ * test right below proves the same harness does see a third open when the
+ * peek does defer. */
+static void
+test_oversized_jpeg_peek_skips_pixbuf(void) {
+   guint8 jpg[64];
+   _build_sof_jpeg(jpg, 65500, 65500);
+   guint u_opens = 0;
+   g_assert_false(_peek_via_fifo(jpg, &u_opens));
+   g_assert_cmpuint(u_opens, ==, 2);
+}
+
+/* A SOF declaring height 0 (a DNL marker would supply it later) is legal
+ * JPEG that detect_jpeg_dims_within_bounds() deliberately lets through, so
+ * the peek used to return TRUE with *p_h == 0. It must never report a zero
+ * side: the verdict is FALSE, reached by deferring to gdk-pixbuf's header
+ * parse (the third open) exactly as loader_load_pixbuf_scaled() lets the
+ * real decoder judge such a file, and that parse's own > 0 check. */
+static void
+test_zero_height_jpeg_peek_is_false(void) {
+   guint8 jpg[64];
+   _build_sof_jpeg(jpg, 6, 0);
+   guint u_opens = 0;
+   g_assert_false(_peek_via_fifo(jpg, &u_opens));
+   g_assert_cmpuint(u_opens, ==, 3);
+}
+
+/* A SOF pushed past the 64 KB peek prefix by a maximal filler segment:
+ * detect reports GGAZE_JPEG_PEEK_INCONCLUSIVE, and the peek fails closed
+ * (FALSE, fast) like the thumbnail path does for the same file, instead of
+ * handing the file to gdk-pixbuf to find the SOF for it. The declared size
+ * behind the filler is a perfectly acceptable 6x3, so a fall-through would
+ * show up as TRUE here. */
+static void
+test_padded_past_prefix_jpeg_peek_refused(void) {
+   const guint16 u_seglen   = 0xFFFD; /* max marker segment length */
+   GByteArray   *p_buf      = g_byte_array_new();
+   const guint8  soi_app0[] = {0xFF,
+                               0xD8,
+                               0xFF,
+                               0xE0,
+                               (guint8)(u_seglen >> 8),
+                               (guint8)(u_seglen & 0xFF)};
+   g_byte_array_append(p_buf, soi_app0, sizeof(soi_app0));
+   g_byte_array_set_size(p_buf, p_buf->len + u_seglen - 2); /* zero fill */
+   guint8 tail[64];
+   _build_sof_jpeg(tail, 6, 3);
+   g_byte_array_append(p_buf, tail + 2, sizeof(tail) - 2); /* skip its SOI */
+   g_assert_cmpuint(p_buf->len, >, GGAZE_JPEG_PEEK_LEN);
+
+   gchar   *c_path = write_tmp(p_buf->data, p_buf->len);
+   GFile   *p_file = g_file_new_for_path(c_path);
+   int      i_w = -1, i_h = -1;
+   gint64   i_start = g_get_monotonic_time();
+   gboolean b_ok    = loader_peek_dimensions(p_file, &i_w, &i_h);
+   gdouble  d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
+   g_assert_false(b_ok);
+   g_assert_cmpfloat(d_secs, <, 5.0);
+   g_object_unref(p_file);
+   unlink(c_path);
+   g_free(c_path);
+   g_byte_array_unref(p_buf);
 }
 
 /* loader_load_async()/loader_load_finish(): the GTask wrapper the window
@@ -771,6 +1053,12 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/loader/pixbuf/tiny_images_load", test_tiny_images_load);
    g_test_add_func("/loader/pixbuf/fifo_two_chunk_read",
                    test_fifo_two_chunk_read);
+   g_test_add_func("/loader/pixbuf/oversized_jpeg_peek_skips_pixbuf",
+                   test_oversized_jpeg_peek_skips_pixbuf);
+   g_test_add_func("/loader/pixbuf/zero_height_jpeg_peek_is_false",
+                   test_zero_height_jpeg_peek_is_false);
+   g_test_add_func("/loader/pixbuf/padded_past_prefix_jpeg_peek_refused",
+                   test_padded_past_prefix_jpeg_peek_refused);
    g_test_add_func("/loader/pixbuf/load_async", test_load_async);
    g_test_add_func("/loader/pixbuf/truncated_thumbnail_and_peek",
                    test_truncated_thumbnail_and_peek);
