@@ -173,6 +173,13 @@ gboolean ggaze_window_tool_key(GgazeWindow *p_win, guint u_keyval,
 void ggaze_window_tool_drag(GgazeWindow *p_win, GgazeViewerDragPhase e_phase,
                             gdouble d_x, gdouble d_y);
 
+/* How many enhance preview renders (a full decode + GEGL chain in a worker)
+ * this window has launched so far; always 0 without GEGL. A test seam: the
+ * controller coalesces renders (at most one in flight plus one queued), and
+ * tests/test_enhance_flow.c pins that a burst of N changes costs at most two
+ * launches. */
+guint ggaze_window_enhance_render_count(GgazeWindow *p_win);
+
 /* --- INTERNAL: bulk-delete safety (used by the confirm-dialog flow and the
  * delete-safety regression test) -------------------------------------------
  *

@@ -31,12 +31,13 @@ static gboolean    _disposed(EnhanceCtrl *p_ctrl);
 static gboolean    _has_navigator(EnhanceCtrl *p_ctrl);
 
 /* Forward decls of the internal state-machine functions. */
-static void _sync_panel(EnhanceCtrl *p_ctrl);
-static void _apply_async(EnhanceCtrl *p_ctrl);
-static void _discard(EnhanceCtrl *p_ctrl);
-static void _destroy(EnhanceCtrl *p_ctrl);
-static void _start_previews(EnhanceCtrl *p_ctrl);
-static void _card_toggle(EnhanceCtrl *p_ctrl, GtkWidget *p_btn);
+static void     _sync_panel(EnhanceCtrl *p_ctrl);
+static void     _apply_async(EnhanceCtrl *p_ctrl);
+static void     _discard(EnhanceCtrl *p_ctrl);
+static void     _destroy(EnhanceCtrl *p_ctrl);
+static void     _start_previews(EnhanceCtrl *p_ctrl);
+static void     _card_toggle(EnhanceCtrl *p_ctrl, GtkWidget *p_btn);
+static gboolean _orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
 
 /* --- struct --------------------------------------------------------------- */
 
@@ -46,23 +47,34 @@ struct EnhanceCtrl {
 
    Enhancer *p_enhancer;     /* GEGL preset engine (always non-NULL) */
    guint8    u_enhance_mask; /* bit i -> preset i enabled (layered) */
-   Transform t_xf;           /* rotate 90 / straighten / crop, applied after
-                              * the presets in the same graph (decision #35);
-                              * the identity when none */
-   gint i_orig_w;            /* the ORIGINAL's upright size, recorded from
+   Transform t_xf;           /* the COMMITTED rotate 90 / straighten / crop,
+                              * applied after the presets in the same graph
+                              * (decision #35); the identity when none. What
+                              * `s` exports and dirty/active are judged on */
+   Transform t_preview;      /* a tool's rendering override (see the header:
+                              * the crop tool shows the base) ... */
+   gboolean b_preview;       /* ... in effect iff this is set */
+   gint     i_orig_w;        /* the ORIGINAL's upright size, recorded from
                               * the last landed apply (0 = not known yet);
                               * transform_base_size of it is the image the
                               * crop rectangle lives on */
    gint     i_orig_h;
    gboolean b_apply_pending; /* an apply is in flight: what is on screen
                               * predates u_enhance_mask/t_xf */
+   gboolean b_relaunch;      /* the state changed while that apply ran: render
+                              * once more when it lands (the coalescing slot;
+                              * never more than one is ever queued) */
+   guint    u_render_count;  /* launches so far (a test seam) */
    gboolean b_disposed;      /* set by enhance_ctrl_dispose */
-   gboolean b_saved;         /* the preview on screen was exported by `s`
-                              * and the mask has not changed since -- it is
-                              * then active but no longer dirty, so moving
-                              * on does not prompt for it */
-   char    *c_saved_name;    /* basename of that export, for the panel */
-   gboolean b_hint_shown;    /* the "Space compares / s saves / a shows the
+   gboolean b_saved;         /* the state on screen IS the saved pair below:
+                              * active but no longer dirty, so moving on does
+                              * not prompt for it (_refresh_saved keeps it
+                              * in step with every state change) */
+   gboolean  b_have_saved;   /* an export succeeded for this file ... */
+   guint8    u_saved_mask;   /* ... with this mask ... */
+   Transform t_saved_xf;     /* ... and this transform */
+   char     *c_saved_name;   /* basename of that export, for the panel */
+   gboolean  b_hint_shown;   /* the "Space compares / s saves / a shows the
                               * presets" status line was shown for this file
                               * (it is shown once per file, and only when a
                               * preset is applied with the panel closed) */
@@ -170,6 +182,31 @@ static gboolean
 _has_work(EnhanceCtrl *p_ctrl) {
    return (p_ctrl->u_enhance_mask != 0 ||
            !transform_is_identity(&p_ctrl->t_xf));
+}
+
+/* The transform the preview graph renders: a tool's override while one is
+ * set, else the committed one. */
+static const Transform *
+_render_transform(EnhanceCtrl *p_ctrl) {
+   return (p_ctrl->b_preview ? &p_ctrl->t_preview : &p_ctrl->t_xf);
+}
+
+/* TRUE iff rendering needs the GEGL chain at all -- the crop tool over a
+ * crop-only transform has work (_has_work) but renders the plain original. */
+static gboolean
+_render_has_work(EnhanceCtrl *p_ctrl) {
+   return (p_ctrl->u_enhance_mask != 0 ||
+           !transform_is_identity(_render_transform(p_ctrl)));
+}
+
+/* Saved iff the committed state is exactly the pair the last export wrote
+ * (see the header): re-derived after every state change rather than
+ * cleared by it, so coming back to the saved state counts as saved. */
+static void
+_refresh_saved(EnhanceCtrl *p_ctrl) {
+   p_ctrl->b_saved = p_ctrl->b_have_saved &&
+                     p_ctrl->u_enhance_mask == p_ctrl->u_saved_mask &&
+                     transform_equal(&p_ctrl->t_xf, &p_ctrl->t_saved_xf);
 }
 
 void
@@ -323,23 +360,25 @@ enhance_ctrl_can_save(EnhanceCtrl *p_ctrl) {
            _has_work(p_ctrl) && p_ctrl->p_enhance_file != NULL);
 }
 
-/* Per-export context: the destination (for the report), the generation the
- * export was started at (so a completion can tell whether the mask it wrote
- * is still the one on screen), the caller's continuation, and a ref on the
- * host so the completion can run after a dispose without dangling (it then
- * only releases). */
+/* Per-export context: the destination (for the report), the (mask,
+ * transform) pair the export writes (so the completion records exactly what
+ * is on disk, whatever the state did meanwhile), the caller's continuation,
+ * and a ref on the host so the completion can run after a dispose without
+ * dangling (it then only releases). */
 typedef struct {
    gpointer          p_host; /* ref'd window */
    EnhanceCtrl      *p_ctrl; /* borrowed, valid while p_host is alive */
    GFile            *p_out;  /* owned */
-   guint             u_gen;
+   guint8            u_mask;
+   Transform         t_xf;
    EnhanceSaveDoneFn fn_done;
    gpointer          p_done_data;
 } _SaveReq;
 
-/* A finished export makes the preview "saved" -- unless the mask moved on
- * while the worker ran (the generation changed), in which case what was
- * written is not what is on screen and the newer preview stays dirty. */
+/* A finished export records the pair it wrote as the saved one; the preview
+ * is then saved iff the state still is (or comes back to) that pair -- a
+ * mask that moved on while the worker ran stays dirty, as before, but is
+ * saved again the moment it is toggled back. */
 static void
 _save_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
@@ -349,10 +388,13 @@ _save_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    gboolean     b_ok   = enhancer_export_chain_finish(p_res, &p_err);
    if (!_disposed(p_ctrl)) {
       _save_report(p_ctrl, p_req->p_out, b_ok, p_err);
-      if (b_ok && p_req->u_gen == p_ctrl->u_enhance_gen && _has_work(p_ctrl)) {
-         p_ctrl->b_saved = TRUE;
+      if (b_ok) {
+         p_ctrl->b_have_saved = TRUE;
+         p_ctrl->u_saved_mask = p_req->u_mask;
+         p_ctrl->t_saved_xf   = p_req->t_xf;
          g_free(p_ctrl->c_saved_name);
          p_ctrl->c_saved_name = g_file_get_basename(p_req->p_out);
+         _refresh_saved(p_ctrl);
          _sync_panel(p_ctrl);
       }
    }
@@ -396,7 +438,8 @@ enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
    p_req->p_host         = g_object_ref(p_ctrl->p_host);
    p_req->p_ctrl         = p_ctrl;
    p_req->p_out          = p_out;
-   p_req->u_gen          = p_ctrl->u_enhance_gen;
+   p_req->u_mask         = p_ctrl->u_enhance_mask;
+   p_req->t_xf           = p_ctrl->t_xf;
    p_req->fn_done        = fn_done;
    p_req->p_done_data    = p_done_data;
    char *c_name          = g_file_get_basename(p_out);
@@ -460,10 +503,14 @@ _req_free(_Req *p_req) {
    g_free(p_req);
 }
 
-/* Async apply completion (tu0): last-write-wins via u_enhance_gen -- a newer
- * apply, a discard, or the window closing while this was still processing in
- * its worker thread all bump the generation, so a stale result here is
- * dropped instead of clobbering whatever is now current. */
+static void _render(EnhanceCtrl *p_ctrl);
+
+/* Async apply completion (tu0): last-write-wins via u_enhance_gen -- a
+ * discard, a navigation, or the window closing while this was still
+ * processing in its worker thread all bump the generation, so a stale result
+ * here is dropped instead of clobbering whatever is now current. A newer
+ * STATE is not a reason to drop it: the result is shown (the screen catches
+ * up one step) and the latest state rendered right after (b_relaunch). */
 static void
 _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
@@ -485,7 +532,8 @@ _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
                 p_err != NULL ? p_err->message : "(no detail)");
       g_clear_error(&p_err);
       _show_status(p_ctrl, "Enhance failed");
-      _discard(p_ctrl); /* back to the original; also bumps the gen */
+      _discard(p_ctrl); /* back to the original; also bumps the gen and
+                         * drops a queued relaunch (it would fail too) */
    } else {
       /* The worker decoded the original: remember its size for the crop
        * tool / the next quarter turn (see i_orig_w). */
@@ -502,27 +550,31 @@ _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
                               "s saves a copy, a shows the presets");
       }
    }
+   if (p_ctrl->b_relaunch) {
+      p_ctrl->b_relaunch = FALSE;
+      _render(p_ctrl); /* the state moved on meanwhile: once more, latest */
+   }
    _req_free(p_req);
 }
 
-/* Switch to large view (if not already there) and start a fresh generation:
- * bump u_enhance_gen and replace p_enhance_cancel, so a still-in-flight older
- * apply's result is recognized as stale and dropped when it eventually
- * completes (last-write-wins; GEGL processing itself cannot be aborted
- * mid-flight once started). A new generation is by definition unsaved. */
+/* Invalidate whatever is in flight: bump u_enhance_gen and replace
+ * p_enhance_cancel, so a still-running apply's result is recognized as stale
+ * and dropped when it eventually completes (GEGL processing itself cannot be
+ * aborted mid-flight once started), and forget a queued relaunch. */
 static void
-_apply_begin(EnhanceCtrl *p_ctrl) {
-   p_ctrl->p_ops->ensure_large_view(p_ctrl->p_host);
+_drop_inflight(EnhanceCtrl *p_ctrl) {
    p_ctrl->u_enhance_gen++;
-   p_ctrl->b_saved = FALSE;
+   p_ctrl->b_apply_pending = FALSE;
+   p_ctrl->b_relaunch      = FALSE;
    g_cancellable_cancel(p_ctrl->p_enhance_cancel);
    g_clear_object(&p_ctrl->p_enhance_cancel);
    p_ctrl->p_enhance_cancel = g_cancellable_new();
 }
 
-/* Launch the async apply for the non-empty mask case: record which file the
- * preview applies to (see nav_changed's comment for why this is set here, not
- * only in nav_changed) and hand off to enhancer_apply_chain_async. */
+/* Launch the async apply for the has-render-work case: record which file
+ * the preview applies to (see nav_changed's comment for why this is set
+ * here, not only in nav_changed) and hand off to enhancer_apply_chain_async
+ * with the RENDER transform (a tool's override, else the committed one). */
 static void
 _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
    g_set_object(&p_ctrl->p_enhance_file, p_file);
@@ -534,51 +586,77 @@ _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
    p_ctrl->b_hint_shown = p_ctrl->b_hint_shown || p_req->b_hint;
    const GPtrArray *p_presets = enhancer_get_presets(p_ctrl->p_enhancer);
    p_ctrl->b_apply_pending    = TRUE;
+   p_ctrl->u_render_count++;
    enhancer_apply_chain_async(p_file, p_presets, p_ctrl->u_enhance_mask,
-                              &p_ctrl->t_xf, p_ctrl->p_enhance_cancel,
-                              _apply_done_cb, p_req);
+                              _render_transform(p_ctrl),
+                              p_ctrl->p_enhance_cancel, _apply_done_cb, p_req);
 }
 
-/* Apply the enabled-preset chain (u_enhance_mask) and the transform to the
- * current image as a live preview, off the GTK main thread
- * (enhancer_apply_chain_async: GEGL processing is CPU-heavy, AGENTS.md
- * "Decode runs in GTask threads"). Nothing active (empty mask, identity
- * transform) restores the original synchronously (texturecache is cheap,
- * no GEGL involved). */
+/* Canonical "nothing to render" site -- every path that clears the state
+ * (Esc/discard, the Original card, `0`, the fourth quarter turn, the
+ * easy-to-miss one: toggling the LAST enabled preset back off via
+ * win.enhance-N or a card) and the crop tool opening over a crop-only
+ * transform funnel through here. Shows the original (texturecache is fast,
+ * no GEGL) and drops anything in flight. Forces the hold-compare flag off:
+ * set_hold_original no-ops once nothing is active, so a Space RELEASE
+ * arriving after the mask was cleared out from under a still-held key would
+ * otherwise leave the flag stuck TRUE and swallow the next press (tu0 review
+ * round 2, issue 4). */
 static void
-_apply_async(EnhanceCtrl *p_ctrl) {
+_restore_original(EnhanceCtrl *p_ctrl) {
+   _drop_inflight(p_ctrl);
+   p_ctrl->b_hold_original = FALSE;
+   g_clear_object(&p_ctrl->p_enhance_tex);
+   _load_current(p_ctrl);
+   _update_header(p_ctrl);
+}
+
+/* Bring the screen in line with the state, off the GTK main thread
+ * (enhancer_apply_chain_async: GEGL processing is CPU-heavy, AGENTS.md
+ * "Decode runs in GTask threads"). With an apply already in flight the state
+ * is only marked for a re-render when it lands (the coalescing slot), so a
+ * burst of nudges costs one extra render rather than one per nudge. */
+static void
+_render(EnhanceCtrl *p_ctrl) {
    if (!_has_navigator(p_ctrl) || p_ctrl->p_enhancer == NULL) {
       return;
    }
-   _apply_begin(p_ctrl);
+   _refresh_saved(p_ctrl);
    _sync_panel(p_ctrl);
-   if (!_has_work(p_ctrl)) {
-      /* Canonical "nothing left active" site -- every path that clears the
-       * state (Esc/discard, the Original card, `0`, the fourth quarter turn,
-       * and the easy-to-miss one: toggling the LAST enabled preset back off
-       * via win.enhance-N or a card) funnels through here. Force the
-       * hold-compare flag off: set_hold_original no-ops once nothing is
-       * active, so a Space RELEASE arriving after the mask was cleared out
-       * from under a still-held key would otherwise leave the flag stuck
-       * TRUE and swallow the next press (tu0 review round 2, issue 4). */
-      p_ctrl->b_hold_original = FALSE;
-      p_ctrl->b_apply_pending = FALSE; /* the gen bump dropped any worker */
-      g_clear_object(&p_ctrl->p_enhance_tex);
-      _load_current(p_ctrl); /* restore original (texturecache is fast) */
-      _update_header(p_ctrl);
+   if (!_render_has_work(p_ctrl)) {
+      _restore_original(p_ctrl);
       return;
    }
    GFile *p_file = _current_file(p_ctrl);
    if (p_file == NULL) {
       p_ctrl->u_enhance_mask = 0;
       transform_init(&p_ctrl->t_xf);
-      p_ctrl->b_hold_original = FALSE; /* see the nothing-active branch */
-      p_ctrl->b_apply_pending = FALSE;
+      p_ctrl->b_preview       = FALSE;
+      p_ctrl->b_hold_original = FALSE; /* see _restore_original */
+      _drop_inflight(p_ctrl);
       _sync_panel(p_ctrl);
       _update_header(p_ctrl);
       return;
    }
+   if (p_ctrl->b_apply_pending) {
+      p_ctrl->b_relaunch = TRUE;
+      return;
+   }
+   _drop_inflight(p_ctrl); /* a fresh generation for the new launch */
    _launch(p_ctrl, p_file);
+}
+
+/* A preset was toggled or a transform committed: switch to the large view
+ * (the preview only makes sense there) and render. Tools use _render
+ * directly -- they have the large view already, and an override cleared by
+ * a view change must not pull the view back. */
+static void
+_apply_async(EnhanceCtrl *p_ctrl) {
+   if (!_has_navigator(p_ctrl) || p_ctrl->p_enhancer == NULL) {
+      return;
+   }
+   p_ctrl->p_ops->ensure_large_view(p_ctrl->p_host);
+   _render(p_ctrl);
 }
 
 /* Drop the current enhance preview and go back to showing the unmodified
@@ -592,9 +670,10 @@ static void
 _discard(EnhanceCtrl *p_ctrl) {
    p_ctrl->u_enhance_mask = 0;
    transform_init(&p_ctrl->t_xf);   /* a discard drops the turn/crop too */
-   p_ctrl->b_hold_original = FALSE; /* belt-and-braces: _apply_async's
-                                     * nothing-active branch also does this,
-                                     * but it early-returns without a
+   p_ctrl->b_preview       = FALSE; /* and a tool's override with it */
+   p_ctrl->b_hold_original = FALSE; /* belt-and-braces: _restore_original
+                                     * also does this, but _render
+                                     * early-returns without a
                                      * navigator/enhancer (issue 4) */
    _apply_async(p_ctrl);
 }
@@ -607,15 +686,60 @@ enhance_ctrl_get_transform(EnhanceCtrl *p_ctrl) {
    return (&p_ctrl->t_xf);
 }
 
+/* Drop p_t's crop when nothing of it lies on its base any more (a crop
+ * committed on one base, then a straighten that shrank the base past it):
+ * the chain would skip it silently while the title said "crop". Needs the
+ * original's size; unknown (no apply landed, nothing cached) means there is
+ * no base to judge by and the chain's own guard is the net. */
+static void
+_drop_collapsed_crop(EnhanceCtrl *p_ctrl, Transform *p_t) {
+   gint i_ow, i_oh;
+   if (!p_t->b_crop || !_orig_size(p_ctrl, &i_ow, &i_oh)) {
+      return;
+   }
+   gdouble  d_bw, d_bh;
+   CropRect t_eff;
+   transform_base_size(p_t, i_ow, i_oh, &d_bw, &d_bh);
+   if (!transform_effective_crop(p_t, d_bw, d_bh, &t_eff)) {
+      p_t->b_crop = FALSE;
+      _show_status(p_ctrl, "Crop removed — nothing of it is left on the "
+                           "straightened image");
+   }
+}
+
 void
 enhance_ctrl_set_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf) {
    g_return_if_fail(p_ctrl != NULL && p_xf != NULL);
-   gboolean b_same = transform_equal(&p_ctrl->t_xf, p_xf);
-   p_ctrl->t_xf    = *p_xf;
+   Transform t_new = *p_xf;
+   _drop_collapsed_crop(p_ctrl, &t_new);
+   gboolean b_same   = transform_equal(_render_transform(p_ctrl), &t_new);
+   p_ctrl->t_xf      = t_new;
+   p_ctrl->b_preview = FALSE; /* a commit ends any tool override */
    if (b_same) {
-      return; /* stored (e.g. the auto-crop flag at 0 degrees), no render */
+      /* Nothing to render (e.g. the auto-crop flag at 0 degrees, or a crop
+       * tool that committed what was on screen), but the committed state
+       * may still have changed in name: keep saved/panel/title in step. */
+      _refresh_saved(p_ctrl);
+      _sync_panel(p_ctrl);
+      _update_header(p_ctrl);
+      return;
    }
    _apply_async(p_ctrl);
+}
+
+void
+enhance_ctrl_set_preview_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf) {
+   g_return_if_fail(p_ctrl != NULL);
+   Transform t_before = *_render_transform(p_ctrl);
+   if (p_xf != NULL) {
+      p_ctrl->t_preview = *p_xf;
+      p_ctrl->b_preview = TRUE;
+   } else {
+      p_ctrl->b_preview = FALSE;
+   }
+   if (!transform_equal(&t_before, _render_transform(p_ctrl))) {
+      _render(p_ctrl); /* not _apply_async: never switches views */
+   }
 }
 
 /* The original's size, from the last landed apply or -- before any apply,
@@ -668,6 +792,18 @@ enhance_ctrl_rotate_quarter(EnhanceCtrl *p_ctrl, gint i_dir) {
    }
    transform_rotate_quarter(&t_new, i_dir, i_bw, i_bh);
    enhance_ctrl_set_transform(p_ctrl, &t_new);
+}
+
+gboolean
+enhance_ctrl_get_orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h) {
+   g_return_val_if_fail(p_ctrl != NULL && p_w != NULL && p_h != NULL, FALSE);
+   return (_has_navigator(p_ctrl) && _orig_size(p_ctrl, p_w, p_h));
+}
+
+guint
+enhance_ctrl_get_render_count(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, 0);
+   return (p_ctrl->u_render_count);
 }
 
 gboolean
@@ -902,16 +1038,16 @@ enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl) {
    if (!b_same) {
       p_ctrl->u_enhance_mask = 0;
       transform_init(&p_ctrl->t_xf);
-      p_ctrl->i_orig_w        = 0; /* another image, another size */
+      p_ctrl->b_preview       = FALSE; /* a tool's override goes with it */
+      p_ctrl->i_orig_w        = 0;     /* another image, another size */
       p_ctrl->i_orig_h        = 0;
-      p_ctrl->b_apply_pending = FALSE;
       p_ctrl->b_saved         = FALSE;
+      p_ctrl->b_have_saved    = FALSE; /* the saved pair was this file's */
       p_ctrl->b_hint_shown    = FALSE;
       p_ctrl->b_hold_original = FALSE; /* mask cleared without going through
-                                        * _apply_async, so reset the hold flag
+                                        * _render, so reset the hold flag
                                         * here too (issue 4) */
-      p_ctrl->u_enhance_gen++;
-      g_cancellable_cancel(p_ctrl->p_enhance_cancel);
+      _drop_inflight(p_ctrl);
       g_clear_object(&p_ctrl->p_enhance_tex);
       if (p_ctrl->p_panel != NULL && p_cur == NULL) {
          _destroy(p_ctrl); /* nothing left to enhance */

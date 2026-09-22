@@ -5,7 +5,10 @@
  * shrinks below the minimum, moves slide along the edge, resizes anchor on
  * the opposite edge, the aspect lock keeps the shape while fitting the
  * room, hits prefer corners, a drag is computed from its start rectangle,
- * and a quarter turn keeps covering the same pixels.
+ * and a quarter turn keeps covering the same pixels. Negative rules: an
+ * edge dragged past the border never moves the opposite edge, NaN deltas
+ * change nothing, a 0x0 image and a rectangle entirely outside are safe,
+ * and the aspect lock holds at the minimum size.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -210,6 +213,117 @@ test_round_snaps_edges(void) {
    assert_rect(&s, 10, 10, 1, 1); /* never collapses to nothing */
 }
 
+/* Dragging the LEFT / TOP edge (or the top-left corner) past the border is
+ * an intersection: the edge stops at 0 and the OPPOSITE edge stays where it
+ * was. The old clamp zeroed x and then re-clamped the width, which stretched
+ * {50,50,20,20} into {0,50,100,20} -- the right edge jumped from 70 to 100.
+ * Holds with and without the aspect lock. */
+static void
+test_overshoot_keeps_the_opposite_edge(void) {
+   CropRect r = {50, 50, 20, 20};
+   croprect_resize(&r, CROPRECT_HIT_LEFT, -100, 0, 0.0, 100, 100);
+   assert_rect(&r, 0, 50, 70, 20);
+   r = (CropRect){50, 50, 20, 20};
+   croprect_resize(&r, CROPRECT_HIT_TOP, 0, -100, 0.0, 100, 100);
+   assert_rect(&r, 50, 0, 20, 70);
+   r = (CropRect){50, 50, 20, 20};
+   croprect_resize(&r, CROPRECT_HIT_TOP_LEFT, -100, -100, 0.0, 100, 100);
+   assert_rect(&r, 0, 0, 70, 70);
+   /* Aspect 1:1, left edge: the width is the room the right edge leaves
+    * (70), the height follows about the old centre. */
+   r = (CropRect){50, 50, 20, 20};
+   croprect_resize(&r, CROPRECT_HIT_LEFT, -100, 0, 1.0, 100, 100);
+   assert_rect(&r, 0, 25, 70, 70);
+   r = (CropRect){50, 50, 20, 20};
+   croprect_resize(&r, CROPRECT_HIT_TOP_LEFT, -100, -100, 1.0, 100, 100);
+   assert_rect(&r, 0, 0, 70, 70);
+   /* The same through the drag entry point (what the pointer path calls). */
+   CropRect start = {50, 50, 20, 20};
+   croprect_drag(&r, &start, CROPRECT_HIT_LEFT, -100, 0, 0.0, 100, 100);
+   assert_rect(&r, 0, 50, 70, 20);
+   /* The clamp itself, on a rectangle hanging off the left/top. */
+   r = (CropRect){-30, -30, 60, 60};
+   croprect_clamp(&r, 100, 100);
+   assert_rect(&r, 0, 0, 30, 30);
+}
+
+/* A NaN delta (a pointer event without coordinates) must never reach the
+ * rectangle: move / resize / drag by NaN are no-ops, and a rectangle that
+ * somehow holds NaN is repaired by the clamp rather than passed on. */
+static void
+test_nan_never_propagates(void) {
+   CropRect r = {100, 100, 100, 50};
+   croprect_move(&r, NAN, NAN, W, H);
+   assert_rect(&r, 100, 100, 100, 50);
+   croprect_resize(&r, CROPRECT_HIT_BOTTOM_RIGHT, NAN, NAN, 0.0, W, H);
+   assert_rect(&r, 100, 100, 100, 50);
+   croprect_resize(&r, CROPRECT_HIT_RIGHT, NAN, 0, 2.0, W, H);
+   assert_rect(&r, 100, 100, 100, 50);
+   croprect_set_aspect(&r, NAN, W, H); /* NaN aspect reads as "free" */
+   assert_rect(&r, 100, 100, 100, 50);
+   CropRect start = r;
+   croprect_drag(&r, &start, CROPRECT_HIT_INSIDE, NAN, 5, 0.0, W, H);
+   assert_rect(&r, 100, 105, 100, 50);
+   CropRect bad = {NAN, 10, NAN, 20};
+   croprect_clamp(&bad, W, H);
+   g_assert_true(isfinite(bad.d_x) && isfinite(bad.d_w));
+   assert_rect(&bad, 0, 10, W, 20);
+   croprect_clamp(&r, NAN, NAN); /* a NaN image is an empty one */
+   g_assert_true(isfinite(r.d_x) && isfinite(r.d_w));
+}
+
+/* A 0x0 image (nothing decoded yet) yields an empty rectangle that every
+ * operation leaves empty and finite; a rectangle entirely outside, at
+ * negative coordinates, is pulled back to the nearest corner at the minimum
+ * size rather than left where the chain could not crop. */
+static void
+test_zero_image_and_outside_rect(void) {
+   CropRect r;
+   croprect_init_full(&r, 0, 0);
+   assert_rect(&r, 0, 0, 0, 0);
+   g_assert_true(croprect_is_full(&r, 0, 0));
+   croprect_move(&r, 10, 10, 0, 0);
+   croprect_resize(&r, CROPRECT_HIT_RIGHT, 10, 0, 1.0, 0, 0);
+   croprect_set_aspect(&r, 1.0, 0, 0);
+   assert_rect(&r, 0, 0, 0, 0);
+   g_assert_cmpint(croprect_hit(&r, 0, 0, 5), ==, CROPRECT_HIT_TOP_LEFT);
+   croprect_init_full(&r, -5, -5); /* negative sizes are empty too */
+   assert_rect(&r, 0, 0, 0, 0);
+   CropRect out = {-50, -50, 10, 10};
+   croprect_clamp(&out, W, H);
+   assert_rect(&out, 0, 0, CROPRECT_MIN_SIZE, CROPRECT_MIN_SIZE);
+   out = (CropRect){-50, -50, 10, 10};
+   croprect_move(&out, -1, -1, W, H); /* a move slides it in at its size */
+   assert_rect(&out, 0, 0, 10, 10);
+   out = (CropRect){W + 10, H + 10, 10, 10};
+   croprect_clamp(&out, W, H);
+   assert_rect(&out, W - CROPRECT_MIN_SIZE, H - CROPRECT_MIN_SIZE,
+               CROPRECT_MIN_SIZE, CROPRECT_MIN_SIZE);
+}
+
+/* The aspect lock holds at the minimum size: a 2:1 lock on the 8x8 minimum
+ * grows the width to 16 rather than clamping the height back up to 8 and
+ * ending at 8x8. Same for a resize that hits the minimum. */
+static void
+test_aspect_lock_holds_at_minimum_size(void) {
+   CropRect r = {100, 100, CROPRECT_MIN_SIZE, CROPRECT_MIN_SIZE};
+   croprect_set_aspect(&r, 2.0, W, H);
+   assert_rect(&r, 96, 100, 2 * CROPRECT_MIN_SIZE, CROPRECT_MIN_SIZE);
+   r = (CropRect){100, 100, CROPRECT_MIN_SIZE, CROPRECT_MIN_SIZE};
+   croprect_set_aspect(&r, 0.5, W, H); /* taller: the height grows */
+   assert_rect(&r, 100, 96, CROPRECT_MIN_SIZE, 2 * CROPRECT_MIN_SIZE);
+   /* A right-edge drag to nothing with a 2:1 lock: 16x8, not 8x8. */
+   r = (CropRect){100, 100, 100, 50};
+   croprect_resize(&r, CROPRECT_HIT_RIGHT, -500, 0, 2.0, W, H);
+   g_assert_cmpfloat(r.d_w, ==, 2 * CROPRECT_MIN_SIZE);
+   g_assert_cmpfloat(r.d_h, ==, CROPRECT_MIN_SIZE);
+   /* And a bottom-edge drag with a 1:2 lock: 8x16. */
+   r = (CropRect){100, 100, 100, 50};
+   croprect_resize(&r, CROPRECT_HIT_BOTTOM, 0, -500, 0.5, W, H);
+   g_assert_cmpfloat(r.d_w, ==, CROPRECT_MIN_SIZE);
+   g_assert_cmpfloat(r.d_h, ==, 2 * CROPRECT_MIN_SIZE);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -237,5 +351,12 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/croprect/rotate_quarter_keeps_the_same_pixels",
                    test_rotate_quarter_keeps_the_same_pixels);
    g_test_add_func("/croprect/round_snaps_edges", test_round_snaps_edges);
+   g_test_add_func("/croprect/overshoot_keeps_the_opposite_edge",
+                   test_overshoot_keeps_the_opposite_edge);
+   g_test_add_func("/croprect/nan_never_propagates", test_nan_never_propagates);
+   g_test_add_func("/croprect/zero_image_and_outside_rect",
+                   test_zero_image_and_outside_rect);
+   g_test_add_func("/croprect/aspect_lock_holds_at_minimum_size",
+                   test_aspect_lock_holds_at_minimum_size);
    return (g_test_run());
 }

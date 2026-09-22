@@ -75,24 +75,38 @@ croprect_equal(const CropRect *p_a, const CropRect *p_b) {
       fabs(p_a->d_w - p_b->d_w) < 1e-6 && fabs(p_a->d_h - p_b->d_h) < 1e-6);
 }
 
+/* A non-finite coordinate can only come from a NaN/inf pointer delta or a
+ * corrupt rectangle; it must never propagate (a NaN edge fails every
+ * comparison, so CLAMP would hand it straight through). Fall back to d_alt. */
+static gdouble
+_finite_or(gdouble d_v, gdouble d_alt) {
+   return (isfinite(d_v) ? d_v : d_alt);
+}
+
 void
 croprect_clamp(CropRect *p_r, gdouble d_w, gdouble d_h) {
    g_return_if_fail(p_r != NULL);
-   d_w = MAX(d_w, 0.0);
-   d_h = MAX(d_h, 0.0);
-   /* Intersect with the image first (an edge past the border is pulled
-    * back to it; the rest of the rectangle stays where it was), THEN grow
-    * to the minimum and slide back in if that overshot. The floor is the
-    * image itself when that is smaller than the minimum: a 6x3 fixture must
-    * still yield a rectangle, just the whole image. */
+   d_w      = MAX(_finite_or(d_w, 0.0), 0.0);
+   d_h      = MAX(_finite_or(d_h, 0.0), 0.0);
+   p_r->d_x = _finite_or(p_r->d_x, 0.0);
+   p_r->d_y = _finite_or(p_r->d_y, 0.0);
+   p_r->d_w = _finite_or(p_r->d_w, d_w);
+   p_r->d_h = _finite_or(p_r->d_h, d_h);
+   /* Intersect with the image FIRST -- every edge past the border is pulled
+    * back to it and the opposite edge stays put -- THEN grow to the minimum
+    * and slide back in if that overshot. Clamping x and then the width (the
+    * old order) turned a left edge dragged past the border into a wider
+    * rectangle: {50,50,20,20} with the left edge at -50 became {0,50,100,20},
+    * its right edge jumping from 70 to 100. The floor is the image itself
+    * when that is smaller than the minimum: a 6x3 fixture must still yield
+    * a rectangle, just the whole image. */
    gdouble d_min_w = MIN(CROPRECT_MIN_SIZE, d_w);
    gdouble d_min_h = MIN(CROPRECT_MIN_SIZE, d_h);
-   p_r->d_x        = CLAMP(p_r->d_x, 0.0, d_w);
-   p_r->d_y        = CLAMP(p_r->d_y, 0.0, d_h);
-   p_r->d_w        = MAX(MIN(p_r->d_w, d_w - p_r->d_x), d_min_w);
-   p_r->d_h        = MAX(MIN(p_r->d_h, d_h - p_r->d_y), d_min_h);
-   p_r->d_x        = CLAMP(p_r->d_x, 0.0, d_w - p_r->d_w);
-   p_r->d_y        = CLAMP(p_r->d_y, 0.0, d_h - p_r->d_h);
+   croprect_intersect(p_r, d_w, d_h);
+   p_r->d_w = MAX(p_r->d_w, d_min_w);
+   p_r->d_h = MAX(p_r->d_h, d_min_h);
+   p_r->d_x = CLAMP(p_r->d_x, 0.0, d_w - p_r->d_w);
+   p_r->d_y = CLAMP(p_r->d_y, 0.0, d_h - p_r->d_h);
 }
 
 void
@@ -114,9 +128,10 @@ croprect_move(CropRect *p_r, gdouble d_dx, gdouble d_dy, gdouble d_w,
    g_return_if_fail(p_r != NULL);
    /* Clamp the POSITION, not the rectangle: a move keeps its size and stops
     * at the border (croprect_clamp alone would shrink a rectangle pushed
-    * past it). */
-   p_r->d_x += d_dx;
-   p_r->d_y += d_dy;
+    * past it). A NaN delta (a pointer event without coordinates) moves
+    * nothing rather than poisoning the rectangle. */
+   p_r->d_x += _finite_or(d_dx, 0.0);
+   p_r->d_y += _finite_or(d_dy, 0.0);
    p_r->d_x = CLAMP(p_r->d_x, 0.0, MAX(0.0, d_w - p_r->d_w));
    p_r->d_y = CLAMP(p_r->d_y, 0.0, MAX(0.0, d_h - p_r->d_h));
    croprect_clamp(p_r, d_w, d_h);
@@ -204,6 +219,27 @@ _place(_Anchor e_anchor, gdouble *p_lo, gdouble d_old, gdouble d_new) {
    }
 }
 
+/* The aspect-locked size (d_nw, d_nh) with the minimum enforced by growing
+ * the OTHER side rather than by the clamp's per-axis floor, which would
+ * break the lock (8x8 is not 2:1). Shared by the resize and set_aspect
+ * paths. The image itself can still be the floor when it is smaller than
+ * the minimum times the aspect; then the clamp wins and the lock does not
+ * hold, which is the honest answer for a rectangle that cannot exist. */
+static void
+_aspect_min(gdouble *p_nw, gdouble *p_nh, gdouble d_aspect, gdouble d_w,
+            gdouble d_h) {
+   gdouble d_min_w = MIN(CROPRECT_MIN_SIZE, d_w);
+   gdouble d_min_h = MIN(CROPRECT_MIN_SIZE, d_h);
+   if (*p_nh < d_min_h) {
+      *p_nh = d_min_h;
+      *p_nw = d_min_h * d_aspect;
+   }
+   if (*p_nw < d_min_w) {
+      *p_nw = d_min_w;
+      *p_nh = d_min_w / d_aspect;
+   }
+}
+
 /* Give p_r the aspect d_aspect after a drag of e: the dragged dimension
  * leads (only a pure top/bottom drag lets the height lead), the other
  * follows, and if the shape then does not fit the room its anchors leave
@@ -234,6 +270,7 @@ _fit_aspect(CropRect *p_r, CropRectHit e, gdouble d_aspect, gdouble d_w,
       d_nh = d_room_h;
       d_nw = d_nh * d_aspect;
    }
+   _aspect_min(&d_nw, &d_nh, d_aspect, d_w, d_h);
    _place(e_ax, &p_r->d_x, p_r->d_w, d_nw);
    _place(e_ay, &p_r->d_y, p_r->d_h, d_nh);
    p_r->d_w = d_nw;
@@ -247,8 +284,11 @@ croprect_resize(CropRect *p_r, CropRectHit e_edge, gdouble d_dx, gdouble d_dy,
    if (e_edge == CROPRECT_HIT_NONE || e_edge == CROPRECT_HIT_INSIDE) {
       return;
    }
-   _move_edges(p_r, e_edge, d_dx, d_dy, MIN(CROPRECT_MIN_SIZE, d_w),
-               MIN(CROPRECT_MIN_SIZE, d_h));
+   /* A NaN delta resizes by nothing; a NaN aspect (never produced by the
+    * key table, but the value is a plain double) reads as "free" -- the
+    * `> 0.0` test is false for NaN, which is the right answer here. */
+   _move_edges(p_r, e_edge, _finite_or(d_dx, 0.0), _finite_or(d_dy, 0.0),
+               MIN(CROPRECT_MIN_SIZE, d_w), MIN(CROPRECT_MIN_SIZE, d_h));
    if (d_aspect > 0.0) {
       _fit_aspect(p_r, e_edge, d_aspect, d_w, d_h);
    }
@@ -258,17 +298,20 @@ croprect_resize(CropRect *p_r, CropRectHit e_edge, gdouble d_dx, gdouble d_dy,
 void
 croprect_set_aspect(CropRect *p_r, gdouble d_aspect, gdouble d_w, gdouble d_h) {
    g_return_if_fail(p_r != NULL);
-   if (d_aspect <= 0.0) {
-      return; /* free: keep whatever shape the user made */
+   if (!(d_aspect > 0.0) || !isfinite(d_aspect)) {
+      return; /* free (0, negative, NaN): keep whatever shape the user made */
    }
    /* The largest rectangle of that shape inside the current one, centred
-    * on it, so switching 3:2 -> 1:1 -> 3:2 stays put rather than drifting. */
+    * on it, so switching 3:2 -> 1:1 -> 3:2 stays put rather than drifting.
+    * At the minimum size the other side grows instead (_aspect_min), so
+    * the lock holds for a rectangle that was already as small as it gets. */
    gdouble d_nw = p_r->d_w;
    gdouble d_nh = d_nw / d_aspect;
    if (d_nh > p_r->d_h) {
       d_nh = p_r->d_h;
       d_nw = d_nh * d_aspect;
    }
+   _aspect_min(&d_nw, &d_nh, d_aspect, d_w, d_h);
    p_r->d_x += (p_r->d_w - d_nw) / 2.0;
    p_r->d_y += (p_r->d_h - d_nh) / 2.0;
    p_r->d_w = d_nw;

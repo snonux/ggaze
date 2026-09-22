@@ -1213,11 +1213,42 @@ _action_info(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 /* Esc: one contextual step per press, in this order -- stop a running
- * slideshow; discard an active enhance preview (said out loud: it used to
- * vanish silently); leave fullscreen; clear marks; large -> grid; and in the
- * grid quit, but only on a SECOND Esc within GGAZE_ESC_QUIT_WINDOW_MS (the
- * first one says so), because `Esc Esc` from the large view is a common
- * "get me out of here" reflex that must not exit the program. */
+ * slideshow; cancel a crop/straighten tool; close the enhance panel; discard
+ * an active enhance preview (said out loud: it used to vanish silently);
+ * leave fullscreen; clear marks; large -> grid; and in the grid quit, but
+ * only on a SECOND Esc within GGAZE_ESC_QUIT_WINDOW_MS (the first one says
+ * so), because `Esc Esc` from the large view is a common "get me out of
+ * here" reflex that must not exit the program. docs/ui-and-interactions.md
+ * lists the same order. */
+#if GGAZE_HAVE_GEGL
+/* The enhance-side steps of Esc, in order: cancel a tool, close the panel,
+ * discard the preview. TRUE iff one of them was the step taken. Split out
+ * of _action_back to keep both under the 50-line limit. */
+static gboolean
+_back_enhance_step(GgazeWindow *p_win) {
+   /* A tool overlay is the most transient thing on screen, so Esc leaves it
+    * first (a real key press never gets here -- the tool's own capture-phase
+    * controller answers Esc -- but the action path covers tests and the
+    * menu). */
+   if (tool_ctrl_get_tool(p_win->p_tool_ctrl) != GGAZE_TOOL_NONE) {
+      tool_ctrl_cancel(p_win->p_tool_ctrl);
+      return (TRUE);
+   }
+   /* With the enhance panel open, Esc closes the panel and keeps the
+    * preview; the next Esc drops the preview (saved or not -- it is on
+    * screen either way). */
+   if (enhance_ctrl_close(p_win->p_enhance_ctrl)) {
+      return (TRUE);
+   }
+   if (enhance_ctrl_is_active(p_win->p_enhance_ctrl)) {
+      enhance_ctrl_discard(p_win->p_enhance_ctrl);
+      _show_status(p_win, "Enhance preview discarded");
+      return (TRUE);
+   }
+   return (FALSE);
+}
+#endif
+
 static void
 _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -1228,23 +1259,7 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       return;
    }
 #if GGAZE_HAVE_GEGL
-   /* A tool overlay is the most transient thing on screen, so Esc leaves it
-    * first (a real key press never gets here -- the tool's own capture-phase
-    * controller answers Esc -- but the action path covers tests and the
-    * menu). */
-   if (tool_ctrl_get_tool(p_win->p_tool_ctrl) != GGAZE_TOOL_NONE) {
-      tool_ctrl_cancel(p_win->p_tool_ctrl);
-      return;
-   }
-   /* With the enhance panel open, Esc closes the panel and keeps the
-    * preview; the next Esc drops the preview (saved or not -- it is on
-    * screen either way). */
-   if (enhance_ctrl_close(p_win->p_enhance_ctrl)) {
-      return;
-   }
-   if (enhance_ctrl_is_active(p_win->p_enhance_ctrl)) {
-      enhance_ctrl_discard(p_win->p_enhance_ctrl);
-      _show_status(p_win, "Enhance preview discarded");
+   if (_back_enhance_step(p_win)) {
       return;
    }
 #endif
@@ -1503,6 +1518,12 @@ ggaze_window_tool_drag(GgazeWindow *p_win, GgazeViewerDragPhase e_phase,
    tool_ctrl_drag(p_win->p_tool_ctrl, e_phase, d_x, d_y);
 }
 
+guint
+ggaze_window_enhance_render_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (enhance_ctrl_get_render_count(p_win->p_enhance_ctrl));
+}
+
 /* The tools' key controller (window-level, capture phase, see
  * _init_tool_state): while a tool is active its modal keys are answered
  * here and STOPPED, so the GLOBAL-scope shortcut table (which runs later, in
@@ -1624,6 +1645,12 @@ ggaze_window_tool_drag(GgazeWindow *p_win, GgazeViewerDragPhase e_phase,
    (void)e_phase;
    (void)d_x;
    (void)d_y;
+}
+
+guint
+ggaze_window_enhance_render_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (0); /* no GEGL, no renders */
 }
 static void
 _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {

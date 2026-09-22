@@ -351,17 +351,19 @@ _append_preset(GeglNode *p_graph, GeglNode *p_prev,
  * to the analytic transform_base_size so the output is exactly the size the
  * crop tool laid its rectangle out on. */
 
-/* A gegl:crop of the analytic size d_w x d_h centred in p_prev's bounding
- * box (the straighten turns about the centre, so that is where the kept
- * pixels are). Whole-pixel offsets: an integer crop cannot be truer than
- * that. */
+/* A gegl:crop of the analytic size d_w x d_h centred on the point (d_cx,
+ * d_cy) the straighten turned about -- NOT on the rotated node's bounding
+ * box, which GEGL pads asymmetrically for the sampler (measured: a 400x300
+ * at 1 degree gets a -3,-4 origin and a 406x308 extent), so centring on it
+ * shifted the crop by up to a pixel and let antialiased edge pixels in.
+ * Whole-pixel offsets: an integer crop cannot be truer than that, and the
+ * half-pixel this rounding can cost is inside TRANSFORM_AUTOCROP_INSET. */
 static GeglNode *
-_append_centred_crop(GeglNode *p_graph, GeglNode *p_prev, gdouble d_w,
-                     gdouble d_h) {
-   GeglRectangle t_bbox = gegl_node_get_bounding_box(p_prev);
-   gdouble       d_x    = t_bbox.x + floor((t_bbox.width - d_w) / 2.0);
-   gdouble       d_y    = t_bbox.y + floor((t_bbox.height - d_h) / 2.0);
-   GeglNode     *p_crop =
+_append_centred_crop(GeglNode *p_graph, GeglNode *p_prev, gdouble d_cx,
+                     gdouble d_cy, gdouble d_w, gdouble d_h) {
+   gdouble   d_x = round(d_cx - d_w / 2.0);
+   gdouble   d_y = round(d_cy - d_h / 2.0);
+   GeglNode *p_crop =
       gegl_node_new_child(p_graph, "operation", "gegl:crop", "x", d_x, "y", d_y,
                           "width", d_w, "height", d_h, NULL);
    gegl_node_link(p_prev, p_crop);
@@ -380,32 +382,32 @@ _append_quarter_turn(GeglNode *p_graph, GeglNode *p_prev, gint i_quarter) {
    return (p_rot);
 }
 
-/* `R`: the straighten angle about the image centre, then a crop to either
- * the largest inscribed rectangle (auto-crop) or the rotated bounding box
- * -- both the analytic sizes transform_base_size promises. */
+/* `R`: the straighten angle about the image centre, then a crop to the size
+ * transform_straighten_size promises -- the inset inscribed rectangle
+ * (auto-crop) or the rotated bounding box -- about that same centre, so the
+ * output is exactly transform_base_size and every auto-cropped pixel is
+ * fully opaque (tests/test_enhancer.c straighten_autocrop_is_opaque). */
 static GeglNode *
 _append_straighten(GeglNode *p_graph, GeglNode *p_prev, const Transform *p_xf) {
    GeglRectangle t_bbox = gegl_node_get_bounding_box(p_prev);
+   gdouble       d_cx   = t_bbox.x + t_bbox.width / 2.0;
+   gdouble       d_cy   = t_bbox.y + t_bbox.height / 2.0;
    GeglNode     *p_rot  = gegl_node_new_child(
       p_graph, "operation", "gegl:rotate", "degrees", -p_xf->d_degrees,
-      "origin-x", t_bbox.x + t_bbox.width / 2.0, "origin-y",
-      t_bbox.y + t_bbox.height / 2.0, NULL);
+      "origin-x", d_cx, "origin-y", d_cy, NULL);
    gegl_node_link(p_prev, p_rot);
    gdouble d_w, d_h;
-   if (p_xf->b_autocrop) {
-      transform_autocrop_size(t_bbox.width, t_bbox.height, p_xf->d_degrees,
-                              &d_w, &d_h);
-   } else {
-      transform_rotated_size(t_bbox.width, t_bbox.height, p_xf->d_degrees, &d_w,
-                             &d_h);
-   }
-   return (_append_centred_crop(p_graph, p_rot, d_w, d_h));
+   transform_straighten_size(t_bbox.width, t_bbox.height, p_xf->d_degrees,
+                             p_xf->b_autocrop, &d_w, &d_h);
+   return (_append_centred_crop(p_graph, p_rot, d_cx, d_cy, d_w, d_h));
 }
 
 /* `c`: the user's crop, clamped into the base image it was drawn on
  * (transform_effective_crop) and offset by that image's origin. An empty
- * result (the base shrank under it) skips the crop rather than emitting
- * nothing. */
+ * result skips the crop rather than emitting nothing; the controller clears
+ * b_crop before it gets here (enhance_ctrl_set_transform drops a crop that
+ * no longer fits its base, with a status line), so this is the chain's own
+ * safety net for a Transform value built by hand. */
 static GeglNode *
 _append_user_crop(GeglNode *p_graph, GeglNode *p_prev, const Transform *p_xf) {
    GeglRectangle t_bbox = gegl_node_get_bounding_box(p_prev);

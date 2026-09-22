@@ -40,11 +40,14 @@ struct ToolCtrl {
    const ToolCtrlHostOps *p_ops;  /* borrowed */
    gpointer               p_host; /* the window, borrowed */
 
-   GgazeTool e_tool;  /* which tool has the view (NONE = idle) */
-   GFile    *p_file;  /* owned: the file the tool started on, so a
-                       * navigation away can be told from a rescan */
-   Transform t_saved; /* the transform at tool start (Esc restores) */
-   Transform t_work;  /* the transform on the preview while editing */
+   GgazeTool e_tool;         /* which tool has the view (NONE = idle) */
+   GFile    *p_file;         /* owned: the file the tool started on, so a
+                              * navigation away can be told from a rescan */
+   Transform t_saved;        /* the transform at tool start (Esc restores) */
+   Transform t_work;         /* the transform on the preview while editing */
+   gboolean  b_crop_dropped; /* straighten: a committed crop was lost to the
+                              * shrinking base this session (said in the
+                              * status line until Enter / Esc) */
 
    /* crop */
    CropRect t_rect;     /* the rectangle, in base-image px */
@@ -255,8 +258,9 @@ _begin(ToolCtrl *p_tc, GgazeTool e_tool) {
    p_tc->p_ops->ensure_large_view(p_tc->p_host);
    p_tc->e_tool = e_tool;
    g_set_object(&p_tc->p_file, p_cur);
-   p_tc->t_saved = *enhance_ctrl_get_transform(p_tc->p_ec);
-   p_tc->t_work  = p_tc->t_saved;
+   p_tc->t_saved        = *enhance_ctrl_get_transform(p_tc->p_ec);
+   p_tc->t_work         = p_tc->t_saved;
+   p_tc->b_crop_dropped = FALSE;
    ggaze_viewer_set_overlay(_viewer(p_tc), _draw_cb, _drag_cb, p_tc);
    return (TRUE);
 }
@@ -282,9 +286,12 @@ _ensure_rect(ToolCtrl *p_tc) {
    return (TRUE);
 }
 
-/* `c`: preview the base (the committed transform minus its crop) and lay
- * the rectangle out on it -- the previous crop, if there was one, so it can
- * be adjusted rather than redrawn. */
+/* `c`: show the base (the committed transform minus its crop) and lay the
+ * rectangle out on it -- the previous crop, if there was one, so it can be
+ * adjusted rather than redrawn. The base is a PREVIEW override, not a
+ * commit: the committed crop keeps counting as work while the tool is open,
+ * so `s` in the tool still exports it and navigating away still prompts
+ * for it (committing "no crop" here used to lose it silently). */
 static void
 _start_crop(ToolCtrl *p_tc) {
    if (!_begin(p_tc, GGAZE_TOOL_CROP)) {
@@ -296,7 +303,7 @@ _start_crop(ToolCtrl *p_tc) {
    p_tc->i_base_w      = 0;
    p_tc->i_base_h      = 0;
    p_tc->t_work.b_crop = FALSE;
-   enhance_ctrl_set_transform(p_tc->p_ec, &p_tc->t_work);
+   enhance_ctrl_set_preview_transform(p_tc->p_ec, &p_tc->t_work);
    _ensure_rect(p_tc); /* now if the size is known, else on first use */
    _redraw(p_tc);
    _status(p_tc, _CROP_HINT);
@@ -310,9 +317,12 @@ _straighten_status(ToolCtrl *p_tc) {
    g_ascii_formatd(c_num, sizeof(c_num), "%.1f", fabs(p_tc->t_work.d_degrees));
    char *c_msg =
       g_strdup_printf("Straighten %s° %s — drag along the horizon · h/l nudge "
-                      "½° · A auto-crop %s · Enter applies, Esc cancels",
+                      "½° · A auto-crop %s · Enter applies, Esc cancels%s",
                       c_num, p_tc->t_work.d_degrees < 0.0 ? "CCW" : "CW",
-                      p_tc->t_work.b_autocrop ? "on" : "off");
+                      p_tc->t_work.b_autocrop ? "on" : "off",
+                      p_tc->b_crop_dropped ? " · crop removed (nothing of "
+                                             "it left at this angle)"
+                                           : "");
    _status(p_tc, c_msg);
    g_free(c_msg);
 }
@@ -363,12 +373,10 @@ _rect_aspect(ToolCtrl *p_tc, gdouble d_aspect) {
    _redraw(p_tc);
 }
 
-/* The crop tool's own keys (the common Enter/Esc/tool keys are handled
- * before this). Every edit needs the rectangle laid out, which needs the
- * base size: until that is known the key is consumed with a status line
- * rather than passed on to, say, win.prev. */
+/* The aspect presets: 1-4 lock 1:1 / 3:2 / 4:3 / 16:9, 0 frees. TRUE iff
+ * u_keyval is one of them, with the ratio in *p_aspect. */
 static gboolean
-_crop_key(ToolCtrl *p_tc, guint u_keyval) {
+_aspect_for_key(guint u_keyval, gdouble *p_aspect) {
    static const struct {
       guint   u_key;
       gdouble d_aspect;
@@ -377,11 +385,27 @@ _crop_key(ToolCtrl *p_tc, guint u_keyval) {
                   {GDK_KEY_3, 4.0 / 3.0},
                   {GDK_KEY_4, 16.0 / 9.0},
                   {GDK_KEY_0, 0.0}};
+   for (gsize u = 0; u < G_N_ELEMENTS(ASPECTS); u++) {
+      if (ASPECTS[u].u_key == u_keyval) {
+         *p_aspect = ASPECTS[u].d_aspect;
+         return (TRUE);
+      }
+   }
+   return (FALSE);
+}
+
+/* The crop tool's own keys (the common Enter/Esc/tool keys are handled
+ * before this). Every edit needs the rectangle laid out, which needs the
+ * base size: until that is known the key is consumed with a status line
+ * rather than passed on to, say, win.prev. */
+static gboolean
+_crop_key(ToolCtrl *p_tc, guint u_keyval) {
    if (!_ensure_rect(p_tc)) {
       _status(p_tc, _RENDERING);
       return (TRUE);
    }
    gdouble d_step = _nudge_step(p_tc);
+   gdouble d_aspect;
    switch (u_keyval) {
    case GDK_KEY_h:
       _rect_move(p_tc, -d_step, 0.0);
@@ -410,11 +434,9 @@ _crop_key(ToolCtrl *p_tc, guint u_keyval) {
    default:
       break;
    }
-   for (gsize u = 0; u < G_N_ELEMENTS(ASPECTS); u++) {
-      if (ASPECTS[u].u_key == u_keyval) {
-         _rect_aspect(p_tc, ASPECTS[u].d_aspect);
-         return (TRUE);
-      }
+   if (_aspect_for_key(u_keyval, &d_aspect)) {
+      _rect_aspect(p_tc, d_aspect);
+      return (TRUE);
    }
    return (FALSE);
 }
@@ -476,11 +498,32 @@ _apply_crop(ToolCtrl *p_tc) {
 
 /* --- straighten editing --------------------------------------------------- */
 
+/* Every change of the angle or the auto-crop flag goes through here: the
+ * base image changes size with it, so a crop committed earlier is kept over
+ * the same content (transform_rebase_crop, anchored on the centre the
+ * straighten turns about) or, when nothing of it is left at this angle,
+ * dropped and said so in the status line -- never silently, and never with
+ * a title still claiming "crop". Esc restores the crop with the rest. */
 static void
-_nudge(ToolCtrl *p_tc, gdouble d_delta) {
-   transform_nudge_angle(&p_tc->t_work, d_delta);
+_change_straighten(ToolCtrl *p_tc, gdouble d_degrees, gboolean b_autocrop) {
+   Transform t_old         = p_tc->t_work;
+   p_tc->t_work.d_degrees  = d_degrees;
+   p_tc->t_work.b_autocrop = b_autocrop;
+   gint i_ow, i_oh;
+   if (p_tc->t_work.b_crop &&
+       enhance_ctrl_get_orig_size(p_tc->p_ec, &i_ow, &i_oh) &&
+       !transform_rebase_crop(&p_tc->t_work, &t_old, i_ow, i_oh)) {
+      p_tc->b_crop_dropped = TRUE;
+   }
    _push_work(p_tc);
    _straighten_status(p_tc);
+}
+
+static void
+_nudge(ToolCtrl *p_tc, gdouble d_delta) {
+   _change_straighten(p_tc,
+                      transform_clamp_angle(p_tc->t_work.d_degrees + d_delta),
+                      p_tc->t_work.b_autocrop);
 }
 
 static gboolean
@@ -497,9 +540,8 @@ _straighten_key(ToolCtrl *p_tc, guint u_keyval) {
       _nudge(p_tc, TRANSFORM_ANGLE_STEP); /* clockwise */
       return (TRUE);
    case GDK_KEY_A:
-      p_tc->t_work.b_autocrop = !p_tc->t_work.b_autocrop;
-      _push_work(p_tc);
-      _straighten_status(p_tc);
+      _change_straighten(p_tc, p_tc->t_work.d_degrees,
+                         !p_tc->t_work.b_autocrop);
       return (TRUE);
    default:
       return (FALSE);
@@ -508,7 +550,11 @@ _straighten_key(ToolCtrl *p_tc, guint u_keyval) {
 
 /* A drag in the straighten tool draws the horizon; on END the line's slope
  * (relative to the preview as it is now, so it ADDS to the current angle)
- * becomes the new angle and the image levels. */
+ * becomes the new angle and the image levels. An UPDATE or END without a
+ * BEGIN -- the drag started before `R` was pressed, or a stale end -- has
+ * no line to level by and is ignored, the way _crop_drag ignores a drag
+ * that began outside the rectangle (it used to apply whatever the start
+ * coordinates last held: a lone END at (300, 200) levelled by 35 degrees). */
 static void
 _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
                  gdouble d_iy) {
@@ -516,6 +562,8 @@ _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
       p_tc->b_line    = TRUE;
       p_tc->d_drag_x0 = d_ix;
       p_tc->d_drag_y0 = d_iy;
+   } else if (!p_tc->b_line) {
+      return;
    }
    p_tc->d_line_x1 = d_ix;
    p_tc->d_line_y1 = d_iy;
@@ -524,10 +572,9 @@ _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
       gdouble d_deg = transform_horizon_degrees(p_tc->d_drag_x0,
                                                 p_tc->d_drag_y0, d_ix, d_iy);
       if (d_deg != 0.0) {
-         p_tc->t_work.d_degrees =
-            transform_clamp_angle(p_tc->t_work.d_degrees + d_deg);
-         _push_work(p_tc);
-         _straighten_status(p_tc);
+         _change_straighten(
+            p_tc, transform_clamp_angle(p_tc->t_work.d_degrees + d_deg),
+            p_tc->t_work.b_autocrop);
       }
    }
    _redraw(p_tc);
@@ -711,7 +758,13 @@ tool_ctrl_cancel(ToolCtrl *p_tc) {
    GgazeTool e_was   = p_tc->e_tool;
    Transform t_saved = p_tc->t_saved;
    _leave(p_tc);
-   enhance_ctrl_set_transform(p_tc->p_ec, &t_saved);
+   if (e_was == GGAZE_TOOL_CROP) {
+      /* The crop tool never committed anything: dropping its base override
+       * is the whole restore (and keeps a saved preview saved). */
+      enhance_ctrl_set_preview_transform(p_tc->p_ec, NULL);
+   } else {
+      enhance_ctrl_set_transform(p_tc->p_ec, &t_saved);
+   }
    _status(p_tc, e_was == GGAZE_TOOL_CROP ? "Crop cancelled"
                                           : "Straighten cancelled");
 }
@@ -719,8 +772,16 @@ tool_ctrl_cancel(ToolCtrl *p_tc) {
 void
 tool_ctrl_abandon(ToolCtrl *p_tc) {
    g_return_if_fail(p_tc != NULL);
-   if (p_tc->e_tool != GGAZE_TOOL_NONE) {
-      _leave(p_tc);
+   if (p_tc->e_tool == GGAZE_TOOL_NONE) {
+      return;
+   }
+   GgazeTool e_was = p_tc->e_tool;
+   _leave(p_tc);
+   if (e_was == GGAZE_TOOL_CROP) {
+      /* The view left the large page under the tool: the committed crop
+       * must be back on the preview when the view returns (the override
+       * only re-renders, it never switches views). */
+      enhance_ctrl_set_preview_transform(p_tc->p_ec, NULL);
    }
 }
 
@@ -733,6 +794,11 @@ tool_ctrl_nav_changed(ToolCtrl *p_tc) {
    GFile *p_cur = _current_file(p_tc);
    if (p_cur == NULL || p_tc->p_file == NULL ||
        !g_file_equal(p_cur, p_tc->p_file)) {
-      tool_ctrl_abandon(p_tc); /* the preview under the tool was reset */
+      /* Another file: only leave. The controller's own nav_changed, which
+       * runs right after this, resets the transform AND a crop tool's
+       * override together; clearing the override here would render the
+       * old transform onto the new file first and make that reset think
+       * the preview already belongs to it. */
+      _leave(p_tc);
    }
 }

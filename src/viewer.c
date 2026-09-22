@@ -38,7 +38,9 @@ struct _GgazeViewer {
    gdouble             d_drag_start_x; /* where the current drag began, in
                                         * widget px (for the overlay's
                                         * absolute coordinates) */
-   gdouble d_drag_start_y;
+   gdouble  d_drag_start_y;
+   gboolean b_drag_to_overlay; /* the drag in progress began with a tool
+                                * overlay installed and belongs to it */
    /* The tool overlay (viewer.h): NULL callbacks = none installed. */
    GgazeViewerOverlayFn fn_overlay;
    GgazeViewerDragFn    fn_drag;
@@ -274,7 +276,13 @@ ggaze_viewer_class_init(GgazeViewerClass *p_klass) {
 
 /* A drag either pans the image or, while a tool overlay is installed, is
  * handed to the tool in absolute widget coordinates (GtkGestureDrag reports
- * offsets from the start point; the tool wants positions). */
+ * offsets from the start point; the tool wants positions). Which of the two
+ * it is gets decided at BEGIN and holds for the whole gesture: a tool that
+ * starts mid-drag never sees an UPDATE without its BEGIN, and a tool that
+ * goes away mid-drag (Esc while dragging the rectangle) hands the rest of
+ * the gesture to panning from where the pointer is NOW -- the pan origin is
+ * re-based at that moment, so the first pan step is not the whole offset
+ * accumulated since the press. */
 static void
 _drag_begin_cb(GtkGestureDrag *p_gesture, gdouble d_x, gdouble d_y,
                gpointer p_data) {
@@ -284,7 +292,8 @@ _drag_begin_cb(GtkGestureDrag *p_gesture, gdouble d_x, gdouble d_y,
    p_v->d_drag_start_y     = d_y;
    p_v->d_drag_start_pan_x = p_v->d_pan_x;
    p_v->d_drag_start_pan_y = p_v->d_pan_y;
-   if (p_v->fn_drag != NULL) {
+   p_v->b_drag_to_overlay  = (p_v->fn_drag != NULL);
+   if (p_v->b_drag_to_overlay) {
       p_v->fn_drag(GGAZE_VIEWER_DRAG_BEGIN, d_x, d_y, p_v->p_overlay_data);
    }
 }
@@ -294,10 +303,17 @@ _drag_update_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
                 gpointer p_data) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_data);
    (void)p_gesture;
-   if (p_v->fn_drag != NULL) {
-      p_v->fn_drag(GGAZE_VIEWER_DRAG_UPDATE, p_v->d_drag_start_x + d_dx,
-                   p_v->d_drag_start_y + d_dy, p_v->p_overlay_data);
-      return;
+   if (p_v->b_drag_to_overlay) {
+      if (p_v->fn_drag != NULL) {
+         p_v->fn_drag(GGAZE_VIEWER_DRAG_UPDATE, p_v->d_drag_start_x + d_dx,
+                      p_v->d_drag_start_y + d_dy, p_v->p_overlay_data);
+         return;
+      }
+      /* The overlay left mid-gesture: from here on this is a pan, measured
+       * from the current offset so nothing jumps. */
+      p_v->d_drag_start_pan_x = p_v->d_pan_x - d_dx;
+      p_v->d_drag_start_pan_y = p_v->d_pan_y - d_dy;
+      p_v->b_drag_to_overlay  = FALSE;
    }
    p_v->d_pan_x = p_v->d_drag_start_pan_x + d_dx;
    p_v->d_pan_y = p_v->d_drag_start_pan_y + d_dy;
@@ -309,10 +325,11 @@ _drag_end_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
              gpointer p_data) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_data);
    (void)p_gesture;
-   if (p_v->fn_drag != NULL) {
+   if (p_v->b_drag_to_overlay && p_v->fn_drag != NULL) {
       p_v->fn_drag(GGAZE_VIEWER_DRAG_END, p_v->d_drag_start_x + d_dx,
                    p_v->d_drag_start_y + d_dy, p_v->p_overlay_data);
    }
+   p_v->b_drag_to_overlay = FALSE;
 }
 
 /* The zoom centre for a scroll event: the pointer position translated into

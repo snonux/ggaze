@@ -63,10 +63,13 @@ gboolean croprect_is_full(const CropRect *p_r, gdouble d_w, gdouble d_h);
 gboolean croprect_equal(const CropRect *p_a, const CropRect *p_b);
 
 /* Force p_r inside the d_w x d_h image -- an edge past the border is pulled
- * back to it, the rest stays put (an intersection, not a slide) -- and at
- * least CROPRECT_MIN_SIZE on each side (the image itself may be smaller than
- * that: then the rectangle is the image). Every editing function ends with
- * this, so a rectangle is valid after any sequence of calls. */
+ * back to it, the rest stays put (an intersection, not a slide, so the
+ * opposite edge never moves) -- and at least CROPRECT_MIN_SIZE on each side
+ * (the image itself may be smaller than that: then the rectangle is the
+ * image; a rectangle entirely outside becomes a minimum-size one at the
+ * nearest corner). Non-finite fields are replaced (NaN never propagates).
+ * Every editing function ends with this, so a rectangle is valid after any
+ * sequence of calls. */
 void croprect_clamp(CropRect *p_r, gdouble d_w, gdouble d_h);
 
 /* Cut p_r down to the part inside the d_w x d_h image -- a plain
@@ -76,7 +79,7 @@ void croprect_clamp(CropRect *p_r, gdouble d_w, gdouble d_h);
 void croprect_intersect(CropRect *p_r, gdouble d_w, gdouble d_h);
 
 /* Translate by (d_dx, d_dy), sliding along the image edge rather than
- * leaving it (the size is preserved). */
+ * leaving it (the size is preserved). A non-finite delta moves nothing. */
 void croprect_move(CropRect *p_r, gdouble d_dx, gdouble d_dy, gdouble d_w,
                    gdouble d_h);
 
@@ -84,14 +87,17 @@ void croprect_move(CropRect *p_r, gdouble d_dx, gdouble d_dy, gdouble d_w,
  * reads d_dx, a vertical one only d_dy, a corner both. d_aspect > 0 locks
  * width/height to that ratio (w/h): the dragged dimension leads and the
  * other follows, anchored on the opposite edge (or centred, for an edge
- * that does not touch that axis). Then clamped. CROPRECT_HIT_INSIDE and
- * _NONE are no-ops. */
+ * that does not touch that axis), holding the lock down to the minimum size
+ * by growing the other side. Then clamped. CROPRECT_HIT_INSIDE and _NONE
+ * are no-ops, and so is a non-finite delta. */
 void croprect_resize(CropRect *p_r, CropRectHit e_edge, gdouble d_dx,
                      gdouble d_dy, gdouble d_aspect, gdouble d_w, gdouble d_h);
 
-/* Re-fit p_r to the aspect ratio d_aspect (w/h; 0 = free, a no-op) around
- * its own centre: the largest rectangle of that shape that fits inside the
- * current one, slid into the image if the centre was near an edge. */
+/* Re-fit p_r to the aspect ratio d_aspect (w/h; 0, negative or NaN = free,
+ * a no-op) around its own centre: the largest rectangle of that shape that
+ * fits inside the current one -- never smaller than the minimum on either
+ * side (the other side grows to keep the lock) -- slid into the image if
+ * the centre was near an edge. */
 void croprect_set_aspect(CropRect *p_r, gdouble d_aspect, gdouble d_w,
                          gdouble d_h);
 

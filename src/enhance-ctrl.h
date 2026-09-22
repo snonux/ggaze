@@ -28,9 +28,28 @@
  * `a` pressed once.
  *
  * Saving: `s` exports a copy and marks the preview SAVED; a saved preview is
- * no longer dirty, so moving on does not prompt for it. Any further preset
- * change makes it unsaved again. The gate's prompt therefore only ever asks
- * about work that has not been written anywhere.
+ * no longer dirty, so moving on does not prompt for it. What was saved is
+ * remembered as the (mask, transform) pair the export wrote: any state that
+ * differs from it is unsaved, and a state that comes back to exactly it (a
+ * tool cancelled back to it, a preset toggled off and on) is saved again --
+ * the file on disk is that state, whichever way it was reached. The gate's
+ * prompt therefore only ever asks about work that has not been written
+ * anywhere.
+ *
+ * Two transforms: the COMMITTED one (enhance_ctrl_set_transform) is what
+ * `s` exports, what the title names and what dirty/active are judged on;
+ * a tool may additionally set a PREVIEW override
+ * (enhance_ctrl_set_preview_transform) that only changes what the graph
+ * renders -- the crop tool shows the base image without its crop while the
+ * rectangle is edited, and the committed crop must keep counting as work
+ * meanwhile (or `s` in the tool would find nothing to save and navigating
+ * away would skip the prompt and lose it).
+ *
+ * Rendering is coalesced: at most one apply is in flight, and a state that
+ * arrives while one runs is remembered as "render again when this lands",
+ * so holding `l` in the straighten tool costs one extra render, not one
+ * full decode per repeat. The result on screen is always the latest state
+ * (last-write-wins), reached in at most two renders.
  *
  * The controller is a plain struct (not a GtkWidget), mirroring SaveGate /
  * DeleteConfirm: it reaches the window through a host vtable (EnhanceUIHostOps)
@@ -125,13 +144,23 @@ guint8           enhance_ctrl_get_mask(EnhanceCtrl *p_ctrl);
 /* The current Transform (borrowed; the identity when none is active). */
 const Transform *enhance_ctrl_get_transform(EnhanceCtrl *p_ctrl);
 
-/* Replace the Transform and re-apply the preview asynchronously (a new,
- * unsaved generation), exactly like toggling a preset. A transform equal
- * in effect to the current one (transform_equal) is stored but triggers no
- * re-apply, so a tool that pushes its working state on every nudge never
- * renders twice for nothing. With an empty mask and the identity the
- * original is restored. */
+/* Commit p_xf as THE Transform (dropping any preview override) and re-apply
+ * the preview asynchronously, exactly like toggling a preset. A transform
+ * that renders the same as what is on screen (transform_equal) is stored
+ * without a re-apply, so a tool that pushes its working state on every nudge
+ * never renders twice for nothing. With an empty mask and the identity the
+ * original is restored. A crop that no longer fits its base (the straighten
+ * shrank it away) is dropped with a status line, so the title never claims
+ * a crop the chain does not apply. */
 void enhance_ctrl_set_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf);
+
+/* Render p_xf instead of the committed transform (NULL: back to the
+ * committed one) without touching what `s` exports or what counts as work
+ * -- the crop tool's view of the base image. Re-applies only when the
+ * rendered transform actually changes, and never switches views (a tool
+ * abandoned by a view change clears its override from the grid). */
+void enhance_ctrl_set_preview_transform(EnhanceCtrl     *p_ctrl,
+                                        const Transform *p_xf);
 
 /* `]` (i_dir > 0) / `[` (i_dir < 0): one more quarter turn, one-shot, then
  * re-apply. An active crop turns with the image. */
@@ -147,6 +176,16 @@ gboolean enhance_ctrl_is_pending(EnhanceCtrl *p_ctrl);
  * transform_base_size), or FALSE when the original's size is not known yet
  * (no apply has landed for this file and its texture is not cached). */
 gboolean enhance_ctrl_get_base_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
+
+/* The original's upright size on the same terms (FALSE when unknown): what
+ * the straighten tool feeds transform_rebase_crop to keep a crop over the
+ * same content while the angle changes the base. */
+gboolean enhance_ctrl_get_orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
+
+/* How many preview renders (full decode + chain) this controller has
+ * launched so far. A test seam for the render coalescing: N rapid changes
+ * must cost at most two launches (tests/test_enhance_flow.c). */
+guint enhance_ctrl_get_render_count(EnhanceCtrl *p_ctrl);
 
 /* --- state queries --- */
 /* TRUE iff a GEGL preview is on screen (a preset enabled or a non-identity

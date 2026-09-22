@@ -53,7 +53,9 @@ void
 transform_rotate_quarter(Transform *p_t, gint i_dir, gdouble d_base_w,
                          gdouble d_base_h) {
    g_return_if_fail(p_t != NULL);
-   if (p_t->b_crop) {
+   if (p_t->b_crop && (d_base_w <= 0.0 || d_base_h <= 0.0)) {
+      p_t->b_crop = FALSE; /* no pixels to keep covering: see transform.h */
+   } else if (p_t->b_crop) {
       croprect_rotate_quarter(&p_t->t_crop, i_dir, d_base_w, d_base_h);
    }
    p_t->i_quarter = (p_t->i_quarter + (i_dir > 0 ? 1 : 3)) % 4;
@@ -63,6 +65,9 @@ transform_rotate_quarter(Transform *p_t, gint i_dir, gdouble d_base_w,
 
 gdouble
 transform_clamp_angle(gdouble d_deg) {
+   if (!isfinite(d_deg)) {
+      return (0.0); /* NaN/inf: round() would keep it and CLAMP pass it on */
+   }
    gdouble d_snapped =
       round(d_deg / TRANSFORM_ANGLE_STEP) * TRANSFORM_ANGLE_STEP;
    d_snapped = CLAMP(d_snapped, -TRANSFORM_ANGLE_MAX, TRANSFORM_ANGLE_MAX);
@@ -72,6 +77,9 @@ transform_clamp_angle(gdouble d_deg) {
 void
 transform_nudge_angle(Transform *p_t, gdouble d_delta) {
    g_return_if_fail(p_t != NULL);
+   if (!isfinite(d_delta)) {
+      return; /* a NaN nudge is no nudge (clamping the sum would zero it) */
+   }
    p_t->d_degrees = transform_clamp_angle(p_t->d_degrees + d_delta);
 }
 
@@ -80,8 +88,9 @@ transform_horizon_degrees(gdouble d_x0, gdouble d_y0, gdouble d_x1,
                           gdouble d_y1) {
    gdouble d_dx = d_x1 - d_x0;
    gdouble d_dy = d_y1 - d_y0;
-   if (fabs(d_dx) < 1e-9 && fabs(d_dy) < 1e-9) {
-      return (0.0);
+   if (!isfinite(d_dx) || !isfinite(d_dy) ||
+       (fabs(d_dx) < 1e-9 && fabs(d_dy) < 1e-9)) {
+      return (0.0); /* nothing to level, or no coordinates to level by */
    }
    /* The line's on-screen angle, clockwise-positive because y points down.
     * Fold it into (-90, 90] so the drag direction does not matter. */
@@ -150,6 +159,27 @@ transform_rotated_size(gdouble d_w, gdouble d_h, gdouble d_deg, gdouble *p_w,
 }
 
 void
+transform_straighten_size(gdouble d_w, gdouble d_h, gdouble d_deg,
+                          gboolean b_autocrop, gdouble *p_w, gdouble *p_h) {
+   g_return_if_fail(p_w != NULL && p_h != NULL);
+   if (d_deg == 0.0) {
+      *p_w = d_w;
+      *p_h = d_h;
+      return;
+   }
+   if (!b_autocrop) {
+      transform_rotated_size(d_w, d_h, d_deg, p_w, p_h);
+      return;
+   }
+   /* The inscribed rectangle minus the sampler's blend margin on every side
+    * (TRANSFORM_AUTOCROP_INSET), floored at a pixel so a tiny image still
+    * yields something the chain can crop to. */
+   transform_autocrop_size(d_w, d_h, d_deg, p_w, p_h);
+   *p_w = MAX(1.0, *p_w - 2.0 * TRANSFORM_AUTOCROP_INSET);
+   *p_h = MAX(1.0, *p_h - 2.0 * TRANSFORM_AUTOCROP_INSET);
+}
+
+void
 transform_base_size(const Transform *p_t, gdouble d_w, gdouble d_h,
                     gdouble *p_w, gdouble *p_h) {
    g_return_if_fail(p_t != NULL && p_w != NULL && p_h != NULL);
@@ -159,15 +189,8 @@ transform_base_size(const Transform *p_t, gdouble d_w, gdouble d_h,
       d_bw = d_h;
       d_bh = d_w;
    }
-   if (p_t->d_degrees != 0.0) {
-      if (p_t->b_autocrop) {
-         transform_autocrop_size(d_bw, d_bh, p_t->d_degrees, &d_bw, &d_bh);
-      } else {
-         transform_rotated_size(d_bw, d_bh, p_t->d_degrees, &d_bw, &d_bh);
-      }
-   }
-   *p_w = d_bw;
-   *p_h = d_bh;
+   transform_straighten_size(d_bw, d_bh, p_t->d_degrees, p_t->b_autocrop, p_w,
+                             p_h);
 }
 
 gboolean
@@ -188,6 +211,32 @@ transform_effective_crop(const Transform *p_t, gdouble d_base_w,
    }
    croprect_round(p_out);
    return (p_out->d_w >= 1.0 && p_out->d_h >= 1.0);
+}
+
+gboolean
+transform_rebase_crop(Transform *p_t, const Transform *p_old, gdouble d_orig_w,
+                      gdouble d_orig_h) {
+   g_return_val_if_fail(p_t != NULL && p_old != NULL, FALSE);
+   if (!p_t->b_crop) {
+      return (TRUE);
+   }
+   gdouble d_ow, d_oh, d_nw, d_nh;
+   transform_base_size(p_old, d_orig_w, d_orig_h, &d_ow, &d_oh);
+   transform_base_size(p_t, d_orig_w, d_orig_h, &d_nw, &d_nh);
+   /* Same offset from the centre as before: the straighten rotates and the
+    * auto-crop shrinks about the centre, so this keeps the rectangle over
+    * the content it framed (the content under it turns, the frame does not
+    * -- the closest thing to "the same pixels" a rotation allows). */
+   p_t->t_crop.d_x += (d_nw - d_ow) / 2.0;
+   p_t->t_crop.d_y += (d_nh - d_oh) / 2.0;
+   CropRect t_cut = p_t->t_crop;
+   croprect_intersect(&t_cut, d_nw, d_nh);
+   if (t_cut.d_w < 1.0 || t_cut.d_h < 1.0) {
+      p_t->b_crop = FALSE; /* nothing of it survives the new base */
+      return (FALSE);
+   }
+   p_t->t_crop = t_cut;
+   return (TRUE);
 }
 
 void

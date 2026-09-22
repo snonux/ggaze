@@ -10,11 +10,16 @@
  * the pointer drag over from panning, and claims a small set of keys
  * (docs/ui-and-interactions.md "Crop, straighten & rotate tools") until
  * Enter applies or Esc cancels. Everything it edits is the EnhanceCtrl's
- * Transform: the crop tool previews the base image (the committed transform
- * with the crop switched off) and commits a rectangle laid out on it; the
- * straighten tool pushes every nudge / horizon drag through
- * enhance_ctrl_set_transform so the image levels live, and cancel restores
- * the transform the tool started from. The one-shot `[` / `]` turns need no
+ * Transform: the crop tool shows the base image (the committed transform
+ * with the crop switched off) through enhance_ctrl_set_preview_transform --
+ * an override of what is rendered, never a commit, so a crop already
+ * applied keeps counting as work (`s` exports it, navigation prompts for
+ * it) while its rectangle is adjusted -- and commits a rectangle laid out
+ * on it; the straighten tool pushes every nudge / horizon drag through
+ * enhance_ctrl_set_transform so the image levels live (a committed crop
+ * follows the changing base, transform_rebase_crop, or is dropped with a
+ * status line when nothing of it is left), and cancel restores the
+ * transform the tool started from. The one-shot `[` / `]` turns need no
  * tool and go straight to enhance_ctrl_rotate_quarter.
  *
  * Geometry is delegated: croprect.c owns how the rectangle moves,
