@@ -51,8 +51,8 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `e`               | open in external program popup |
 | `!`               | run a shell script popup |
 | `Ctrl+c`          | copy image (or marked files) to the clipboard |
-| `a`, `1`–`8`, `0`  | quick GEGL enhance chooser · toggle preset · original (optional) |
-| `s`               | save an enhanced copy (original is never modified) |
+| `a`, `1`–`8`, `0`  | quick GEGL enhance side panel · toggle preset · original (optional) |
+| `s` / `Ctrl+S`     | save an enhanced copy (original is never modified; a saved preview no longer prompts) |
 | `Space` (hold)     | compare original vs modified |
 | `f` / `F11`        | fullscreen |
 | `S` / `F5`         | slideshow |

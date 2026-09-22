@@ -108,8 +108,8 @@ drift from the live bindings.
 | `m`            | move marks (or current) → destination popup |
 | `e`            | open current image in an external program → popup |
 | `!`            | run a shell script → popup (e.g. `usbimport`) |
-| `a`            | quick enhance → gallery window / popover (GEGL) |
-| `1`–`8` / `0`  | toggle enhance preset N (layered, large view) / back to original |
+| `a`            | quick enhance → side panel beside the image (GEGL) |
+| `1`–`8` / `0`  | toggle enhance preset N (layered, large view) / back to original (panel open) |
 | `u` / `Ctrl+z` | undo last `d` / `m` (restore from `.Trash` or move back) |
 | `o` / `Ctrl+o` | open image dialog (image filter) |
 | `O` / `Ctrl+Shift+o` | open folder dialog |
@@ -269,35 +269,36 @@ Loaded lazily; never blocks display of the pixels.
 
 ## Quick enhance (GEGL, optional)
 
-- **`a` → enhance chooser**: a resizable preview window by default, or the
-  same compact `GtkPopover` pattern as `m`/`e`/`!` when preview thumbnails are
-  disabled (shared `_popup_hotkey_char`/`_popup_key_to_index` helpers).
-  Lists configurable presets, each with an auto-assigned hotkey (`1`, `2`, …
-  then `0`, `a`-`z`, capped at the mask's 8 slots) plus a `0  Original` reset
-  row. Example:
+- **`a` → enhance side panel**: a narrow column of cards *beside* the large
+  view, inside the main window (switching to the large view first if needed)
+  — no second window, no popover. The image keeps the whole viewer. Cards:
+  `0  Original`, then one per configurable preset with an auto-assigned
+  hotkey (`1`, `2`, … capped at the mask's 8 slots), by default each with a
+  small preview thumbnail of that preset applied alone (Preferences can turn
+  the thumbnails off for label-only cards). Under the cards: a state line
+  that says whether the preview is unsaved, a **Save copy** button, and the
+  key hint (`1-8` toggle · `0` original · `Space` hold to see the original ·
+  `s / Ctrl+S` save · `Esc` close). Example:
   ```
-  Enhance IMG_0001.jpg:
-   1  Auto-fix
-   2  Brightness
-   3  Contrast
-   4  Saturation
-   5  Sharpen
-   6  Denoise
-   0  Original
+  Enhance IMG_0001.jpg
+   [thumb] 0  Original
+   [thumb] 1  Auto-fix
+   [thumb] 2  Brightness
+   …
+  Unsaved preview — press s to save a copy.
+  [ Save copy (s) ]
   ```
   Presets are **layered**: pressing `1` toggles "Auto-fix" on as a
   **non-destructive live preview**, and `2` composes "Brightness" on top of
-  it — press either again to toggle it back off. A hotkey/row click does **not**
-  close the chooser (toggling combinations while comparing is the point);
-  `Esc`, re-pressing `a`, or closing the gallery window leaves the preview in
-  place. An outside click also closes compact popover mode. `0` (or its row)
-  discards the whole preview outright.
-- By default `a` opens a separate, resizable thumbnail gallery window that can
-  be maximized to use the whole screen. It reflows as it grows and chooses the
-  row/column layout that makes the cards largest while keeping the Original
-  and all eight enhancer previews visible at once. The bounded previews are
-  generated together off the GTK thread. Preferences can disable thumbnails
-  and use the compact popover text list on slower systems.
+  it — press either again to toggle it back off. A hotkey/card click does
+  **not** close the panel (toggling combinations while comparing is the
+  point); `Esc` or re-pressing `a` closes it and leaves the preview in place.
+  `0` (or the Original card) discards the whole preview while the panel is
+  open. The panel stays open across navigation (re-titled and re-previewed
+  for the new image) and is hidden with the grid, back with the large view.
+- **Hold `Space`** shows the original; release shows the current edit — with
+  or without the panel. If a preset is applied with the panel closed, a
+  status line says once per image how to compare, save and open the panel.
 - Presets are GEGL op graphs (e.g. Auto-fix = `gegl:stretch-contrast` →
   `gegl:color-enhance`; Brightness = `gegl:exposure`; Contrast =
   `gegl:brightness-contrast`; Saturation = `gegl:saturation`; Sharpen =
@@ -308,15 +309,17 @@ Loaded lazily; never blocks display of the pixels.
   worker); the UI stays responsive while GEGL processes, and a newer
   toggle/navigation/discard supersedes a still-in-flight one (last-write-wins
   — its result is dropped when it lands).
-- **`s`** (or menu *Save enhanced copy…*) writes the enhanced result to
-  `<name>-enhanced.<ext>`, or `<name>-enhanced-1.<ext>`, `-2`, … if that name
-  is already taken (same collision convention as the move popup) — the
-  **original is never touched**. ggaze **never auto-saves**: an enhance
-  preview is a live overlay only, and pressing `s` again (still looking at
-  the same image) exports another, separately-numbered copy rather than
-  clearing the preview.
-- **Dirty state + prompt on navigate:** an active (un-exported) enhance
-  preview is "dirty". Navigating to another image (`h`/`l`/`g`/`G`/scroll),
+- **`s` / `Ctrl+S`** (or the panel's *Save copy* button, or menu *Save
+  enhanced copy…*) writes the enhanced result to `<name>-enhanced.<ext>`, or
+  `<name>-enhanced-1.<ext>`, `-2`, … if that name is already taken (same
+  collision convention as the move popup) — the **original is never
+  touched**. ggaze **never auto-saves**: an enhance preview is a live overlay
+  only. A successful save marks the preview **saved**: it stays on screen
+  (pressing `s` again exports another, separately-numbered copy), but it is
+  no longer dirty, so moving on does not prompt. Any further preset change
+  makes it unsaved again.
+- **Dirty state + prompt on navigate:** an active enhance preview that has
+  not been exported since its last change is "dirty". Navigating to another image (`h`/`l`/`g`/`G`/scroll),
   picking a different image in the grid (double-click/Enter, middle-click
   mark, `j`/`k` cursor move, or toggling back to large on another cell),
   trashing/deleting/moving the current file (`d`/`D`/`m`), opening a
@@ -326,10 +329,10 @@ Loaded lazily; never blocks display of the pixels.
   **Discard** (drop the preview, proceed), or **Cancel** (stay). If the
   export **fails** (read-only folder, full disk, ...), Save behaves like
   Cancel plus an error message: the preview is kept and nothing proceeds, so
-  an unwritable destination can never cost the enhancement. `s` saves
-  without clearing dirty (see above); toggling every preset back off, `0`, or
-  `Esc` (when the popover is not open) discards it directly (explicit, no
-  prompt). Slideshow auto-advance is the one exception: it discards a dirty
+  an unwritable destination can never cost the enhancement. `s` clears
+  dirty by putting the work on disk (see above); toggling every preset back
+  off, `0` (panel open), or `Esc` (panel closed) discards it directly
+  (explicit, no prompt). Slideshow auto-advance is the one exception: it discards a dirty
   preview silently rather than blocking on a prompt no one is there to
   answer.
 - **One prompt at a time, and it decides for the image it named.** Only one
@@ -398,7 +401,8 @@ not built in, all show the "GEGL not built in" toast.
   return to the **modified** (preview-graph) image — a quick before/after to
   decide whether to `s` save. Only meaningful when a preview (enhance / crop /
   straighten / rotate) is active; otherwise original == modified, no-op.
-- Large view only. GUI: menu *Show original* (toggle) for mouse users.
+- Large view only. Works with or without the enhance panel open; the panel's
+  hint names it. GUI: menu *Show original* (toggle) for mouse users.
 
 ## Hotkey visibility
 

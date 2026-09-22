@@ -163,8 +163,8 @@ src/settings-pair.{c,h} the (name, value) pair of the a(ss) lists
 src/ggaze-enums.h     shared preference enums
 src/enhancer.{c,h}    optional GEGL presets (built-in table + user graphs), export naming
 src/enhancer-gegl.h   the GEGL buffer/texture/export operations (sync + async)
-src/enhance-ctrl.{c,h} optional enhance feature controller (mask, previews, gallery, async save)
-src/enhance-ui.{c,h}  optional pure enhance widget construction
+src/enhance-ctrl.{c,h} optional enhance feature controller (mask, previews, side panel, saved flag, async save)
+src/enhance-ui.{c,h}  optional pure enhance side-panel widget construction
 src/clipboard.{c,h}   image/png (displayed texture) or file-URI content providers
 src/thumbnail.{c,h}   freedesktop TMS cache (bounded pool)
 src/texturecache.{c,h} bounded LRU of decoded GdkTextures (mtime/size validated)

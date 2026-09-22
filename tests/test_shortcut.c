@@ -372,9 +372,9 @@ test_shortcut_full_table_registered(void) {
    }
    /* Every SHORTCUTS[] row with an action registers one shortcut; most
     * actions appear at least twice (a vi-style key and a traditional one:
-    * h/Left/PageUp, g/Home, d/Delete, ...). The hold-Space help-only row does
-    * not. Keep this in step with the table. */
-   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 69);
+    * h/Left/PageUp, g/Home, d/Delete, s/Ctrl+S, ...). The hold-Space
+    * help-only row does not. Keep this in step with the table. */
+   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 70);
    g_object_unref(p_sc);
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(200);

@@ -23,8 +23,8 @@ ggaze
 ├── save-gate.{c,h}       # Save/Discard/Cancel prompt gate every discarding continuation funnels through
 ├── delete-confirm.{c,h}  # >1-target permanent-delete confirm (captured targets, folder re-check)
 ├── dialog-util.{c,h}     # alert-dialog toplevel lookup shared by the two dialog modules
-├── enhance-ctrl.{c,h}    # (optional) enhance feature controller: mask, previews, gallery/popover, async save
-├── enhance-ui.{c,h}      # (optional) pure enhance gallery/popover widget construction
+├── enhance-ctrl.{c,h}    # (optional) enhance feature controller: mask, previews, side panel, saved flag, async save
+├── enhance-ui.{c,h}      # (optional) pure enhance side-panel widget construction
 ├── popup_list.{c,h}      # shared hotkey list popover (e / ! / m)
 ├── undo.{c,h}            # which of trash/move `u` undoes
 ├── pathutil.{c,h}        # stem/ext split, safe mkdir -p, non-colliding child names
@@ -230,14 +230,16 @@ on done → navigator_rescan() (scripts may add/remove files)
 ## Data flow (quick enhance, GEGL)
 
 ```
-key 'a' → window shows enhance popup (GtkPopover)
+key 'a' → enhance side panel appended beside the large view (in-window)
         → enhancer_get_presets() → [ {"Auto-fix", "stretch-contrast|color-enhance"}, … ]
-        → popup assigns hotkeys 1..9,0,a.. by list order
+        → one card per preset, hotkeys 1..8 by list order; thumbnail batch
+        → panel stays across navigation (re-previewed), hidden with the grid
 key '1' → import decoded image → GeglBuffer
         → enhancer_apply(buf, presets[0], &err)   [GTask thread]
         → GeglBuffer out → render to GdkTexture → viewer (non-destructive)
-        → toggle off on second press / Esc
-key 's' → enhancer_export(buf, presets[0], out_file, &err)
+        → toggle off on second press; Esc closes the panel, then discards
+key 's' → enhancer_export(buf, presets[0], out_file, &err)  [GTask thread]
+        → on success the preview is SAVED: still shown, no longer dirty
         → writes IMG_0001-enhanced.<ext> via GEGL saver; original untouched
         → does NOT clear the dirty flag (press again → another numbered copy)
 navigate with dirty preview → prompt: Save (export) / Discard / Cancel

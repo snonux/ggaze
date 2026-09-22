@@ -11,7 +11,12 @@
  *   - the preview never touches the original file: byte-for-byte identical
  *     before/after apply, toggle-off (discard), and hold-Space compare.
  *   - ggaze_window_enhance_is_dirty() tracks the mask (TRUE once a preset is
- *     active, FALSE again once every preset is toggled back off).
+ *     active, FALSE again once every preset is toggled back off) AND the
+ *     saved flag: a preview `s` already exported is not dirty until the
+ *     mask changes again, so moving on does not prompt for it.
+ *   - `a` opens the enhance side panel beside the viewer (inside the window,
+ *     no second toplevel), which survives navigation and re-previews the
+ *     new image; Esc closes it first, `0` is its Original hotkey.
  *   - ggaze_window_set_hold_original() swaps the displayed texture to the
  *     (cached) original and back without touching u_enhance_mask.
  *   - win.enhance-save exports a NEW file next to the original
@@ -51,6 +56,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
+#include "enhance-ui.h"
 #include "gridview.h"
 #include "gtk_helpers.h"
 #include "settings.h"
@@ -213,23 +219,9 @@ wait_for_texture_change(GgazeWindow *p_win, GdkTexture *p_before) {
    ggtest_drain_main(50);
 }
 
-static GtkWidget *
-find_widget_type(GtkWidget *p_root, GType e_type) {
-   if (G_TYPE_CHECK_INSTANCE_TYPE(p_root, e_type)) {
-      return (p_root);
-   }
-   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
-   while (p_child != NULL) {
-      GtkWidget *p_found = find_widget_type(p_child, e_type);
-      if (p_found != NULL) {
-         return (p_found);
-      }
-      p_child = gtk_widget_get_next_sibling(p_child);
-   }
-   return (NULL);
-}
-
-/* Return an owned reference to the transient gallery window, if present. */
+/* Return an owned reference to a window transient for p_parent, if any. The
+ * enhance UI used to be one (a gallery window); the panel tests assert that
+ * none appears any more. */
 static GtkWindow *
 find_transient_window(GtkWindow *p_parent) {
    GListModel *p_windows = gtk_window_get_toplevels();
@@ -256,18 +248,6 @@ collect_pictures(GtkWidget *p_root, GPtrArray *p_pictures) {
    }
 }
 
-/* Direct children of the flow box -- i.e. the grid CELLS (GtkFlowBoxChild),
- * not the buttons inside them. Cell geometry is what "fits the window" is
- * about; the button is just what fills the cell. */
-static void
-collect_cells(GtkWidget *p_flow, GPtrArray *p_cells) {
-   GtkWidget *p_child = gtk_widget_get_first_child(p_flow);
-   while (p_child != NULL) {
-      g_ptr_array_add(p_cells, p_child);
-      p_child = gtk_widget_get_next_sibling(p_child);
-   }
-}
-
 static char *
 load_bytes(const char *c_path, gsize *pu_len) {
    char   *c_data = NULL;
@@ -277,351 +257,251 @@ load_bytes(const char *c_path, gsize *pu_len) {
    return (c_data);
 }
 
-/* Find the GtkPicture belonging to the card whose label reads c_label. Located
- * by label rather than by index so the tests do not silently follow a change
- * in card ORDER and start asserting about the wrong thumbnail. */
+/* The enhance side panel: the widget carrying GGAZE_ENHANCE_PANEL_CLASS
+ * anywhere under p_root (it sits beside the stack, not inside it), or NULL
+ * when closed. Found by class rather than by tree shape so the tests do not
+ * follow a layout change silently. */
 static GtkWidget *
-find_card_picture(GtkWidget *p_flow, const char *c_label) {
-   GtkWidget *p_cell = gtk_widget_get_first_child(p_flow);
-   while (p_cell != NULL) {
-      GPtrArray *p_pics = g_ptr_array_new();
-      collect_pictures(p_cell, p_pics);
-      GtkWidget *p_lbl = find_widget_type(p_cell, GTK_TYPE_LABEL);
-      if (p_lbl != NULL && p_pics->len > 0 &&
-          g_strcmp0(gtk_label_get_text(GTK_LABEL(p_lbl)), c_label) == 0) {
-         GtkWidget *p_pic = g_ptr_array_index(p_pics, 0);
-         g_ptr_array_unref(p_pics);
-         return (p_pic);
+find_panel_in(GtkWidget *p_root) {
+   if (gtk_widget_has_css_class(p_root, GGAZE_ENHANCE_PANEL_CLASS)) {
+      return (p_root);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
+   while (p_child != NULL) {
+      GtkWidget *p_found = find_panel_in(p_child);
+      if (p_found != NULL) {
+         return (p_found);
       }
-      g_ptr_array_unref(p_pics);
-      p_cell = gtk_widget_get_next_sibling(p_cell);
+      p_child = gtk_widget_get_next_sibling(p_child);
    }
    return (NULL);
 }
 
-/* The "Current" card shows the LAYERED result -- what the large view is
- * actually displaying -- which with two presets on is none of the other cards:
- * Original is unmodified and each preset card has only its own preset applied.
- * With an empty mask "current" means the original, and the card must say so
- * rather than keep showing a stale chain.
- *
- * Asserted on the paintable IDENTITY, because that is the property that makes
- * the card trustworthy: it is the very texture handed to the viewer
- * (p_enhance_tex), so the card cannot drift out of agreement with the image
- * the user is judging. */
-static void
-test_current_card_tracks_layered_chain(void) {
-   Settings *p_cfg = settings_new();
-   settings_set_enhance_preview_thumbnails(p_cfg, TRUE);
-   GError *p_err = NULL;
-   char   *c_dir = g_dir_make_tmp("ggaze-enhance-current-XXXXXX", &p_err);
-   g_assert_no_error(p_err);
-   copy_fixture(c_dir, "plain.jpg");
-   char        *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
-   GFile       *p_file = g_file_new_for_path(c_path);
-   GgazeWindow *p_win  = new_window();
-   ggaze_window_open(p_win, p_file);
-   gtk_window_set_default_size(GTK_WINDOW(p_win), 900, 700);
-   gtk_window_present(GTK_WINDOW(p_win));
-   wait_for_load(p_win);
-
-   fire(p_win, "win.enhance");
-   GtkWindow *p_gallery = find_transient_window(GTK_WINDOW(p_win));
-   g_assert_nonnull(p_gallery);
-   GtkWidget *p_flow =
-      find_widget_type(GTK_WIDGET(p_gallery), GTK_TYPE_FLOW_BOX);
-   g_assert_nonnull(p_flow);
-   GtkWidget *p_cur_pic  = find_card_picture(p_flow, "Current");
-   GtkWidget *p_orig_pic = find_card_picture(p_flow, "0  Original");
-   g_assert_nonnull(p_cur_pic);
-   g_assert_nonnull(p_orig_pic);
-
-   /* Wait for the preview batch, which is what gives the Original card (and
-    * so, with an empty mask, the Current card) its paintable. */
-   for (guint u = 0;
-        u < 6000 && gtk_picture_get_paintable(GTK_PICTURE(p_orig_pic)) == NULL;
-        u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   GdkPaintable *p_orig = gtk_picture_get_paintable(GTK_PICTURE(p_orig_pic));
-   g_assert_nonnull(p_orig);
-   /* Empty mask: Current mirrors Original exactly. */
-   g_assert_true(gtk_picture_get_paintable(GTK_PICTURE(p_cur_pic)) == p_orig);
-
-   /* Layer two presets. Each apply is async, so wait for the card to move off
-    * the original rather than assuming a fixed settling time. */
-   fire(p_win, "win.enhance-1");
-   fire(p_win, "win.enhance-3");
-   for (guint u = 0; u < 12000 && gtk_picture_get_paintable(
-                                     GTK_PICTURE(p_cur_pic)) == p_orig;
-        u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   GdkPaintable *p_chain = gtk_picture_get_paintable(GTK_PICTURE(p_cur_pic));
-   g_assert_nonnull(p_chain);
-   g_assert_true(p_chain != p_orig);
-   /* ... and it is the very texture the large view is displaying, not a
-    * separate render of it. This is the whole point of the card: it cannot
-    * disagree with the image being judged, and it costs no extra GEGL pass. */
-   GtkWidget *p_large =
-      gtk_stack_get_child_by_name(ggaze_window_get_stack(p_win), "large");
-   g_assert_nonnull(p_large);
-   g_assert_true(GDK_PAINTABLE(ggaze_viewer_get_texture(
-                    GGAZE_VIEWER(p_large))) == p_chain);
-   /* The other cards are untouched by layering: each still shows its own
-    * preset applied alone, so none of them equals the chain. */
-   g_assert_true(gtk_picture_get_paintable(GTK_PICTURE(p_orig_pic)) != p_chain);
-
-   /* Toggle both back off: "current" is the original again. */
-   fire(p_win, "win.enhance-1");
-   fire(p_win, "win.enhance-3");
-   for (guint u = 0; u < 12000 && gtk_picture_get_paintable(
-                                     GTK_PICTURE(p_cur_pic)) != p_orig;
-        u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_true(gtk_picture_get_paintable(GTK_PICTURE(p_cur_pic)) == p_orig);
-
-   fire(p_win, "win.enhance"); /* close */
-   g_object_unref(p_gallery);
-   ggtest_drain_main(300);
-   g_settings_reset(settings_get_gsettings(p_cfg),
-                    "enhance-preview-thumbnails");
-   settings_delete(p_cfg);
-   g_object_unref(p_file);
-   gtk_window_destroy(GTK_WINDOW(p_win));
-   g_free(c_path);
-   ggtest_drain_main(300);
-   cleanup_temp_dir(c_dir);
+static GtkWidget *
+find_panel(GgazeWindow *p_win) {
+   return (find_panel_in(GTK_WIDGET(p_win)));
 }
 
-/* The gallery grid must EXACTLY fill the window's width, and must not resize
- * itself while nothing is happening.
- *
- * Both halves are user-reported defects from the same cause. The layout used
- * to be driven by a per-frame GtkTickCallback that measured the gallery window
- * and pushed computed pixel size requests onto the scroll area and every
- * picture. Its arithmetic subtracted fixed guesses for chrome (-48/-96 on the
- * window, -24/-48 per cell) that did not match the real widgets, so a strip of
- * the window was always left over; and because it recomputed on ANY change of
- * window size, a single pixel of jitter resized every thumbnail even though
- * the user never touched the window. The cells now expand into the grid
- * through GTK's own layout, so both properties hold by construction -- and
- * regress together if anyone reintroduces measure-then-resize. */
-static void
-test_preview_grid_fills_window_and_is_stable(void) {
-   Settings *p_cfg = settings_new();
-   settings_set_enhance_preview_thumbnails(p_cfg, TRUE);
-   GError *p_err = NULL;
-   char   *c_dir = g_dir_make_tmp("ggaze-enhance-grid-XXXXXX", &p_err);
-   g_assert_no_error(p_err);
-   copy_fixture(c_dir, "plain.jpg");
-   char        *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
-   GFile       *p_file = g_file_new_for_path(c_path);
-   GgazeWindow *p_win  = new_window();
-   ggaze_window_open(p_win, p_file);
-   gtk_window_set_default_size(GTK_WINDOW(p_win), 900, 700);
-   gtk_window_present(GTK_WINDOW(p_win));
-   wait_for_load(p_win);
-
-   fire(p_win, "win.enhance");
-   GtkWindow *p_gallery = find_transient_window(GTK_WINDOW(p_win));
-   g_assert_nonnull(p_gallery);
-   GtkWidget *p_flow =
-      find_widget_type(GTK_WIDGET(p_gallery), GTK_TYPE_FLOW_BOX);
-   g_assert_nonnull(p_flow);
-   for (guint u = 0; u < 3000 && gtk_widget_get_width(p_flow) == 0; u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
+/* The card (a GtkButton with GGAZE_ENHANCE_CARD_CLASS, carrying its index
+ * in the "idx" datum) for preset i_idx, or the Original card for -1; NULL if
+ * absent. The class check matters: preset 0's datum is GINT_TO_POINTER(0),
+ * i.e. NULL, which every other button also "has". */
+static GtkWidget *
+find_card(GtkWidget *p_root, gint i_idx) {
+   if (gtk_widget_has_css_class(p_root, GGAZE_ENHANCE_CARD_CLASS) &&
+       GPOINTER_TO_INT(g_object_get_data(G_OBJECT(p_root), "idx")) == i_idx) {
+      return (p_root);
    }
-   g_assert_cmpint(gtk_widget_get_width(p_flow), >, 0);
-
-   /* 9 cells (original + 8 presets) laid out as a fixed 3-wide grid. */
-   GPtrArray *p_cells = g_ptr_array_new();
-   collect_cells(p_flow, p_cells);
-   /* Original + Current + 8 presets. */
-   g_assert_cmpuint(p_cells->len, ==, 10);
-   /* The column count is chosen once from the gallery's size (whichever value
-    * shows the largest thumbnails), so this asserts that it is PINNED -- min
-    * == max, which is what makes a homogeneous row divide the width exactly --
-    * rather than hardcoding a number that depends on the window geometry. */
-   guint u_cols = gtk_flow_box_get_max_children_per_line(GTK_FLOW_BOX(p_flow));
-   g_assert_cmpuint(u_cols, >=, 2);
-   g_assert_cmpuint(u_cols, <=, p_cells->len);
-   g_assert_cmpuint(
-      gtk_flow_box_get_min_children_per_line(GTK_FLOW_BOX(p_flow)), ==, u_cols);
-
-   /* FITS, part 1: a row of cells plus its spacing covers the flow box, give
-    * or take the widget's own CSS padding. Compared as a fraction rather than
-    * an exact figure because that padding is the theme's to choose (18px of
-    * 874 when this was written); what must never return is a leftover strip on
-    * the scale of a whole column. */
-   int i_flow_w  = gtk_widget_get_width(p_flow);
-   int i_spacing = (int)gtk_flow_box_get_column_spacing(GTK_FLOW_BOX(p_flow));
-   int i_row_w   = i_spacing * (int)(u_cols - 1);
-   for (guint u = 0; u < u_cols; u++) {
-      i_row_w +=
-         gtk_widget_get_width(GTK_WIDGET(g_ptr_array_index(p_cells, u)));
+   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
+   while (p_child != NULL) {
+      GtkWidget *p_found = find_card(p_child, i_idx);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
    }
-   g_assert_cmpint(i_row_w * 100, >=, i_flow_w * 90);
-
-   /* FITS, part 2, and the assertion that actually pins the fix: the BUTTON
-    * fills its cell. That is what was wrong -- the buttons were laid out
-    * GTK_ALIGN_START, so each sat at its natural width inside a wider cell and
-    * left the visible gap down the right of every thumbnail. Checking the
-    * cells alone would never have caught it, because homogeneous cells were
-    * already equal to each other. */
-   for (guint u = 0; u < p_cells->len; u++) {
-      GtkWidget *p_cell = GTK_WIDGET(g_ptr_array_index(p_cells, u));
-      GtkWidget *p_btn  = gtk_widget_get_first_child(p_cell);
-      g_assert_nonnull(p_btn);
-      g_assert_cmpint(gtk_widget_get_width(p_btn) * 100, >=,
-                      gtk_widget_get_width(p_cell) * 90);
-   }
-
-   /* STABLE: nothing is touched, so nothing may move. A surviving
-    * measure-then-resize loop shows up here as a changed width. */
-   int i_cell0 =
-      gtk_widget_get_width(GTK_WIDGET(g_ptr_array_index(p_cells, 0)));
-   for (guint u = 0; u < 5; u++) {
-      ggtest_drain_main(120);
-      g_assert_cmpint(
-         gtk_widget_get_width(GTK_WIDGET(g_ptr_array_index(p_cells, 0))), ==,
-         i_cell0);
-   }
-   g_ptr_array_unref(p_cells);
-
-   fire(p_win, "win.enhance"); /* close */
-   g_object_unref(p_gallery);
-   ggtest_drain_main(300);
-   g_settings_reset(settings_get_gsettings(p_cfg),
-                    "enhance-preview-thumbnails");
-   settings_delete(p_cfg);
-   g_object_unref(p_file);
-   gtk_window_destroy(GTK_WINDOW(p_win));
-   g_free(c_path);
-   ggtest_drain_main(300);
-   cleanup_temp_dir(c_dir);
+   return (NULL);
 }
 
-static void
-test_preview_thumbnail_window(void) {
-   Settings *p_cfg = settings_new();
-   settings_set_enhance_preview_thumbnails(p_cfg, TRUE);
-   GError *p_err = NULL;
-   char   *c_dir = g_dir_make_tmp("ggaze-enhance-thumbs-XXXXXX", &p_err);
-   g_assert_no_error(p_err);
-   copy_fixture(c_dir, "plain.jpg");
-   char        *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
-   GFile       *p_file = g_file_new_for_path(c_path);
-   GgazeWindow *p_win  = new_window();
-   ggaze_window_open(p_win, p_file);
-   gtk_window_set_default_size(GTK_WINDOW(p_win), 500, 500);
-   gtk_window_present(GTK_WINDOW(p_win));
-   wait_for_load(p_win);
+/* The first GtkLabel under p_root whose text starts with c_prefix. */
+static GtkWidget *
+find_label_prefix(GtkWidget *p_root, const char *c_prefix) {
+   if (GTK_IS_LABEL(p_root) &&
+       g_str_has_prefix(gtk_label_get_text(GTK_LABEL(p_root)), c_prefix)) {
+      return (p_root);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
+   while (p_child != NULL) {
+      GtkWidget *p_found = find_label_prefix(p_child, c_prefix);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (NULL);
+}
 
-   fire(p_win, "win.enhance");
-   GtkWindow *p_gallery = find_transient_window(GTK_WINDOW(p_win));
-   g_assert_nonnull(p_gallery);
-   g_assert_true(gtk_window_get_resizable(p_gallery));
-   GtkWidget *p_scroll =
-      find_widget_type(GTK_WIDGET(p_gallery), GTK_TYPE_SCROLLED_WINDOW);
-   GtkWidget *p_flow =
-      find_widget_type(GTK_WIDGET(p_gallery), GTK_TYPE_FLOW_BOX);
-   g_assert_nonnull(p_scroll);
-   g_assert_nonnull(p_flow);
-   for (guint u = 0; u < 3000 && gtk_widget_get_width(p_scroll) == 0; u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_cmpint(gtk_widget_get_width(p_scroll), >, 0);
-   int        i_initial_width    = gtk_widget_get_width(p_scroll);
-   GPtrArray *p_initial_pictures = g_ptr_array_new();
-   collect_pictures(GTK_WIDGET(p_gallery), p_initial_pictures);
-   g_assert_cmpuint(p_initial_pictures->len, ==, 10);
-   int i_initial_picture_width = gtk_widget_get_width(
-      GTK_WIDGET(g_ptr_array_index(p_initial_pictures, 0)));
-   g_ptr_array_unref(p_initial_pictures);
-   /* Widen via a size request on the scroll area, NOT
-    * gtk_window_set_default_size() on the gallery. GTK4's set_default_size on
-    * an ALREADY-PRESENTED window only asks the window manager to resize, and
-    * the suites run under `xvfb-run` with no WM at all -- so the request is
-    * dropped, the gallery stays 500 wide and the reflow assertions below fail
-    * against an unchanged 484px scroll area. A size request grows the widget
-    * (and with it the toplevel) through GTK's own layout pass, which needs no
-    * WM and settles synchronously enough for the wait loop to observe. */
-   /* Grow the gallery via a size request on the TOPLEVEL, not
-    * gtk_window_set_default_size() and not a request on p_scroll.
-    *
-    * set_default_size on an already-presented GTK4 window only asks the window
-    * manager to resize, and these suites run under `xvfb-run` with no WM at
-    * all -- the request is dropped and the gallery stays 500 wide. A request
-    * on p_scroll does not work either: _enhance_gallery_tick_cb (window.c)
-    * owns that widget's size request and rewrites it from the gallery window's
-    * own allocation on every frame, so a test-side value is overwritten before
-    * the next assertion reads it. Requesting on the toplevel grows the window
-    * through GTK's layout pass (no WM needed), which is exactly the input the
-    * tick callback reacts to -- so this drives the real reflow path. */
-   gtk_widget_set_size_request(GTK_WIDGET(p_gallery), 1200, 800);
-   for (guint u = 0;
-        u < 3000 && gtk_widget_get_width(p_scroll) <= i_initial_width; u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_cmpint(gtk_widget_get_width(p_scroll), >, i_initial_width);
-   GPtrArray *p_pictures = g_ptr_array_new();
-   collect_pictures(GTK_WIDGET(p_gallery), p_pictures);
-   g_assert_cmpuint(p_pictures->len, ==, 10);
-   /* The pictures need their own wait: _enhance_resize_gallery sets a size
-    * REQUEST on each one, and a request only becomes an allocation on the next
-    * layout pass. The scroll-area loop above returns as soon as the scroll
-    * grew, which is that same pass -- one frame too early for the children. */
-   for (guint u = 0;
-        u < 3000 &&
-        gtk_widget_get_width(GTK_WIDGET(g_ptr_array_index(p_pictures, 0))) <=
-           i_initial_picture_width;
-        u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_cmpint(
-      gtk_widget_get_width(GTK_WIDGET(g_ptr_array_index(p_pictures, 0))), >,
-      i_initial_picture_width);
+/* Pump until every picture in p_pics has a paintable (the thumbnail batch
+ * runs in a worker), up to 10 s. */
+static void
+wait_for_pictures_painted(GPtrArray *p_pics) {
    guint u_painted = 0;
-   for (guint u = 0; u < 10000 && u_painted < p_pictures->len; u++) {
+   for (guint u = 0; u < 10000 && u_painted < p_pics->len; u++) {
       u_painted = 0;
-      for (guint i = 0; i < p_pictures->len; i++) {
-         GtkPicture *p_pic = g_ptr_array_index(p_pictures, i);
-         if (gtk_picture_get_paintable(p_pic) != NULL) {
+      for (guint i = 0; i < p_pics->len; i++) {
+         if (gtk_picture_get_paintable(g_ptr_array_index(p_pics, i)) != NULL) {
             u_painted++;
          }
       }
       g_main_context_iteration(g_main_context_default(), FALSE);
       g_usleep(1000);
    }
-   g_assert_cmpuint(u_painted, ==, p_pictures->len);
-   GtkAdjustment *p_vadjustment =
-      gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(p_scroll));
-   g_assert_cmpfloat(gtk_adjustment_get_upper(p_vadjustment), <=,
-                     gtk_adjustment_get_page_size(p_vadjustment) + 1.0);
-   g_ptr_array_unref(p_pictures);
+   g_assert_cmpuint(u_painted, ==, p_pics->len);
+}
 
-   fire(p_win, "win.enhance"); /* close resized gallery */
-   g_object_unref(p_gallery);
-   fire(p_win, "win.enhance"); /* reopen, start another preview batch */
-   fire(p_win, "win.enhance"); /* immediately close and cancel it */
-   ggtest_drain_main(500);
+/* Open plain.jpg alone in a presented 900x700 window with the thumbnail
+ * preference set as asked, and return the window. The caller frees c_dir /
+ * c_path via the out parameters. */
+static GgazeWindow *
+open_presented(gboolean b_thumbnails, const char *c_tmpl, char **c_dir_out,
+               char **c_path_out) {
+   Settings *p_cfg = settings_new();
+   settings_set_enhance_preview_thumbnails(p_cfg, b_thumbnails);
+   settings_delete(p_cfg);
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp(c_tmpl, &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "plain.jpg");
+   char        *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GgazeWindow *p_win  = new_window();
+   ggaze_window_open(p_win, p_file);
+   g_object_unref(p_file);
+   gtk_window_set_default_size(GTK_WINDOW(p_win), 900, 700);
+   gtk_window_present(GTK_WINDOW(p_win));
+   wait_for_load(p_win);
+   *c_dir_out  = c_dir;
+   *c_path_out = c_path;
+   return (p_win);
+}
+
+/* Undo open_presented: reset the preference, close the window, drop the
+ * folder. */
+static void
+close_presented(GgazeWindow *p_win, char *c_dir, char *c_path) {
+   Settings *p_cfg = settings_new();
    g_settings_reset(settings_get_gsettings(p_cfg),
                     "enhance-preview-thumbnails");
    settings_delete(p_cfg);
-   g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
    ggtest_drain_main(300);
    cleanup_temp_dir(c_dir);
+}
+
+/* `a` opens the panel INSIDE the window, beside the viewer -- no second
+ * toplevel -- with one thumbnail card per preset plus the Original card, and
+ * the image keeps the rest of the width rather than being covered. Asserted
+ * on allocation: the panel starts where the viewer ends. */
+static void
+test_panel_opens_beside_viewer_with_thumbnails(void) {
+   char        *c_dir  = NULL;
+   char        *c_path = NULL;
+   GgazeWindow *p_win =
+      open_presented(TRUE, "ggaze-enhance-panel-XXXXXX", &c_dir, &c_path);
+   g_assert_null(find_panel(p_win));
+
+   fire(p_win, "win.enhance");
+   GtkWidget *p_panel = find_panel(p_win);
+   g_assert_nonnull(p_panel);
+   g_assert_null(find_transient_window(GTK_WINDOW(p_win)));
+   for (guint u = 0; u < 3000 && gtk_widget_get_width(p_panel) == 0; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpint(gtk_widget_get_width(p_panel), >=,
+                   GGAZE_ENHANCE_PANEL_WIDTH);
+   GtkWidget *p_viewer =
+      gtk_stack_get_child_by_name(ggaze_window_get_stack(p_win), "large");
+   graphene_rect_t r_panel, r_viewer;
+   g_assert_true(
+      gtk_widget_compute_bounds(p_panel, GTK_WIDGET(p_win), &r_panel));
+   g_assert_true(
+      gtk_widget_compute_bounds(p_viewer, GTK_WIDGET(p_win), &r_viewer));
+   g_assert_cmpfloat(r_panel.origin.x, >=,
+                     r_viewer.origin.x + r_viewer.size.width - 1.0f);
+   g_assert_cmpfloat(r_viewer.size.width, >, 400.0f);
+
+   /* Original + 8 presets, every one a picture card that gets painted. */
+   GPtrArray *p_pics = g_ptr_array_new();
+   collect_pictures(p_panel, p_pics);
+   g_assert_cmpuint(p_pics->len, ==, 9);
+   g_assert_nonnull(find_card(p_panel, -1));
+   g_assert_nonnull(find_card(p_panel, 7));
+   g_assert_null(find_card(p_panel, 8));
+   wait_for_pictures_painted(p_pics);
+   g_ptr_array_unref(p_pics);
+   /* The save state is spelled out even before anything is on. */
+   g_assert_nonnull(find_label_prefix(p_panel, "No preset on"));
+
+   fire(p_win, "win.enhance"); /* close */
+   g_assert_null(find_panel(p_win));
+   fire(p_win, "win.enhance"); /* reopen, start another preview batch */
+   fire(p_win, "win.enhance"); /* immediately close and cancel it */
+   ggtest_drain_main(500);
+   close_presented(p_win, c_dir, c_path);
+}
+
+/* Preferences can turn the thumbnails off: the same panel, label-only cards,
+ * no GtkPicture anywhere (so no preview batch is ever started). */
+static void
+test_panel_label_only_mode_has_no_pictures(void) {
+   char        *c_dir  = NULL;
+   char        *c_path = NULL;
+   GgazeWindow *p_win =
+      open_presented(FALSE, "ggaze-enhance-labels-XXXXXX", &c_dir, &c_path);
+   fire(p_win, "win.enhance");
+   GtkWidget *p_panel = find_panel(p_win);
+   g_assert_nonnull(p_panel);
+   GPtrArray *p_pics = g_ptr_array_new();
+   collect_pictures(p_panel, p_pics);
+   g_assert_cmpuint(p_pics->len, ==, 0);
+   g_ptr_array_unref(p_pics);
+   g_assert_nonnull(find_card(p_panel, -1));
+   g_assert_nonnull(find_card(p_panel, 7));
+   fire(p_win, "win.enhance");
+   g_assert_null(find_panel(p_win));
+   close_presented(p_win, c_dir, c_path);
+}
+
+/* The cards report the mask (highlight on the enabled ones) and their
+ * thumbnails are per-preset previews that do NOT change when presets are
+ * layered: the large view is the one place that shows the combination
+ * (hold Space compares it with the original), so the cards must stay the
+ * stable reference they were painted as. Asserted on paintable identity. */
+static void
+test_panel_cards_track_mask_and_thumbnails_stay(void) {
+   char        *c_dir  = NULL;
+   char        *c_path = NULL;
+   GgazeWindow *p_win =
+      open_presented(TRUE, "ggaze-enhance-cards-XXXXXX", &c_dir, &c_path);
+   fire(p_win, "win.enhance");
+   GtkWidget *p_panel = find_panel(p_win);
+   g_assert_nonnull(p_panel);
+   GPtrArray *p_pics = g_ptr_array_new();
+   collect_pictures(p_panel, p_pics);
+   wait_for_pictures_painted(p_pics);
+   GtkPicture   *p_pic0   = g_ptr_array_index(p_pics, 0);
+   GtkPicture   *p_pic1   = g_ptr_array_index(p_pics, 1);
+   GdkPaintable *p_thumb0 = gtk_picture_get_paintable(p_pic0);
+   GdkPaintable *p_thumb1 = gtk_picture_get_paintable(p_pic1);
+   g_ptr_array_unref(p_pics);
+
+   GdkTexture *p_orig = ref_viewer_texture(p_win);
+   fire(p_win, "win.enhance-1");
+   fire(p_win, "win.enhance-3");
+   wait_for_texture_change(p_win, p_orig);
+   ggtest_drain_main(300); /* let the second apply land too */
+   g_assert_true(viewer_texture(p_win) != p_orig);
+   g_assert_true(
+      gtk_widget_has_css_class(find_card(p_panel, 0), "ggaze-enhance-on"));
+   g_assert_true(
+      gtk_widget_has_css_class(find_card(p_panel, 2), "ggaze-enhance-on"));
+   g_assert_false(
+      gtk_widget_has_css_class(find_card(p_panel, 1), "ggaze-enhance-on"));
+   g_assert_true(gtk_picture_get_paintable(p_pic0) == p_thumb0);
+   g_assert_true(gtk_picture_get_paintable(p_pic1) == p_thumb1);
+   g_assert_nonnull(find_label_prefix(p_panel, "Unsaved preview"));
+
+   fire(p_win, "win.enhance-1");
+   fire(p_win, "win.enhance-3");
+   ggtest_drain_main(300);
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+   g_assert_false(
+      gtk_widget_has_css_class(find_card(p_panel, 0), "ggaze-enhance-on"));
+   g_assert_nonnull(find_label_prefix(p_panel, "No preset on"));
+   g_object_unref(p_orig);
+   close_presented(p_win, c_dir, c_path);
 }
 
 /* --- dirty-preview fixture ----------------------------------------------- */
@@ -2600,17 +2480,162 @@ test_close_request_blocked_while_prompt_is_up(void) {
    fixture_teardown(&fx); /* the fixture ref is what keeps this valid */
 }
 
+/* --- side panel + saved state (the redesign) ------------------------------ */
+
+/* `s` on a dirty preview exports the copy AND clears dirty: the preview stays
+ * on screen (mask untouched, the enhanced texture still displayed), but
+ * navigating away no longer prompts -- the work is on disk. Touching the
+ * mask again makes it dirty again, even when it ends up back at the saved
+ * combination: "saved" is a fact about one exact export, not a memo. */
+static void
+test_manual_save_clears_dirty_until_next_change(void) {
+   DirtyFixture fx = {0};
+   fixture_open(&fx, "ggaze-enhance-saved-XXXXXX");
+   fire(fx.p_win, "win.enhance-save");
+   char *c_out = g_build_filename(fx.c_dir, "plain-enhanced.jpg", NULL);
+   wait_for_file(c_out);
+   wait_for_status_prefix(fx.p_win, "Saved");
+   g_free(c_out);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_mod); /* still on screen */
+
+   /* Another preset on top: dirty again ... */
+   fire(fx.p_win, "win.enhance-2");
+   wait_for_texture_change(fx.p_win, fx.p_mod);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   /* ... and back to exactly the saved combination is still dirty. */
+   GdkTexture *p_two = ref_viewer_texture(fx.p_win);
+   fire(fx.p_win, "win.enhance-2");
+   wait_for_texture_change(fx.p_win, p_two);
+   g_object_unref(p_two);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+
+   /* Save once more, then move on: no prompt, the other image simply shows.
+    * win.last rather than win.next, because the exported copies land in the
+    * same folder and sort right after plain.jpg once the monitor's rescan
+    * has picked them up -- whether it has by now is a race this subtest is
+    * not about. */
+   fire(fx.p_win, "win.enhance-save");
+   char *c_out2 = g_build_filename(fx.c_dir, "plain-enhanced-1.jpg", NULL);
+   wait_for_file(c_out2);
+   wait_for_status_prefix(fx.p_win, "Saved");
+   g_free(c_out2);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   fire(fx.p_win, "win.last");
+   ggtest_drain_main(400);
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    0);
+   assert_showing(fx.p_win, "rot6.jpg");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   fixture_teardown(&fx);
+}
+
+/* Esc is layered: with the panel open it closes the panel and KEEPS the
+ * preview; the next Esc drops the preview. */
+static void
+test_esc_closes_panel_before_discarding(void) {
+   DirtyFixture fx = {0};
+   fixture_open(&fx, "ggaze-enhance-esc-XXXXXX");
+   fire(fx.p_win, "win.enhance");
+   g_assert_nonnull(find_panel(fx.p_win));
+   fire(fx.p_win, "win.back");
+   g_assert_null(find_panel(fx.p_win));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);
+   fire(fx.p_win, "win.back");
+   ggtest_drain_main(200);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   fixture_teardown(&fx);
+}
+
+/* `0` is bound to win.zoom-reset window-wide; with the panel open it is the
+ * panel's Original hotkey instead and drops the preview, leaving the panel
+ * up for the next attempt. */
+static void
+test_zero_discards_while_panel_open(void) {
+   DirtyFixture fx = {0};
+   fixture_open(&fx, "ggaze-enhance-zero-XXXXXX");
+   fire(fx.p_win, "win.enhance");
+   GtkWidget *p_panel = find_panel(fx.p_win);
+   g_assert_nonnull(p_panel);
+   fire(fx.p_win, "win.zoom-reset");
+   ggtest_drain_main(200);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_true(find_panel(fx.p_win) == p_panel);
+   g_assert_nonnull(find_label_prefix(p_panel, "No preset on"));
+   fixture_teardown(&fx);
+}
+
+/* The panel outlives a navigation: after Discard it is the SAME widget,
+ * retitled for the new file, with no card highlighted and a fresh batch of
+ * thumbnails for the new image. It is hidden (not closed) with the grid and
+ * back beside the viewer after `t` twice. */
+static void
+test_panel_persists_across_navigation(void) {
+   Settings *p_cfg = settings_new();
+   settings_set_enhance_preview_thumbnails(p_cfg, TRUE);
+   DirtyFixture fx = {0};
+   fixture_open(&fx, "ggaze-enhance-persist-XXXXXX");
+   fire(fx.p_win, "win.enhance");
+   GtkWidget *p_panel = find_panel(fx.p_win);
+   g_assert_nonnull(p_panel);
+   g_assert_nonnull(find_label_prefix(p_panel, "Enhance plain.jpg"));
+   g_assert_true(
+      gtk_widget_has_css_class(find_card(p_panel, 0), "ggaze-enhance-on"));
+
+   fire(fx.p_win, "win.next");
+   answer_prompt(&fx, "Discard");
+   assert_showing(fx.p_win, "rot6.jpg");
+   g_assert_true(find_panel(fx.p_win) == p_panel);
+   g_assert_nonnull(find_label_prefix(p_panel, "Enhance rot6.jpg"));
+   g_assert_false(
+      gtk_widget_has_css_class(find_card(p_panel, 0), "ggaze-enhance-on"));
+   GPtrArray *p_pics = g_ptr_array_new();
+   collect_pictures(p_panel, p_pics);
+   g_assert_cmpuint(p_pics->len, ==, 9);
+   wait_for_pictures_painted(p_pics);
+   g_ptr_array_unref(p_pics);
+
+   /* The window is never presented here, so ask the panel's slot for its
+    * own visible flag rather than gtk_widget_is_visible (which also needs
+    * every ancestor, the toplevel included, to be shown). */
+   GtkWidget *p_slot = gtk_widget_get_parent(p_panel);
+   g_assert_true(gtk_widget_get_visible(p_slot));
+   fire(fx.p_win, "win.toggle-view"); /* grid: the panel is hidden ... */
+   ggtest_drain_main(100);
+   g_assert_true(find_panel(fx.p_win) == p_panel);
+   g_assert_false(gtk_widget_get_visible(p_slot));
+   fire(fx.p_win, "win.toggle-view"); /* ... and back with the large view */
+   ggtest_drain_main(100);
+   g_assert_true(gtk_widget_get_visible(p_slot));
+
+   g_settings_reset(settings_get_gsettings(p_cfg),
+                    "enhance-preview-thumbnails");
+   settings_delete(p_cfg);
+   fixture_teardown(&fx);
+}
+
 /* Registration split in two so neither function runs past the ~30-line
  * convention: the original feature coverage, and the round-2 subtests that
  * answer the real Save/Discard/Cancel prompt (see the file header). */
 static void
 add_feature_tests(void) {
-   g_test_add_func("/enhance_flow/preview_thumbnail_window",
-                   test_preview_thumbnail_window);
-   g_test_add_func("/enhance_flow/preview_grid_fills_window_and_is_stable",
-                   test_preview_grid_fills_window_and_is_stable);
-   g_test_add_func("/enhance_flow/current_card_tracks_layered_chain",
-                   test_current_card_tracks_layered_chain);
+   g_test_add_func("/enhance_flow/panel_opens_beside_viewer_with_thumbnails",
+                   test_panel_opens_beside_viewer_with_thumbnails);
+   g_test_add_func("/enhance_flow/panel_label_only_mode_has_no_pictures",
+                   test_panel_label_only_mode_has_no_pictures);
+   g_test_add_func("/enhance_flow/panel_cards_track_mask_and_thumbnails_stay",
+                   test_panel_cards_track_mask_and_thumbnails_stay);
+   g_test_add_func("/enhance_flow/manual_save_clears_dirty_until_next_change",
+                   test_manual_save_clears_dirty_until_next_change);
+   g_test_add_func("/enhance_flow/esc_closes_panel_before_discarding",
+                   test_esc_closes_panel_before_discarding);
+   g_test_add_func("/enhance_flow/zero_discards_while_panel_open",
+                   test_zero_discards_while_panel_open);
+   g_test_add_func("/enhance_flow/panel_persists_across_navigation",
+                   test_panel_persists_across_navigation);
    g_test_add_func("/enhance_flow/apply_is_async_and_original_untouched",
                    test_apply_is_async_and_original_untouched);
    g_test_add_func("/enhance_flow/toggle_off_resets_to_original",

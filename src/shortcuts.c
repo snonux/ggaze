@@ -81,8 +81,8 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_a, GDK_CONTROL_MASK, "win.mark-all", "Mark all",
     "Selection (marks)"},
    {GDK_KEY_Escape, 0, "win.back",
-    "Stop slideshow / discard preview / clear marks / back to grid / "
-    "quit (press twice in the grid)",
+    "Stop slideshow / close enhance panel / discard preview / clear marks / "
+    "back to grid / quit (press twice in the grid)",
     "Selection (marks)"},
    /* Files */
    {GDK_KEY_o, 0, "win.open", "Open image", "Files"},
@@ -109,7 +109,7 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_q, 0, "win.quit", "Quit", "Files"},
    {GDK_KEY_q, GDK_CONTROL_MASK, "win.quit", "Quit", "Files"},
    /* Enhance */
-   {GDK_KEY_a, 0, "win.enhance", "Open / close the enhance chooser", "Enhance"},
+   {GDK_KEY_a, 0, "win.enhance", "Open / close the enhance panel", "Enhance"},
    {GDK_KEY_1, 0, "win.enhance-1",
     "Toggle enhance preset 1-8 (layered, large view)", "Enhance"},
    {GDK_KEY_2, 0, "win.enhance-2",
@@ -127,6 +127,8 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_8, 0, "win.enhance-8",
     "Toggle enhance preset 1-8 (layered, large view)", "Enhance"},
    {GDK_KEY_s, 0, "win.enhance-save", "Save enhanced copy", "Enhance"},
+   {GDK_KEY_s, GDK_CONTROL_MASK, "win.enhance-save", "Save enhanced copy",
+    "Enhance"},
    {GDK_KEY_space, 0, NULL, "Hold to compare with the original", "Enhance"},
    /* Zoom */
    {GDK_KEY_plus, 0, "win.zoom-in", "Zoom in (large) / bigger thumbnails",
@@ -142,9 +144,13 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_minus, GDK_CONTROL_MASK, "win.zoom-out",
     "Zoom out (large) / smaller thumbnails", "Zoom"},
    {GDK_KEY_0, 0, "win.zoom-reset",
-    "Toggle fit / 100% (large), reset thumbnail size (grid)", "Zoom"},
+    "Toggle fit / 100% (large), reset thumbnail size (grid), "
+    "original (enhance panel open)",
+    "Zoom"},
    {GDK_KEY_0, GDK_CONTROL_MASK, "win.zoom-reset",
-    "Toggle fit / 100% (large), reset thumbnail size (grid)", "Zoom"},
+    "Toggle fit / 100% (large), reset thumbnail size (grid), "
+    "original (enhance panel open)",
+    "Zoom"},
    /* Help */
    {GDK_KEY_question, 0, "win.shortcuts", "Show this help", "Help"},
    {GDK_KEY_F1, 0, "win.shortcuts", "Show this help", "Help"},

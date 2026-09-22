@@ -71,7 +71,7 @@ toggle. The cursor stays in sync across the switch.
 
 ## Quick enhance (GEGL, optional)
 
-- `a` → popup of enhance presets (auto-assigned hotkeys); applies a GEGL graph
+- `a` → side panel of enhance presets beside the image (auto-assigned hotkeys, preview thumbnails); applies a GEGL graph
   as a **non-destructive live preview**; press again / `Esc` to turn off.
 - `s` / menu *Save enhanced copy…* writes `<name>-enhanced.<ext>`; original
   untouched. **No auto-save** — navigating away from an un-exported preview

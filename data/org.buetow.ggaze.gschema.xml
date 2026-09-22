@@ -82,7 +82,7 @@
       <key name="enhance-preview-thumbnails" type="b">
          <default>true</default>
          <summary>GEGL enhance preview thumbnails</summary>
-         <description>Show small per-preset previews in the enhance popover.</description>
+         <description>Show a small per-preset preview thumbnail on each card of the enhance side panel (label-only cards when off).</description>
       </key>
 
       <key name="window-geometry" type="(iiib)">

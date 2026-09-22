@@ -81,12 +81,15 @@ struct _GgazeWindow {
    PopupList *p_run_script_pop; /* `!` run-script popover (NULL when none) */
    PopupList *p_move_pop;       /* `m` move-to-destination popover (NULL when
                                  * none) */
-   Undo        *p_undo;         /* unified-undo coordinator (Trash vs Mover) */
-   FileOps     *p_fileops;      /* trash/delete/move/undo policy (fileops.h) */
-   GtkWidget   *p_viewer;       /* GgazeViewer — the large view */
-   GgazeGrid   *p_grid;      /* the thumbnail grid (the "grid" stack child) */
-   int          i_grid_size; /* current thumbnail size (64-512, decision T) */
-   GtkWidget   *p_overlay; /* GtkOverlay wrapping the stack (for info label) */
+   Undo      *p_undo;           /* unified-undo coordinator (Trash vs Mover) */
+   FileOps   *p_fileops;        /* trash/delete/move/undo policy (fileops.h) */
+   GtkWidget *p_viewer;         /* GgazeViewer — the large view */
+   GgazeGrid *p_grid;      /* the thumbnail grid (the "grid" stack child) */
+   int        i_grid_size; /* current thumbnail size (64-512, decision T) */
+   GtkWidget *p_overlay;   /* GtkOverlay wrapping the stack (for info label) */
+   GtkWidget *p_side_slot; /* GtkBox beside the overlay that the enhance
+                            * side panel is appended to while open; shown
+                            * only in the large view (_set_view) */
    InfoOverlay *p_info;    /* info card + status line over the stack */
    guint        u_slideshow;     /* slideshow timeout id (0=off) */
    gint64       i_esc_at;        /* monotonic us of the last grid Esc (two-step
@@ -109,10 +112,10 @@ struct _GgazeWindow {
       *p_enhance_ctrl; /* GEGL enhance feature controller (SRP): owns the
                         * preset mask, the in-flight apply/preview
                         * cancellables + generation counters, the cached
-                        * enhanced texture, the hold-Space flag, the
-                        * enhance UI widget + its rows/pictures, and the
+                        * enhanced texture, the hold-Space flag, the saved
+                        * flag, the side panel + its cards/pictures, and the
                         * Enhancer engine. window.c forwards only the
-                        * a/s/digit/Space actions and a few choke-point
+                        * a/s/digit/Space/0/Esc actions and a few choke-point
                         * queries (is_dirty, override_texture,
                         * nav_changed). NULL when GEGL is not built in. */
 };
@@ -415,6 +418,10 @@ static void
 _set_view(GgazeWindow *p_win, GgazeViewMode e_view) {
    gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack),
                                     VIEW_NAMES[e_view]);
+   /* The enhance side panel is about the image on screen: it is shown only
+    * beside the large view and hidden (not closed -- its state survives a
+    * `t` round trip) with the grid or the empty page. */
+   gtk_widget_set_visible(p_win->p_side_slot, e_view == GGAZE_VIEW_LARGE);
 }
 
 /* TRUE iff a folder is open; otherwise says so (the keys that need a folder
@@ -1104,6 +1111,14 @@ _action_zoom_reset(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+#if GGAZE_HAVE_GEGL
+   /* `0` is the panel's "Original" hotkey (docs/gegl.md): while the panel
+    * is open it drops the preview instead of toggling the zoom. */
+   if (enhance_ctrl_is_open(p_win->p_enhance_ctrl)) {
+      enhance_ctrl_discard(p_win->p_enhance_ctrl);
+      return;
+   }
+#endif
    if (_get_view(p_win) == GGAZE_VIEW_LARGE) {
       ggaze_viewer_toggle_fit_100(GGAZE_VIEWER(p_win->p_viewer));
    } else {
@@ -1186,7 +1201,13 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       return;
    }
 #if GGAZE_HAVE_GEGL
-   if (enhance_ctrl_is_dirty(p_win->p_enhance_ctrl)) {
+   /* With the enhance panel open, Esc closes the panel and keeps the
+    * preview; the next Esc drops the preview (saved or not -- it is on
+    * screen either way). */
+   if (enhance_ctrl_close(p_win->p_enhance_ctrl)) {
+      return;
+   }
+   if (enhance_ctrl_is_active(p_win->p_enhance_ctrl)) {
       enhance_ctrl_discard(p_win->p_enhance_ctrl);
       _show_status(p_win, "Enhance preview discarded");
       return;
@@ -1218,8 +1239,8 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * The GgazeWindow forwards only the a/s/digit/Space actions and a few
  * choke-point queries to the EnhanceCtrl (see enhance-ctrl.h); these ops are
  * the controller's view back into the window -- the texture/view display,
- * the status line, the current-file/texturecache/settings/stack getters, and
- * the disposed/navigator flags. The GEGL build wires them into _ENHANCE_OPS
+ * the status line, the current-file/texturecache getters, the side-panel
+ * slot, and the navigator flag. The GEGL build wires them into _ENHANCE_OPS
  * and creates the controller in _init_enhance_state; the non-GEGL build has
  * no controller (p_enhance_ctrl stays NULL) and the actions/public API below
  * are stubs. */
@@ -1264,22 +1285,8 @@ _ec_ensure_large_view(gpointer p_host) {
 }
 
 static GtkWidget *
-_ec_popover_parent(gpointer p_host) {
-   return (GGAZE_WINDOW(p_host)->p_stack);
-}
-
-static GtkWindow *
-_ec_transient_parent(gpointer p_host) {
-   return (GTK_WINDOW(p_host));
-}
-
-/* The gallery window is its own GtkRoot: give it this window's action group
- * under the same "win" prefix and the same key table, so every shortcut
- * works there exactly as in the main window. */
-static void
-_ec_bind_shortcuts(gpointer p_host, GtkWidget *p_toplevel) {
-   gtk_widget_insert_action_group(p_toplevel, "win", G_ACTION_GROUP(p_host));
-   shortcuts_install(p_toplevel);
+_ec_panel_slot(gpointer p_host) {
+   return (GGAZE_WINDOW(p_host)->p_side_slot);
 }
 
 static gboolean
@@ -1295,15 +1302,13 @@ static const EnhanceUIHostOps _ENHANCE_OPS = {
    .ensure_large_view  = _ec_ensure_large_view,
    .get_current_file   = _ec_current_file,
    .get_cached_texture = _ec_cached_texture,
-   .popover_parent     = _ec_popover_parent,
-   .transient_parent   = _ec_transient_parent,
-   .bind_shortcuts     = _ec_bind_shortcuts,
+   .panel_slot         = _ec_panel_slot,
    .has_navigator      = _ec_has_navigator,
 };
 
-/* win.enhance (key 'a'): thumbnail mode opens a resizable gallery window;
- * compact mode retains the anchored popover used by the other chooser UIs.
- * A second press closes either form. Row clicks and hotkeys keep it open so
+/* win.enhance (key 'a'): open the side panel beside the large view (with a
+ * preview thumbnail per preset card, or label-only cards when Preferences
+ * turns thumbnails off), or close it. Card clicks and hotkeys keep it open so
  * several layered presets can be compared. The widget orchestration lives in
  * the EnhanceCtrl; this just routes the action. */
 static void
@@ -1314,13 +1319,13 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (!_require_folder(p_win)) {
       return;
    }
-   gboolean b_previews =
+   gboolean b_thumbnails =
       p_win->p_settings != NULL &&
       settings_get_enhance_preview_thumbnails(p_win->p_settings);
-   enhance_ctrl_toggle_open(p_win->p_enhance_ctrl, b_previews);
+   enhance_ctrl_toggle_open(p_win->p_enhance_ctrl, b_thumbnails);
 }
 
-/* win.enhance-N (keys 1-8, always live -- not gated on the popover being
+/* win.enhance-N (keys 1-8, always live -- not gated on the panel being
  * open): toggle preset N on/off (layered), then re-apply asynchronously. The
  * preset index rides on the action as data (_add_enhance_actions); nothing
  * parses the action name. */
@@ -1343,10 +1348,12 @@ _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    enhance_ctrl_toggle_preset(p_win->p_enhance_ctrl, i_idx);
 }
 
-/* win.enhance-save (key 's'): export the current image with the enabled-preset
- * chain to a non-colliding <stem>-enhanced[-<n>].<ext>. Never overwrites the
- * original or an existing enhanced copy. No-op (with a status line) when no
- * preset is enabled. */
+/* win.enhance-save (keys 's' / Ctrl+S, and the panel's Save button): export
+ * the current image with the enabled-preset chain to a non-colliding
+ * <stem>-enhanced[-<n>].<ext>. Never overwrites the original or an existing
+ * enhanced copy; on success the preview counts as saved, so moving on no
+ * longer prompts for it. No-op (with a status line) when no preset is
+ * enabled. */
 static void
 _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -2670,8 +2677,10 @@ _init_engines_and_settings(GgazeWindow *p_win) {
 }
 
 /* Wrap p_win->p_stack (built already) in a GtkOverlay with the auto-hiding
- * info label floating on top, and make it the window's child. Split out of
- * _init_stack_and_viewer to keep it under the ~30-line convention. */
+ * info label floating on top, put that and the enhance side-panel slot in a
+ * row, and make the row the window's child. The slot is an empty box until
+ * `a` appends the panel to it, so it costs no width while closed. Split out
+ * of _init_stack_and_viewer to keep it under the ~30-line convention. */
 static void
 _init_info_overlay(GgazeWindow *p_win) {
    p_win->p_overlay = gtk_overlay_new();
@@ -2679,7 +2688,12 @@ _init_info_overlay(GgazeWindow *p_win) {
    p_win->p_info = info_overlay_new(GTK_OVERLAY(p_win->p_overlay));
    gtk_widget_set_hexpand(p_win->p_overlay, TRUE);
    gtk_widget_set_vexpand(p_win->p_overlay, TRUE);
-   gtk_window_set_child(GTK_WINDOW(p_win), p_win->p_overlay);
+   p_win->p_side_slot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+   gtk_widget_set_vexpand(p_win->p_side_slot, TRUE);
+   GtkWidget *p_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+   gtk_box_append(GTK_BOX(p_row), p_win->p_overlay);
+   gtk_box_append(GTK_BOX(p_row), p_win->p_side_slot);
+   gtk_window_set_child(GTK_WINDOW(p_win), p_row);
 }
 
 /* Header bar, the grid/large GtkStack (+ its info overlay), and the viewer

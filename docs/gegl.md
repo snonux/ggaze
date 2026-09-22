@@ -19,59 +19,52 @@ editing remains a non-goal.
 
 ## The quick-enhance feature
 
-- `a` → **enhance chooser**: a resizable preview window by default, or the same
-  compact `GtkPopover` pattern as `m`/`e`/`!` when thumbnails are disabled. It
-  lists presets with auto-assigned hotkeys (`1`, `2`, … then `0`, `a`-`z`),
-  plus a `0 Original` reset row.
+- `a` → **enhance side panel**: a narrow column of cards *beside* the large
+  view, inside the main window (no second window, no popover). The image keeps
+  the whole viewer; the cards are the choices: `0 Original` first, then one
+  card per preset with its auto-assigned hotkey (`1`, `2`, …, capped at the
+  mask's 8 slots). By default each card carries a bounded preview thumbnail
+  of that preset applied *alone*, all generated as one cancellable background
+  batch; Preferences can turn the thumbnails off, which leaves label-only
+  cards (no batch at all) for slower systems.
 - Selecting a preset toggles a **GEGL graph** on/off and re-renders the
   viewer through the chain of every currently-enabled preset —
   non-destructively, and **layered**: multiple presets compose (e.g.
-  Auto-fix + Sharpen at once). A hotkey/row click does not close the
-  chooser, so combinations can be compared before dismissing it (`Esc`,
-  re-press `a`, or the gallery's close button; outside click also works in
-  compact popover mode). `0` (or `Esc` when the chooser is closed) discards the
-  whole preview outright. Applying the chain runs off the GTK main thread (a
-  GTask worker; last-write-wins if superseded before it finishes).
-- By default `a` opens a separate, resizable gallery of bounded previews for
-  all eight presets. It can be maximized to use the whole screen. Ten cards —
-  **Original**, **Current**, and the eight presets — sit in a fixed grid whose
-  cells **expand to fill the window exactly** at any size, so the cards grow
-  and shrink with the window and never leave an unused strip beside them.
-- **Current** shows the LAYERED result: presets stack (the mask is a bitmask,
-  not a selection), so with two or more enabled the image on screen is not any
-  of the other cards — Original is unmodified and each preset card shows that
-  preset applied *alone*. Current is the one card that shows the combination,
-  which is what makes a stack judgeable without looking away from the gallery.
-  It reuses the texture already computed for the large view, so it costs no
-  extra GEGL pass and cannot disagree with what is being judged; with an empty
-  mask it mirrors Original. It reports state rather than offering a toggle, so
-  it takes no clicks and no focus.
-- The column count is chosen **once**, when the gallery opens, as the count
-  that makes the thumbnails largest at that size — cell *aspect* dominates, so
-  a layout that tiles perfectly can still lose (10 cards in 790×590: 5×2 wastes
-  no cell but shows a 158×105 image, while 4×3 wastes two cells and shows
-  197×131). A later resize keeps the column count and simply lets the cells
-  grow.
-  That fit comes from GTK's own layout: the cells expand, and each card fills
-  its cell. Nothing measures the window and pushes pixel sizes back into it.
-  Do not reintroduce such a pass (a tick callback or size-allocate handler that
-  sets size requests from the window's dimensions): it made every thumbnail
-  visibly resize whenever the window size changed by even a pixel, and it fed
-  the gallery's own size back into the measurement it reacted to.
-  Each preset is shown independently on the current
-  original and all previews are generated as one cancellable background batch.
-  Preferences can disable thumbnails and restore the compact popover text list
-  on slower systems.
-- `s` (or menu *Save enhanced copy…*) writes the enhanced result to a new
-  file, e.g. `IMG_0001-enhanced.jpg`, or `-enhanced-1.jpg`, `-2`, … if that
-  name is taken (same collision suffixing as the move popup), via a GEGL
-  saver. Original untouched. ggaze **never auto-saves** — the preview is a
-  live overlay only, and `s` does not clear the dirty flag (pressing it again
-  just exports another numbered copy of the same preview). Moving to
-  another image (large-view keys/scroll **or** any grid/thumbnail
-  selection), trashing/deleting/moving the current file, opening a
-  different file/folder, or quitting (`q` **or** the window manager's close
-  button / Alt+F4) with an un-exported preview prompts
+  Auto-fix + Sharpen at once). The large view is the one place that shows
+  the *combination*; the thumbnails stay per-preset references. A hotkey or
+  card click does not close the panel, so combinations can be compared before
+  dismissing it (`Esc` or re-press `a`; the preview stays). `0` (or the
+  Original card) discards the whole preview outright while the panel is
+  open, and so does `Esc` once the panel is closed. Applying the chain runs
+  off the GTK main thread (a GTask worker; last-write-wins if superseded
+  before it finishes).
+- **Hold `Space`** to see the original; release to see the current edit. This
+  works with or without the panel (the window binds it), and never touches
+  the mask.
+- The panel **stays open across navigation**: moving to the next image
+  re-titles it and re-previews the new file, so a whole folder can be worked
+  through with `a` pressed once. It is hidden (not closed) with the grid and
+  comes back with the large view. Its cards are not keyboard-focusable on
+  purpose: a focused button activates on Space, the compare key.
+- **How to save is spelled out** on the panel: a state line reads
+  *"No preset on"*, *"Unsaved preview — press s to save a copy"* or
+  *"Saved as IMG_0001-enhanced.jpg"*, above a **Save copy** button (bound to
+  the same action as `s`) and a key hint. When a preset is applied with the
+  panel closed, a status line says it once per image: *hold Space to
+  compare, s saves a copy, a shows the presets*.
+- `s` / `Ctrl+S` (or the panel's *Save copy* button, or menu *Save enhanced
+  copy…*) writes the enhanced result to a new file, e.g.
+  `IMG_0001-enhanced.jpg`, or `-enhanced-1.jpg`, `-2`, … if that name is
+  taken (same collision suffixing as the move popup), via a GEGL saver.
+  Original untouched. ggaze **never auto-saves** — the preview is a live
+  overlay only. A successful save marks the preview **saved**: it stays on
+  screen (pressing `s` again exports another numbered copy), but it is no
+  longer *dirty*, so moving on does not prompt for it. Any further preset
+  change makes it unsaved again, even one that lands back on the saved
+  combination. Moving to another image (large-view keys/scroll **or** any
+  grid/thumbnail selection), trashing/deleting/moving the current file,
+  opening a different file/folder, or quitting (`q` **or** the window
+  manager's close button / Alt+F4) with an **unsaved** preview prompts
   Save/Discard/Cancel; a Save whose export fails keeps the preview and does
   not proceed (it is not silently downgraded to Discard). At most one prompt is
   outstanding per window: a second request that the modal grab cannot swallow

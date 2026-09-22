@@ -12,9 +12,9 @@
  * outside-click tear it down. This module is that shared scaffolding so the
  * three sites shrink to a constructor call plus a small activate callback.
  * The hotkey helpers (popup_list_hotkey_char / popup_list_key_to_index /
- * popup_list_row_label) are also reused by the enhance (`a`) popover, which
- * is a toggle-popover rather than a list-popover and so keeps its own build
- * logic.
+ * popup_list_row_label) are also reused by the enhance (`a`) side panel's
+ * cards, which toggle presets rather than pick one item and so keep their
+ * own build logic (enhance-ui.c).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
