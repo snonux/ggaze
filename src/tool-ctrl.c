@@ -309,22 +309,34 @@ _start_crop(ToolCtrl *p_tc) {
    _status(p_tc, _CROP_HINT);
 }
 
+/* The angle as the status lines say it: "0.0°", "1.5° CW", "2.0° CCW" --
+ * a zero angle has no direction (it used to read "0.0° CW"). g_ascii_formatd
+ * keeps a decimal point regardless of locale. Caller frees. */
+static char *
+_angle_text(gdouble d_degrees) {
+   char c_num[G_ASCII_DTOSTR_BUF_SIZE];
+   g_ascii_formatd(c_num, sizeof(c_num), "%.1f", fabs(d_degrees));
+   if (d_degrees == 0.0) {
+      return (g_strdup_printf("%s°", c_num));
+   }
+   return (g_strdup_printf("%s° %s", c_num, d_degrees < 0.0 ? "CCW" : "CW"));
+}
+
 /* The straighten status line: the current angle, the keys, the auto-crop
  * state. Re-shown on every change so the angle is always readable. */
 static void
 _straighten_status(ToolCtrl *p_tc) {
-   char c_num[G_ASCII_DTOSTR_BUF_SIZE];
-   g_ascii_formatd(c_num, sizeof(c_num), "%.1f", fabs(p_tc->t_work.d_degrees));
+   char *c_angle = _angle_text(p_tc->t_work.d_degrees);
    char *c_msg =
-      g_strdup_printf("Straighten %s° %s — drag along the horizon · h/l nudge "
+      g_strdup_printf("Straighten %s — drag along the horizon · h/l nudge "
                       "½° · A auto-crop %s · Enter applies, Esc cancels%s",
-                      c_num, p_tc->t_work.d_degrees < 0.0 ? "CCW" : "CW",
-                      p_tc->t_work.b_autocrop ? "on" : "off",
+                      c_angle, p_tc->t_work.b_autocrop ? "on" : "off",
                       p_tc->b_crop_dropped ? " · crop removed (nothing of "
                                              "it left at this angle)"
                                            : "");
    _status(p_tc, c_msg);
    g_free(c_msg);
+   g_free(c_angle);
 }
 
 static void
@@ -394,12 +406,38 @@ _aspect_for_key(guint u_keyval, gdouble *p_aspect) {
    return (FALSE);
 }
 
+/* TRUE iff u_keyval is one of the crop tool's own editing keys: the moves
+ * and resizes below plus the aspect presets. */
+static gboolean
+_is_crop_key(guint u_keyval) {
+   gdouble d_unused;
+   switch (u_keyval) {
+   case GDK_KEY_h:
+   case GDK_KEY_l:
+   case GDK_KEY_j:
+   case GDK_KEY_k:
+   case GDK_KEY_H:
+   case GDK_KEY_L:
+   case GDK_KEY_J:
+   case GDK_KEY_K:
+      return (TRUE);
+   default:
+      return (_aspect_for_key(u_keyval, &d_unused));
+   }
+}
+
 /* The crop tool's own keys (the common Enter/Esc/tool keys are handled
- * before this). Every edit needs the rectangle laid out, which needs the
- * base size: until that is known the key is consumed with a status line
- * rather than passed on to, say, win.prev. */
+ * before this). A key that is not the tool's is never consumed, so q, s,
+ * ?, t, Space ... keep their meaning at every moment of the session.
+ * Every edit needs the rectangle laid out, which needs the base size:
+ * until that is known the tool's OWN keys are consumed with a status line
+ * rather than passed on to, say, win.prev (an earlier version swallowed
+ * every plain key in that state, and `q` could not quit). */
 static gboolean
 _crop_key(ToolCtrl *p_tc, guint u_keyval) {
+   if (!_is_crop_key(u_keyval)) {
+      return (FALSE);
+   }
    if (!_ensure_rect(p_tc)) {
       _status(p_tc, _RENDERING);
       return (TRUE);
@@ -436,18 +474,23 @@ _crop_key(ToolCtrl *p_tc, guint u_keyval) {
    }
    if (_aspect_for_key(u_keyval, &d_aspect)) {
       _rect_aspect(p_tc, d_aspect);
-      return (TRUE);
    }
-   return (FALSE);
+   return (TRUE); /* _is_crop_key said so: nothing else reaches here */
 }
 
 /* A drag over the crop rectangle: BEGIN decides what was grabbed, every
  * later phase re-derives the rectangle from the one at BEGIN plus the total
- * offset (croprect_drag), so a drag never accumulates clamping error. */
+ * offset (croprect_drag), so a drag never accumulates clamping error. The
+ * whole gesture is ignored while the texture on screen is not the base the
+ * rectangle is laid out on (the base preview is still rendering): pointer
+ * pixels mapped through that other image's geometry would land on the
+ * wrong image pixels -- the same guard under which _draw_crop hides the
+ * rectangle, so nothing invisible can be edited. */
 static void
 _crop_drag(ToolCtrl *p_tc, const GgazeViewerGeom *p_g,
            GgazeViewerDragPhase e_phase, gdouble d_ix, gdouble d_iy) {
-   if (!_ensure_rect(p_tc)) {
+   if (!_ensure_rect(p_tc) || p_g->i_img_w != p_tc->i_base_w ||
+       p_g->i_img_h != p_tc->i_base_h) {
       return;
    }
    if (e_phase == GGAZE_VIEWER_DRAG_BEGIN) {
@@ -584,15 +627,14 @@ _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
  * nudge pushed it), so committing is leaving. */
 static gboolean
 _apply_straighten(ToolCtrl *p_tc) {
-   char c_num[G_ASCII_DTOSTR_BUF_SIZE];
-   g_ascii_formatd(c_num, sizeof(c_num), "%.1f", fabs(p_tc->t_work.d_degrees));
-   char *c_msg =
-      g_strdup_printf("Straightened %s° %s — s saves a "
-                      "copy, Esc discards the preview",
-                      c_num, p_tc->t_work.d_degrees < 0.0 ? "CCW" : "CW");
+   char *c_angle = _angle_text(p_tc->t_work.d_degrees);
+   char *c_msg   = g_strdup_printf("Straightened %s — s saves a "
+                                   "copy, Esc discards the preview",
+                                   c_angle);
    _leave(p_tc);
    _status(p_tc, c_msg);
    g_free(c_msg);
+   g_free(c_angle);
    return (TRUE);
 }
 
@@ -783,6 +825,20 @@ tool_ctrl_abandon(ToolCtrl *p_tc) {
        * only re-renders, it never switches views). */
       enhance_ctrl_set_preview_transform(p_tc->p_ec, NULL);
    }
+}
+
+void
+tool_ctrl_discarded(ToolCtrl *p_tc) {
+   g_return_if_fail(p_tc != NULL);
+   if (p_tc->e_tool == GGAZE_TOOL_NONE) {
+      return;
+   }
+   /* Only leave: the discard that called this resets the transform and a
+    * crop tool's override together, so restoring t_saved or clearing the
+    * override here would just render once more for nothing. Before this
+    * hook the tool stayed up with its t_work / t_saved intact, and the
+    * next nudge or Enter re-applied the "discarded" angle or turn. */
+   _leave(p_tc);
 }
 
 void

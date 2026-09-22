@@ -2689,20 +2689,26 @@ tool_fx_open(ToolFx *p_fx, gboolean b_present) {
    g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
 }
 
-/* Like tool_fx_open(FALSE), plus a second image ("a.jpg", plain.jpg's 6x3)
- * that sorts BEFORE tool.png, so win.prev has somewhere to go: the subtests
- * about navigating away from a tool need a target and a crop needs the
- * 400x300 image (the 6x3 fixture is below the rectangle's minimum size). */
+/* Like tool_fx_open(FALSE), plus u_siblings copies of plain.jpg (6x3) named
+ * "a.jpg", "b.jpg", ... that sort BEFORE tool.png, so win.prev / win.first
+ * have somewhere to go: the subtests about navigating away from a tool need
+ * a target (a crop needs the 400x300 image -- the 6x3 fixture is below the
+ * rectangle's minimum size), and one two positions away is what no
+ * prefetch has cached. */
 static void
-tool_fx_open_with_sibling(ToolFx *p_fx) {
+tool_fx_open_siblings(ToolFx *p_fx, guint u_siblings) {
    memset(p_fx, 0, sizeof(*p_fx));
    p_fx->c_dir = make_tool_dir(&p_fx->c_path);
-   copy_fixture(p_fx->c_dir, "plain.jpg");
-   char *c_a = g_build_filename(p_fx->c_dir, "a.jpg", NULL);
-   char *c_p = g_build_filename(p_fx->c_dir, "plain.jpg", NULL);
-   g_assert_cmpint(g_rename(c_p, c_a), ==, 0);
-   g_free(c_a);
-   g_free(c_p);
+   for (guint u = 0; u < u_siblings; u++) {
+      copy_fixture(p_fx->c_dir, "plain.jpg");
+      char c_name[] = "a.jpg";
+      c_name[0]     = (char)('a' + u);
+      char *c_a     = g_build_filename(p_fx->c_dir, c_name, NULL);
+      char *c_p     = g_build_filename(p_fx->c_dir, "plain.jpg", NULL);
+      g_assert_cmpint(g_rename(c_p, c_a), ==, 0);
+      g_free(c_a);
+      g_free(c_p);
+   }
    GFile *p_file = g_file_new_for_path(p_fx->c_path);
    p_fx->p_win   = new_window();
    ggaze_window_open(p_fx->p_win, p_file);
@@ -2710,6 +2716,12 @@ tool_fx_open_with_sibling(ToolFx *p_fx) {
    wait_for_load(p_fx->p_win);
    p_fx->p_orig = ref_viewer_texture(p_fx->p_win);
    g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
+}
+
+/* The one-sibling form ("a.jpg" before tool.png). */
+static void
+tool_fx_open_with_sibling(ToolFx *p_fx) {
+   tool_fx_open_siblings(p_fx, 1);
 }
 
 /* Pump until the viewer shows an i_w x i_h texture (a render landed with
@@ -3014,7 +3026,8 @@ test_straighten_nudge_and_autocrop(void) {
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.straighten");
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
-   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Straighten 0.0"));
+   /* A zero angle has no direction (it used to read "0.0° CW"). */
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Straighten 0.0° —"));
    tool_key_and_wait(fx.p_win, GDK_KEY_l);
    tool_key_and_wait(fx.p_win, GDK_KEY_l);
    GdkTexture *p_tex = viewer_texture(fx.p_win);
@@ -3350,7 +3363,8 @@ test_straighten_drag_end_without_begin_is_ignored(void) {
    ggtest_drain_main(300);
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
    g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
-   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Straighten 0.0"));
+   /* A zero angle has no direction (it used to read "0.0° CW"). */
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Straighten 0.0° —"));
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
    /* A proper line right after still works (the guard is per gesture). */
    ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN, g.d_x + 50 * d_s,
@@ -3532,6 +3546,163 @@ test_tool_key_controller_claims_keys_only_while_active(void) {
    tool_fx_close(&fx);
 }
 
+/* A discard while a tool is up ends the tool BEFORE the transform is reset
+ * -- the Original card and `0` with the panel open both go through it --
+ * so the straighten session's working angle cannot come back: afterwards
+ * `l` is not a tool key any more (no tool, so no overlay either) and the
+ * title stays without an angle. Before this hook tool-ctrl kept its
+ * t_work / t_saved across the discard and the next nudge re-applied the
+ * "discarded" angle. */
+static void
+test_discard_ends_the_straighten_tool(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance"); /* the panel: the Original card and `0` */
+   GtkWidget *p_panel = find_panel(fx.p_win);
+   g_assert_nonnull(p_panel);
+   fire(fx.p_win, "win.straighten");
+   tool_key_and_wait(fx.p_win, GDK_KEY_l);
+   tool_key_and_wait(fx.p_win, GDK_KEY_l);
+   g_assert_nonnull(
+      g_strstr_len(window_title(fx.p_win), -1, "straighten 1.0° CW"));
+   ggtest_click_button(find_card(p_panel, -1)); /* Original */
+   ggtest_drain_main(300);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_l, 0)); /* no tool */
+   ggtest_drain_main(300);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   /* `0` with the panel open is the same discard. */
+   fire(fx.p_win, "win.straighten");
+   tool_key_and_wait(fx.p_win, GDK_KEY_h);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
+   fire(fx.p_win, "win.zoom-reset");
+   ggtest_drain_main(300);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_l, 0));
+   ggtest_drain_main(300);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   tool_fx_close(&fx);
+}
+
+/* The same for a quarter turn under the crop tool: `]`, `c`, the Original
+ * card, then Enter -- the global Enter, since no tool is left -- must not
+ * bring the turn back (the crop tool's t_work carried the turn and Enter
+ * used to commit it). */
+static void
+test_discard_ends_the_crop_tool_and_its_turn(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   fire(fx.p_win, "win.enhance");
+   GtkWidget *p_panel = find_panel(fx.p_win);
+   g_assert_nonnull(p_panel);
+   fire(fx.p_win, "win.crop");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   tool_key(fx.p_win, GDK_KEY_H); /* some work in the tool */
+   ggtest_click_button(find_card(p_panel, -1));
+   ggtest_drain_main(300);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_Return, 0));
+   fire(fx.p_win, "win.enter-large"); /* what a real Enter activates */
+   ggtest_drain_main(300);
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "90°"));
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "crop"));
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   tool_fx_close(&fx);
+}
+
+/* While the crop tool's base size is still unknown -- `c` right after a
+ * jump to a file two positions away, which no prefetch cached and whose
+ * load has not landed -- only the tool's OWN keys are consumed (with the
+ * still-rendering status); q, s, ?, t and Space propagate to their usual
+ * meaning. Before, every plain key was swallowed in that state and `q`
+ * could not quit. Once the load lands the same key edits the rectangle. */
+static void
+test_crop_tool_passes_foreign_keys_while_base_unknown(void) {
+   ToolFx fx;
+   tool_fx_open_siblings(&fx, 2); /* a.jpg, b.jpg, tool.png */
+   fire(fx.p_win, "win.first");   /* a.jpg: two away, never prefetched */
+   fire(fx.p_win, "win.crop");    /* before its load lands */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_false(emit_capture_key(fx.p_win, GDK_KEY_q));
+   g_assert_false(emit_capture_key(fx.p_win, GDK_KEY_s));
+   g_assert_false(emit_capture_key(fx.p_win, GDK_KEY_question));
+   g_assert_false(emit_capture_key(fx.p_win, GDK_KEY_t));
+   g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_space, 0));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(emit_capture_key(fx.p_win, GDK_KEY_h)); /* ours: stopped */
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Preview still"));
+   g_assert_true(ggaze_window_tool_key(fx.p_win, GDK_KEY_1, 0));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(ggaze_window_tool_key(fx.p_win, GDK_KEY_Return, 0));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   wait_for_texture_size(fx.p_win, 6, 3); /* the load landed: a base */
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "a.jpg"));
+   g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_q, 0));
+   tool_key(fx.p_win, GDK_KEY_h);      /* laid out now: no "still rendering" */
+   tool_key(fx.p_win, GDK_KEY_Return); /* ... and Enter is accepted */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Crop removed"));
+   tool_fx_close(&fx);
+}
+
+/* A pointer drag in the crop tool is ignored while the texture on screen is
+ * not the base the rectangle is laid out on (the base preview is still
+ * rendering: here a `]` in flight under `c`), exactly as the overlay is not
+ * drawn then -- pointer pixels mapped through the old image's geometry would
+ * edit a rectangle the user cannot see. Once the base has landed the same
+ * gesture resizes. */
+static void
+test_crop_drag_ignored_while_sizes_disagree(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   GgazeViewer *p_v = GGAZE_VIEWER(
+      gtk_stack_get_child_by_name(ggaze_window_get_stack(fx.p_win), "large"));
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   g_assert_cmpint(g.i_img_w, ==, TOOL_W);
+   fire(fx.p_win, "win.rotate-cw"); /* in flight: 400x300 on screen, the
+                                     * rectangle's base is 300x400 */
+   fire(fx.p_win, "win.crop");
+   gdouble d_s = g.d_scale;
+   /* The bottom-right corner dragged inward: on a visible rectangle this
+    * resizes it to 200x100. */
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN,
+                          g.d_x + TOOL_W * d_s, g.d_y + TOOL_H * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_UPDATE, g.d_x + 200 * d_s,
+                          g.d_y + 100 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 200 * d_s,
+                          g.d_y + 100 * d_s);
+   wait_for_texture_change(fx.p_win, fx.p_orig);
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   tool_key(fx.p_win, GDK_KEY_Return); /* still the whole base: no crop */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Crop removed"));
+   ggtest_drain_main(300);
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   /* Now the sizes agree: the same gesture on the turned image resizes. */
+   fire(fx.p_win, "win.crop");
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   g_assert_cmpint(g.i_img_w, ==, TOOL_H);
+   d_s = g.d_scale;
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN,
+                          g.d_x + TOOL_H * d_s, g.d_y + TOOL_W * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 200 * d_s,
+                          g.d_y + 100 * d_s);
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_texture_size(fx.p_win, 200, 100);
+   tool_fx_close(&fx);
+}
+
 static void
 add_tool_tests(void) {
    g_test_add_func("/enhance_flow/rotate_cw_repeats_to_the_original",
@@ -3585,6 +3756,20 @@ add_tool_review_tests(void) {
                    test_crop_follows_straighten_or_is_dropped);
    g_test_add_func("/enhance_flow/tool_key_controller_claims_keys_only_active",
                    test_tool_key_controller_claims_keys_only_while_active);
+}
+
+/* wb2 second review round: a discard ends the tool first, the crop tool
+ * never swallows foreign keys, and drags obey the overlay's size guard. */
+static void
+add_tool_review2_tests(void) {
+   g_test_add_func("/enhance_flow/discard_ends_the_straighten_tool",
+                   test_discard_ends_the_straighten_tool);
+   g_test_add_func("/enhance_flow/discard_ends_the_crop_tool_and_its_turn",
+                   test_discard_ends_the_crop_tool_and_its_turn);
+   g_test_add_func("/enhance_flow/crop_tool_passes_foreign_keys_base_unknown",
+                   test_crop_tool_passes_foreign_keys_while_base_unknown);
+   g_test_add_func("/enhance_flow/crop_drag_ignored_while_sizes_disagree",
+                   test_crop_drag_ignored_while_sizes_disagree);
 }
 
 /* Registration split in two so neither function runs past the ~30-line
@@ -3766,5 +3951,6 @@ main(int i_argc, char **c_argv) {
    add_dispose_prompt_tests();
    add_tool_tests();
    add_tool_review_tests();
+   add_tool_review2_tests();
    return (g_test_run());
 }

@@ -173,7 +173,9 @@ transform_straighten_size(gdouble d_w, gdouble d_h, gdouble d_deg,
    }
    /* The inscribed rectangle minus the sampler's blend margin on every side
     * (TRANSFORM_AUTOCROP_INSET), floored at a pixel so a tiny image still
-    * yields something the chain can crop to. */
+    * yields something the chain can crop to -- below 3 px per side that
+    * floor lies inside the margin and the opacity guarantee is off (see the
+    * define). */
    transform_autocrop_size(d_w, d_h, d_deg, p_w, p_h);
    *p_w = MAX(1.0, *p_w - 2.0 * TRANSFORM_AUTOCROP_INSET);
    *p_h = MAX(1.0, *p_h - 2.0 * TRANSFORM_AUTOCROP_INSET);
@@ -226,16 +228,19 @@ transform_rebase_crop(Transform *p_t, const Transform *p_old, gdouble d_orig_w,
    /* Same offset from the centre as before: the straighten rotates and the
     * auto-crop shrinks about the centre, so this keeps the rectangle over
     * the content it framed (the content under it turns, the frame does not
-    * -- the closest thing to "the same pixels" a rotation allows). */
+    * -- the closest thing to "the same pixels" a rotation allows). Only the
+    * shift is stored: the stored rectangle stays whole and the cutting is
+    * transform_effective_crop's job at render / export time. Storing the
+    * cut rectangle eroded a border-touching crop for good on the first
+    * nudge ({0,0,100,100} on 400x300, 5 degrees and back, came out as
+    * {12,17,88,83}); a shift is exactly undone by the opposite shift. */
    p_t->t_crop.d_x += (d_nw - d_ow) / 2.0;
    p_t->t_crop.d_y += (d_nh - d_oh) / 2.0;
-   CropRect t_cut = p_t->t_crop;
-   croprect_intersect(&t_cut, d_nw, d_nh);
-   if (t_cut.d_w < 1.0 || t_cut.d_h < 1.0) {
+   CropRect t_eff;
+   if (!transform_effective_crop(p_t, d_nw, d_nh, &t_eff)) {
       p_t->b_crop = FALSE; /* nothing of it survives the new base */
       return (FALSE);
    }
-   p_t->t_crop = t_cut;
    return (TRUE);
 }
 

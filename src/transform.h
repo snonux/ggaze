@@ -45,7 +45,14 @@ G_BEGIN_DECLS
  * corners, up to 32 such pixels on 400x300; a JPEG export then differs from
  * the preview there). One pixel per side is the smallest inset that left
  * every kept pixel fully opaque at 0.5..45 degrees on 33x47 .. 4000x3000
- * (tests/test_enhancer.c pins it). */
+ * (tests/test_enhancer.c pins it).
+ *
+ * The guarantee needs room for the inset: the inscribed rectangle must be
+ * at least 2 * inset + 1 = 3 px on each side. Below that
+ * transform_straighten_size floors the output at 1x1 INSIDE the blend
+ * margin, so straightening an image that small (a 3x2 at 45 degrees) may
+ * keep translucent pixels -- and is not a meaningful operation anyway;
+ * tests/test_transform.c pins the boundary rather than refusing it. */
 #define TRANSFORM_AUTOCROP_INSET 1.0
 
 typedef struct {
@@ -142,10 +149,15 @@ gboolean transform_effective_crop(const Transform *p_t, gdouble d_base_w,
  * of *p_old and is now that of *p_t (a straighten angle or auto-crop change;
  * a quarter turn is handled exactly by transform_rotate_quarter instead). The
  * straighten turns and the auto-crop shrinks about the centre, so the crop
- * is anchored on the centre -- the same offset from it as before -- and then
- * cut down to the new base. Returns FALSE, with b_crop cleared, when nothing
- * of it is left; TRUE (also with no crop at all) otherwise. The title only
- * ever says "crop" for a crop that is really applied. */
+ * is anchored on the centre -- the same offset from it as before. The
+ * rectangle is kept WHOLE (shifted, never cut down): what the chain crops is
+ * transform_effective_crop, its intersection with the base, judged at render
+ * and export time, so a crop reaching past a shrunken base grows back when
+ * the angle comes back and the same angles give back the same rectangle
+ * exactly. Returns FALSE, with b_crop cleared, when the effective crop on the
+ * new base is empty (nothing of it is left); TRUE (also with no crop at all)
+ * otherwise. The title only ever says "crop" for a crop that is really
+ * applied. */
 gboolean transform_rebase_crop(Transform *p_t, const Transform *p_old,
                                gdouble d_orig_w, gdouble d_orig_h);
 

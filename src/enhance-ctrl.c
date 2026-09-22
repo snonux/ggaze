@@ -663,11 +663,15 @@ _apply_async(EnhanceCtrl *p_ctrl) {
  * original: clears the mask + cached texture and reloads the original
  * (_apply_async's mask==0 path also invalidates any in-flight apply via
  * u_enhance_gen). Used by Esc (explicit discard, no prompt), the Original
- * card / `0`, the slideshow timer, and after Save/Discard in the
- * navigate-away prompt. Never touches the file on disk -- discarding a
- * preview only drops in-memory state. */
+ * card / `0`, the slideshow timer, a failed apply, and after Save/Discard
+ * in the navigate-away prompt. Never touches the file on disk -- discarding
+ * a preview only drops in-memory state. A crop / straighten session over
+ * the preview ends FIRST (abandon_tool): the tool's working copy of the
+ * transform would otherwise survive the reset and come back on its next
+ * nudge or Enter. */
 static void
 _discard(EnhanceCtrl *p_ctrl) {
+   p_ctrl->p_ops->abandon_tool(p_ctrl->p_host);
    p_ctrl->u_enhance_mask = 0;
    transform_init(&p_ctrl->t_xf);   /* a discard drops the turn/crop too */
    p_ctrl->b_preview       = FALSE; /* and a tool's override with it */

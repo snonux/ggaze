@@ -87,7 +87,9 @@ void tool_ctrl_toggle_straighten(ToolCtrl *p_tc);
  * l / + clockwise by 0.5 degrees, A toggles auto-crop; both: Enter applies,
  * Esc cancels, and c / R / [ / ] are answered with "finish the tool first"
  * (a tool switch or a turn under a laid-out rectangle would silently move
- * it). Every other key is left alone. FALSE with no tool active. */
+ * it). Every other key is left alone -- also while the crop tool's base is
+ * still unknown and its own keys only report "still rendering". FALSE with
+ * no tool active. */
 gboolean tool_ctrl_key(ToolCtrl *p_tc, guint u_keyval, GdkModifierType e_state);
 
 /* A pointer drag on the viewer in widget coordinates (the viewer's overlay
@@ -108,6 +110,14 @@ void tool_ctrl_cancel(ToolCtrl *p_tc);
 /* Leave without touching the transform -- the image under the tool changed
  * hands (navigation reset the preview, the view left the large page). */
 void tool_ctrl_abandon(ToolCtrl *p_tc);
+
+/* The preview under the tool is being discarded (Esc outside the tool, `0`
+ * / the Original card with the panel open, a failed render, the gate's
+ * Discard, the slideshow): leave WITHOUT restoring or committing anything
+ * -- the discard resets the transform and a crop tool's override together.
+ * The enhance controller calls this through its host ops before it resets,
+ * so no tool can outlive the state it was editing and re-apply it. */
+void tool_ctrl_discarded(ToolCtrl *p_tc);
 
 /* The navigator "changed" choke point: abandon iff the current file is no
  * longer the one the tool started on (a same-file rescan keeps it). */

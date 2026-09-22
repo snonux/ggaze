@@ -114,6 +114,13 @@ typedef struct {
     * present, current NULL -- still reaches the mask-reset branch rather than
     * early-returning. */
    gboolean (*has_navigator)(gpointer p_host);
+   /* The preview is about to be discarded (Esc, `0` / the Original card, a
+    * failed apply, the gate's Discard, the slideshow): end a crop /
+    * straighten session over it first, without restoring anything -- the
+    * discard resets the transform and a tool's override together. A tool
+    * left running kept its working angle / turn and re-applied the
+    * discarded state on the next nudge or Enter. */
+   void (*abandon_tool)(gpointer p_host);
 } EnhanceUIHostOps;
 
 /* Continuation for enhance_ctrl_save_async: b_ok is TRUE on a real write. */
@@ -246,8 +253,8 @@ gboolean enhance_ctrl_can_save(EnhanceCtrl *p_ctrl);
 void enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl);
 
 /* Drop the current enhance preview and go back to the original (Esc, `0`,
- * slideshow auto-advance, the SaveGate's Discard). Never touches the file
- * on disk. */
+ * slideshow auto-advance, the SaveGate's Discard). Ends a running tool
+ * first (abandon_tool). Never touches the file on disk. */
 void enhance_ctrl_discard(EnhanceCtrl *p_ctrl);
 
 G_END_DECLS

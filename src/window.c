@@ -1140,7 +1140,9 @@ _action_zoom_reset(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
 #if GGAZE_HAVE_GEGL
    /* `0` is the panel's "Original" hotkey (docs/gegl.md): while the panel
-    * is open it drops the preview instead of toggling the zoom. */
+    * is open it drops the preview instead of toggling the zoom -- and a
+    * straighten session with it (the controller ends the tool before it
+    * resets; the crop tool claims `0` itself as its free-aspect key). */
    if (enhance_ctrl_is_open(p_win->p_enhance_ctrl)) {
       enhance_ctrl_discard(p_win->p_enhance_ctrl);
       return;
@@ -1344,6 +1346,17 @@ _ec_has_navigator(gpointer p_host) {
    return (GGAZE_WINDOW(p_host)->p_nav != NULL);
 }
 
+/* The tool controller is created after the enhance controller
+ * (_init_tool_state needs the viewer) and freed before it, so it may be
+ * NULL at either end of the window's life. */
+static void
+_ec_abandon_tool(gpointer p_host) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_host);
+   if (p_win->p_tool_ctrl != NULL) {
+      tool_ctrl_discarded(p_win->p_tool_ctrl);
+   }
+}
+
 static const EnhanceUIHostOps _ENHANCE_OPS = {
    .show_texture       = _ec_show_texture,
    .update_header      = _ec_update_header,
@@ -1354,6 +1367,7 @@ static const EnhanceUIHostOps _ENHANCE_OPS = {
    .get_cached_texture = _ec_cached_texture,
    .panel_slot         = _ec_panel_slot,
    .has_navigator      = _ec_has_navigator,
+   .abandon_tool       = _ec_abandon_tool,
 };
 
 /* win.enhance (key 'a'): open the side panel beside the large view (with a
