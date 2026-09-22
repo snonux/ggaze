@@ -81,8 +81,8 @@ guint ggaze_grid_get_count(GgazeGrid *p_grid);
 
 /* Toggle the mark on the cell at (i_x, i_y) in the grid's flowbox
  * coordinates, exactly as a middle-click does: select the cell, sync
- * navigator.current to it THROUGH the select gate above, then dispatch the
- * shared "win.mark" action. Returns TRUE iff a cell was found there.
+ * navigator.current to it THROUGH the select gate above, then emit
+ * "mark-requested". Returns TRUE iff a cell was found there.
  *
  * Public because that is the only way the middle-click path can be tested:
  * the gesture itself would need a synthesized pointer press at real
@@ -94,9 +94,17 @@ gboolean ggaze_grid_mark_at_pos(GgazeGrid *p_grid, gint i_x, gint i_y);
 /* Disconnect from the navigator (call before the navigator is freed). */
 void ggaze_grid_detach(GgazeGrid *p_grid);
 
-/* "activate": emitted when the user presses Enter or double-clicks a cell (the
- * window switches to the large view on the current file). */
-guint ggaze_grid_activate_signal(void);
+/* Signals (the grid names no window action; the owner connects these):
+ *   "activate"            Enter / double-click on a cell (owner opens the
+ *                         large view on the current file).
+ *   "navigate" (gint dir) Left (-1) / Right (+1) pressed in the grid.
+ *   "mark-requested"      middle-click on a cell (owner toggles the mark on
+ *                         the selected cell).
+ *   "mark-all-requested"  Ctrl+a pressed in the grid (GtkFlowBox would
+ *                         otherwise swallow it as its own select-all).
+ * A single click (or a GtkFlowBox Home/End/PageUp/PageDown move) syncs
+ * navigator.current to the highlighted cell through the select gate, so the
+ * highlighted cell is always the target of per-image actions. */
 
 G_END_DECLS
 

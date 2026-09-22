@@ -471,6 +471,51 @@ test_mark_at_pos_respects_refusing_gate(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* A single click (here: the flowbox selection moving, which is what a click
+ * does with activate-on-single-click off) must sync navigator.current
+ * through the gate, so per-image actions target the highlighted cell. A
+ * refusing gate is asked and obeyed; without a gate current follows. */
+static void
+test_click_selection_syncs_current(void) {
+   char      *c_dir = make_folder();
+   GtkWindow *p_win;
+   Navigator *p_nav;
+   Thumbnail *p_thumb;
+   GgazeGrid *p_grid;
+   build_grid(c_dir, &p_win, &p_nav, &p_thumb, &p_grid);
+   GtkFlowBox *p_flow = ggtest_find_flow_box(GTK_WIDGET(p_grid));
+   g_assert_nonnull(p_flow);
+
+   GFile *p_before = navigator_get_current(p_nav);
+   char  *c_before = g_file_get_basename(p_before);
+
+   FakeGate fg = {0};
+   fg.p_nav    = p_nav;
+   fg.b_allow  = FALSE;
+   ggaze_grid_set_select_func(p_grid, fake_gate, &fg);
+   gtk_flow_box_select_child(p_flow,
+                             gtk_flow_box_get_child_at_index(p_flow, 2));
+   ggtest_drain_main(50);
+   g_assert_cmpuint(fg.u_calls, >, 0);
+   char *c_after = g_file_get_basename(navigator_get_current(p_nav));
+   g_assert_cmpstr(c_before, ==, c_after); /* refused: current stayed */
+   g_free(c_after);
+
+   ggaze_grid_set_select_func(p_grid, NULL, NULL);
+   gtk_flow_box_select_child(p_flow,
+                             gtk_flow_box_get_child_at_index(p_flow, 1));
+   ggtest_drain_main(50);
+   g_assert_cmpint(navigator_get_current_index(p_nav), ==, 1);
+
+   g_free(c_before);
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   ggtest_drain_main(100);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -498,5 +543,7 @@ main(int i_argc, char **c_argv) {
                    test_move_cursor_respects_refusing_gate);
    g_test_add_func("/grid_select_gate/mark_at_pos_respects_refusing_gate",
                    test_mark_at_pos_respects_refusing_gate);
+   g_test_add_func("/grid_select_gate/click_selection_syncs_current",
+                   test_click_selection_syncs_current);
    return (g_test_run());
 }

@@ -500,15 +500,6 @@ ggaze_viewer_toggle_fit_100(GgazeViewer *p_viewer) {
 }
 
 void
-ggaze_viewer_fit(GgazeViewer *p_viewer) {
-   g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
-   p_viewer->b_fit   = TRUE;
-   p_viewer->d_pan_x = 0.0;
-   p_viewer->d_pan_y = 0.0;
-   gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
-}
-
-void
 ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy) {
    g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
    /* Same invariant _zoom_at enforces (hx0): the pan fields must stay finite.

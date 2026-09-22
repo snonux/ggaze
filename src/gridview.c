@@ -17,8 +17,9 @@
 
 /* Per-cell data, attached to the GtkPicture via qdata. */
 typedef struct {
-   GFile *p_file;     /* owned ref */
-   GFile *p_expected; /* the file this thumbnail request is for (owned) */
+   GFile   *p_file;     /* owned ref */
+   GFile   *p_expected; /* the file this thumbnail request is for (owned) */
+   gboolean b_done;     /* thumbnail painted for the current size bucket */
 } CellData;
 
 static const char *CELL_DATA_KEY = "ggaze-cell-data";
@@ -42,9 +43,89 @@ struct _GgazeGrid {
 
 G_DEFINE_TYPE(GgazeGrid, ggaze_grid, GTK_TYPE_WIDGET)
 
+/* Signals (see gridview.h). The grid never names a window action: it says
+ * what the user asked for and the owner decides what that means. */
 static guint u_activate_signal = 0;
+static guint u_navigate_signal = 0;
+static guint u_mark_signal     = 0;
+static guint u_mark_all_signal = 0;
 
 static void _queue_visible_thumbnails(GgazeGrid *p_grid);
+
+/* --- cell walking --------------------------------------------------------
+ *
+ * Every cell is a GtkFlowBoxChild carrying its GFile as "file" qdata and a
+ * vertical box (picture + caption) as its child. These helpers are the one
+ * place that layout is known; the five walks that used to repeat it now go
+ * through _foreach_cell / _find_cell. */
+
+/* The cell's file (borrowed from the child's qdata), or NULL. */
+static GFile *
+_cell_file(GtkWidget *p_child) {
+   return ((GFile *)g_object_get_data(G_OBJECT(p_child), "file"));
+}
+
+/* The cell's content box (picture + caption), or NULL. */
+static GtkWidget *
+_cell_box(GtkWidget *p_child) {
+   return (gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(p_child)));
+}
+
+typedef void (*GgazeGridCellFn)(GgazeGrid *p_grid, GtkWidget *p_child,
+                                gpointer p_data);
+
+/* Call fn for every cell in flow-box order. Safe against fn removing the
+ * cell it was handed (the next sibling is fetched first). */
+static void
+_foreach_cell(GgazeGrid *p_grid, GgazeGridCellFn fn, gpointer p_data) {
+   if (p_grid->p_flow == NULL) {
+      return;
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
+   while (p_child != NULL) {
+      GtkWidget *p_next = gtk_widget_get_next_sibling(p_child);
+      fn(p_grid, p_child, p_data);
+      p_child = p_next;
+   }
+}
+
+/* The cell showing p_file, or NULL when it has none (hidden or gone). */
+static GtkWidget *
+_find_cell(GgazeGrid *p_grid, GFile *p_file) {
+   if (p_grid->p_flow == NULL || p_file == NULL) {
+      return (NULL);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
+   while (p_child != NULL) {
+      GFile *p_f = _cell_file(p_child);
+      if (p_f != NULL && g_file_equal(p_f, p_file)) {
+         return (p_child);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (NULL);
+}
+
+/* Apply the "ggaze-marked" badge state to one cell's box. */
+static void
+_set_marked(GtkWidget *p_box, gboolean b_marked) {
+   if (b_marked) {
+      gtk_widget_add_css_class(p_box, "ggaze-marked");
+   } else {
+      gtk_widget_remove_css_class(p_box, "ggaze-marked");
+   }
+}
+
+/* Apply the dimmed/"ggaze-removed" appearance to one cell's box. */
+static void
+_set_removed(GtkWidget *p_box, gboolean b_removed) {
+   gtk_widget_set_opacity(p_box, b_removed ? 0.35 : 1.0);
+   if (b_removed) {
+      gtk_widget_add_css_class(p_box, "ggaze-removed");
+   } else {
+      gtk_widget_remove_css_class(p_box, "ggaze-removed");
+   }
+}
 
 static void
 _cell_data_free(gpointer p_void) {
@@ -102,6 +183,7 @@ _thumb_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       if (p_d->p_expected != NULL &&
           g_file_equal(p_d->p_expected, p_d->p_file)) {
          gtk_picture_set_paintable(GTK_PICTURE(p_pic), (GdkPaintable *)p_tex);
+         p_d->b_done = TRUE; /* no re-request until the size changes */
       }
       g_object_unref(p_tex);
    } else {
@@ -117,8 +199,8 @@ _request_thumbnail(GtkWidget *p_pic) {
    if (p_d == NULL || p_d->p_file == NULL) {
       return;
    }
-   if (p_d->p_expected != NULL) {
-      return; /* already in flight */
+   if (p_d->p_expected != NULL || p_d->b_done) {
+      return; /* already in flight, or already painted for this size */
    }
    p_d->p_expected = (GFile *)g_object_ref(p_d->p_file);
    GgazeGrid *p_grid =
@@ -204,9 +286,8 @@ _make_picture(GgazeGrid *p_grid, GFile *p_file) {
    GtkWidget *p_pic = gtk_picture_new();
    gtk_widget_set_size_request(p_pic, p_grid->i_size, p_grid->i_size);
    gtk_picture_set_content_fit(GTK_PICTURE(p_pic), GTK_CONTENT_FIT_CONTAIN);
-   CellData *p_d   = g_new(CellData, 1);
-   p_d->p_file     = (GFile *)g_object_ref(p_file);
-   p_d->p_expected = NULL;
+   CellData *p_d = g_new0(CellData, 1);
+   p_d->p_file   = (GFile *)g_object_ref(p_file);
    g_object_set_data_full(G_OBJECT(p_pic), CELL_DATA_KEY, p_d, _cell_data_free);
    g_signal_connect(p_pic, "map", G_CALLBACK(_on_pic_map), NULL);
    return (p_pic);
@@ -226,15 +307,8 @@ _make_cell(GgazeGrid *p_grid, GFile *p_file) {
    gtk_widget_add_css_class(p_label, "caption");
    gtk_box_append(GTK_BOX(p_box), p_label);
 
-   /* mark badge */
-   if (navigator_is_marked(p_grid->p_nav, p_file)) {
-      gtk_widget_add_css_class(p_box, "ggaze-marked");
-   }
-   /* dim removed */
-   if (navigator_is_removed(p_grid->p_nav, p_file)) {
-      gtk_widget_set_opacity(p_box, 0.35);
-      gtk_widget_add_css_class(p_box, "ggaze-removed");
-   }
+   _set_marked(p_box, navigator_is_marked(p_grid->p_nav, p_file));
+   _set_removed(p_box, navigator_is_removed(p_grid->p_nav, p_file));
 
    GtkWidget *p_child = gtk_flow_box_child_new();
    gtk_flow_box_child_set_child(GTK_FLOW_BOX_CHILD(p_child), p_box);
@@ -255,13 +329,26 @@ _on_child_activated(GtkFlowBox *p_flow, GtkFlowBoxChild *p_child,
    g_signal_emit(p_grid, u_activate_signal, 0);
 }
 
+/* Keys the grid answers itself. Arrow/vi rows move the cursor; Left/Right,
+ * Ctrl+a and the middle-click mark are reported as signals for the owner to
+ * act on (the grid does not know the window's action names). Ctrl+a must be
+ * caught here: GtkFlowBox binds it to its own "select-all", which counts as
+ * handled even in SINGLE selection mode, so the window's global shortcut
+ * would never see it. */
 static gboolean
 _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
              GdkModifierType e_st, gpointer p_data) {
    (void)p_key;
    (void)u_kc;
-   (void)e_st;
-   GgazeGrid *p_grid = GGAZE_GRID(p_data);
+   GgazeGrid      *p_grid = GGAZE_GRID(p_data);
+   GdkModifierType e_mods = e_st & gtk_accelerator_get_default_mod_mask();
+   if (e_mods == GDK_CONTROL_MASK && u_kv == GDK_KEY_a) {
+      g_signal_emit(p_grid, u_mark_all_signal, 0);
+      return (TRUE);
+   }
+   if (e_mods != 0) {
+      return (FALSE); /* other chords belong to the window */
+   }
    if (u_kv == GDK_KEY_Return || u_kv == GDK_KEY_KP_Enter) {
       /* Sync navigator.current to the highlighted cell before activating, so
        * Enter opens the arrow-selected image, not a stale current. */
@@ -279,26 +366,33 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
       ggaze_grid_move_cursor(p_grid, -1);
       return (TRUE);
    }
-   if (u_kv == GDK_KEY_Left) {
-      return (gtk_widget_activate_action(GTK_WIDGET(p_grid), "win.prev", NULL));
+   if (u_kv == GDK_KEY_Left || u_kv == GDK_KEY_Right) {
+      g_signal_emit(p_grid, u_navigate_signal, 0,
+                    (u_kv == GDK_KEY_Left) ? -1 : 1);
+      return (TRUE);
    }
-   if (u_kv == GDK_KEY_Right) {
-      return (gtk_widget_activate_action(GTK_WIDGET(p_grid), "win.next", NULL));
-   }
-   if (u_kv == GDK_KEY_d) {
-      /* `d` in the grid trashes the current file (window handles via action).
-       */
-      return (FALSE);
-   }
-   return (FALSE);
+   return (FALSE); /* everything else (d, v, ...) is a window action */
+}
+
+/* A click (or GtkFlowBox's own Home/End/PageUp/PageDown bindings) moved the
+ * highlight: keep navigator.current in step through the select gate, so the
+ * per-image actions (d/D/m/e/!/i) and the header act on the cell the user is
+ * looking at, not on whatever was current before the click. Re-entrant
+ * selections made by _select_current land on the file that is already
+ * current and are no-ops in the navigator. */
+static void
+_on_selection_changed(GtkFlowBox *p_flow, gpointer p_data) {
+   (void)p_flow;
+   ggaze_grid_sync_current(GGAZE_GRID(p_data));
 }
 
 /* Toggle the mark on the cell at (i_x, i_y) — see gridview.h.
  *
- * win.mark targets the FLOWBOX SELECTION, not navigator.current --
- * window.c's _action_mark prefers ggaze_grid_get_selected_file() while the
- * grid is the visible stack child -- so gtk_flow_box_select_child() below is
- * what makes the mark land on this cell. The _grid_select() call next to it
+ * The owner's mark handler targets the FLOWBOX SELECTION, not
+ * navigator.current -- window.c's _action_mark prefers
+ * ggaze_grid_get_selected_file() while the grid is the visible stack child --
+ * so gtk_flow_box_select_child() below is what makes the mark land on this
+ * cell. The _grid_select() call next to it
  * is a separate concern: it keeps navigator.current (header, large view,
  * prefetch) in step with the cell the user just pointed at, and since tu0 may
  * legitimately be refused or deferred by the installed select gate when an
@@ -315,14 +409,14 @@ ggaze_grid_mark_at_pos(GgazeGrid *p_grid, gint i_x, gint i_y) {
       return (FALSE);
    }
    /* Select the cell (this is what win.mark acts on), keep navigator.current
-    * in step with it through the gate, then dispatch the shared toggle
-    * action (handles badge + header update). */
+    * in step with it through the gate, then ask the owner to toggle the mark
+    * ("mark-requested": badge + header update happen there). */
    gtk_flow_box_select_child(GTK_FLOW_BOX(p_grid->p_flow), p_child);
-   GFile *p_file = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
+   GFile *p_file = _cell_file(GTK_WIDGET(p_child));
    if (p_file != NULL) {
       _grid_select(p_grid, p_file);
    }
-   gtk_widget_activate_action(GTK_WIDGET(p_grid), "win.mark", NULL);
+   g_signal_emit(p_grid, u_mark_signal, 0);
    return (TRUE);
 }
 
@@ -357,20 +451,12 @@ _clear_flow(GgazeGrid *p_grid) {
 
 static void
 _select_current(GgazeGrid *p_grid) {
-   GFile *p_cur = navigator_get_current(p_grid->p_nav);
-   if (p_cur == NULL) {
-      return;
-   }
-   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
-   while (p_child != NULL) {
-      GFile *p_f = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
-      if (p_f != NULL && g_file_equal(p_f, p_cur)) {
-         GtkFlowBoxChild *p_fc = GTK_FLOW_BOX_CHILD(p_child);
-         gtk_flow_box_select_child(GTK_FLOW_BOX(p_grid->p_flow), p_fc);
-         gtk_widget_grab_focus(p_child);
-         return;
-      }
-      p_child = gtk_widget_get_next_sibling(p_child);
+   GtkWidget *p_child =
+      _find_cell(p_grid, navigator_get_current(p_grid->p_nav));
+   if (p_child != NULL) {
+      gtk_flow_box_select_child(GTK_FLOW_BOX(p_grid->p_flow),
+                                GTK_FLOW_BOX_CHILD(p_child));
+      gtk_widget_grab_focus(p_child);
    }
 }
 
@@ -397,12 +483,62 @@ ggaze_grid_sync_current(GgazeGrid *p_grid) {
    if (p_sel == NULL) {
       return (FALSE);
    }
-   GFile *p_file = (GFile *)g_object_get_data(G_OBJECT(p_sel->data), "file");
+   GFile *p_file = _cell_file(GTK_WIDGET(p_sel->data));
    g_list_free(p_sel);
    if (p_file == NULL) {
       return (FALSE);
    }
    return (_grid_select(p_grid, p_file));
+}
+
+/* Running best-match for _nearest_cell_in_row_direction's walk. */
+typedef struct {
+   GtkWidget      *p_cur;
+   graphene_rect_t r_cur;
+   int             i_dy;
+   GtkWidget      *p_best;
+   float           f_best_dy;
+   float           f_best_dx;
+} NearestSearch;
+
+/* One step of the nearest-cell search: a laid-out cell in the wanted vertical
+ * direction wins if it is in a nearer row, or in the same row and nearer to
+ * the current column. */
+static void
+_nearest_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
+   NearestSearch  *p_s = (NearestSearch *)p_data;
+   graphene_rect_t r;
+   if (p_child == p_s->p_cur ||
+       !gtk_widget_compute_bounds(p_child, p_grid->p_flow, &r) ||
+       r.size.width == 0) {
+      return;
+   }
+   float f_dy = r.origin.y - p_s->r_cur.origin.y;
+   if (!((p_s->i_dy > 0 && f_dy > 0) || (p_s->i_dy < 0 && f_dy < 0))) {
+      return;
+   }
+   float f_ady = ABS(f_dy);
+   float f_adx = ABS(r.origin.x - p_s->r_cur.origin.x);
+   if (p_s->p_best == NULL || f_ady < p_s->f_best_dy ||
+       (f_ady == p_s->f_best_dy && f_adx < p_s->f_best_dx)) {
+      p_s->p_best    = p_child;
+      p_s->f_best_dy = f_ady;
+      p_s->f_best_dx = f_adx;
+   }
+}
+
+/* The laid-out cell in the row below (i_dy > 0) or above (i_dy < 0) p_cur
+ * that is closest to p_cur's column, or NULL when there is none (or the grid
+ * is not laid out yet). Pure geometry over the flow box. */
+static GtkWidget *
+_nearest_cell_in_row_direction(GgazeGrid *p_grid, GtkWidget *p_cur, int i_dy) {
+   NearestSearch st = {p_cur, {{0, 0}, {0, 0}}, i_dy, NULL, 0.0f, 0.0f};
+   if (!gtk_widget_compute_bounds(p_cur, p_grid->p_flow, &st.r_cur) ||
+       st.r_cur.size.width == 0) {
+      return (NULL); /* not laid out yet */
+   }
+   _foreach_cell(p_grid, _nearest_step, &st);
+   return (st.p_best);
 }
 
 /* Move the grid cursor one row down (i_dy = +1) or up (i_dy = -1), selecting
@@ -422,40 +558,10 @@ ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy) {
    }
    GtkWidget *p_cur = GTK_WIDGET(p_sel->data);
    g_list_free(p_sel);
-   graphene_rect_t r_cur;
-   if (!gtk_widget_compute_bounds(p_cur, p_grid->p_flow, &r_cur) ||
-       r_cur.size.width == 0) {
-      return; /* not laid out yet */
-   }
-   GtkWidget *p_best  = NULL;
-   float      best_dy = 0;
-   float      best_dx = 0;
-   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
-   while (p_child != NULL) {
-      if (p_child != p_cur) {
-         graphene_rect_t r;
-         if (gtk_widget_compute_bounds(p_child, p_grid->p_flow, &r) &&
-             r.size.width != 0) {
-            float dy = r.origin.y - r_cur.origin.y;
-            if ((i_dy > 0 && dy > 0) || (i_dy < 0 && dy < 0)) {
-               float ady = ABS(dy);
-               float adx = ABS(r.origin.x - r_cur.origin.x);
-               if (p_best == NULL || ady < best_dy ||
-                   (ady == best_dy && adx < best_dx)) {
-                  p_best  = p_child;
-                  best_dy = ady;
-                  best_dx = adx;
-               }
-            }
-         }
-      }
-      p_child = gtk_widget_get_next_sibling(p_child);
-   }
-   if (p_best != NULL) {
-      GFile *p_f = (GFile *)g_object_get_data(G_OBJECT(p_best), "file");
-      if (p_f != NULL) {
-         _grid_select(p_grid, p_f);
-      }
+   GtkWidget *p_best = _nearest_cell_in_row_direction(p_grid, p_cur, i_dy);
+   GFile     *p_f    = (p_best != NULL) ? _cell_file(p_best) : NULL;
+   if (p_f != NULL) {
+      _grid_select(p_grid, p_f);
    }
 }
 
@@ -471,7 +577,7 @@ ggaze_grid_get_selected_file(GgazeGrid *p_grid) {
    if (p_sel == NULL) {
       return (NULL);
    }
-   GFile *p_file = (GFile *)g_object_get_data(G_OBJECT(p_sel->data), "file");
+   GFile *p_file = _cell_file(GTK_WIDGET(p_sel->data));
    g_list_free(p_sel);
    return (p_file); /* borrowed: owned by the cell's qdata */
 }
@@ -485,23 +591,10 @@ ggaze_grid_update_mark_badge(GgazeGrid *p_grid, GFile *p_file) {
    if (p_file == NULL || p_grid->p_nav == NULL) {
       return;
    }
-   gboolean   b_marked = navigator_is_marked(p_grid->p_nav, p_file);
-   GtkWidget *p_child  = gtk_widget_get_first_child(p_grid->p_flow);
-   while (p_child != NULL) {
-      GFile *p_f = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
-      if (p_f != NULL && g_file_equal(p_f, p_file)) {
-         GtkWidget *p_box =
-            gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(p_child));
-         if (p_box != NULL) {
-            if (b_marked) {
-               gtk_widget_add_css_class(p_box, "ggaze-marked");
-            } else {
-               gtk_widget_remove_css_class(p_box, "ggaze-marked");
-            }
-         }
-         return;
-      }
-      p_child = gtk_widget_get_next_sibling(p_child);
+   GtkWidget *p_child = _find_cell(p_grid, p_file);
+   GtkWidget *p_box   = (p_child != NULL) ? _cell_box(p_child) : NULL;
+   if (p_box != NULL) {
+      _set_marked(p_box, navigator_is_marked(p_grid->p_nav, p_file));
    }
 }
 
@@ -539,26 +632,23 @@ ggaze_grid_refresh(GgazeGrid *p_grid) {
 /* Update every cell's "ggaze-marked" badge from the navigator's mark set
  * in place (no rebuild), so mark changes and navigation don't blank the grid
  * by recreating cells. */
+static void
+_refresh_badge_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
+   (void)p_data;
+   GFile     *p_f   = _cell_file(p_child);
+   GtkWidget *p_box = _cell_box(p_child);
+   if (p_f != NULL && p_box != NULL) {
+      _set_marked(p_box, navigator_is_marked(p_grid->p_nav, p_f));
+   }
+}
+
 void
 ggaze_grid_refresh_mark_badges(GgazeGrid *p_grid) {
    g_return_if_fail(GGAZE_IS_GRID(p_grid));
    if (p_grid->p_nav == NULL) {
       return;
    }
-   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
-   while (p_child != NULL) {
-      GFile     *p_f = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
-      GtkWidget *p_box =
-         gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(p_child));
-      if (p_f != NULL && p_box != NULL) {
-         if (navigator_is_marked(p_grid->p_nav, p_f)) {
-            gtk_widget_add_css_class(p_box, "ggaze-marked");
-         } else {
-            gtk_widget_remove_css_class(p_box, "ggaze-marked");
-         }
-      }
-      p_child = gtk_widget_get_next_sibling(p_child);
-   }
+   _foreach_cell(p_grid, _refresh_badge_step, NULL);
 }
 
 /* Walk every cell and sync its dimmed/removed appearance to the
@@ -567,26 +657,21 @@ ggaze_grid_refresh_mark_badges(GgazeGrid *p_grid) {
  * dims or un-dims the right cell. Mirrors ggaze_grid_refresh_mark_badges for
  * the "ggaze-removed" class + opacity instead of the mark badge. */
 static void
+_refresh_removed_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
+   (void)p_data;
+   GFile     *p_f   = _cell_file(p_child);
+   GtkWidget *p_box = _cell_box(p_child);
+   if (p_f != NULL && p_box != NULL) {
+      _set_removed(p_box, navigator_is_removed(p_grid->p_nav, p_f));
+   }
+}
+
+static void
 _refresh_removed_state(GgazeGrid *p_grid) {
    if (p_grid->p_nav == NULL) {
       return;
    }
-   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
-   while (p_child != NULL) {
-      GFile     *p_f = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
-      GtkWidget *p_box =
-         gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(p_child));
-      if (p_f != NULL && p_box != NULL) {
-         if (navigator_is_removed(p_grid->p_nav, p_f)) {
-            gtk_widget_set_opacity(p_box, 0.35);
-            gtk_widget_add_css_class(p_box, "ggaze-removed");
-         } else {
-            gtk_widget_set_opacity(p_box, 1.0);
-            gtk_widget_remove_css_class(p_box, "ggaze-removed");
-         }
-      }
-      p_child = gtk_widget_get_next_sibling(p_child);
-   }
+   _foreach_cell(p_grid, _refresh_removed_step, NULL);
 }
 
 static void
@@ -658,6 +743,15 @@ ggaze_grid_class_init(GgazeGridClass *p_klass) {
    u_activate_signal =
       g_signal_new("activate", G_TYPE_FROM_CLASS(p_klass), G_SIGNAL_RUN_LAST, 0,
                    NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 0);
+   u_navigate_signal = g_signal_new(
+      "navigate", G_TYPE_FROM_CLASS(p_klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
+      g_cclosure_marshal_generic, G_TYPE_NONE, 1, G_TYPE_INT);
+   u_mark_signal = g_signal_new("mark-requested", G_TYPE_FROM_CLASS(p_klass),
+                                G_SIGNAL_RUN_LAST, 0, NULL, NULL,
+                                g_cclosure_marshal_generic, G_TYPE_NONE, 0);
+   u_mark_all_signal = g_signal_new(
+      "mark-all-requested", G_TYPE_FROM_CLASS(p_klass), G_SIGNAL_RUN_LAST, 0,
+      NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 0);
 }
 
 static void
@@ -688,6 +782,8 @@ ggaze_grid_init(GgazeGrid *p_grid) {
    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(p_grid->p_flow), TRUE);
    gtk_flow_box_set_activate_on_single_click(GTK_FLOW_BOX(p_grid->p_flow),
                                              FALSE);
+   g_signal_connect(p_grid->p_flow, "selected-children-changed",
+                    G_CALLBACK(_on_selection_changed), p_grid);
    g_signal_connect(p_grid->p_flow, "child-activated",
                     G_CALLBACK(_on_child_activated), p_grid);
    GtkEventController *p_key = gtk_event_controller_key_new();
@@ -730,6 +826,26 @@ ggaze_grid_set_select_func(GgazeGrid *p_grid, GgazeGridSelectFunc fn,
    p_grid->p_select_data = p_user_data;
 }
 
+/* Re-request the picture at the new size and forget that it was painted:
+ * a different size may map to a different thumbnail bucket. */
+static void
+_resize_cell_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
+   (void)p_data;
+   GtkWidget *p_box = _cell_box(p_child);
+   if (p_box == NULL) {
+      return;
+   }
+   GtkWidget *p_pic = gtk_widget_get_first_child(p_box);
+   if (p_pic != NULL) {
+      gtk_widget_set_size_request(p_pic, p_grid->i_size, p_grid->i_size);
+      CellData *p_d = _cell_data(p_pic);
+      if (p_d != NULL) {
+         p_d->b_done = FALSE;
+      }
+   }
+   gtk_widget_set_size_request(p_box, p_grid->i_size + 4, p_grid->i_size + 18);
+}
+
 void
 ggaze_grid_set_thumbnail_size(GgazeGrid *p_grid, int i_size) {
    g_return_if_fail(GGAZE_IS_GRID(p_grid));
@@ -740,20 +856,7 @@ ggaze_grid_set_thumbnail_size(GgazeGrid *p_grid, int i_size) {
       return;
    }
    p_grid->i_size = i_size;
-   /* Update the size request of every cell's picture and reflow. */
-   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
-   while (p_child != NULL) {
-      GtkWidget *p_box =
-         gtk_flow_box_child_get_child(GTK_FLOW_BOX_CHILD(p_child));
-      if (p_box != NULL) {
-         GtkWidget *p_pic = gtk_widget_get_first_child(p_box);
-         if (p_pic != NULL) {
-            gtk_widget_set_size_request(p_pic, i_size, i_size);
-         }
-         gtk_widget_set_size_request(p_box, i_size + 4, i_size + 18);
-      }
-      p_child = gtk_widget_get_next_sibling(p_child);
-   }
+   _foreach_cell(p_grid, _resize_cell_step, NULL);
    gtk_widget_queue_resize(p_grid->p_flow);
    _queue_visible_thumbnails(p_grid);
 }
@@ -798,9 +901,4 @@ ggaze_grid_get_count(GgazeGrid *p_grid) {
       p_child = gtk_widget_get_next_sibling(p_child);
    }
    return (u_count);
-}
-
-guint
-ggaze_grid_activate_signal(void) {
-   return (u_activate_signal);
 }

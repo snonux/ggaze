@@ -100,7 +100,6 @@ void navigator_set_debounce_ms(Navigator *p_nav, guint u_ms);
  */
 gboolean navigator_is_removed(Navigator *p_nav, GFile *p_file);
 void     navigator_mark_removed(Navigator *p_nav, GFile *p_file);
-gboolean navigator_unmark_removed(Navigator *p_nav, GFile *p_file);
 guint    navigator_get_removed_count(Navigator *p_nav);
 
 /* "changed" signal: emitted on sort/filter/rescan/remove/monitor event. */

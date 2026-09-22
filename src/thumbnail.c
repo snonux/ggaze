@@ -325,6 +325,29 @@ _thumb_pool_func(gpointer p_data, gpointer p_user) {
    g_object_unref(p_task);
 }
 
+/* Pool item free func (g_thread_pool_new_full): runs for every GTask still
+ * queued when thumbnail_delete() drops the pool. Without it those tasks were
+ * simply discarded -- never run, never completed, never unref'd -- leaking
+ * the GTask, its GFile/ThumbTask and the GtkPicture ref the grid's callback
+ * carries, once per cell still pending when a window closed. Completing them
+ * as CANCELLED lets every owner release its refs through the normal
+ * callback path. */
+static void
+_thumb_item_drop(gpointer p_data) {
+   /* g_thread_pool_free() pushes its private wake-up marker
+    * (glib/gthreadpool.c wakeup_thread_marker == GUINT_TO_POINTER(1)) into
+    * the queue once per thread before draining it, and GLib 2.88 hands that
+    * marker to the item free func too (verified by backtrace). It is not a
+    * task; skip it. */
+   if (p_data == GUINT_TO_POINTER(1)) {
+      return;
+   }
+   GTask *p_task = G_TASK(p_data);
+   g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                           "thumbnail pool shut down");
+   g_object_unref(p_task);
+}
+
 /* GTaskThreadFunc wrapper for the (unlikely) fallback to g_task_run_in_thread
  * if the bounded pool could not be created. */
 static void
@@ -346,8 +369,8 @@ thumbnail_new(void) {
     * delivers each result to the main thread. */
    gint    i_max = MAX(1, MIN(g_get_num_processors() / 2, 4));
    GError *p_err = NULL;
-   p_t->p_pool =
-      g_thread_pool_new(_thumb_pool_func, NULL, i_max, FALSE, &p_err);
+   p_t->p_pool = g_thread_pool_new_full(_thumb_pool_func, NULL,
+                                        _thumb_item_drop, i_max, FALSE, &p_err);
    if (p_err != NULL) {
       g_warning("ggaze: thumbnail pool: %s", p_err->message);
       g_error_free(p_err);
@@ -361,7 +384,8 @@ thumbnail_delete(Thumbnail *p_t) {
       return;
    }
    if (p_t->p_pool != NULL) {
-      /* Drop queued work immediately; don't block on running decodes. */
+      /* Drop queued work immediately (each queued GTask is completed as
+       * CANCELLED by _thumb_item_drop); don't block on running decodes. */
       g_thread_pool_free(p_t->p_pool, TRUE, FALSE);
    }
    g_free(p_t);

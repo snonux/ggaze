@@ -55,7 +55,6 @@ gdouble ggaze_viewer_get_scale(GgazeViewer *p_viewer);
  * this too when checking that the image is still displayable. */
 void ggaze_viewer_get_pan(GgazeViewer *p_viewer, gdouble *p_x, gdouble *p_y);
 void ggaze_viewer_toggle_fit_100(GgazeViewer *p_viewer);
-void ggaze_viewer_fit(GgazeViewer *p_viewer);
 void ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy);
 
 /* Configure the background colour drawn behind the image and what the scroll

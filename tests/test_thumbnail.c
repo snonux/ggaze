@@ -614,6 +614,48 @@ test_cache_dir_not_creatable(void) {
    g_free(c_tmp);
 }
 
+/* Regression: thumbnail_delete() with requests still queued used to discard
+ * the queued GTasks without completing them, leaking each one (and the refs
+ * its callback data carried). Every request must now finish -- as a texture
+ * or as G_IO_ERROR_CANCELLED -- so the owners' callbacks run and release. */
+static guint GGAZE_DONE_COUNT;
+
+static void
+_count_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   (void)p_data;
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = thumbnail_get_finish(NULL, p_res, &p_err);
+   if (p_tex != NULL) {
+      g_object_unref(p_tex);
+   } else {
+      g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+      g_error_free(p_err);
+   }
+   GGAZE_DONE_COUNT++;
+}
+
+static void
+test_delete_completes_queued_requests(void) {
+   Thumbnail  *p_t  = thumbnail_new();
+   GFile      *p_a  = fixture_file("plain.jpg");
+   GFile      *p_b  = fixture_file("rot6.jpg");
+   const guint u_n  = 24;
+   GGAZE_DONE_COUNT = 0;
+   for (guint u = 0; u < u_n; u++) {
+      thumbnail_get_async(p_t, (u % 2 == 0) ? p_a : p_b, 128, NULL,
+                          _count_done_cb, NULL);
+   }
+   thumbnail_delete(p_t); /* queue still holds most of the requests */
+   for (guint u = 0; u < 2000 && GGAZE_DONE_COUNT < u_n; u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpuint(GGAZE_DONE_COUNT, ==, u_n);
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -645,6 +687,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/thumbnail/cache_dir_not_creatable",
                    test_cache_dir_not_creatable);
    g_test_add_func("/thumbnail/oversized_jpeg", test_oversized_jpeg);
+   g_test_add_func("/thumbnail/delete_completes_queued_requests",
+                   test_delete_completes_queued_requests);
    g_test_add_func("/thumbnail/padded_past_prefix_oversized_jpeg",
                    test_padded_past_prefix_oversized_jpeg);
 

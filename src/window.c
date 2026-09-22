@@ -3103,6 +3103,28 @@ _open_read_prefs(GgazeWindow *p_win, GgazeSort *pe_sort, gboolean *pb_wrap,
    }
 }
 
+/* Grid signals -> window actions. The grid reports intent ("navigate",
+ * "mark-requested", "mark-all-requested"); only the window knows which
+ * win.* action that maps to, so the widget stays usable without one. */
+static void
+_on_grid_navigate(GgazeGrid *p_grid, gint i_dir, gpointer p_data) {
+   (void)p_grid;
+   gtk_widget_activate_action(GTK_WIDGET(p_data),
+                              (i_dir < 0) ? "win.prev" : "win.next", NULL);
+}
+
+static void
+_on_grid_mark_requested(GgazeGrid *p_grid, gpointer p_data) {
+   (void)p_grid;
+   gtk_widget_activate_action(GTK_WIDGET(p_data), "win.mark", NULL);
+}
+
+static void
+_on_grid_mark_all_requested(GgazeGrid *p_grid, gpointer p_data) {
+   (void)p_grid;
+   gtk_widget_activate_action(GTK_WIDGET(p_data), "win.mark-all", NULL);
+}
+
 /* Replace the "grid" stack page with a fresh GgazeGrid bound to the window's
  * (already-built) navigator, and give the folder a fresh Trash instance. */
 static void
@@ -3121,6 +3143,12 @@ _open_rebuild_grid(GgazeWindow *p_win, gboolean b_hide_trashed) {
       p_win->p_nav, p_win->p_thumb, p_win->i_grid_size, b_hide_trashed));
    g_signal_connect(p_win->p_grid, "activate", G_CALLBACK(_on_grid_activate),
                     p_win);
+   g_signal_connect(p_win->p_grid, "navigate", G_CALLBACK(_on_grid_navigate),
+                    p_win);
+   g_signal_connect(p_win->p_grid, "mark-requested",
+                    G_CALLBACK(_on_grid_mark_requested), p_win);
+   g_signal_connect(p_win->p_grid, "mark-all-requested",
+                    G_CALLBACK(_on_grid_mark_all_requested), p_win);
    /* Route every grid/thumbnail selection through the dirty-preview gate
     * (tu0 review round 2, issue 1) instead of letting gridview.c call
     * navigator_set_current_file() directly. */

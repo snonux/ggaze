@@ -535,12 +535,6 @@ navigator_mark_removed(Navigator *p_nav, GFile *p_file) {
    }
 }
 
-gboolean
-navigator_unmark_removed(Navigator *p_nav, GFile *p_file) {
-   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), FALSE);
-   return (g_hash_table_remove(p_nav->p_removed, p_file));
-}
-
 guint
 navigator_get_removed_count(Navigator *p_nav) {
    g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), 0);
