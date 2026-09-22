@@ -194,6 +194,28 @@ test_trash = executable(
 )
 test('trash', test_trash, suite : 'unit', env : fixtures_env)
 
+# wb2: the crop/straighten/rotate geometry is plain C (no GTK, no GEGL), so
+# these run in every lane, the minimal one included.
+test_croprect = executable(
+   'test_croprect',
+   ['test_croprect.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, m_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('croprect', test_croprect, suite : 'unit', env : fixtures_env)
+
+test_transform = executable(
+   'test_transform',
+   ['test_transform.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, m_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('transform', test_transform, suite : 'unit', env : fixtures_env)
+
 test_thumbnail = executable(
    'test_thumbnail',
    ['test_thumbnail.c', ggaze_conf_h],
