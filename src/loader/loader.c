@@ -11,6 +11,16 @@
  * edit and the pixbuf backend never has to know which formats it does not
  * own.
  *
+ * Before any backend -- or, on the thumbnail and info paths, any gdk-pixbuf
+ * call that takes a path -- sees the file, the sniffed header goes through
+ * detect_reject_truncated(): a file shorter than the smallest complete file
+ * of its signature's format is refused with G_IO_ERROR_INVALID_DATA. This is
+ * the dispatcher's job rather than the pixbuf backend's because all three
+ * entry points share it and because it is a property of the bytes, not of
+ * any decoder: on a glycin desktop gdk-pixbuf forwards such a file to a
+ * sandboxed loader subprocess and the JXL one waits forever for the missing
+ * bytes (task tb2), with no cancellable or timeout reachable from here.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -53,7 +63,9 @@ static const GgazeLoaderBackend *BACKENDS[] = {
    NULL, /* sentinel: keeps the array non-empty in the minimal build */
 };
 
-#define GGAZE_SNIFF_LEN 64
+/* Sniff buffer length; lives in detect.h so detect_reject_truncated() can
+ * promise every minimum file length fits inside it. */
+#define GGAZE_SNIFF_LEN GGAZE_DETECT_SNIFF_LEN
 
 /* Read up to u_max header bytes. Returns the byte count (0 for an empty
  * file) or -1 with p_err set on an I/O failure. */
@@ -88,23 +100,40 @@ _backend_for(const guint8 *p_head, gsize u_len) {
    return (&pixbuf_backend);
 }
 
-/* The one sniff-and-dispatch path behind both loader_load() and the async
- * worker. An empty file is reported as G_IO_ERROR_INVALID_DATA rather than
- * handed to a decoder (the sync path used to return NULL with NO error for
- * it, which made downstream g_task_return_error(NULL) callers hang their
- * GTask forever). p_progress may be NULL; a backend without
- * load_progressive() is used through load() regardless. */
-static GdkTexture *
-_dispatch(GFile *p_file, GCancellable *p_cancel, LoaderProgressCb p_progress,
-          gpointer p_progress_data, GError **p_err) {
-   guint8 head[GGAZE_SNIFF_LEN];
-   gssize i_read = _read_header(p_file, p_cancel, head, GGAZE_SNIFF_LEN, p_err);
+/* Read the sniff header and refuse what no decoder should see: an empty
+ * file (reported as G_IO_ERROR_INVALID_DATA rather than handed on -- the
+ * sync path used to return NULL with NO error for it, which made downstream
+ * g_task_return_error(NULL) callers hang their GTask forever) and a file
+ * shorter than its signature's minimum (see the top-of-file comment).
+ * Returns the byte count read into p_head, or -1 with p_err set. */
+static gssize
+_sniff_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head,
+              GError **p_err) {
+   gssize i_read =
+      _read_header(p_file, p_cancel, p_head, GGAZE_SNIFF_LEN, p_err);
    if (i_read < 0) {
-      return (NULL);
+      return (-1);
    }
    if (i_read == 0) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                   "empty file (0 bytes)");
+      return (-1);
+   }
+   if (!detect_reject_truncated(p_head, (gsize)i_read, p_err)) {
+      return (-1);
+   }
+   return (i_read);
+}
+
+/* The one sniff-and-dispatch path behind both loader_load() and the async
+ * worker. p_progress may be NULL; a backend without load_progressive() is
+ * used through load() regardless. */
+static GdkTexture *
+_dispatch(GFile *p_file, GCancellable *p_cancel, LoaderProgressCb p_progress,
+          gpointer p_progress_data, GError **p_err) {
+   guint8 head[GGAZE_SNIFF_LEN];
+   gssize i_read = _sniff_header(p_file, p_cancel, head, p_err);
+   if (i_read < 0) {
       return (NULL);
    }
    const GgazeLoaderBackend *p_be = _backend_for(head, (gsize)i_read);
@@ -173,13 +202,10 @@ loader_load_finish(GAsyncResult *p_res, GError **p_err) {
 
 /* --- scaled decode + dimension peek (thumbnail / info) ------------------- */
 
-/* TRUE iff a specific (non-pixbuf) backend claims p_file. On an unreadable
- * file FALSE is returned and the pixbuf path reports the I/O error. */
+/* TRUE iff a specific (non-pixbuf) backend claims the sniffed header. */
 static gboolean
-_specific_backend_claims(GFile *p_file, GCancellable *p_cancel) {
-   guint8 head[GGAZE_SNIFF_LEN];
-   gssize i_read = _read_header(p_file, p_cancel, head, GGAZE_SNIFF_LEN, NULL);
-   return (i_read > 0 && _backend_for(head, (gsize)i_read) != &pixbuf_backend);
+_specific_backend_claims(const guint8 *p_head, gsize u_len) {
+   return (_backend_for(p_head, u_len) != &pixbuf_backend);
 }
 
 /* Reject c_path if it is a JPEG whose declared header dimensions exceed the
@@ -249,7 +275,16 @@ loader_load_pixbuf_scaled(GFile *p_file, int i_max_px, GCancellable *p_cancel,
                           GError **p_err) {
    g_return_val_if_fail(G_IS_FILE(p_file), NULL);
    g_return_val_if_fail(i_max_px > 0, NULL);
-   if (_specific_backend_claims(p_file, p_cancel)) {
+   /* The same empty/truncated gate as the full load runs before the
+    * path-taking gdk_pixbuf_new_from_file_at_scale() below, which would
+    * otherwise stall the thumbnail pool on a truncated JXL exactly like the
+    * large view (task tb2). */
+   guint8 head[GGAZE_SNIFF_LEN];
+   gssize i_read = _sniff_header(p_file, p_cancel, head, p_err);
+   if (i_read < 0) {
+      return (NULL);
+   }
+   if (_specific_backend_claims(head, (gsize)i_read)) {
       return (_scaled_via_backend(p_file, i_max_px, p_cancel, p_err));
    }
    char *c_path = g_file_get_path(p_file);
@@ -273,6 +308,29 @@ loader_load_pixbuf_scaled(GFile *p_file, int i_max_px, GCancellable *p_cancel,
    return (p_up);
 }
 
+/* Header-only dimensions for anything GdkPixbuf can parse (the STORED
+ * dimensions, before orientation, which is what an EXIF card reports next
+ * to its Orientation line): no pixel decode, so no oversized-header stall.
+ * TRUE with *p_w and *p_h set when GdkPixbuf parsed a header whose size the
+ * decoders would accept; a header they would refuse (oversized) has no
+ * honest size to report, so it is FALSE rather than an echoed crafted
+ * 65500x65500. */
+static gboolean
+_peek_via_pixbuf_header(const char *c_path, int *p_w, int *p_h) {
+   *p_w = 0;
+   *p_h = 0;
+   if (gdk_pixbuf_get_file_info(c_path, p_w, p_h) == NULL || *p_w <= 0 ||
+       *p_h <= 0) {
+      return (FALSE);
+   }
+   if (!detect_dims_within_bounds("info", (guint64)*p_w, (guint64)*p_h, NULL,
+                                  NULL)) {
+      *p_w = 0;
+      *p_h = 0;
+   }
+   return (*p_w > 0);
+}
+
 gboolean
 loader_peek_dimensions(GFile *p_file, int *p_w, int *p_h) {
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
@@ -281,28 +339,22 @@ loader_peek_dimensions(GFile *p_file, int *p_w, int *p_h) {
    if (c_path == NULL) {
       return (FALSE);
    }
-   /* Header-only for anything GdkPixbuf can parse (the STORED dimensions,
-    * before orientation, which is what an EXIF card reports next to its
-    * Orientation line): no pixel decode, so no oversized-header stall. */
-   *p_w = 0;
-   *p_h = 0;
-   if (gdk_pixbuf_get_file_info(c_path, p_w, p_h) != NULL && *p_w > 0 &&
-       *p_h > 0) {
+   /* An empty or truncated file has no dimensions, and must not reach the
+    * path-taking gdk_pixbuf_get_file_info() (glycin stall, task tb2). */
+   guint8 head[GGAZE_SNIFF_LEN];
+   gssize i_read = _sniff_header(p_file, NULL, head, NULL);
+   if (i_read < 0) {
       g_free(c_path);
-      /* A header the decoders would refuse (oversized) has no honest size
-       * to report: say unknown rather than echo a crafted 65500x65500. */
-      if (!detect_dims_within_bounds("info", (guint64)*p_w, (guint64)*p_h, NULL,
-                                     NULL)) {
-         *p_w = 0;
-         *p_h = 0;
-         return (FALSE);
-      }
+      return (FALSE);
+   }
+   if (_peek_via_pixbuf_header(c_path, p_w, p_h)) {
+      g_free(c_path);
       return (TRUE);
    }
    g_free(c_path);
    /* A format only a specific backend decodes (JXL/AVIF/HEIF without a
     * system pixbuf loader): decode it there. */
-   if (!_specific_backend_claims(p_file, NULL)) {
+   if (!_specific_backend_claims(head, (gsize)i_read)) {
       return (FALSE);
    }
    GdkTexture *p_tex = loader_load(p_file, NULL, NULL);

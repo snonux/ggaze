@@ -12,7 +12,12 @@
  * JPEG when libjpeg is off, and anything else GdkPixbuf understands). Every
  * backend honors EXIF Orientation so the returned GdkTexture is upright
  * (decision #26) and honors the GCancellable so a superseded load stops
- * before its expensive decode. See docs/architecture.md "Image decode".
+ * before its expensive decode. Every entry point first refuses an empty
+ * file and a file shorter than the smallest complete file of its sniffed
+ * format (detect_reject_truncated(), G_IO_ERROR_INVALID_DATA), so a
+ * truncated container never reaches a decoder that might wait on it
+ * forever (glycin-jxl does; task tb2). See docs/architecture.md "Image
+ * decode".
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -72,8 +77,8 @@ GdkTexture *loader_load_finish(GAsyncResult *p_res, GError **p_err);
  * only a specific backend decodes (JXL/AVIF/HEIF) go through that backend's
  * full decode and are scaled afterwards -- which is what keeps the grid from
  * staying blank for exactly the formats the large view can show. The same
- * oversized-JPEG guard the full path uses runs here, so a crafted header
- * cannot stall the thumbnail pool. Caller unrefs. */
+ * oversized-JPEG and empty/truncated-file guards the full path uses run
+ * here, so a crafted header cannot stall the thumbnail pool. Caller unrefs. */
 GdkPixbuf *loader_load_pixbuf_scaled(GFile *p_file, int i_max_px,
                                      GCancellable *p_cancel, GError **p_err);
 
@@ -81,7 +86,8 @@ GdkPixbuf *loader_load_pixbuf_scaled(GFile *p_file, int i_max_px,
  * EXIF card reports them) without decoding it when GdkPixbuf can parse the
  * header, else -- for a format only a specific backend decodes (JXL/AVIF/
  * HEIF) -- through that backend's decode, in which case they are the
- * upright ones. FALSE when they cannot be determined. Callers gathering
+ * upright ones. FALSE when they cannot be determined, including for an
+ * empty or truncated file (never handed to gdk-pixbuf). Callers gathering
  * info for arbitrary files should run in a worker (the decode path). */
 gboolean loader_peek_dimensions(GFile *p_file, int *p_w, int *p_h);
 

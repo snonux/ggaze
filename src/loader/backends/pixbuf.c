@@ -19,6 +19,18 @@
  * _jpeg_reject_if_oversized() for its own GdkPixbuf call site. With `jpeg`
  * on, jpeg.c claims every JPEG first and this guard is not reached.
  *
+ * What this backend cannot guard against on its own (task tb2): on a glycin
+ * desktop (Fedora >= 41) gdk-pixbuf forwards formats it has no module for
+ * (JXL/AVIF/HEIF/...) to sandboxed loader subprocesses, and
+ * gdk_pixbuf_loader_close() then blocks in gly_loader_load() with no
+ * cancellable, timeout or partial-result path. The glycin-jxl loader was
+ * measured to wait forever on a truncated or garbage codestream. The
+ * dispatcher (loader.c) therefore refuses a file shorter than its
+ * signature's minimum before this backend is reached; a JXL that is long
+ * enough but still garbage remains a glycin-jxl defect this side can only
+ * report upstream. The GCancellable is honoured at the two points it can
+ * be: the read and the moment before the (uninterruptible) decode.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -98,6 +110,12 @@ _pixbuf_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
       return (NULL);
    }
    if (!_pixbuf_reject_if_oversized_jpeg((const guint8 *)c_buf, u_len, p_err)) {
+      g_free(c_buf);
+      return (NULL);
+   }
+   /* Last chance to honour a superseded load: the GdkPixbufLoader below
+    * cannot be interrupted once it runs (loader.h backend contract). */
+   if (g_cancellable_set_error_if_cancelled(p_cancel, p_err)) {
       g_free(c_buf);
       return (NULL);
    }
