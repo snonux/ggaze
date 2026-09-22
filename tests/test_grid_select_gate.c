@@ -516,6 +516,34 @@ test_click_selection_syncs_current(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* Regression: a rebuild of a grid that is NOT on screen (the listing changed
+ * behind the large view: a `d` created .Trash, a script wrote a file) used
+ * to grab keyboard focus into one of its unmapped cells, after which the
+ * toplevel dropped every key. The focus must stay off the hidden grid. */
+static void
+test_hidden_grid_rebuild_keeps_focus_off_it(void) {
+   char      *c_dir = make_folder();
+   GtkWindow *p_win;
+   Navigator *p_nav;
+   Thumbnail *p_thumb;
+   GgazeGrid *p_grid;
+   build_grid(c_dir, &p_win, &p_nav, &p_thumb, &p_grid);
+   /* Hide the grid the way the window's stack does (an unmapped page). */
+   gtk_widget_set_visible(GTK_WIDGET(p_grid), FALSE);
+   ggtest_drain_main(50);
+   navigator_rescan(p_nav); /* LISTING -> ggaze_grid_refresh */
+   ggtest_drain_main(50);
+   GtkWidget *p_focus = gtk_root_get_focus(GTK_ROOT(p_win));
+   g_assert_true(p_focus == NULL ||
+                 !gtk_widget_is_ancestor(p_focus, GTK_WIDGET(p_grid)));
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   ggtest_drain_main(100);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -545,5 +573,7 @@ main(int i_argc, char **c_argv) {
                    test_mark_at_pos_respects_refusing_gate);
    g_test_add_func("/grid_select_gate/click_selection_syncs_current",
                    test_click_selection_syncs_current);
+   g_test_add_func("/grid_select_gate/hidden_grid_rebuild_keeps_focus_off_it",
+                   test_hidden_grid_rebuild_keeps_focus_off_it);
    return (g_test_run());
 }

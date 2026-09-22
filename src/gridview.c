@@ -447,14 +447,34 @@ _clear_flow(GgazeGrid *p_grid) {
    }
 }
 
+/* Highlight the current file's cell and, ONLY while the grid is on screen,
+ * move keyboard focus onto it. Grabbing focus into an unmapped cell (the
+ * grid rebuilds behind the large view whenever the folder listing changes
+ * -- a `d` creates .Trash, a script writes a file) parked the toplevel's
+ * focus on a widget that can never receive a key, and every key after that
+ * was dropped. _on_map re-grabs once the grid is shown again. */
 static void
 _select_current(GgazeGrid *p_grid) {
    GtkWidget *p_child =
       _find_cell(p_grid, navigator_get_current(p_grid->p_nav));
-   if (p_child != NULL) {
-      gtk_flow_box_select_child(GTK_FLOW_BOX(p_grid->p_flow),
-                                GTK_FLOW_BOX_CHILD(p_child));
+   if (p_child == NULL) {
+      return;
+   }
+   gtk_flow_box_select_child(GTK_FLOW_BOX(p_grid->p_flow),
+                             GTK_FLOW_BOX_CHILD(p_child));
+   if (gtk_widget_get_mapped(GTK_WIDGET(p_grid))) {
       gtk_widget_grab_focus(p_child);
+   }
+}
+
+/* The grid came on screen (toggle from the large view, folder open): put
+ * keyboard focus on the highlighted cell now that it can take it. */
+static void
+_on_map(GtkWidget *p_widget, gpointer p_data) {
+   (void)p_data;
+   GgazeGrid *p_grid = GGAZE_GRID(p_widget);
+   if (p_grid->p_nav != NULL) {
+      _select_current(p_grid);
    }
 }
 
@@ -784,6 +804,7 @@ ggaze_grid_init(GgazeGrid *p_grid) {
                                              FALSE);
    g_signal_connect(p_grid->p_flow, "selected-children-changed",
                     G_CALLBACK(_on_selection_changed), p_grid);
+   g_signal_connect(p_grid, "map", G_CALLBACK(_on_map), NULL);
    g_signal_connect(p_grid->p_flow, "child-activated",
                     G_CALLBACK(_on_child_activated), p_grid);
    GtkEventController *p_key = gtk_event_controller_key_new();
