@@ -53,14 +53,18 @@ trash_bin(Trash *p_t, GFile *p_file, GError **p_err) {
       g_object_unref(p_td);
       return (FALSE);
    }
-   char  *c_base = g_file_get_basename(p_file);
-   char  *c_fmt  = g_strdup_printf("%s-%%u", c_base);
-   GFile *p_dst  = pathutil_unique_child(p_td, c_base, c_fmt, 1);
-   g_free(c_fmt);
+   /* Collision-suffix on the stem ("a.jpg" -> "a-1.jpg"), the same rule the
+    * mover and enhance-save use, so a binned file keeps its extension. */
+   char       *c_base = g_file_get_basename(p_file);
+   char       *c_stem = NULL;
+   const char *c_ext  = NULL;
+   pathutil_split_ext(c_base, &c_stem, &c_ext);
+   GFile *p_dst = pathutil_unique_child(p_td, c_stem, c_ext, 1);
+   g_free(c_stem);
    g_free(c_base);
    g_object_unref(p_td);
    if (p_dst == NULL) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_TOO_MANY_OPEN_FILES,
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_EXISTS,
                   "could not find a non-colliding trash name");
       return (FALSE);
    }

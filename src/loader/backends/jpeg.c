@@ -4,59 +4,50 @@
  * Two-phase decode: a quick 1/8-scale decode (coarse frame, <50 ms for a
  * 40 MP JPEG) is emitted via the progress callback, then the full decode
  * completes and is returned. Uses libjpeg-turbo's jpeg_mem_src + scale_num/
- * scale_denom for the low-res phase. Compiled when meson feature `jpeg` is on.
+ * scale_denom for the low-res phase. Compiled when meson feature `jpeg` is
+ * on; when it is off, pixbuf.c decodes JPEG through GdkPixbuf instead.
  *
- * Safety, libjpeg side: both the low-res and full *direct* decode (i.e. via
- * this file's own _decode_at_scale(), used by _jpeg_load() and phase 1 of
- * _jpeg_load_progressive()) treat libjpeg's reported dimensions as
- * untrusted. A JPEG SOF marker can declare up to 65535x65535 using only a
- * few header bytes, with no actual pixel data required, so
- * _jpeg_check_dims() bounds width/height against detect.h's
- * GGAZE_JPEG_MAX_SIDE/GGAZE_JPEG_MAX_PIXELS and computes the RGB/RGBA buffer
- * sizes with checked guint64 arithmetic BEFORE either g_malloc() call —
- * g_malloc() aborts the process on failure, so an unbounded multi-gigabyte
- * request would crash ggaze rather than fail gracefully. A bound violation
- * yields a recoverable G_IO_ERROR (mirroring the checked-allocation pattern
- * already applied to heif.c and jxl.c), never an abort or overflowed loop
- * counter. NOTE: the loader dispatcher (loader.c) currently never calls
- * jpeg_backend.load() for a synchronous loader_load() (BACKENDS[] omits
- * jpeg_backend; sync JPEG loads fall through to pixbuf.c), so this guard is
- * presently reachable only via _jpeg_load_progressive()'s phase-1 low-res
- * decode -- real defense-in-depth, not dead code, but its libjpeg-side
- * bound can never actually trigger there because libjpeg's own
- * JPEG_MAX_DIMENSION (65500) at 1/8 scale tops out at 8188x8188 (~67M
- * pixels), already under the cap. See tests/test_loader_jpeg.c for the
- * direct-call coverage of this path regardless.
+ * Dispatch (loader.c): with `jpeg` on, jpeg_backend is in BACKENDS[] ahead of
+ * the GdkPixbuf fallback and claims every JPEG, so BOTH the synchronous
+ * loader_load() (enhancer, tests) and every async load go through this file
+ * -- _jpeg_load() for sync/prefetch, _jpeg_load_progressive() for the
+ * visible load with a progress callback. The pixbuf backend never sees a
+ * JPEG in that build.
  *
- * Safety, GdkPixbuf side: phase 2 of _jpeg_load_progressive() (the full
- * decode users actually see when browsing, per window.c's _load_current)
- * hands off to gdk_pixbuf_new_from_file() for EXIF-orientation-aware
- * decoding, and pixbuf.c's fallback backend does the equivalent via
- * GdkPixbufLoader for every other reachable JPEG path (sync loader_load(),
- * prefetch). Neither goes through _decode_at_scale(), so the guard above
- * does not cover them. Empirically (mu0 review), gdk-pixbuf 2.44's JPEG
- * loader (glycin) does NOT abort/crash on a maximum-dimension declared
- * header -- it pre-allocates a huge sparse memfd sized off the declared
- * dimensions, then stalls for ~28s before its own internal size cap (8 GB)
- * rejects the file with a clean GError. That is a real, reachable
- * unbounded-latency DoS (not a crash), so both GdkPixbuf entry points are
- * now preceded by detect_jpeg_peek_dims() + the same GGAZE_JPEG_MAX_SIDE/
- * GGAZE_JPEG_MAX_PIXELS caps, applied to the file's real bytes without
- * invoking any decoder (see _jpeg_reject_if_oversized() below and its
- * twin in pixbuf.c).
+ * Safety, libjpeg side: the low-res *direct* decode (_decode_at_scale())
+ * treats libjpeg's reported dimensions as untrusted. A JPEG SOF marker can
+ * declare up to 65535x65535 using only a few header bytes, so
+ * _jpeg_check_dims() bounds width/height with detect_dims_within_bounds()
+ * and computes the RGB/RGBA buffer sizes with checked guint64 arithmetic
+ * BEFORE either g_malloc() call -- g_malloc() aborts the process on
+ * failure. A bound violation yields a recoverable G_IO_ERROR, never an
+ * abort. At 1/8 scale libjpeg's own JPEG_MAX_DIMENSION (65500) tops out at
+ * 8188x8188 (~67M pixels), under the cap, so the guard is defense in depth
+ * here; tests/test_loader_jpeg.c covers it directly.
+ *
+ * Safety, GdkPixbuf side: the full decode (_jpeg_full_decode_via_pixbuf(),
+ * used by _jpeg_load() and phase 2 of the progressive load) goes through
+ * gdk_pixbuf_new_from_file() for EXIF-orientation-aware decoding, which has
+ * no bound of its own: gdk-pixbuf 2.44's JPEG loader (glycin) pre-allocates
+ * a huge sparse memfd sized off the declared dimensions and stalls ~28s
+ * before its internal 8 GB cap rejects the file (mu0 review) -- a reachable
+ * unbounded-latency DoS. Both entry points therefore run
+ * _jpeg_reject_if_oversized() on the file's real bytes first, using
+ * detect_jpeg_peek_dims() (no decoder invoked).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
-#include "../loader.h"
-#include "../detect.h"
-
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <jpeglib.h>
 #include <setjmp.h>
-#include <gdk-pixbuf/gdk-pixbuf.h>
+
+#include "../detect.h"
+#include "../loader.h"
+#include "../pixbuf-util.h"
 
 #define GGAZE_JPEG_LORES_DENOM 8
 
@@ -84,34 +75,22 @@ _jpeg_check_dims(int i_w, int i_h, gsize *p_rowstride, gsize *p_rgb_len,
                   "jpeg: invalid dimensions (%dx%d)", i_w, i_h);
       return (FALSE);
    }
-   if (i_w > GGAZE_JPEG_MAX_SIDE || i_h > GGAZE_JPEG_MAX_SIDE) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                  "jpeg: image too large (%dx%d, max %d per side)", i_w, i_h,
-                  GGAZE_JPEG_MAX_SIDE);
+   /* Shared per-side / pixel-count caps + checked RGBA size. */
+   if (!detect_dims_within_bounds("jpeg", (guint64)i_w, (guint64)i_h,
+                                  p_rgba_len, p_err)) {
       return (FALSE);
    }
-   guint64 u_pixels = (guint64)i_w * (guint64)i_h;
-   if (u_pixels > GGAZE_JPEG_MAX_PIXELS) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                  "jpeg: pixel count too large (%llu, max %llu)",
-                  (unsigned long long)u_pixels,
-                  (unsigned long long)GGAZE_JPEG_MAX_PIXELS);
-      return (FALSE);
-   }
-   /* i_w/i_h are already capped at GGAZE_JPEG_MAX_SIDE, so these products
-    * cannot approach G_MAXSIZE on any 64-bit build; the check is kept for
-    * parity with heif.c/jxl.c and for 32-bit portability. */
+   /* Sides are capped, so the RGB product fits every 64-bit gsize; the check
+    * stays for 32-bit portability. */
    guint64 u_rowstride = (guint64)i_w * 3u;
    guint64 u_rgb_len   = (guint64)i_h * u_rowstride;
-   guint64 u_rgba_len  = u_pixels * 4u;
-   if (u_rgb_len > (guint64)G_MAXSIZE || u_rgba_len > (guint64)G_MAXSIZE) {
+   if (u_rgb_len > (guint64)G_MAXSIZE) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                   "jpeg: buffer size overflows gsize");
       return (FALSE);
    }
    *p_rowstride = (gsize)u_rowstride;
    *p_rgb_len   = (gsize)u_rgb_len;
-   *p_rgba_len  = (gsize)u_rgba_len;
    return (TRUE);
 }
 
@@ -208,22 +187,27 @@ _jpeg_can_load(const guint8 *p_head, gsize u_len) {
 
 static GdkTexture *
 _jpeg_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
-   (void)p_cancel;
-   /* Sync load: the orientation-aware GdkPixbuf path the progressive backend
-    * uses for its full-decode phase, so a sync loader_load() of a JPEG (e.g.
-    * the GEGL enhancer) is upright (decision #26). The libjpeg
-    * _decode_at_scale() fast path is only used for the progressive low-res
-    * preview, which does not need orientation. Reject an oversized header
-    * before the GdkPixbuf call -- see _jpeg_load_progressive(). */
+   /* Sync / prefetch load: the orientation-aware GdkPixbuf path the
+    * progressive backend uses for its full-decode phase, so a sync
+    * loader_load() of a JPEG (e.g. the GEGL enhancer) is upright (decision
+    * #26). The libjpeg _decode_at_scale() fast path is only used for the
+    * progressive low-res preview, which does not need orientation. Reject
+    * an oversized header before the GdkPixbuf call -- see
+    * _jpeg_load_progressive(). */
    gchar *c_buf = NULL;
    gsize  u_len = 0;
-   if (!g_file_load_contents(p_file, NULL, &c_buf, &u_len, NULL, p_err)) {
+   if (!g_file_load_contents(p_file, p_cancel, &c_buf, &u_len, NULL, p_err)) {
       return (NULL);
    }
    gboolean b_ok =
       _jpeg_reject_if_oversized((const guint8 *)c_buf, u_len, p_err);
    g_free(c_buf);
    if (!b_ok) {
+      return (NULL);
+   }
+   /* A superseded prefetch/visible load stops here instead of paying for
+    * the full decode it would only throw away. */
+   if (g_cancellable_set_error_if_cancelled(p_cancel, p_err)) {
       return (NULL);
    }
    return (_jpeg_full_decode_via_pixbuf(p_file, p_err));
@@ -246,27 +230,6 @@ _jpeg_reject_if_oversized(const guint8 *p_buf, gsize u_len, GError **p_err) {
    return (detect_jpeg_dims_within_bounds(u_w, u_h, p_err));
 }
 
-/* Build a GdkTexture (RGBA) from an already-oriented GdkPixbuf. Adds an
- * alpha channel first if the source lacks one. Caller keeps ownership of
- * p_pix; the returned texture holds its own ref via p_rgba. */
-static GdkTexture *
-_jpeg_pixbuf_to_texture(GdkPixbuf *p_pix) {
-   int        i_w         = gdk_pixbuf_get_width(p_pix);
-   int        i_h         = gdk_pixbuf_get_height(p_pix);
-   GdkPixbuf *p_rgba      = gdk_pixbuf_get_has_alpha(p_pix)
-                               ? GDK_PIXBUF(g_object_ref(p_pix))
-                               : gdk_pixbuf_add_alpha(p_pix, FALSE, 0, 0, 0);
-   int        i_rowstride = gdk_pixbuf_get_rowstride(p_rgba);
-   guchar    *p_px        = gdk_pixbuf_get_pixels(p_rgba);
-   gsize      u_len   = (gsize)(i_h - 1) * (gsize)i_rowstride + (gsize)i_w * 4u;
-   GBytes    *p_bytes = g_bytes_new_with_free_func(
-      p_px, u_len, (GDestroyNotify)g_object_unref, p_rgba);
-   GdkTexture *p_tex = gdk_memory_texture_new(i_w, i_h, GDK_MEMORY_R8G8B8A8,
-                                              p_bytes, (gsize)i_rowstride);
-   g_bytes_unref(p_bytes);
-   return (p_tex);
-}
-
 /* Phase 2 of the progressive load: full decode via GdkPixbuf, which applies
  * EXIF orientation (something _decode_at_scale()/libjpeg does not do here).
  * Caller (_jpeg_load_progressive) must already have run
@@ -286,12 +249,12 @@ _jpeg_full_decode_via_pixbuf(GFile *p_file, GError **p_err) {
       g_propagate_error(p_err, p_sub);
       return (NULL);
    }
-   GdkPixbuf *p_oriented = gdk_pixbuf_apply_embedded_orientation(p_pix);
-   GdkPixbuf *p_use =
-      (p_oriented != NULL) ? p_oriented : GDK_PIXBUF(g_object_ref(p_pix));
+   GdkTexture *p_tex = pixbuf_util_to_upright_texture(p_pix);
    g_object_unref(p_pix);
-   GdkTexture *p_tex = _jpeg_pixbuf_to_texture(p_use);
-   g_object_unref(p_use);
+   if (p_tex == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "jpeg: could not build texture from decoded pixels");
+   }
    return (p_tex);
 }
 

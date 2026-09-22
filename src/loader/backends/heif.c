@@ -24,13 +24,13 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
-#include "../loader.h"
-#include "../detect.h"
-#include "heif_internal.h"
-
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <libheif/heif.h>
+
+#include "../detect.h"
+#include "../loader.h"
+#include "heif_internal.h"
 
 static gboolean
 _heif_can_load(const guint8 *p_head, gsize u_len) {
@@ -62,6 +62,12 @@ _heif_check_plane(int i_w, int i_h, int i_stride, gsize *p_len,
    if (i_stride <= 0) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
                   "heif: invalid stride (%d)", i_stride);
+      return (FALSE);
+   }
+   /* Shared per-side / pixel-count caps (the copy below is sized off these
+    * dimensions, so an unbounded decode must be refused before it). */
+   if (!detect_dims_within_bounds("heif", (guint64)i_w, (guint64)i_h, NULL,
+                                  p_err)) {
       return (FALSE);
    }
    guint64 u_row_bytes = (guint64)i_w * 4u;
@@ -190,10 +196,14 @@ _heif_build_texture(struct heif_context      *p_ctx,
 
 static GdkTexture *
 _heif_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
-   (void)p_cancel;
    char *c_path = g_file_get_path(p_file);
    if (c_path == NULL) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED, "heif: non-local file");
+      return (NULL);
+   }
+   /* Honour a cancel before the expensive decode (superseded load). */
+   if (g_cancellable_set_error_if_cancelled(p_cancel, p_err)) {
+      g_free(c_path);
       return (NULL);
    }
 

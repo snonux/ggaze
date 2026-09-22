@@ -1,7 +1,10 @@
 /* opener.c — launch external programs with %f expansion. Detached GSubprocess.
  */
 #include "opener.h"
-#include "pathutil.h"
+
+#include <gio/gio.h>
+#include <glib.h>
+#include <string.h>
 
 struct Opener {
    GPtrArray *p_progs; /* SettingsPair* */
@@ -77,12 +80,11 @@ _expand_command(const char *c_cmd, GFile *p_file, GError **p_err) {
       if (g_str_equal(argv[i], "%f")) {
          g_free(argv[i]);
          argv[i] = g_strdup(c_path);
-      } else if (strstr(argv[i], "%f")) {
-         char *r = pathutil_str_replace(argv[i], "%f", c_path);
-         if (r) {
-            g_free(argv[i]);
-            argv[i] = r;
-         }
+      } else if (strstr(argv[i], "%f") != NULL) {
+         GString *p_s = g_string_new(argv[i]);
+         g_string_replace(p_s, "%f", c_path, 0);
+         g_free(argv[i]);
+         argv[i] = g_string_free(p_s, FALSE);
       }
    }
    g_free(c_path);

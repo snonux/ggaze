@@ -1,7 +1,10 @@
 /* runner.c — async shell script runner with %f/%d expansion + injection guard.
  */
 #include "runner.h"
-#include "pathutil.h"
+
+#include <gio/gio.h>
+#include <glib.h>
+#include <string.h>
 
 struct Runner {
    GPtrArray *p_scripts;
@@ -42,28 +45,50 @@ runner_get_scripts(Runner *r) {
    return r ? r->p_scripts : NULL;
 }
 
-/* Single-quote a path for safe shell interpolation. Caller frees. */
-static char *
-_shell_quote(const char *c_path) {
-   /* g_shell_quote wraps the path in single quotes and escapes any
-    * embedded quotes, making it safe to interpolate into a sh -c script. */
-   return g_shell_quote(c_path);
-}
-
+/* Expand %f (file path) and %d (folder path) in c_cmd, each single-quoted
+ * with g_shell_quote so a hostile file name cannot break out of its argument.
+ * The template is scanned ONCE, left to right, and the quoted values are
+ * emitted without ever being re-scanned: a sequential replace-%f-then-%d
+ * used to splice the folder path into a file name that itself contained
+ * "%d", which both mangled the path and let shell metacharacters in the
+ * folder name escape their quotes (command injection). "%%" yields a literal
+ * "%"; any other "%x" is copied through unchanged. Caller frees. */
 static char *
 _expand(const char *c_cmd, GFile *p_file, GFile *p_dir) {
    char *c_fpath = p_file ? g_file_get_path(p_file) : g_strdup("");
    char *c_dpath = p_dir ? g_file_get_path(p_dir) : g_strdup("");
-   char *c_fq    = _shell_quote(c_fpath);
-   char *c_dq    = _shell_quote(c_dpath);
+   char *c_fq    = g_shell_quote(c_fpath != NULL ? c_fpath : "");
+   char *c_dq    = g_shell_quote(c_dpath != NULL ? c_dpath : "");
    g_free(c_fpath);
    g_free(c_dpath);
-   char *r1 = pathutil_str_replace(c_cmd, "%f", c_fq);
-   char *r2 = pathutil_str_replace(r1 ? r1 : c_cmd, "%d", c_dq);
-   g_free(r1);
+
+   GString *p_out = g_string_sized_new(strlen(c_cmd) + 64);
+   for (const char *p = c_cmd; *p != '\0'; p++) {
+      if (*p != '%') {
+         g_string_append_c(p_out, *p);
+         continue;
+      }
+      switch (p[1]) {
+      case 'f':
+         g_string_append(p_out, c_fq);
+         p++;
+         break;
+      case 'd':
+         g_string_append(p_out, c_dq);
+         p++;
+         break;
+      case '%':
+         g_string_append_c(p_out, '%');
+         p++;
+         break;
+      default:
+         g_string_append_c(p_out, '%');
+         break;
+      }
+   }
    g_free(c_fq);
    g_free(c_dq);
-   return r2 ? r2 : g_strdup(c_cmd);
+   return (g_string_free(p_out, FALSE));
 }
 
 gboolean

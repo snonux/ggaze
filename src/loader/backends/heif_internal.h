@@ -1,3 +1,6 @@
+#ifndef GGAZE_HEIF_INTERNAL_H
+#define GGAZE_HEIF_INTERNAL_H
+
 /*:*
  * ggaze — HEIF backend internals exposed for direct unit testing (task 7u0)
  *
@@ -14,9 +17,6 @@
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
-
-#ifndef GGAZE_HEIF_INTERNAL_H
-#define GGAZE_HEIF_INTERNAL_H
 
 #include <glib.h>
 #include <stdint.h>

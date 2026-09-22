@@ -270,15 +270,49 @@ detect_jpeg_peek_dims_from_path(const char *c_path, guint32 *p_w,
 }
 
 gboolean
-detect_jpeg_dims_within_bounds(guint32 u_w, guint32 u_h, GError **p_err) {
-   if (u_w > GGAZE_JPEG_MAX_SIDE || u_h > GGAZE_JPEG_MAX_SIDE ||
-       (guint64)u_w * u_h > GGAZE_JPEG_MAX_PIXELS) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                  "jpeg: image too large (%ux%u, max %d per side / %llu "
-                  "pixels)",
-                  u_w, u_h, GGAZE_JPEG_MAX_SIDE,
-                  (unsigned long long)GGAZE_JPEG_MAX_PIXELS);
+detect_dims_within_bounds(const char *c_backend, guint64 u_w, guint64 u_h,
+                          gsize *p_rgba_len, GError **p_err) {
+   if (u_w == 0 || u_h == 0) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "%s: zero-sized image (%" G_GUINT64_FORMAT
+                  "x%" G_GUINT64_FORMAT ")",
+                  c_backend, u_w, u_h);
       return (FALSE);
    }
+   if (u_w > GGAZE_IMAGE_MAX_SIDE || u_h > GGAZE_IMAGE_MAX_SIDE ||
+       u_w * u_h > GGAZE_IMAGE_MAX_PIXELS) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "%s: image too large (%" G_GUINT64_FORMAT
+                  "x%" G_GUINT64_FORMAT ", max %d per side / %llu pixels)",
+                  c_backend, u_w, u_h, GGAZE_IMAGE_MAX_SIDE,
+                  (unsigned long long)GGAZE_IMAGE_MAX_PIXELS);
+      return (FALSE);
+   }
+   /* Both sides are <= 32768 here, so w*h*4 is at most ~4e9 * 4 and fits a
+    * 64-bit gsize; the gint and gsize checks are kept for 32-bit targets. */
+   if (u_w > (guint64)G_MAXINT || u_h > (guint64)G_MAXINT) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "%s: dimensions exceed gint range", c_backend);
+      return (FALSE);
+   }
+   guint64 u_bytes = u_w * u_h * 4u;
+   if (u_bytes > (guint64)G_MAXSIZE) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                  "%s: buffer size overflows gsize", c_backend);
+      return (FALSE);
+   }
+   if (p_rgba_len != NULL) {
+      *p_rgba_len = (gsize)u_bytes;
+   }
    return (TRUE);
+}
+
+gboolean
+detect_jpeg_dims_within_bounds(guint32 u_w, guint32 u_h, GError **p_err) {
+   /* A declared height of 0 is legal JPEG (a DNL marker supplies it later),
+    * so a zero side is not "oversized": let the real decoder judge it. */
+   if (u_w == 0 || u_h == 0) {
+      return (TRUE);
+   }
+   return (detect_dims_within_bounds("jpeg", u_w, u_h, NULL, p_err));
 }

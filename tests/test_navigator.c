@@ -777,12 +777,54 @@ test_bulk_remove_then_next(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* Regression: a Latin-1 (non-UTF-8) file name used to crash the name sort
+ * (g_utf8_collate on raw bytes). The listing must sort without crashing and
+ * still address the file by its raw name. */
+static void
+test_sort_non_utf8_name(void) {
+   char *c_dir = make_temp_dir();
+   touch_file(c_dir, "b.jpg");
+   touch_file(c_dir, "caf\xe9.jpg"); /* Latin-1 e-acute, invalid UTF-8 */
+   touch_file(c_dir, "a.jpg");
+   GFile     *p_dir = g_file_new_for_path(c_dir);
+   Navigator *p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, TRUE, TRUE);
+   g_assert_cmpuint(navigator_get_count(p_nav), ==, 3);
+   assert_name(navigator_get_file(p_nav, 0), "a.jpg");
+   assert_name(navigator_get_file(p_nav, 1), "b.jpg");
+   assert_name(navigator_get_file(p_nav, 2), "caf\xe9.jpg");
+   navigator_set_sort(p_nav, GGAZE_SORT_TIME);
+   navigator_set_sort(p_nav, GGAZE_SORT_NAME);
+   assert_name(navigator_get_file(p_nav, 2), "caf\xe9.jpg");
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   cleanup_temp_dir(c_dir);
+}
+
+/* Natural ("img2" before "img10") ordering of the name sort. */
+static void
+test_sort_name_natural(void) {
+   char *c_dir = make_temp_dir();
+   touch_file(c_dir, "img10.jpg");
+   touch_file(c_dir, "img2.jpg");
+   touch_file(c_dir, "img1.jpg");
+   GFile     *p_dir = g_file_new_for_path(c_dir);
+   Navigator *p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, TRUE, TRUE);
+   assert_name(navigator_get_file(p_nav, 0), "img1.jpg");
+   assert_name(navigator_get_file(p_nav, 1), "img2.jpg");
+   assert_name(navigator_get_file(p_nav, 2), "img10.jpg");
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
    g_test_add_func("/navigator/filter_and_listing", test_filter_and_listing);
    g_test_add_func("/navigator/hide_raw_sidecars", test_hide_raw_sidecars);
    g_test_add_func("/navigator/sort_time_and_size", test_sort_time_and_size);
+   g_test_add_func("/navigator/sort_non_utf8_name", test_sort_non_utf8_name);
+   g_test_add_func("/navigator/sort_name_natural", test_sort_name_natural);
    g_test_add_func("/navigator/prev_next_wrap", test_prev_next_wrap);
    g_test_add_func("/navigator/set_current_file", test_set_current_file);
    g_test_add_func("/navigator/marks", test_marks);

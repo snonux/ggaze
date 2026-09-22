@@ -27,10 +27,11 @@ static const char *RAW_EXTS[]   = {"raf", "cr2", "cr3", "nef", "arw",
 #define GGAZE_DEFAULT_DEBOUNCE_MS 250
 
 typedef struct {
-   GFile *file; /* owned ref */
-   gchar *name; /* owned (basename) */
-   gint64 mtime;
-   gint64 size;
+   GFile *p_file; /* owned ref */
+   gchar *c_name; /* owned (basename, raw filesystem bytes) */
+   gchar *c_key;  /* owned collation key for the name sort (see _relist) */
+   gint64 i_mtime;
+   gint64 i_size;
 } Entry;
 
 struct _Navigator {
@@ -113,9 +114,24 @@ _stem_lower(const char *c_name) {
 static void
 _entry_free(gpointer p_void) {
    Entry *p_e = (Entry *)p_void;
-   g_clear_object(&p_e->file);
-   g_free(p_e->name);
+   g_clear_object(&p_e->p_file);
+   g_free(p_e->c_name);
+   g_free(p_e->c_key);
    g_free(p_e);
+}
+
+/* Collation key for the name sort. The raw name is in the filesystem's byte
+ * encoding and may not be valid UTF-8 (Latin-1 names from old cameras or
+ * Windows archives); g_utf8_collate() on such bytes crashes inside GLib, so
+ * the key is built from the guaranteed-UTF-8 display name. The
+ * for_filename variant also orders "img2" before "img10", which is what a
+ * camera dump needs. Computed once per entry and compared with strcmp. */
+static gchar *
+_collate_key_for(const char *c_name) {
+   gchar *c_display = g_filename_display_name(c_name);
+   gchar *c_key     = g_utf8_collate_key_for_filename(c_display, -1);
+   g_free(c_display);
+   return (c_key);
 }
 
 static gint
@@ -126,18 +142,18 @@ _compare_entries(gconstpointer p_a, gconstpointer p_b, gpointer p_data) {
 
    switch (e_sort) {
    case GGAZE_SORT_TIME:
-      if (p_ea->mtime < p_eb->mtime) {
+      if (p_ea->i_mtime < p_eb->i_mtime) {
          return (-1);
       }
-      if (p_ea->mtime > p_eb->mtime) {
+      if (p_ea->i_mtime > p_eb->i_mtime) {
          return (1);
       }
       break;
    case GGAZE_SORT_SIZE:
-      if (p_ea->size < p_eb->size) {
+      if (p_ea->i_size < p_eb->i_size) {
          return (-1);
       }
-      if (p_ea->size > p_eb->size) {
+      if (p_ea->i_size > p_eb->i_size) {
          return (1);
       }
       break;
@@ -145,8 +161,8 @@ _compare_entries(gconstpointer p_a, gconstpointer p_b, gpointer p_data) {
    default:
       break;
    }
-   /* Tie-break (and the NAME case) by collated basename. */
-   return (g_utf8_collate(p_ea->name, p_eb->name));
+   /* Tie-break (and the NAME case) by the precomputed collation key. */
+   return (strcmp(p_ea->c_key, p_eb->c_key));
 }
 
 static gint
@@ -213,18 +229,19 @@ _relist(Navigator *p_nav) {
          g_object_unref(p_info);
          continue;
       }
-      Entry *p_e = g_new(Entry, 1);
-      p_e->file  = g_file_get_child(p_nav->p_dir, c_name);
-      p_e->name  = g_strdup(c_name);
-      p_e->mtime = (gint64)g_file_info_get_attribute_uint64(
+      Entry *p_e   = g_new(Entry, 1);
+      p_e->p_file  = g_file_get_child(p_nav->p_dir, c_name);
+      p_e->c_name  = g_strdup(c_name);
+      p_e->c_key   = _collate_key_for(c_name);
+      p_e->i_mtime = (gint64)g_file_info_get_attribute_uint64(
          p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED);
-      p_e->size = (gint64)g_file_info_get_size(p_info);
+      p_e->i_size = (gint64)g_file_info_get_size(p_info);
       g_object_unref(p_info);
 
-      const char *c_ext = _ext_of(p_e->name); /* p_e->name is owned; c_name
-                                               * was borrowed from p_info */
+      const char *c_ext = _ext_of(p_e->c_name); /* p_e->c_name is owned;
+                                                 * c_name was borrowed */
       if (_is_jpeg_ext(c_ext)) {
-         char *c_stem = _stem_lower(p_e->name);
+         char *c_stem = _stem_lower(p_e->c_name);
          g_hash_table_add(p_jpeg_stems, c_stem);
       }
       g_ptr_array_add(p_entries, p_e);
@@ -235,9 +252,9 @@ _relist(Navigator *p_nav) {
    if (p_nav->b_hide_raw) {
       for (gsize u_i = p_entries->len; u_i > 0; u_i--) {
          Entry      *p_e   = (Entry *)g_ptr_array_index(p_entries, u_i - 1);
-         const char *c_ext = _ext_of(p_e->name);
+         const char *c_ext = _ext_of(p_e->c_name);
          if (_is_raw_ext(c_ext)) {
-            char *c_stem = _stem_lower(p_e->name);
+            char *c_stem = _stem_lower(p_e->c_name);
             if (g_hash_table_contains(p_jpeg_stems, c_stem)) {
                g_ptr_array_remove_index(p_entries, u_i - 1);
             }
@@ -261,7 +278,7 @@ _relist(Navigator *p_nav) {
    g_ptr_array_set_size(p_nav->p_files, 0);
    for (gsize u_i = 0; u_i < p_entries->len; u_i++) {
       Entry *p_e = (Entry *)g_ptr_array_index(p_entries, u_i);
-      g_ptr_array_add(p_nav->p_files, g_object_ref(p_e->file));
+      g_ptr_array_add(p_nav->p_files, g_object_ref(p_e->p_file));
    }
 
    if (p_keep != NULL) {

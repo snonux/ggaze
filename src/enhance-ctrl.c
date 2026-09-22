@@ -269,11 +269,9 @@ _split_name(const char *c_base, char **pc_stem, const char **pc_ext) {
  * existing file. */
 static GFile *
 _unique_dest(GFile *p_dir, const char *c_stem, const char *c_ext) {
-   char  *c_first = g_strdup_printf("%s-enhanced%s", c_stem, c_ext);
-   char  *c_fmt   = g_strdup_printf("%s-enhanced-%%u%s", c_stem, c_ext);
-   GFile *p_out   = pathutil_unique_child(p_dir, c_first, c_fmt, 1);
-   g_free(c_fmt);
-   g_free(c_first);
+   char  *c_prefix = g_strconcat(c_stem, "-enhanced", NULL);
+   GFile *p_out    = pathutil_unique_child(p_dir, c_prefix, c_ext, 1);
+   g_free(c_prefix);
    return (p_out);
 }
 

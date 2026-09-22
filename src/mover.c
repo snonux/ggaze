@@ -69,19 +69,14 @@ mover_move(Mover *m, GList *p_files, const SettingsPair *p_dest,
       GFile *src  = G_FILE(it->data);
       char  *base = g_file_get_basename(src);
       /* Suffix on the stem (before the extension): a.jpg -> a-1.jpg. */
-      const char *c_d = strrchr(base, '.');
-      char       *c_s =
-         (c_d && c_d != base) ? g_strndup(base, c_d - base) : g_strdup(base);
-      const char *c_e     = (c_d && c_d != base) ? c_d : "";
-      char       *c_first = g_strdup_printf("%s%s", c_s, c_e);
-      char       *c_fmt   = g_strdup_printf("%s-%%u%s", c_s, c_e);
-      GFile      *dst     = pathutil_unique_child(p_ddir, c_first, c_fmt, 1);
-      g_free(c_fmt);
-      g_free(c_first);
+      char       *c_s = NULL;
+      const char *c_e = NULL;
+      pathutil_split_ext(base, &c_s, &c_e);
+      GFile *dst = pathutil_unique_child(p_ddir, c_s, c_e, 1);
       g_free(c_s);
       g_free(base);
       if (dst == NULL) {
-         g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_TOO_MANY_OPEN_FILES,
+         g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_EXISTS,
                      "could not find a non-colliding move destination");
          g_object_unref(p_ddir);
          return FALSE;
@@ -103,21 +98,27 @@ mover_move(Mover *m, GList *p_files, const SettingsPair *p_dest,
 gboolean
 mover_undo_last(Mover *m, GError **p_err) {
    g_return_val_if_fail(m != NULL, FALSE);
-   if (m->p_last_dst->len == 0)
-      return FALSE;
-   for (guint i = 0; i < m->p_last_dst->len; i++) {
-      GFile  *dst = g_ptr_array_index(m->p_last_dst, i);
-      GFile  *src = g_ptr_array_index(m->p_last_src, i);
+   if (m->p_last_dst->len == 0) {
+      return (FALSE);
+   }
+   /* Restore from the end and drop each pair as soon as it is back, so a
+    * failure part-way leaves only the still-moved files recorded: the next
+    * undo then retries exactly those instead of failing forever on a file
+    * that was already restored. */
+   while (m->p_last_dst->len > 0) {
+      guint   u_i = m->p_last_dst->len - 1;
+      GFile  *dst = g_ptr_array_index(m->p_last_dst, u_i);
+      GFile  *src = g_ptr_array_index(m->p_last_src, u_i);
       GError *e   = NULL;
       if (!g_file_move(dst, src, G_FILE_COPY_NOFOLLOW_SYMLINKS, NULL, NULL,
                        NULL, &e)) {
          g_propagate_error(p_err, e);
-         return FALSE;
+         return (FALSE);
       }
+      g_ptr_array_remove_index(m->p_last_dst, u_i);
+      g_ptr_array_remove_index(m->p_last_src, u_i);
    }
-   g_ptr_array_set_size(m->p_last_src, 0);
-   g_ptr_array_set_size(m->p_last_dst, 0);
-   return TRUE;
+   return (TRUE);
 }
 
 gboolean

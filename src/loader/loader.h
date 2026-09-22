@@ -4,14 +4,15 @@
 /*:*
  * ggaze — image loader
  *
- * Synchronous load API for M1; M3 adds loader_load_async/_finish on top of the
- * same worker. The loader sniffs the format from the file header (detect.c)
- * and dispatches to the first registered backend whose can_load() accepts the
- * header. GdkPixbuf is the fallback backend (covers PNG/JPEG/GIF/WebP/TIFF/ICO
- * and anything GdkPixbuf happens to understand); JXL/AVIF/HEIF get specific
- * backends in M5. Every backend honors EXIF Orientation so the returned
- * GdkTexture is upright (decision #26). See docs/architecture.md "Image
- * decode".
+ * Synchronous loader_load() plus loader_load_async/_finish on top of the same
+ * worker. The loader sniffs the format from the file header (detect.c) and
+ * dispatches to the first format-specific backend whose can_load() accepts
+ * the header (JXL/AVIF/HEIF/JPEG, each optional); when none claims the file
+ * the dispatcher falls back to the GdkPixbuf backend (PNG/GIF/WebP/TIFF/ICO,
+ * JPEG when libjpeg is off, and anything else GdkPixbuf understands). Every
+ * backend honors EXIF Orientation so the returned GdkTexture is upright
+ * (decision #26) and honors the GCancellable so a superseded load stops
+ * before its expensive decode. See docs/architecture.md "Image decode".
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -28,7 +29,11 @@ G_BEGIN_DECLS
 typedef void (*LoaderProgressCb)(GdkTexture *p_partial, gpointer p_data);
 
 /* A loader backend. Compiled in conditionally (meson feature options) and
- * registered with the loader at link time. */
+ * registered with the loader at link time. load()/load_progressive() MUST
+ * honour p_cancel: pass it to the file read and call
+ * g_cancellable_set_error_if_cancelled() before the decode, so the window's
+ * one-active-load cancel is not a no-op on the slowest formats. On failure
+ * they return NULL and MUST set *p_err. */
 typedef struct {
    gboolean (*can_load)(const guint8 *p_head, gsize u_len);
    GdkTexture *(*load)(GFile *p_file, GCancellable *p_cancel, GError **p_err);
@@ -38,14 +43,15 @@ typedef struct {
                                    gpointer p_progress_data, GError **p_err);
 } GgazeLoaderBackend;
 
-/* Backends register a const instance; the dispatcher (loader.c) iterates
- * BACKENDS[] in priority order. pixbuf_backend is the fallback and MUST stay
- * last (it accepts GGAZE_FMT_UNKNOWN). */
+/* Backends register a const instance; the dispatcher (loader.c) tries the
+ * format-specific ones in priority order and then this GdkPixbuf fallback
+ * unconditionally. */
 extern const GgazeLoaderBackend pixbuf_backend;
 
 /* Synchronously load p_file into a GdkTexture (EXIF orientation applied).
- * Returns a new GdkTexture (caller owns it) or NULL with p_err set. Used by
- * tests and the clipboard helpers; the window uses the async variant below. */
+ * Returns a new GdkTexture (caller owns it) or NULL with p_err set (always,
+ * including for an empty file). Used by tests and the GEGL enhancer; the
+ * window uses the async variant below. */
 GdkTexture *loader_load(GFile *p_file, GCancellable *p_cancel, GError **p_err);
 
 /* Asynchronous load: runs the sync worker in a GTask thread, returns the

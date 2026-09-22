@@ -1,7 +1,9 @@
 /* test_runner.c — %f/%d expansion, injection guard, exit status. */
 #include "runner.h"
+
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 
 static GMainLoop *g_loop;
 static int        g_exit_code;
@@ -219,6 +221,46 @@ test_spaces_in_args(void) {
    _run_and_check_output("printf 'a b c\\n' > '%s'", "a b c\n");
 }
 
+/* Regression: a file named with "%d" inside a folder whose name carries shell
+ * metacharacters. The old replace-%f-then-%d expansion re-scanned the quoted
+ * file path, spliced the folder path into it and let the ';' in the folder
+ * name escape its quotes (the injected command ran). The single-pass
+ * expansion must hand the script exactly the file's real path. */
+static void
+test_percent_d_in_filename(void) {
+   GError *e = NULL;
+   char   *d = g_dir_make_tmp("ggaze-runner-XXXXXX", &e);
+   g_assert_no_error(e);
+   char *sentinel_p = g_build_filename(d, "PWNED", NULL);
+   char *hostile    = g_strdup_printf("%s/pics;touch %s;", d, sentinel_p);
+   g_assert_cmpint(g_mkdir_with_parents(hostile, 0700), ==, 0);
+   char  *fp = g_build_filename(hostile, "a%d.jpg", NULL);
+   GFile *f  = g_file_new_for_path(fp);
+   g_file_replace_contents(f, "x", 1, NULL, FALSE,
+                           G_FILE_CREATE_REPLACE_DESTINATION, NULL, NULL, NULL);
+   GFile *dd       = g_file_new_for_path(hostile);
+   GFile *sentinel = g_file_new_for_path(sentinel_p);
+
+   /* "test -f %f" exits 0 only if the expanded path is the real file. */
+   Runner      *r = runner_new();
+   SettingsPair s = {"t", "test -f %f && test -d %d && test x%% = x%"};
+   run_and_wait(r, f, dd, &s);
+   g_assert_cmpint(g_exit_code, ==, 0);
+   g_assert_false(g_file_query_exists(sentinel, NULL));
+
+   runner_delete(r);
+   g_file_delete(f, NULL, NULL);
+   g_file_delete(dd, NULL, NULL);
+   g_object_unref(sentinel);
+   g_object_unref(f);
+   g_object_unref(dd);
+   g_rmdir(d);
+   g_free(fp);
+   g_free(hostile);
+   g_free(sentinel_p);
+   g_free(d);
+}
+
 int
 main(int argc, char **argv) {
    g_test_init(&argc, &argv, NULL);
@@ -226,6 +268,7 @@ main(int argc, char **argv) {
    g_test_add_func("/runner/false_exit_nonzero", test_false_exit_nonzero);
    g_test_add_func("/runner/injection_guard", test_injection_guard);
    g_test_add_func("/runner/hostile_filename", test_hostile_filename);
+   g_test_add_func("/runner/percent_d_in_filename", test_percent_d_in_filename);
    g_test_add_func("/runner/multi_word", test_multi_word);
    g_test_add_func("/runner/pipeline", test_pipeline);
    g_test_add_func("/runner/redirection", test_redirection);

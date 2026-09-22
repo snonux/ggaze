@@ -211,6 +211,27 @@ test_heif_check_plane_data(void) {
    g_assert_no_error(p_err);
 }
 
+/* A load whose cancellable is already cancelled must fail with
+ * G_IO_ERROR_CANCELLED before the (expensive) decode runs: the window's
+ * one-active-load cancel relies on every backend honouring it. */
+static void
+test_heif_cancelled(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar        *c_path   = g_build_filename(c_dir, "tiny.heic", NULL);
+   GFile        *p_file   = g_file_new_for_path(c_path);
+   GCancellable *p_cancel = g_cancellable_new();
+   g_cancellable_cancel(p_cancel);
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = loader_load(p_file, p_cancel, &p_err);
+   g_assert_null(p_tex);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+   g_error_free(p_err);
+   g_object_unref(p_cancel);
+   g_object_unref(p_file);
+   g_free(c_path);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -220,5 +241,6 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/loader/heif/check_plane_guards",
                    test_heif_check_plane_guards);
    g_test_add_func("/loader/heif/check_plane_data", test_heif_check_plane_data);
+   g_test_add_func("/loader/heif/cancelled", test_heif_cancelled);
    return (g_test_run());
 }

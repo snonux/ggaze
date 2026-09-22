@@ -30,6 +30,7 @@
 #include <glib.h>
 
 #include "loader/detect.h"
+#include "loader/pixbuf-util.h"
 
 #define GGAZE_TMS_NORMAL 128
 #define GGAZE_TMS_LARGE 256
@@ -110,28 +111,6 @@ _thumb_option(GdkPixbuf *p_pix, const char *c_key) {
    return (c_val);
 }
 
-static GdkTexture *
-_texture_from_pixbuf(GdkPixbuf *p_pix) {
-   g_return_val_if_fail(GDK_IS_PIXBUF(p_pix), NULL);
-   int        i_w    = gdk_pixbuf_get_width(p_pix);
-   int        i_h    = gdk_pixbuf_get_height(p_pix);
-   GdkPixbuf *p_rgba = gdk_pixbuf_get_has_alpha(p_pix)
-                          ? GDK_PIXBUF(g_object_ref(p_pix))
-                          : gdk_pixbuf_add_alpha(p_pix, FALSE, 0, 0, 0);
-   if (p_rgba == NULL) {
-      return (NULL);
-   }
-   int     i_rowstride = gdk_pixbuf_get_rowstride(p_rgba);
-   guchar *p_pixels    = gdk_pixbuf_get_pixels(p_rgba);
-   gsize   u_len   = (gsize)(i_h - 1) * (gsize)i_rowstride + (gsize)i_w * 4u;
-   GBytes *p_bytes = g_bytes_new_with_free_func(
-      p_pixels, u_len, (GDestroyNotify)g_object_unref, p_rgba);
-   GdkTexture *p_tex = gdk_memory_texture_new(i_w, i_h, GDK_MEMORY_R8G8B8A8,
-                                              p_bytes, (gsize)i_rowstride);
-   g_bytes_unref(p_bytes);
-   return (p_tex);
-}
-
 /* Load a cached PNG into a texture, but only if the entry really describes the
  * current state of p_file:
  *   - Thumb::MTime must equal i_mtime -- the spec's staleness check, so an
@@ -163,7 +142,7 @@ _load_cached(GFile *p_file, const char *c_path, gint64 i_mtime) {
       g_object_unref(p_pix);
       return (NULL); /* stale, foreign or unverifiable entry */
    }
-   GdkTexture *p_tex = _texture_from_pixbuf(p_pix);
+   GdkTexture *p_tex = pixbuf_util_to_texture(p_pix);
    g_object_unref(p_pix);
    return (p_tex);
 }
@@ -246,15 +225,17 @@ _generate(GFile *p_file, int i_bucket, const char *c_cache_path, gint64 i_mtime,
    if (p_pix == NULL) {
       return (NULL);
    }
-   GdkPixbuf *p_oriented = gdk_pixbuf_apply_embedded_orientation(p_pix);
-   GdkPixbuf *p_use =
-      (p_oriented != NULL) ? p_oriented : GDK_PIXBUF(g_object_ref(p_pix));
+   GdkPixbuf *p_use = pixbuf_util_upright(p_pix);
    g_object_unref(p_pix);
 
    _write_cache(p_file, p_use, c_cache_path, i_mtime, i_size);
 
-   GdkTexture *p_tex = _texture_from_pixbuf(p_use);
+   GdkTexture *p_tex = pixbuf_util_to_texture(p_use);
    g_object_unref(p_use);
+   if (p_tex == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "could not build thumbnail texture");
+   }
    return (p_tex);
 }
 

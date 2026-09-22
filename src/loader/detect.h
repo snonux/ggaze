@@ -35,14 +35,31 @@ typedef enum {
  * unrecognized. */
 GgazeFormat detect_format(const guint8 *p_head, gsize u_len);
 
-/* Per-dimension / total-pixel caps applied to a JPEG's declared header
- * dimensions before either backend that can decode JPEG (jpeg.c's
- * libjpeg-driven decode, pixbuf.c's GdkPixbuf-driven decode) commits to an
- * allocation sized off them. Defined once here so the two backends cannot
- * drift out of sync (mu0). 32768 per side / 100M total
- * pixels (~400 MB RGBA) comfortably admits real camera photos. */
-#define GGAZE_JPEG_MAX_SIDE 32768
-#define GGAZE_JPEG_MAX_PIXELS 100000000ULL
+/* Per-dimension / total-pixel caps applied to EVERY decoder's declared or
+ * reported dimensions before any allocation sized off them (JPEG header
+ * peek, libjpeg output, libjxl basic info, libavif/libheif decoded planes).
+ * Defined once here, enforced by detect_dims_within_bounds() below, so the
+ * backends cannot drift out of sync -- they used to carry three copies of
+ * the same constants and the AVIF backend had no cap at all. 32768 per side
+ * / 100M total pixels (~400 MB RGBA) comfortably admits real camera photos.
+ * The GGAZE_JPEG_* spellings are kept as aliases for the JPEG peek helpers.
+ */
+#define GGAZE_IMAGE_MAX_SIDE 32768
+#define GGAZE_IMAGE_MAX_PIXELS 100000000ULL
+#define GGAZE_JPEG_MAX_SIDE GGAZE_IMAGE_MAX_SIDE
+#define GGAZE_JPEG_MAX_PIXELS GGAZE_IMAGE_MAX_PIXELS
+
+/* The one bounds check every backend runs before allocating pixels: rejects
+ * a zero side, a side over GGAZE_IMAGE_MAX_SIDE, a pixel count over
+ * GGAZE_IMAGE_MAX_PIXELS, and a side that does not fit the gint
+ * GdkMemoryTexture takes; then computes the RGBA byte length with checked
+ * 64-bit arithmetic. c_backend prefixes the error message ("jxl", ...).
+ * Returns TRUE and stores the byte length in *p_rgba_len (may be NULL) when
+ * within bounds; FALSE with a recoverable G_IO_ERROR (p_err may be NULL)
+ * otherwise. */
+gboolean detect_dims_within_bounds(const char *c_backend, guint64 u_w,
+                                   guint64 u_h, gsize *p_rgba_len,
+                                   GError **p_err);
 
 /* Bounded prefix read by detect_jpeg_peek_dims_from_path() below. Generous
  * enough for real-world APPn/EXIF/ICC segments ahead of the SOF marker while
@@ -117,13 +134,12 @@ typedef enum {
 GgazeJpegPeekStatus detect_jpeg_peek_dims_from_path(const char *c_path,
                                                     guint32 *p_w, guint32 *p_h);
 
-/* Compare a JPEG's declared u_w/u_h against GGAZE_JPEG_MAX_SIDE/MAX_PIXELS.
- * Returns TRUE if within bounds. On an oversized violation, returns FALSE
- * and (if p_err is non-NULL) sets *p_err to a G_IO_ERROR describing the
- * limit -- callers that don't propagate a GError (e.g. info.c, which simply
- * omits dimensions on any failure) may pass NULL. Centralizing the bound
- * comparison and message here keeps the four JPEG decode call sites
- * (pixbuf.c, jpeg.c, thumbnail.c, info.c) from drifting out of sync (mu0). */
+/* Compare a JPEG's declared u_w/u_h against the caps above (a thin wrapper
+ * over detect_dims_within_bounds() with the "jpeg" prefix). Returns TRUE if
+ * within bounds. On an oversized violation, returns FALSE and (if p_err is
+ * non-NULL) sets *p_err to a G_IO_ERROR describing the limit -- callers that
+ * don't propagate a GError (e.g. info.c, which simply omits dimensions on
+ * any failure) may pass NULL. */
 gboolean detect_jpeg_dims_within_bounds(guint32 u_w, guint32 u_h,
                                         GError **p_err);
 

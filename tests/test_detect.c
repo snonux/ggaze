@@ -332,10 +332,30 @@ test_jpeg_dims_within_bounds_null_err_ok(void) {
    g_assert_false(detect_jpeg_dims_within_bounds(65500, 65500, NULL));
 }
 
+/* detect_dims_within_bounds(): the single cap every backend applies. */
+static void
+test_dims_within_bounds(void) {
+   GError *p_err  = NULL;
+   gsize   u_rgba = 0;
+   g_assert_true(detect_dims_within_bounds("t", 6, 3, &u_rgba, &p_err));
+   g_assert_no_error(p_err);
+   g_assert_cmpuint(u_rgba, ==, 6 * 3 * 4);
+   g_assert_false(detect_dims_within_bounds("t", 0, 3, NULL, &p_err));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED);
+   g_clear_error(&p_err);
+   g_assert_false(detect_dims_within_bounds("t", GGAZE_IMAGE_MAX_SIDE + 1, 1,
+                                            NULL, &p_err));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+   g_clear_error(&p_err);
+   g_assert_false(detect_dims_within_bounds("t", 20000, 20000, NULL, NULL));
+   g_assert_true(detect_dims_within_bounds("t", 10000, 10000, NULL, NULL));
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
    g_test_add_func("/detect/jpeg", test_jpeg);
+   g_test_add_func("/detect/dims_within_bounds", test_dims_within_bounds);
    g_test_add_func("/detect/png", test_png);
    g_test_add_func("/detect/gif", test_gif);
    g_test_add_func("/detect/webp", test_webp);

@@ -1,9 +1,9 @@
 # ggaze — GTK Gaze
 #
 # A small, fast, native image viewer for Fedora Linux, written in C with
-# GTK4. Full design lives in docs/; this file is the build root. Phase 0
-# establishes the build/test/CI/convention harness — no production sources
-# yet (they arrive from M0; see docs/roadmap.md).
+# GTK4. Full design lives in docs/; this file is the build root: the static
+# ggaze library (shared by the executable and the tests), the optional
+# backends behind meson feature options, and the generated config header.
 
 project('ggaze', 'c',
    version : '0.1.0',
@@ -23,13 +23,15 @@ gio_dep        = dependency('gio-2.0')
 adwaita_dep    = dependency('libadwaita-1')
 gdkpixbuf_dep  = dependency('gdk-pixbuf-2.0')  # pixbuf loader backend
 libexif_dep    = dependency('libexif')           # EXIF gather (info overlay, M4)
-libjpeg_dep    = dependency('libjpeg')           # libjpeg-turbo direct JPEG (M6)
 
 # --- Optional backends (feature: auto/disabled/enabled). See meson_options.txt.
-gegl_dep = dependency('gegl-0.4', required : get_option('gegl'))
-jxl_dep  = dependency('libjxl',   required : get_option('jxl'))
-avif_dep = dependency('libavif', required : get_option('avif'))
-heif_dep = dependency('libheif',  required : get_option('heif'))
+gegl_dep    = dependency('gegl-0.4', required : get_option('gegl'))
+jxl_dep     = dependency('libjxl',   required : get_option('jxl'))
+avif_dep    = dependency('libavif',  required : get_option('avif'))
+heif_dep    = dependency('libheif',  required : get_option('heif'))
+# libjpeg-turbo direct JPEG (progressive low-res preview); without it the
+# GdkPixbuf backend decodes JPEG.
+libjpeg_dep = dependency('libjpeg',  required : get_option('jpeg'))
 
 # --- Generated config header (app id, version, feature flags) ---
 conf = configuration_data()
@@ -79,6 +81,7 @@ ggaze_src = files(
       'src/clipboard.c',
       'src/loader/loader.c',
       'src/loader/detect.c',
+      'src/loader/pixbuf-util.c',
       'src/loader/backends/pixbuf.c',
    )
 ggaze_c_args = []

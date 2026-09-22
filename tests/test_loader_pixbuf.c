@@ -23,6 +23,7 @@
  *:*/
 
 #include "loader/loader.h"
+#include "loader/pixbuf-util.h"
 
 #include <gdk/gdk.h>
 #include <gio/gio.h>
@@ -205,6 +206,72 @@ test_rgba_png(void) {
    g_object_unref(p_tex);
 }
 
+/* Regression: an empty file used to make loader_load() return NULL with NO
+ * GError (the sync path tested the error out-pointer instead of an error),
+ * which left downstream GTasks incomplete. It must be a real error now. */
+static void
+test_empty_file_sets_error(void) {
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = load_bytes((const guint8 *)"", 0, &p_err);
+   g_assert_null(p_tex);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+   g_error_free(p_err);
+}
+
+/* A load whose cancellable is already cancelled must fail with
+ * G_IO_ERROR_CANCELLED before decoding anything. */
+static void
+test_cancelled_before_decode(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar        *c_path   = g_build_filename(c_dir, "small.png", NULL);
+   GFile        *p_file   = g_file_new_for_path(c_path);
+   GCancellable *p_cancel = g_cancellable_new();
+   g_cancellable_cancel(p_cancel);
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = loader_load(p_file, p_cancel, &p_err);
+   g_assert_null(p_tex);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+   g_error_free(p_err);
+   g_object_unref(p_cancel);
+   g_object_unref(p_file);
+   g_free(c_path);
+}
+
+/* pixbuf_util_to_texture adds alpha to an RGB pixbuf and keeps an RGBA one;
+ * pixbuf_util_upright returns a new ref for a pixbuf without orientation. */
+static void
+test_pixbuf_util(void) {
+   GdkPixbuf *p_rgb = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 3, 2);
+   gdk_pixbuf_fill(p_rgb, 0x10203000);
+   GdkTexture *p_tex = pixbuf_util_to_texture(p_rgb);
+   g_assert_nonnull(p_tex);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 3);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 2);
+   /* gdk_texture_download yields premultiplied B8G8R8A8. */
+   guchar px[3 * 2 * 4];
+   gdk_texture_download(p_tex, px, 3 * 4);
+   g_assert_cmpuint(px[2], ==, 0x10); /* R */
+   g_assert_cmpuint(px[0], ==, 0x30); /* B */
+   g_assert_cmpuint(px[3], ==, 0xff); /* alpha forced opaque */
+   g_object_unref(p_tex);
+
+   GdkPixbuf *p_up = pixbuf_util_upright(p_rgb);
+   g_assert_nonnull(p_up);
+   g_assert_cmpint(gdk_pixbuf_get_width(p_up), ==, 3);
+   g_object_unref(p_up);
+   g_object_unref(p_rgb);
+
+   GdkPixbuf *p_rgba = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, 2, 2);
+   gdk_pixbuf_fill(p_rgba, 0x11223380);
+   p_tex = pixbuf_util_to_upright_texture(p_rgba);
+   g_assert_nonnull(p_tex);
+   gdk_texture_download(p_tex, px, 2 * 4);
+   g_assert_cmpuint(px[3], ==, 0x80);
+   g_object_unref(p_tex);
+   g_object_unref(p_rgba);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -218,5 +285,10 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/loader/pixbuf/corrupt_jpeg", test_corrupt_jpeg);
    g_test_add_func("/loader/pixbuf/oversized_jpeg", test_oversized_jpeg);
    g_test_add_func("/loader/pixbuf/rgba_png", test_rgba_png);
+   g_test_add_func("/loader/pixbuf/empty_file_sets_error",
+                   test_empty_file_sets_error);
+   g_test_add_func("/loader/pixbuf/cancelled_before_decode",
+                   test_cancelled_before_decode);
+   g_test_add_func("/loader/pixbuf/pixbuf_util", test_pixbuf_util);
    return (g_test_run());
 }

@@ -151,6 +151,36 @@ test_collision_suffix(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* Regression: a '%' in the file name used to be fed to g_strdup_printf as a
+ * format on the first collision ("50% off.jpg" was binned as "501ff.jpg-1",
+ * "%s%s%s.jpg" crashed). The name must survive verbatim, suffixed on the
+ * stem like the mover does: "50% off-1.jpg". */
+static void
+test_collision_percent_in_name(void) {
+   char   *c_dir  = make_temp_dir();
+   GFile  *p_a1   = write_file(c_dir, "50% off %s%s%s.jpg");
+   GFile  *p_dirf = g_file_new_for_path(c_dir);
+   Trash  *p_t    = trash_new(p_dirf);
+   GError *p_err  = NULL;
+
+   g_assert_true(trash_bin(p_t, p_a1, &p_err));
+   g_assert_no_error(p_err);
+   GFile *p_a2 = write_file(c_dir, "50% off %s%s%s.jpg");
+   g_assert_true(trash_bin(p_t, p_a2, &p_err));
+   g_assert_no_error(p_err);
+
+   GFile *p_td  = g_file_get_child(p_dirf, ".Trash");
+   GFile *p_exp = g_file_get_child(p_td, "50% off %s%s%s-1.jpg");
+   g_assert_true(g_file_query_exists(p_exp, NULL));
+   g_object_unref(p_exp);
+   g_object_unref(p_td);
+   g_object_unref(p_a2);
+   trash_delete(p_t);
+   g_object_unref(p_a1);
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
 static void
 test_permanent_delete(void) {
    char  *c_dir  = make_temp_dir();
@@ -285,6 +315,8 @@ main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
    g_test_add_func("/trash/bin_and_restore", test_bin_and_restore);
    g_test_add_func("/trash/collision_suffix", test_collision_suffix);
+   g_test_add_func("/trash/collision_percent_in_name",
+                   test_collision_percent_in_name);
    g_test_add_func("/trash/permanent_delete", test_permanent_delete);
    g_test_add_func("/trash/bin_rejects_symlink_trash",
                    test_bin_rejects_symlink_trash);

@@ -3,25 +3,22 @@
 
 #include <gio/gio.h>
 #include <glib.h>
+#include <string.h>
 
-char *
-pathutil_str_replace(const char *c_str, const char *c_old, const char *c_new) {
-   if (c_str == NULL || c_old == NULL || c_new == NULL) {
-      return (NULL);
+void
+pathutil_split_ext(const char *c_base, char **pc_stem, const char **pc_ext) {
+   g_return_if_fail(c_base != NULL);
+   g_return_if_fail(pc_stem != NULL);
+   g_return_if_fail(pc_ext != NULL);
+   /* A leading dot is a hidden-file marker, not an extension separator. */
+   const char *c_dot = strrchr(c_base, '.');
+   if (c_dot == NULL || c_dot == c_base) {
+      *pc_stem = g_strdup(c_base);
+      *pc_ext  = "";
+      return;
    }
-   GString    *p_out     = g_string_new(NULL);
-   const char *p         = c_str;
-   gsize       u_old_len = strlen(c_old);
-   while (*p != '\0') {
-      if (strncmp(p, c_old, u_old_len) == 0) {
-         g_string_append(p_out, c_new);
-         p += u_old_len;
-      } else {
-         g_string_append_c(p_out, *p);
-         p++;
-      }
-   }
-   return (g_string_free(p_out, FALSE));
+   *pc_stem = g_strndup(c_base, (gsize)(c_dot - c_base));
+   *pc_ext  = c_dot;
 }
 
 gboolean
@@ -57,12 +54,15 @@ pathutil_ensure_dir(GFile *p_dir, GError **p_err) {
 }
 
 GFile *
-pathutil_unique_child(GFile *p_dir, const char *c_first, const char *c_fmt,
+pathutil_unique_child(GFile *p_dir, const char *c_prefix, const char *c_suffix,
                       guint u_start) {
    g_return_val_if_fail(G_IS_FILE(p_dir), NULL);
-   g_return_val_if_fail(c_first != NULL, NULL);
-   g_return_val_if_fail(c_fmt != NULL, NULL);
-   char  *c_name = g_strdup(c_first);
+   g_return_val_if_fail(c_prefix != NULL, NULL);
+   g_return_val_if_fail(c_suffix != NULL, NULL);
+   /* The prefix/suffix are user-controlled file-name pieces, so they are
+    * concatenated -- never passed as a printf format (a name like
+    * "50% off.jpg" used to be mangled and "%s%s%s.jpg" crashed). */
+   char  *c_name = g_strconcat(c_prefix, c_suffix, NULL);
    GFile *p_out  = NULL;
    for (guint u_n = u_start;; u_n++) {
       p_out = g_file_get_child(p_dir, c_name);
@@ -76,7 +76,7 @@ pathutil_unique_child(GFile *p_dir, const char *c_first, const char *c_fmt,
          break;
       }
       g_free(c_name);
-      c_name = g_strdup_printf(c_fmt, u_n);
+      c_name = g_strdup_printf("%s-%u%s", c_prefix, u_n, c_suffix);
    }
    g_free(c_name);
    return (NULL);

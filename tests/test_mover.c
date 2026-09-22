@@ -198,11 +198,60 @@ test_move_accepts_preexisting_real_dir(void) {
    cleanup_dir(dst_dir);
 }
 
+/* Regression: an undo that fails part-way (one moved file was deleted from
+ * the destination behind our back) must keep only the still-moved files
+ * queued, so a retry restores them instead of failing forever on the file
+ * that already came back. */
+static void
+test_undo_partial_failure_retries(void) {
+   char        *src_dir = make_tmp_dir();
+   char        *dst_dir = make_tmp_dir();
+   GFile       *a       = write_file(src_dir, "a.jpg");
+   GFile       *b       = write_file(src_dir, "b.jpg");
+   Mover       *m       = mover_new();
+   SettingsPair dest    = {"dst", dst_dir};
+   GList       *files   = g_list_append(g_list_append(NULL, a), b);
+   GError      *e       = NULL;
+   g_assert_true(mover_move(m, files, &dest, &e));
+   g_assert_no_error(e);
+
+   /* Sabotage: remove the moved-in a.jpg so restoring it must fail. */
+   GFile *p_dd = g_file_new_for_path(dst_dir);
+   GFile *p_da = g_file_get_child(p_dd, "a.jpg");
+   g_assert_true(g_file_delete(p_da, NULL, NULL));
+
+   /* First undo: b.jpg (restored last-to-first) comes back, a.jpg fails. */
+   g_assert_false(mover_undo_last(m, &e));
+   g_assert_nonnull(e);
+   g_clear_error(&e);
+   g_assert_true(g_file_query_exists(b, NULL));
+   g_assert_true(mover_can_undo(m)); /* only a.jpg is still queued */
+
+   /* Put a.jpg back in the destination; the retry must now succeed. */
+   g_file_replace_contents(p_da, "x", 1, NULL, FALSE,
+                           G_FILE_CREATE_REPLACE_DESTINATION, NULL, NULL, NULL);
+   g_assert_true(mover_undo_last(m, &e));
+   g_assert_no_error(e);
+   g_assert_true(g_file_query_exists(a, NULL));
+   g_assert_false(mover_can_undo(m));
+
+   g_object_unref(p_da);
+   g_object_unref(p_dd);
+   g_list_free(files);
+   mover_delete(m);
+   g_object_unref(a);
+   g_object_unref(b);
+   cleanup_dir(src_dir);
+   cleanup_dir(dst_dir);
+}
+
 int
 main(int argc, char **argv) {
    g_test_init(&argc, &argv, NULL);
    g_test_add_func("/mover/move_undo", test_move_and_undo);
    g_test_add_func("/mover/collision", test_collision);
+   g_test_add_func("/mover/undo_partial_failure_retries",
+                   test_undo_partial_failure_retries);
    g_test_add_func("/mover/rejects_symlink_dest",
                    test_move_rejects_symlink_dest);
    g_test_add_func("/mover/rejects_regular_file_dest",
