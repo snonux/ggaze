@@ -7,20 +7,9 @@ struct Settings {
    GSettings *p_gs;
 };
 
-void
-settings_pair_free(gpointer p) {
-   SettingsPair *pr = (SettingsPair *)p;
-   if (pr == NULL) {
-      return;
-   }
-   g_free(pr->c_name);
-   g_free(pr->c_value);
-   g_free(pr);
-}
-
 static GPtrArray *
 _new_pair_array(void) {
-   return (g_ptr_array_new_with_free_func(settings_pair_free));
+   return (settings_pair_array_new());
 }
 
 /* Read an a(ss) key into a fresh GPtrArray of SettingsPair*. The key is read
@@ -35,10 +24,7 @@ _get_pairs(GSettings *p_gs, const char *c_key) {
    const gchar *c_name;
    const gchar *c_value;
    while (g_variant_iter_next(&iter, "(ss)", &c_name, &c_value)) {
-      SettingsPair *pr = g_new(SettingsPair, 1);
-      pr->c_name       = g_strdup(c_name);
-      pr->c_value      = g_strdup(c_value);
-      g_ptr_array_add(p_out, pr);
+      g_ptr_array_add(p_out, settings_pair_new(c_name, c_value));
       g_free((gpointer)c_name);
       g_free((gpointer)c_value);
    }

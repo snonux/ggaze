@@ -27,17 +27,9 @@ runner_delete(Runner *r) {
 
 void
 runner_set_scripts(Runner *r, const GPtrArray *p) {
-   g_return_if_fail(r);
-   g_ptr_array_set_size(r->p_scripts, 0);
-   if (!p)
-      return;
-   for (guint i = 0; i < p->len; i++) {
-      const SettingsPair *src = g_ptr_array_index((GPtrArray *)p, i);
-      SettingsPair       *ns  = g_new(SettingsPair, 1);
-      ns->c_name              = g_strdup(src->c_name);
-      ns->c_value             = g_strdup(src->c_value);
-      g_ptr_array_add(r->p_scripts, ns);
-   }
+   g_return_if_fail(r != NULL);
+   g_ptr_array_unref(r->p_scripts);
+   r->p_scripts = settings_pair_array_copy(p);
 }
 
 const GPtrArray *

@@ -5,6 +5,8 @@
  * ggaze — GEGL enhance operations (feature-gated)
  *
  * The GeglBuffer/GdkTexture operations on top of the Enhancer preset engine.
+ * They are pure functions of their arguments (the preset list is passed in),
+ * so none takes an Enhancer instance.
  * Guarded on GGAZE_HAVE_GEGL: the whole header is empty in a non-GEGL build,
  * so it can be included unconditionally alongside enhancer.h without pulling
  * <gegl.h> into a build that does not have GEGL. See enhancer.h for the
@@ -25,30 +27,39 @@
 
 G_BEGIN_DECLS
 
-/* Apply a preset to a GeglBuffer (returns a new buffer, or NULL on error). */
-GeglBuffer *enhancer_apply(Enhancer *p_e, GeglBuffer *p_in,
-                           const EnhancerPreset *p_preset, GError **p_err);
+/* Apply one preset (built-in or user graph) to a GeglBuffer. Returns a new
+ * buffer, or NULL with p_err set. */
+GeglBuffer *enhancer_apply(GeglBuffer *p_in, const EnhancerPreset *p_preset,
+                           GError **p_err);
 
-/* Apply a chain of the enabled built-in presets (bit i of u_mask -> preset i)
- * in array order, composing them. Returns a new buffer, or NULL if none are
- * enabled / on error. */
-GeglBuffer *enhancer_apply_chain(Enhancer *p_e, GeglBuffer *p_in,
-                                 const GPtrArray *p_presets, guint8 u_mask,
-                                 GError **p_err);
+/* Apply the enabled presets (bit i of u_mask -> preset i) in array order,
+ * composing them into one graph. Returns a new buffer, or NULL if none is
+ * enabled / on error. Built-in and user-graph presets mix freely. */
+GeglBuffer *enhancer_apply_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
+                                 guint8 u_mask, GError **p_err);
 
 /* Export the enhanced buffer to a file. The saver is chosen from p_out's
  * extension: .jpg/.jpeg -> gegl:jpg-save (quality 95), .png -> gegl:png-save,
  * .webp -> gegl:webp-save (if available). Other extensions fail with
  * G_IO_ERROR_NOT_SUPPORTED. Success is verified by a real stat of the output
  * (not pre-existence). Returns TRUE on success. */
-gboolean enhancer_export(Enhancer *p_e, GeglBuffer *p_in,
-                         const EnhancerPreset *p_preset, GFile *p_out,
-                         GError **p_err);
+gboolean enhancer_export(GeglBuffer *p_in, const EnhancerPreset *p_preset,
+                         GFile *p_out, GError **p_err);
 
 /* Export p_in with the enabled-preset chain (u_mask) composed, to p_out. */
-gboolean enhancer_export_chain(Enhancer *p_e, GeglBuffer *p_in,
-                               const GPtrArray *p_presets, guint8 u_mask,
-                               GFile *p_out, GError **p_err);
+gboolean enhancer_export_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
+                               guint8 u_mask, GFile *p_out, GError **p_err);
+
+/* Async export: load p_src, apply the chain, save to p_out -- all in a GTask
+ * worker, because the full-resolution decode + GEGL chain + encode takes
+ * seconds on a 40 MP photo and used to freeze the UI (AGENTS.md: decode runs
+ * in GTask threads). p_presets is snapshotted. Finish returns TRUE on a real
+ * write. */
+void     enhancer_export_chain_async(GFile *p_src, const GPtrArray *p_presets,
+                                     guint8 u_mask, GFile *p_out,
+                                     GCancellable       *p_cancel,
+                                     GAsyncReadyCallback p_cb, gpointer p_data);
+gboolean enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err);
 
 /* Load a file into a GeglBuffer, upright (EXIF Orientation applied). Loads
  * through ggaze's own orientation-aware loader (not gegl:load, which does
@@ -70,9 +81,8 @@ GdkTexture *enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err);
  * started yet -- a caller that needs last-write-wins semantics (e.g. a newer
  * apply superseding this one) must still check that on its own before using
  * the finished result. */
-void enhancer_apply_chain_async(Enhancer *p_e, GFile *p_file,
-                                const GPtrArray *p_presets, guint8 u_mask,
-                                GCancellable       *p_cancel,
+void enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
+                                guint8 u_mask, GCancellable *p_cancel,
                                 GAsyncReadyCallback p_cb, gpointer p_data);
 
 /* Finish enhancer_apply_chain_async(). Returns a new GdkTexture (caller
@@ -83,7 +93,7 @@ GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, GError **p_err);
  * previews. The returned array owns its GdkTexture entries; index 0 is the
  * original and index i + 1 corresponds to preset i. An unsupported individual
  * preset is represented by NULL. */
-void       enhancer_preview_thumbnails_async(Enhancer *p_e, GFile *p_file,
+void       enhancer_preview_thumbnails_async(GFile              *p_file,
                                              const GPtrArray    *p_presets,
                                              GCancellable       *p_cancel,
                                              GAsyncReadyCallback p_cb,

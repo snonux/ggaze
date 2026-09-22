@@ -41,6 +41,9 @@ G_BEGIN_DECLS
 
 typedef struct SaveGate SaveGate;
 
+/* Continuation the host calls when its do_save op has finished. */
+typedef void (*SaveGateSaveDoneFn)(gboolean b_proceed, gpointer p_data);
+
 /* Window-side operations the gate calls back through. p_host is the window
  * (borrowed for the duration of each call, and IS the GtkWindow the dialog is
  * transient for). */
@@ -48,12 +51,16 @@ typedef struct {
    /* TRUE iff an unsaved enhance preview is active. The gate prompts only
     * when dirty; otherwise it runs the continuation at once. */
    gboolean (*is_dirty)(gpointer p_host);
-   /* The Save button: export the enhanced copy. Return TRUE iff the user's
-    * action may proceed -- a successful export, OR "nothing to save" (which
-    * is NOT a failure: the preview can legitimately be gone by the time the
-    * dialog is answered). Return FALSE on a real export failure, so the gate
-    * keeps the preview and does not proceed. The op reports status itself. */
-   gboolean (*do_save)(gpointer p_host);
+   /* The Save button: export the enhanced copy, then call fn_done(b_proceed,
+    * p_done_data) -- from the main thread, now or later (the export runs in
+    * a worker, so this is asynchronous). b_proceed TRUE means the user's
+    * action may go ahead: a successful export, OR "nothing to save" (which is
+    * NOT a failure: the preview can legitimately be gone by the time the
+    * dialog is answered). FALSE means a real export failure, so the gate
+    * keeps the preview and does not proceed. The op reports status itself.
+    * The prompt counts as outstanding until fn_done runs. */
+   void (*do_save)(gpointer p_host, SaveGateSaveDoneFn fn_done,
+                   gpointer p_done_data);
    /* Drop the in-memory enhance preview (the mask/preview), called after a
     * Discard and after a Save that may proceed. */
    void (*discard)(gpointer p_host);

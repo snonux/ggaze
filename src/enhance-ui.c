@@ -238,7 +238,9 @@ enhance_ui_build_content(const GPtrArray *p_presets, const char *c_basename,
       gtk_box_append(GTK_BOX(p_box), p_btn0);
    }
 
-   GtkWidget *p_hint = gtk_label_new("s  Save enhanced copy");
+   GtkWidget *p_hint = gtk_label_new(
+      "1-8  toggle a preset   0  original   Space  hold to compare   "
+      "s  save enhanced copy   Esc  close");
    gtk_widget_set_halign(p_hint, GTK_ALIGN_START);
    gtk_widget_set_margin_top(p_hint, 8);
    gtk_widget_add_css_class(p_hint, "dim-label");

@@ -20,16 +20,12 @@
 #include <glib-object.h>
 #include <glib.h>
 
+#include "ggaze-enums.h"
+
 G_BEGIN_DECLS
 
 #define GGAZE_TYPE_NAVIGATOR (navigator_get_type())
 G_DECLARE_FINAL_TYPE(Navigator, navigator, GGAZE, NAVIGATOR, GObject)
-
-typedef enum {
-   GGAZE_SORT_NAME = 0,
-   GGAZE_SORT_TIME,
-   GGAZE_SORT_SIZE
-} GgazeSort;
 
 /* What a "changed" emission is about (bit flags, several may be set). The
  * signal used to carry nothing, so every consumer reconstructed the meaning

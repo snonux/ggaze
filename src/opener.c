@@ -27,17 +27,9 @@ opener_delete(Opener *o) {
 
 void
 opener_set_progs(Opener *o, const GPtrArray *p) {
-   g_return_if_fail(o);
-   g_ptr_array_set_size(o->p_progs, 0);
-   if (!p)
-      return;
-   for (guint i = 0; i < p->len; i++) {
-      const SettingsPair *src = g_ptr_array_index((GPtrArray *)p, i);
-      SettingsPair       *np  = g_new(SettingsPair, 1);
-      np->c_name              = g_strdup(src->c_name);
-      np->c_value             = g_strdup(src->c_value);
-      g_ptr_array_add(o->p_progs, np);
-   }
+   g_return_if_fail(o != NULL);
+   g_ptr_array_unref(o->p_progs);
+   o->p_progs = settings_pair_array_copy(p);
 }
 
 const GPtrArray *

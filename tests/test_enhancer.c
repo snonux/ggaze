@@ -46,7 +46,7 @@ test_builtin_presets(void) {
       if (!preset->i_builtin)
          continue;
       GError     *err = NULL;
-      GeglBuffer *out = enhancer_apply(e, buf, preset, &err);
+      GeglBuffer *out = enhancer_apply(buf, preset, &err);
       if (out != NULL) {
          g_assert_cmpint(gegl_buffer_get_width(out), ==, 2);
          g_assert_cmpint(gegl_buffer_get_height(out), ==, 2);
@@ -74,7 +74,7 @@ test_export(void) {
    char    *tmp  = g_dir_make_tmp("ggaze-enhance-XXXXXX", NULL);
    char    *path = g_build_filename(tmp, "out.jpg", NULL);
    GFile   *out  = g_file_new_for_path(path);
-   gboolean ok   = enhancer_export(e, buf, preset, out, &err);
+   gboolean ok   = enhancer_export(buf, preset, out, &err);
    /* Export may fail if the op isn't available, but it shouldn't crash. */
    if (ok) {
       g_assert_true(g_file_query_exists(out, NULL));
@@ -194,7 +194,7 @@ test_export_format(void) {
       char  *c_p   = g_build_filename(tmp, "out.png", NULL);
       GFile *p_out = g_file_new_for_path(c_p);
       g_clear_error(&p_err);
-      gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+      gboolean ok = enhancer_export(p_buf, preset, p_out, &p_err);
       g_assert_true(ok);
       g_assert_no_error(p_err);
       gchar *data = NULL;
@@ -220,7 +220,7 @@ test_export_format(void) {
       char  *c_p   = g_build_filename(tmp, "out.jpg", NULL);
       GFile *p_out = g_file_new_for_path(c_p);
       g_clear_error(&p_err);
-      gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+      gboolean ok = enhancer_export(p_buf, preset, p_out, &p_err);
       g_assert_true(ok);
       g_assert_no_error(p_err);
       gchar *data = NULL;
@@ -250,7 +250,7 @@ test_export_format(void) {
       } else {
          GFile *p_out = g_file_new_for_path(c_p);
          g_clear_error(&p_err);
-         gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+         gboolean ok = enhancer_export(p_buf, preset, p_out, &p_err);
          g_assert_true(ok);
          g_assert_no_error(p_err);
          gchar *data = NULL;
@@ -319,7 +319,7 @@ test_export_real_success(void) {
       GFile *p_out = g_file_new_for_path(c_bad);
       g_clear_error(&p_err);
       GLogLevelFlags old_mask = g_log_set_always_fatal(G_LOG_LEVEL_ERROR);
-      gboolean       ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+      gboolean       ok       = enhancer_export(p_buf, preset, p_out, &p_err);
       g_log_set_always_fatal(old_mask);
       g_assert_false(ok);
       g_assert_nonnull(p_err);
@@ -338,7 +338,7 @@ test_export_real_success(void) {
       GFile *p_out = g_file_new_for_path(c_dir);
       g_clear_error(&p_err);
       GLogLevelFlags old_mask = g_log_set_always_fatal(G_LOG_LEVEL_ERROR);
-      gboolean       ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+      gboolean       ok       = enhancer_export(p_buf, preset, p_out, &p_err);
       g_log_set_always_fatal(old_mask);
       g_assert_false(ok);
       g_assert_nonnull(p_err);
@@ -390,7 +390,7 @@ test_export_stale_dest(void) {
       g_assert_true(g_file_set_contents(c_p, stale, n_st, NULL));
       GFile *p_out = g_file_new_for_path(c_p);
       g_clear_error(&p_err);
-      gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+      gboolean ok = enhancer_export(p_buf, preset, p_out, &p_err);
       g_assert_true(ok);
       g_assert_no_error(p_err);
       gchar *data = NULL;
@@ -424,7 +424,7 @@ test_export_stale_dest(void) {
          GFile *p_out = g_file_new_for_path(c_p);
          g_clear_error(&p_err);
          GLogLevelFlags old_mask = g_log_set_always_fatal(G_LOG_LEVEL_ERROR);
-         gboolean       ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+         gboolean       ok = enhancer_export(p_buf, preset, p_out, &p_err);
          g_log_set_always_fatal(old_mask);
          g_assert_false(ok);
          g_assert_nonnull(p_err);
@@ -475,7 +475,7 @@ test_export_reject_unsupported(void) {
       char  *c_p   = g_build_filename(tmp, "out.bmp", NULL);
       GFile *p_out = g_file_new_for_path(c_p);
       g_clear_error(&p_err);
-      gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+      gboolean ok = enhancer_export(p_buf, preset, p_out, &p_err);
       g_assert_false(ok);
       g_assert_nonnull(p_err);
       g_assert_cmpint(p_err->code, ==, G_IO_ERROR_NOT_SUPPORTED);
@@ -490,7 +490,7 @@ test_export_reject_unsupported(void) {
       char  *c_p   = g_build_filename(tmp, "out", NULL);
       GFile *p_out = g_file_new_for_path(c_p);
       g_clear_error(&p_err);
-      gboolean ok = enhancer_export(e, p_buf, preset, p_out, &p_err);
+      gboolean ok = enhancer_export(p_buf, preset, p_out, &p_err);
       g_assert_false(ok);
       g_assert_nonnull(p_err);
       g_assert_cmpint(p_err->code, ==, G_IO_ERROR_NOT_SUPPORTED);
@@ -518,7 +518,7 @@ test_apply_chain(void) {
    /* Compose Auto-fix (bit 0) + Sharpen (bit 6) if those ops exist. */
    guint8      u_mask = (guint8)((1u << 0) | (1u << 6));
    GError     *p_err  = NULL;
-   GeglBuffer *p_out  = enhancer_apply_chain(e, buf, p, u_mask, &p_err);
+   GeglBuffer *p_out  = enhancer_apply_chain(buf, p, u_mask, &p_err);
    if (p_out != NULL) {
       g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 4);
       g_assert_cmpint(gegl_buffer_get_height(p_out), ==, 4);
@@ -527,7 +527,7 @@ test_apply_chain(void) {
       g_clear_error(&p_err); /* ops may be unavailable; skip gracefully */
    }
    /* An empty mask must fail (no preset enabled). */
-   p_out = enhancer_apply_chain(e, buf, p, 0, &p_err);
+   p_out = enhancer_apply_chain(buf, p, 0, &p_err);
    g_assert_null(p_out);
    g_assert_nonnull(p_err);
    g_clear_error(&p_err);
@@ -557,8 +557,8 @@ test_preview_thumbnails(void) {
    GFile        *p_file = g_file_new_for_path(c_path);
    Enhancer     *p_e    = enhancer_new();
    PreviewResult result = {.p_loop = g_main_loop_new(NULL, FALSE)};
-   enhancer_preview_thumbnails_async(p_e, p_file, enhancer_get_presets(p_e),
-                                     NULL, preview_done_cb, &result);
+   enhancer_preview_thumbnails_async(p_file, enhancer_get_presets(p_e), NULL,
+                                     preview_done_cb, &result);
    g_main_loop_run(result.p_loop);
    g_assert_no_error(result.p_err);
    g_assert_nonnull(result.p_result);
@@ -596,8 +596,8 @@ test_preview_orientation(void) {
    GFile        *p_file = g_file_new_for_path(c_path);
    Enhancer     *p_e    = enhancer_new();
    PreviewResult result = {.p_loop = g_main_loop_new(NULL, FALSE)};
-   enhancer_preview_thumbnails_async(p_e, p_file, enhancer_get_presets(p_e),
-                                     NULL, preview_done_cb, &result);
+   enhancer_preview_thumbnails_async(p_file, enhancer_get_presets(p_e), NULL,
+                                     preview_done_cb, &result);
    g_main_loop_run(result.p_loop);
    g_assert_no_error(result.p_err);
    g_assert_nonnull(result.p_result);
@@ -625,6 +625,92 @@ test_preview_orientation(void) {
    g_free(c_path);
 }
 
+/* User presets: a graph string is parsed into a chain of GEGL operations
+ * with prop=value settings and applied like a built-in; a bad op name is a
+ * clean error. enhancer_set_user_presets rebuilds built-ins + users and is
+ * idempotent (the window used to double the user presets on every
+ * Preferences change). */
+static void
+test_user_graph_presets(void) {
+   Enhancer  *p_e     = enhancer_new();
+   GPtrArray *p_pairs = settings_pair_array_new();
+   g_ptr_array_add(p_pairs, settings_pair_new("Punch", "gegl:saturation "
+                                                       "scale=1.5 "
+                                                       "gegl:unsharp-mask"));
+   g_ptr_array_add(p_pairs, settings_pair_new("Broken", "gegl:no-such-op"));
+   enhancer_set_user_presets(p_e, p_pairs);
+   enhancer_set_user_presets(p_e, p_pairs); /* again: no duplication */
+   const GPtrArray *p_presets = enhancer_get_presets(p_e);
+   g_assert_cmpuint(p_presets->len, ==, 8 + 2);
+   const EnhancerPreset *p_punch = g_ptr_array_index((GPtrArray *)p_presets, 8);
+   const EnhancerPreset *p_broken =
+      g_ptr_array_index((GPtrArray *)p_presets, 9);
+   g_assert_cmpstr(p_punch->c_name, ==, "Punch");
+   g_assert_cmpint(p_punch->i_builtin, ==, 0);
+
+   GeglRectangle rect  = {0, 0, 2, 2};
+   GeglBuffer   *p_buf = gegl_buffer_new(&rect, babl_format("RGBA float"));
+   GError       *p_err = NULL;
+   GeglBuffer   *p_out = enhancer_apply(p_buf, p_punch, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_out);
+   g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 2);
+   g_object_unref(p_out);
+
+   p_out = enhancer_apply(p_buf, p_broken, &p_err);
+   g_assert_null(p_out);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+   g_clear_error(&p_err);
+
+   /* The title suffix names the enabled presets, capped at the 8-bit mask. */
+   char *c_desc = enhancer_describe_mask(p_presets, 0x03);
+   g_assert_cmpstr(c_desc, ==, "Auto-fix,Brightness");
+   g_free(c_desc);
+   g_assert_null(enhancer_describe_mask(p_presets, 0));
+
+   g_object_unref(p_buf);
+   g_ptr_array_unref(p_pairs);
+   enhancer_delete(p_e);
+}
+
+/* Export destinations: "<stem>-enhanced<ext>", then "-1", "-2"; an
+ * unsupported source extension is kept in the stem and .jpg appended. */
+static void
+test_export_dest_for(void) {
+   char  *c_dir = g_dir_make_tmp("ggaze-dest-XXXXXX", NULL);
+   char  *c_src = g_build_filename(c_dir, "IMG_0001.jpg", NULL);
+   GFile *p_src = g_file_new_for_path(c_src);
+   GFile *p_out = enhancer_export_dest_for(p_src);
+   char  *c_out = g_file_get_basename(p_out);
+   g_assert_cmpstr(c_out, ==, "IMG_0001-enhanced.jpg");
+   g_assert_true(g_file_set_contents(g_file_peek_path(p_out), "x", 1, NULL));
+   g_free(c_out);
+   g_object_unref(p_out);
+   p_out = enhancer_export_dest_for(p_src);
+   c_out = g_file_get_basename(p_out);
+   g_assert_cmpstr(c_out, ==, "IMG_0001-enhanced-1.jpg");
+   g_free(c_out);
+   g_remove(g_file_peek_path(p_out));
+   g_object_unref(p_out);
+   g_object_unref(p_src);
+   g_free(c_src);
+
+   c_src = g_build_filename(c_dir, "scan.tiff", NULL);
+   p_src = g_file_new_for_path(c_src);
+   p_out = enhancer_export_dest_for(p_src);
+   c_out = g_file_get_basename(p_out);
+   g_assert_cmpstr(c_out, ==, "scan.tiff-enhanced.jpg");
+   g_free(c_out);
+   g_object_unref(p_out);
+   g_object_unref(p_src);
+   g_free(c_src);
+   char *c_first = g_build_filename(c_dir, "IMG_0001-enhanced.jpg", NULL);
+   g_remove(c_first);
+   g_free(c_first);
+   g_rmdir(c_dir);
+   g_free(c_dir);
+}
+
 int
 main(int argc, char **argv) {
    gegl_init(&argc, &argv);
@@ -641,5 +727,7 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer/apply_chain", test_apply_chain);
    g_test_add_func("/enhancer/preview_thumbnails", test_preview_thumbnails);
    g_test_add_func("/enhancer/preview_orientation", test_preview_orientation);
+   g_test_add_func("/enhancer/user_graph_presets", test_user_graph_presets);
+   g_test_add_func("/enhancer/export_dest_for", test_export_dest_for);
    return g_test_run();
 }

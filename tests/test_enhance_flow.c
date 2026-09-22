@@ -169,6 +169,18 @@ wait_for_load(GgazeWindow *p_win) {
    ggtest_drain_main(200);
 }
 
+/* Pump until c_path exists (the enhance export runs in a worker now, so a
+ * save's file lands a little after the key press), up to 10 s. */
+static void
+wait_for_file(const char *c_path) {
+   for (guint u = 0; u < 10000 && !g_file_test(c_path, G_FILE_TEST_EXISTS);
+        u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(g_file_test(c_path, G_FILE_TEST_EXISTS));
+}
+
 static void
 fire(GgazeWindow *p_win, const char *c_action) {
    gtk_widget_activate_action(GTK_WIDGET(p_win), c_action, NULL);
@@ -1072,9 +1084,9 @@ test_hold_flag_not_stuck_after_mask_cleared(void) {
 static void
 assert_second_save_is_suffixed(GgazeWindow *p_win, const char *c_dir) {
    fire(p_win, "win.enhance-save");
-   ggtest_drain_main(300);
    char *c_out2 = g_build_filename(c_dir, "plain-enhanced-1.jpg", NULL);
-   g_assert_true(g_file_test(c_out2, G_FILE_TEST_EXISTS));
+   wait_for_file(c_out2);
+   ggtest_drain_main(100);
    g_free(c_out2);
 }
 
@@ -1104,7 +1116,8 @@ test_save_exports_collision_safe_copy(void) {
    GFile *p_out1 = g_file_new_for_path(c_out1);
    g_assert_false(g_file_query_exists(p_out1, NULL));
    fire(p_win, "win.enhance-save");
-   ggtest_drain_main(300);
+   wait_for_file(c_out1);
+   ggtest_drain_main(100);
    g_assert_true(g_file_query_exists(p_out1, NULL));
 
    /* Original is still exactly what it was. */
@@ -1447,7 +1460,8 @@ test_save_exports_then_applies_deferred_select(void) {
    answer_prompt(&fx, "Save");
 
    char *c_out = g_build_filename(fx.c_dir, "plain-enhanced.jpg", NULL);
-   g_assert_true(g_file_test(c_out, G_FILE_TEST_EXISTS));
+   wait_for_file(c_out);
+   ggtest_drain_main(300); /* the gate's continuation runs after the write */
    g_free(c_out);
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
    assert_showing(fx.p_win, "rot6.jpg");
@@ -1487,6 +1501,7 @@ test_failed_save_keeps_preview_and_aborts(void) {
    g_assert_cmpint(g_chmod(fx.c_dir, 0500), ==, 0); /* r-x: no new files */
    activate_other_cell(&fx);
    answer_prompt(&fx, "Save");
+   ggtest_drain_main(500); /* the export runs in a worker; let it fail */
    g_assert_cmpint(g_chmod(fx.c_dir, 0700), ==, 0); /* restore for cleanup */
 
    /* Nothing was written ... */
@@ -1890,7 +1905,8 @@ test_close_request_save_closes_window(void) {
    answer_prompt(&fx, "Save");
 
    char *c_out = g_build_filename(fx.c_dir, "plain-enhanced.jpg", NULL);
-   g_assert_true(g_file_test(c_out, G_FILE_TEST_EXISTS));
+   wait_for_file(c_out);
+   ggtest_drain_main(300); /* the gate's quit continuation runs after it */
    g_free(c_out);
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
    g_assert_false(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));
@@ -1918,6 +1934,7 @@ test_close_request_failed_save_keeps_window(void) {
    g_signal_emit_by_name(fx.p_win, "close-request", &b_stop);
    g_assert_true(b_stop);
    answer_prompt(&fx, "Save");
+   ggtest_drain_main(500); /* the export runs in a worker; let it fail */
    g_assert_cmpint(g_chmod(fx.c_dir, 0700), ==, 0); /* restore for cleanup */
 
    g_assert_true(ggtest_is_open_toplevel(GTK_WINDOW(fx.p_win)));

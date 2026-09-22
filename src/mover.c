@@ -31,17 +31,8 @@ mover_delete(Mover *m) {
 void
 mover_set_dests(Mover *m, const GPtrArray *p_dests) {
    g_return_if_fail(m != NULL);
-   g_ptr_array_set_size(m->p_dests, 0);
-   if (p_dests != NULL) {
-      for (guint i = 0; i < p_dests->len; i++) {
-         const SettingsPair *d =
-            (const SettingsPair *)g_ptr_array_index((GPtrArray *)p_dests, i);
-         SettingsPair *nd = g_new(SettingsPair, 1);
-         nd->c_name       = g_strdup(d->c_name);
-         nd->c_value      = g_strdup(d->c_value);
-         g_ptr_array_add(m->p_dests, nd);
-      }
-   }
+   g_ptr_array_unref(m->p_dests);
+   m->p_dests = settings_pair_array_copy(p_dests);
 }
 
 const GPtrArray *

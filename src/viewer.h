@@ -18,7 +18,7 @@
 #include <gdk/gdk.h>
 #include <gtk/gtk.h>
 
-#include "settings.h"
+#include "ggaze-enums.h"
 
 G_BEGIN_DECLS
 

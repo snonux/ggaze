@@ -255,6 +255,34 @@ _report_unanswered_prompt(_PromptOutcome e_outcome) {
  *
  * All three end in the same place either way: keep the preview, do not
  * proceed. */
+/* This prompt is gone, and so is its cancellable's job: a later trigger may
+ * open a fresh one, which brings its own. Clearing the slot is safe even
+ * after save_gate_dispose already cleared it -- the ctx keeps the object
+ * alive until _save_ctx_finish. */
+static void
+_prompt_resolved(SaveGate *p_gate) {
+   p_gate->b_save_prompt = FALSE;
+   g_clear_object(&p_gate->p_prompt_cancel);
+}
+
+/* The host's Save finished (its export runs in a worker, so this lands
+ * later, on the main thread): a failed export keeps the preview and does
+ * not proceed; a success (or "nothing to save") discards and proceeds. The
+ * prompt stayed outstanding meanwhile so nothing could stack on top of the
+ * running save. */
+static void
+_save_done_cb(gboolean b_proceed, gpointer p_data) {
+   _SaveCtx *p_ctx  = (_SaveCtx *)p_data;
+   SaveGate *p_gate = p_ctx->p_gate;
+   _prompt_resolved(p_gate);
+   if (!b_proceed) {
+      _save_ctx_finish(p_ctx, FALSE);
+      return;
+   }
+   p_gate->p_ops->discard(p_gate->p_host);
+   _save_ctx_finish(p_ctx, TRUE);
+}
+
 static void
 _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
    _SaveCtx *p_ctx  = (_SaveCtx *)p_data;
@@ -265,24 +293,18 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
    g_object_unref(GTK_ALERT_DIALOG(p_dlg));
    _PromptOutcome e_outcome = _save_prompt_outcome(p_ctx, p_err);
    g_clear_error(&p_err);
-   /* This prompt is gone, and so is its cancellable's job: a later trigger may
-    * open a fresh one, which brings its own (see save_gate_maybe_save_then).
-    * Clearing the gate's slot here is safe even after save_gate_dispose
-    * already cleared it -- the ctx keeps the object alive until
-    * _save_ctx_finish. */
-   p_gate->b_save_prompt = FALSE;
-   g_clear_object(&p_gate->p_prompt_cancel);
    if (e_outcome != _PROMPT_ANSWERED) { /* cancelled/dismissed -> as Cancel */
       _report_unanswered_prompt(e_outcome);
+      _prompt_resolved(p_gate);
       _save_ctx_finish(p_ctx, FALSE);
       return;
    }
-   if (i_btn == 2 && !p_gate->p_ops->do_save(p_gate->p_host)) { /* Save, but
-                                                                 * it failed */
-      _save_ctx_finish(p_ctx, FALSE);
+   if (i_btn == 2) { /* Save: the prompt stays outstanding until it lands */
+      p_gate->p_ops->do_save(p_gate->p_host, _save_done_cb, p_ctx);
       return;
    }
-   if (i_btn == 1 || i_btn == 2) { /* Discard, or a Save that may proceed */
+   _prompt_resolved(p_gate);
+   if (i_btn == 1) { /* Discard */
       p_gate->p_ops->discard(p_gate->p_host);
       _save_ctx_finish(p_ctx, TRUE);
       return;

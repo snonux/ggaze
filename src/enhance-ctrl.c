@@ -17,9 +17,6 @@ static void        _show_status(EnhanceCtrl *p_ctrl, const char *c_msg);
 static void        _load_current(EnhanceCtrl *p_ctrl);
 static GFile      *_current_file(EnhanceCtrl *p_ctrl);
 static GdkTexture *_cached_texture(EnhanceCtrl *p_ctrl, GFile *p_file);
-static gboolean    _previews(EnhanceCtrl *p_ctrl);
-static GtkWidget  *_stack(EnhanceCtrl *p_ctrl);
-static GtkWidget  *_win_widget(EnhanceCtrl *p_ctrl);
 static gboolean    _disposed(EnhanceCtrl *p_ctrl);
 static gboolean    _has_navigator(EnhanceCtrl *p_ctrl);
 
@@ -38,12 +35,16 @@ struct EnhanceCtrl {
    const EnhanceUIHostOps *p_ops;  /* borrowed, for the controller's lifetime */
    gpointer                p_host; /* the window, borrowed */
 
-   Enhancer  *p_enhancer;          /* GEGL preset engine (always non-NULL) */
-   guint8     u_enhance_mask;      /* bit i -> preset i enabled (layered) */
-   GtkWidget *p_ui;                /* `a` gallery window or compact popover */
-   GtkWidget *p_btns[8];           /* preset rows, for highlighting; NULL'd on
-                                    * close */
-   GtkWidget *p_pics[8];           /* optional per-preset preview pictures */
+   Enhancer  *p_enhancer;     /* GEGL preset engine (always non-NULL) */
+   guint8     u_enhance_mask; /* bit i -> preset i enabled (layered) */
+   gboolean   b_disposed;     /* set by enhance_ctrl_dispose */
+   gboolean   b_previews;     /* the open UI is the gallery window */
+   GtkWidget *p_ui;           /* `a` gallery window or compact popover */
+   GtkWidget *p_btns[GGAZE_ENHANCE_MAX_PRESETS]; /* preset rows, for
+                                                  * highlighting; NULL'd on
+                                                  * close */
+   GtkWidget *p_pics[GGAZE_ENHANCE_MAX_PRESETS]; /* optional per-preset
+                                                  * preview pictures */
    GtkWidget *p_original_pic;      /* optional Original preview picture */
    GtkWidget *p_current_pic;       /* optional "Current" (layered chain) preview
                                     * picture; shows the SAME texture the viewer
@@ -57,7 +58,10 @@ struct EnhanceCtrl {
                                     * so hold-Space can restore it without a
                                     * GEGL recompute */
    GCancellable *p_enhance_cancel; /* in-flight enhance-apply GTask */
-   guint         u_enhance_gen;    /* bumped on every apply/discard; a
+   GCancellable *p_save_cancel;    /* in-flight export (`s`); cancelled on
+                                    * dispose so a closing window never gets
+                                    * a late completion */
+   guint u_enhance_gen;            /* bumped on every apply/discard; a
                                     * completion whose request predates the
                                     * current value is stale and dropped
                                     * (last-write-wins -- GEGL processing
@@ -107,23 +111,8 @@ _cached_texture(EnhanceCtrl *p_ctrl, GFile *p_file) {
 }
 
 static gboolean
-_previews(EnhanceCtrl *p_ctrl) {
-   return (p_ctrl->p_ops->get_preview_thumbnails(p_ctrl->p_host));
-}
-
-static GtkWidget *
-_stack(EnhanceCtrl *p_ctrl) {
-   return (p_ctrl->p_ops->get_stack(p_ctrl->p_host));
-}
-
-static GtkWidget *
-_win_widget(EnhanceCtrl *p_ctrl) {
-   return (p_ctrl->p_ops->get_window_widget(p_ctrl->p_host));
-}
-
-static gboolean
 _disposed(EnhanceCtrl *p_ctrl) {
-   return (p_ctrl->p_ops->is_disposed(p_ctrl->p_host));
+   return (p_ctrl->b_disposed);
 }
 
 static gboolean
@@ -151,6 +140,7 @@ enhance_ctrl_delete(EnhanceCtrl *p_ctrl) {
    }
    /* dispose should already have run; clear any leftover defensively. */
    g_clear_object(&p_ctrl->p_enhance_cancel);
+   g_clear_object(&p_ctrl->p_save_cancel);
    g_clear_object(&p_ctrl->p_preview_cancel);
    g_clear_object(&p_ctrl->p_enhance_tex);
    g_clear_object(&p_ctrl->p_enhance_file);
@@ -163,9 +153,12 @@ enhance_ctrl_dispose(EnhanceCtrl *p_ctrl) {
    if (p_ctrl == NULL) {
       return;
    }
+   p_ctrl->b_disposed = TRUE;
    _destroy(p_ctrl);
    g_cancellable_cancel(p_ctrl->p_enhance_cancel);
    g_clear_object(&p_ctrl->p_enhance_cancel);
+   g_cancellable_cancel(p_ctrl->p_save_cancel);
+   g_clear_object(&p_ctrl->p_save_cancel);
    g_clear_object(&p_ctrl->p_enhance_tex);
    g_clear_object(&p_ctrl->p_enhance_file);
    /* The enhancer engine is released here (in dispose, after the widgets),
@@ -179,10 +172,10 @@ enhance_ctrl_dispose(EnhanceCtrl *p_ctrl) {
 /* --- engine presets ------------------------------------------------------ */
 
 void
-enhance_ctrl_set_presets(EnhanceCtrl *p_ctrl, const GPtrArray *p_presets) {
+enhance_ctrl_set_user_presets(EnhanceCtrl *p_ctrl, const GPtrArray *p_pairs) {
    g_return_if_fail(p_ctrl != NULL);
    if (p_ctrl->p_enhancer != NULL) {
-      enhancer_set_presets(p_ctrl->p_enhancer, p_presets);
+      enhancer_set_user_presets(p_ctrl->p_enhancer, p_pairs);
    }
 }
 
@@ -243,89 +236,34 @@ enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold) {
 
 /* --- save / export ------------------------------------------------------- */
 
-/* Split p_base ("IMG_0001.jpg") into a stem ("IMG_0001") and a saver-
- * supported extension (defaults to ".jpg" if p_base's own extension is not
- * one the saver supports, matching the "defaults to the original format"
- * contract in docs/gegl.md). *pc_stem is caller-owned. */
-static void
-_split_name(const char *c_base, char **pc_stem, const char **pc_ext) {
-   const char *c_dot = strrchr(c_base, '.');
-   *pc_ext           = ".jpg";
-   if (c_dot != NULL && (g_ascii_strcasecmp(c_dot, ".jpg") == 0 ||
-                         g_ascii_strcasecmp(c_dot, ".jpeg") == 0 ||
-                         g_ascii_strcasecmp(c_dot, ".png") == 0 ||
-                         g_ascii_strcasecmp(c_dot, ".webp") == 0)) {
-      *pc_ext = c_dot;
-   }
-   *pc_stem = (c_dot != NULL && *pc_ext == c_dot)
-                 ? g_strndup(c_base, (gsize)(c_dot - c_base))
-                 : g_strdup(c_base);
-}
-
-/* Build a non-colliding export destination in p_dir: "<stem>-enhanced<ext>",
- * or "<stem>-enhanced-<n><ext>" (n = 1, 2, ...) the first time that name is
- * already taken -- mirroring mover.c's move-collision suffixing so the two
- * copy-style flows in this codebase behave the same way. Never overwrites an
- * existing file. */
-static GFile *
-_unique_dest(GFile *p_dir, const char *c_stem, const char *c_ext) {
-   char  *c_prefix = g_strconcat(c_stem, "-enhanced", NULL);
-   GFile *p_out    = pathutil_unique_child(p_dir, c_prefix, c_ext, 1);
-   g_free(c_prefix);
-   return (p_out);
-}
-
-/* Compute the non-colliding "<stem>-enhanced[-<n>].<ext>" destination for
- * p_file in its own folder. Caller unrefs. */
-static GFile *
-_dest_for(GFile *p_file) {
-   char       *c_base = g_file_get_basename(p_file);
-   char       *c_stem;
-   const char *c_ext;
-   _split_name(c_base, &c_stem, &c_ext);
-   GFile *p_dir = g_file_get_parent(p_file);
-   GFile *p_out = _unique_dest(p_dir, c_stem, c_ext);
-   g_free(c_stem);
-   g_free(c_base);
-   g_object_unref(p_dir);
-   return (p_out);
-}
-
 /* Report the outcome of an export via _show_status (+ g_warning on failure),
- * mirroring mover.c's success/failure split. Frees p_out and p_err. */
+ * mirroring mover.c's success/failure split. */
 static void
-_save_report(EnhanceCtrl *p_ctrl, GFile *p_out, gboolean b_ok, GError *p_err) {
+_save_report(EnhanceCtrl *p_ctrl, GFile *p_out, gboolean b_ok,
+             const GError *p_err) {
    char *c_saved = g_file_get_basename(p_out);
-   g_object_unref(p_out);
-   if (b_ok) {
-      char *c_msg = g_strdup_printf("Saved %s", c_saved);
-      _show_status(p_ctrl, c_msg);
-      g_free(c_msg);
-   } else {
-      g_warning("ggaze: enhance-save failed: %s",
-                p_err != NULL ? p_err->message : "(no detail)");
-      char *c_msg = g_strdup_printf("Enhance-save failed: %s",
-                                    p_err != NULL ? p_err->message : "?");
-      _show_status(p_ctrl, c_msg);
-      g_free(c_msg);
+   char *c_msg   = b_ok ? g_strdup_printf("Saved %s", c_saved)
+                        : g_strdup_printf("Enhance-save failed: %s",
+                                          p_err != NULL ? p_err->message : "?");
+   if (!b_ok) {
+      g_warning("ggaze: %s", c_msg);
    }
+   _show_status(p_ctrl, c_msg);
+   g_free(c_msg);
    g_free(c_saved);
-   g_clear_error(&p_err);
 }
 
 /* TRUE iff there is actually an enhance preview to export right now. Split
- * out of _do_save so the Save/Discard/Cancel gate can tell "nothing to save"
- * apart from "the export failed": _do_save returns FALSE for both, and
- * treating the first as a failure made the Save button silently do nothing
- * AND cancel the user's action.
+ * out so the Save/Discard/Cancel gate can tell "nothing to save" apart from
+ * "the export failed": treating the first as a failure made the Save button
+ * silently do nothing AND cancel the user's action.
  *
  * The subject is p_enhance_file -- the file the mask/preview was computed FOR
  * (_launch sets it) -- not a fresh _current_file(). Save runs from a dialog
  * callback, so it is one of the deferred paths that must not re-derive its
  * target: nav_changed does clear the mask whenever current's identity
  * changes, which makes the two equal today, but that is an invariant holding
- * a permanent write together rather than a reason to depend on it. Asking
- * the preview which file it belongs to needs no invariant. */
+ * a permanent write together rather than a reason to depend on it. */
 gboolean
 enhance_ctrl_can_save(EnhanceCtrl *p_ctrl) {
    g_return_val_if_fail(p_ctrl != NULL, FALSE);
@@ -333,31 +271,78 @@ enhance_ctrl_can_save(EnhanceCtrl *p_ctrl) {
            p_ctrl->u_enhance_mask != 0 && p_ctrl->p_enhance_file != NULL);
 }
 
+/* Per-export context: the destination (for the report), the caller's
+ * continuation, and a ref on the host so the completion can run after a
+ * dispose without dangling (it then only releases). */
+typedef struct {
+   gpointer          p_host; /* ref'd window */
+   EnhanceCtrl      *p_ctrl; /* borrowed, valid while p_host is alive */
+   GFile            *p_out;  /* owned */
+   EnhanceSaveDoneFn fn_done;
+   gpointer          p_done_data;
+} _SaveReq;
+
+static void
+_save_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   _SaveReq    *p_req  = (_SaveReq *)p_data;
+   EnhanceCtrl *p_ctrl = p_req->p_ctrl;
+   GError      *p_err  = NULL;
+   gboolean     b_ok   = enhancer_export_chain_finish(p_res, &p_err);
+   if (!_disposed(p_ctrl)) {
+      _save_report(p_ctrl, p_req->p_out, b_ok, p_err);
+   }
+   if (p_req->fn_done != NULL) {
+      p_req->fn_done(b_ok, p_req->p_done_data);
+   }
+   g_clear_error(&p_err);
+   g_object_unref(p_req->p_out);
+   g_object_unref(p_req->p_host);
+   g_free(p_req);
+}
+
 /* Export the previewed image with the enabled-preset chain to a non-colliding
- * "<stem>-enhanced[-<n>].<ext>" in the same folder. Returns TRUE on success.
- * The original file is never touched: enhancer_export_chain reads it
- * (enhancer_load) and writes only to the freshly computed destination. The
- * subject is p_enhance_file, the file the preview belongs to -- see
- * enhance_ctrl_can_save. */
-gboolean
-enhance_ctrl_do_save(EnhanceCtrl *p_ctrl) {
-   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+ * "<stem>-enhanced[-<n>].<ext>" in the same folder, in a worker. The original
+ * file is never touched: the worker reads it (enhancer_load) and writes only
+ * to the freshly computed destination. The subject is p_enhance_file, the
+ * file the preview belongs to -- see enhance_ctrl_can_save. */
+void
+enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
+                        gpointer p_done_data) {
+   g_return_if_fail(p_ctrl != NULL);
    if (!enhance_ctrl_can_save(p_ctrl)) {
-      return (FALSE);
+      _show_status(p_ctrl, "Nothing to save (no enhance preset enabled)");
+      if (fn_done != NULL) {
+         fn_done(FALSE, p_done_data);
+      }
+      return;
    }
-   GFile      *p_file = p_ctrl->p_enhance_file;
-   GFile      *p_out  = _dest_for(p_file);
-   GError     *p_err  = NULL;
-   GeglBuffer *p_buf  = enhancer_load(p_file, &p_err);
-   gboolean    b_ok   = FALSE;
-   if (p_buf != NULL) {
-      const GPtrArray *p_presets = enhancer_get_presets(p_ctrl->p_enhancer);
-      b_ok = enhancer_export_chain(p_ctrl->p_enhancer, p_buf, p_presets,
-                                   p_ctrl->u_enhance_mask, p_out, &p_err);
-      g_object_unref(p_buf);
+   GFile *p_out = enhancer_export_dest_for(p_ctrl->p_enhance_file);
+   if (p_out == NULL) {
+      _show_status(p_ctrl, "Enhance-save failed: no free file name");
+      if (fn_done != NULL) {
+         fn_done(FALSE, p_done_data);
+      }
+      return;
    }
-   _save_report(p_ctrl, p_out, b_ok, p_err);
-   return (b_ok);
+   g_cancellable_cancel(p_ctrl->p_save_cancel);
+   g_clear_object(&p_ctrl->p_save_cancel);
+   p_ctrl->p_save_cancel = g_cancellable_new();
+   _SaveReq *p_req       = g_new0(_SaveReq, 1);
+   p_req->p_host         = g_object_ref(p_ctrl->p_host);
+   p_req->p_ctrl         = p_ctrl;
+   p_req->p_out          = p_out;
+   p_req->fn_done        = fn_done;
+   p_req->p_done_data    = p_done_data;
+   char *c_name          = g_file_get_basename(p_out);
+   char *c_msg           = g_strdup_printf("Saving %s\u2026", c_name);
+   _show_status(p_ctrl, c_msg);
+   g_free(c_msg);
+   g_free(c_name);
+   enhancer_export_chain_async(p_ctrl->p_enhance_file,
+                               enhancer_get_presets(p_ctrl->p_enhancer),
+                               p_ctrl->u_enhance_mask, p_out,
+                               p_ctrl->p_save_cancel, _save_done_cb, p_req);
 }
 
 /* --- apply / discard ----------------------------------------------------- */
@@ -462,11 +447,7 @@ _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
  * mid-flight once started). */
 static void
 _apply_begin(EnhanceCtrl *p_ctrl) {
-   GtkWidget  *p_stack = _stack(p_ctrl);
-   const char *c_cur   = gtk_stack_get_visible_child_name(GTK_STACK(p_stack));
-   if (g_strcmp0(c_cur, "large") != 0) {
-      gtk_stack_set_visible_child_name(GTK_STACK(p_stack), "large");
-   }
+   p_ctrl->p_ops->ensure_large_view(p_ctrl->p_host);
    p_ctrl->u_enhance_gen++;
    g_cancellable_cancel(p_ctrl->p_enhance_cancel);
    g_clear_object(&p_ctrl->p_enhance_cancel);
@@ -484,9 +465,8 @@ _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
    p_req->p_ctrl              = p_ctrl;
    p_req->u_gen               = p_ctrl->u_enhance_gen;
    const GPtrArray *p_presets = enhancer_get_presets(p_ctrl->p_enhancer);
-   enhancer_apply_chain_async(p_ctrl->p_enhancer, p_file, p_presets,
-                              p_ctrl->u_enhance_mask, p_ctrl->p_enhance_cancel,
-                              _apply_done_cb, p_req);
+   enhancer_apply_chain_async(p_file, p_presets, p_ctrl->u_enhance_mask,
+                              p_ctrl->p_enhance_cancel, _apply_done_cb, p_req);
 }
 
 /* Apply the enabled-preset chain (u_enhance_mask) to the current image as a
@@ -598,8 +578,14 @@ _window_close_cb(GtkWindow *p_window, gpointer p_data) {
 }
 
 /* Enhance-UI key controller: Esc closes the gallery/popover only (the preview,
- * if any, stays); '0' discards the whole preview outright. Any other bound
- * digit/letter toggles that preset without closing the UI. */
+ * if any, stays); '0' discards the whole preview outright; a bound digit /
+ * letter toggles that preset without closing the UI. Space is hold-compare
+ * (press shows the original, release restores). Everything else: the keys
+ * the window binds (`s` save, `a` close, h/l, q, ...) propagate to it -- the
+ * compact popover shares the window's root, and the gallery window has the
+ * window's shortcut table bound onto it (bind_shortcuts) -- but any OTHER
+ * unmodified key stops here, so a stray letter cannot trash or quit under
+ * the chooser. Lock modifiers (Caps Lock) are ignored. */
 static gboolean
 _key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
                 GdkModifierType e_state, gpointer p_data) {
@@ -610,21 +596,49 @@ _key_pressed_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
       _destroy(p_ctrl);
       return (GDK_EVENT_STOP);
    }
-   if (e_state != 0) {
-      return (GDK_EVENT_PROPAGATE);
+   if ((e_state & gtk_accelerator_get_default_mod_mask() & ~GDK_SHIFT_MASK) !=
+       0) {
+      return (GDK_EVENT_PROPAGATE); /* chords belong to the window */
    }
-   if (u_keyval == GDK_KEY_0) {
+   guint u_low = gdk_keyval_to_lower(u_keyval);
+   if (u_low == GDK_KEY_space) {
+      enhance_ctrl_set_hold_original(p_ctrl, TRUE);
+      return (GDK_EVENT_STOP);
+   }
+   if (u_low == GDK_KEY_0) {
       _discard(p_ctrl);
       return (GDK_EVENT_STOP);
    }
-   gint i_idx = popup_list_key_to_index(u_keyval);
-   if (i_idx < 0 || i_idx >= (gint)G_N_ELEMENTS(p_ctrl->p_btns)) {
-      return (GDK_EVENT_PROPAGATE);
+   gint i_idx = popup_list_key_to_index(u_low);
+   if (i_idx >= 0 && i_idx < (gint)G_N_ELEMENTS(p_ctrl->p_btns)) {
+      p_ctrl->u_enhance_mask ^= (guint8)(1u << i_idx);
+      _update_highlights(p_ctrl);
+      _apply_async(p_ctrl);
+      return (GDK_EVENT_STOP);
    }
-   p_ctrl->u_enhance_mask ^= (guint8)(1u << i_idx);
-   _update_highlights(p_ctrl);
-   _apply_async(p_ctrl);
+   /* Window-owned keys that make sense with the chooser open. */
+   static const guint PASS[] = {
+      GDK_KEY_s,         GDK_KEY_a,        GDK_KEY_h,     GDK_KEY_l,
+      GDK_KEY_q,         GDK_KEY_Left,     GDK_KEY_Right, GDK_KEY_Page_Up,
+      GDK_KEY_Page_Down, GDK_KEY_question, GDK_KEY_F1};
+   for (gsize u = 0; u < G_N_ELEMENTS(PASS); u++) {
+      if (u_low == PASS[u]) {
+         return (GDK_EVENT_PROPAGATE);
+      }
+   }
    return (GDK_EVENT_STOP);
+}
+
+static gboolean
+_key_released_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
+                 GdkModifierType e_state, gpointer p_data) {
+   (void)p_c;
+   (void)u_kc;
+   (void)e_state;
+   if (u_keyval == GDK_KEY_space) {
+      enhance_ctrl_set_hold_original((EnhanceCtrl *)p_data, FALSE);
+   }
+   return (GDK_EVENT_PROPAGATE);
 }
 
 typedef struct {
@@ -666,7 +680,7 @@ _preview_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
 
 static void
 _start_previews(EnhanceCtrl *p_ctrl, const GPtrArray *p_presets) {
-   if (!_previews(p_ctrl)) {
+   if (!p_ctrl->b_previews) {
       return;
    }
    GFile *p_file = _current_file(p_ctrl);
@@ -681,9 +695,8 @@ _start_previews(EnhanceCtrl *p_ctrl, const GPtrArray *p_presets) {
    p_ctx->p_host            = g_object_ref(p_ctrl->p_host);
    p_ctx->p_ctrl            = p_ctrl;
    p_ctx->u_gen             = p_ctrl->u_preview_gen;
-   enhancer_preview_thumbnails_async(p_ctrl->p_enhancer, p_file, p_presets,
-                                     p_ctrl->p_preview_cancel, _preview_done_cb,
-                                     p_ctx);
+   enhancer_preview_thumbnails_async(
+      p_file, p_presets, p_ctrl->p_preview_cancel, _preview_done_cb, p_ctx);
 }
 
 /* Build the popover's content box (title + preset rows) and wire it into the
@@ -698,7 +711,7 @@ _build_box(EnhanceCtrl *p_ctrl, const GPtrArray *p_presets) {
    if (p_cur != NULL) {
       c_basename = g_file_get_basename(p_cur);
    }
-   gboolean         b_previews = _previews(p_ctrl);
+   gboolean         b_previews = p_ctrl->b_previews;
    EnhanceUIWidgets ui;
    GtkWidget       *p_box = enhance_ui_build_content(
       p_presets, c_basename, p_ctrl->u_enhance_mask, b_previews, &ui);
@@ -725,13 +738,13 @@ _build_box(EnhanceCtrl *p_ctrl, const GPtrArray *p_presets) {
 static GtkWidget *
 _build_gallery_window(EnhanceCtrl *p_ctrl, const GPtrArray *p_presets) {
    GtkWidget *p_window = gtk_window_new();
-   GtkWidget *p_host   = _win_widget(p_ctrl);
+   GtkWindow *p_parent = p_ctrl->p_ops->transient_parent(p_ctrl->p_host);
    gtk_window_set_title(GTK_WINDOW(p_window), "Enhance previews");
-   gtk_window_set_transient_for(GTK_WINDOW(p_window), GTK_WINDOW(p_host));
+   gtk_window_set_transient_for(GTK_WINDOW(p_window), p_parent);
    gtk_window_set_destroy_with_parent(GTK_WINDOW(p_window), TRUE);
    gtk_window_set_resizable(GTK_WINDOW(p_window), TRUE);
-   int i_width  = MAX(500, gtk_widget_get_width(p_host));
-   int i_height = MAX(500, gtk_widget_get_height(p_host));
+   int i_width  = MAX(500, gtk_widget_get_width(GTK_WIDGET(p_parent)));
+   int i_height = MAX(500, gtk_widget_get_height(GTK_WIDGET(p_parent)));
    gtk_window_set_default_size(GTK_WINDOW(p_window), i_width, i_height);
    gtk_window_set_child(GTK_WINDOW(p_window), _build_box(p_ctrl, p_presets));
    /* Choose the column count once, now that the cells exist and the size the
@@ -748,6 +761,10 @@ _build_gallery_window(EnhanceCtrl *p_ctrl, const GPtrArray *p_presets) {
       (int)u_presets + 2, i_width, i_height);
    g_signal_connect(p_window, "close-request", G_CALLBACK(_window_close_cb),
                     p_ctrl);
+   /* The gallery is its own GtkRoot: without this the window's `s` / `a` /
+    * h / l / q shortcuts did nothing while it had focus, although its own
+    * hint said "s  Save enhanced copy". */
+   p_ctrl->p_ops->bind_shortcuts(p_ctrl->p_host, p_window);
    return (p_window);
 }
 
@@ -758,7 +775,7 @@ _build_gallery_window(EnhanceCtrl *p_ctrl, const GPtrArray *p_presets) {
  * either form. Row clicks and hotkeys keep it open so several layered presets
  * can be compared. */
 void
-enhance_ctrl_toggle_open(EnhanceCtrl *p_ctrl) {
+enhance_ctrl_toggle_open(EnhanceCtrl *p_ctrl, gboolean b_previews) {
    g_return_if_fail(p_ctrl != NULL);
    if (!_has_navigator(p_ctrl) || p_ctrl->p_enhancer == NULL) {
       return;
@@ -767,9 +784,9 @@ enhance_ctrl_toggle_open(EnhanceCtrl *p_ctrl) {
       _destroy(p_ctrl);
       return;
    }
-   const GPtrArray *p_presets  = enhancer_get_presets(p_ctrl->p_enhancer);
-   gboolean         b_previews = _previews(p_ctrl);
-   GtkWidget       *p_ui       = NULL;
+   p_ctrl->b_previews         = b_previews;
+   const GPtrArray *p_presets = enhancer_get_presets(p_ctrl->p_enhancer);
+   GtkWidget       *p_ui      = NULL;
    if (b_previews) {
       p_ui = _build_gallery_window(p_ctrl, p_presets);
    } else {
@@ -780,11 +797,13 @@ enhance_ctrl_toggle_open(EnhanceCtrl *p_ctrl) {
       g_signal_connect(GTK_POPOVER(p_ui), "closed", G_CALLBACK(_closed_cb),
                        p_ctrl);
       gtk_popover_set_child(GTK_POPOVER(p_ui), _build_box(p_ctrl, p_presets));
-      gtk_widget_set_parent(p_ui, _stack(p_ctrl));
+      gtk_widget_set_parent(p_ui,
+                            p_ctrl->p_ops->popover_parent(p_ctrl->p_host));
    }
    GtkEventController *p_kc = gtk_event_controller_key_new();
    gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
    g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_key_pressed_cb), p_ctrl);
+   g_signal_connect(p_kc, "key-released", G_CALLBACK(_key_released_cb), p_ctrl);
    gtk_widget_add_controller(p_ui, p_kc);
    p_ctrl->p_ui = p_ui;
    /* No initial sizing pass: the cells expand into whatever the gallery

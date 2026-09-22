@@ -19,36 +19,18 @@
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
-:*/
-
-#include "navigator.h"
+ *:*/
 
 #include <gio/gio.h>
 #include <glib.h>
+
+#include "ggaze-enums.h"
+#include "settings-pair.h"
 
 G_BEGIN_DECLS
 
 #define GGAZE_SETTINGS_SCHEMA_ID "org.buetow.ggaze"
 #define GGAZE_SETTINGS_PATH "/org/buetow/ggaze/"
-
-/* Background colour behind the image in large view. Order matches the
- * `org.buetow.ggaze.background` schema enum (black=0 ... checker=3). */
-typedef enum {
-   GGAZE_BG_BLACK = 0,
-   GGAZE_BG_DARK,
-   GGAZE_BG_GREY,
-   GGAZE_BG_CHECKER
-} GgazeBackground;
-
-/* What the mouse scroll wheel does in large view. Order matches the
- * `org.buetow.ggaze.scroll-behavior` schema enum (zoom=0 ... navigate=2). */
-typedef enum {
-   GGAZE_SCROLL_ZOOM = 0,
-   GGAZE_SCROLL_PAN_WHEN_ZOOMED,
-   GGAZE_SCROLL_NAVIGATE
-} GgazeScrollBehavior;
-
-#include "settings-pair.h"
 
 typedef struct Settings Settings;
 

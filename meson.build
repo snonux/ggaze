@@ -80,6 +80,7 @@ ggaze_src = files(
       'src/pathutil.c',
       'src/runner.c',
       'src/settings.c',
+      'src/settings-pair.c',
       'src/prefs.c',
       'src/clipboard.c',
       'src/loader/loader.c',

@@ -16,13 +16,13 @@
  *
  * The controller is a plain struct (not a GtkWidget), mirroring SaveGate /
  * DeleteConfirm: it reaches the window through a host vtable (EnhanceUIHostOps)
- * for the ~10 window-side operations it needs (show a texture in the large
- * viewer, refresh the title, show a status line, reload the current file,
- * and getters for the current file, the texturecache, the preview-thumbnails
- * setting, the grid/large stack, the toplevel window widget, and whether the
- * window is disposed). The pure widget construction is delegated to
- * enhance-ui.c (enhance_ui_build_content); this module owns the built widgets
- * and wires their signals.
+ * for the window-side operations it needs (show a texture, refresh the
+ * title, show a status line, reload the current file, make the large view
+ * visible, the current file, a cached texture, a popover parent, the
+ * transient parent, and binding the window's shortcuts onto the gallery
+ * window). It tracks its own disposed state. The pure widget construction is
+ * delegated to enhance-ui.c (enhance_ui_build_content); this module owns the
+ * built widgets and wires their signals.
  *
  * Compiled only when GEGL is enabled (alongside enhancer.c / enhance-ui.c):
  * every caller is under #if GGAZE_HAVE_GEGL, and there is no enhance feature
@@ -45,44 +45,45 @@ typedef struct EnhanceCtrl EnhanceCtrl;
 
 /* Window-side operations the controller calls back through. p_host is the
  * window, borrowed for the duration of each call. Every getter returns a
- * borrowed reference unless noted. */
+ * borrowed reference unless noted. The ops say what the controller NEEDS
+ * ("make the large view visible", "a widget to parent the popover to"), not
+ * how the window is laid out. */
 typedef struct {
    /* Show a texture in the large viewer. The apply-completion, hold-Space
-    * restore, and mask-empty restore all funnel through here (as they did
-    * through window.c's _show_texture). */
+    * restore, and mask-empty restore all funnel through here. */
    void (*show_texture)(gpointer p_host, GdkTexture *p_tex);
-   /* Refresh the window title (preset names are appended when layered, by
-    * the caller reading enhance_ctrl_get_mask / _get_presets). */
+   /* Refresh the window title (enhancer_describe_mask gives the suffix). */
    void (*update_header)(gpointer p_host);
    /* Transient status line (the window's info overlay). */
    void (*show_status)(gpointer p_host, const char *c_msg);
    /* Reload the current file's original into the viewer (the mask-empty
     * restore path -- texturecache is cheap, no GEGL). */
    void (*load_current)(gpointer p_host);
+   /* Bring the large view on screen (a preset was toggled). */
+   void (*ensure_large_view)(gpointer p_host);
 
    /* The navigator's current file (NULL if no folder is open or the folder
     * is empty). Safe to call in any state. */
    GFile *(*get_current_file)(gpointer p_host);
-   /* The cached texture for p_file from the texturecache (NULL if evicted),
-    * for hold-Space compare. */
+   /* The cached texture for p_file (NULL if evicted), for hold-Space. */
    GdkTexture *(*get_cached_texture)(gpointer p_host, GFile *p_file);
-   /* Whether preview-thumbnails mode is on (gallery vs compact popover). */
-   gboolean (*get_preview_thumbnails)(gpointer p_host);
-   /* The grid/large GtkStack: the compact popover's parent and the "large"
-    * switch target in apply_begin. */
-   GtkWidget *(*get_stack)(gpointer p_host);
-   /* The toplevel window widget: the gallery window's transient parent and
-    * sizing reference. */
-   GtkWidget *(*get_window_widget)(gpointer p_host);
-   /* TRUE once the host's dispose has run; async callbacks check it before
-    * touching any widget. */
-   gboolean (*is_disposed)(gpointer p_host);
+   /* A widget in the window's tree to parent the compact popover to. */
+   GtkWidget *(*popover_parent)(gpointer p_host);
+   /* The toplevel the gallery window is transient for. */
+   GtkWindow *(*transient_parent)(gpointer p_host);
+   /* Give p_toplevel (the gallery window, its own GtkRoot) the window's
+    * actions and key table, so `s`, `a`, h/l, q, ... work while it has
+    * focus. */
+   void (*bind_shortcuts)(gpointer p_host, GtkWidget *p_toplevel);
    /* TRUE iff a folder is open (the navigator is non-NULL). The apply path
     * guards on this (NOT on get_current_file) so an EMPTY folder -- navigator
     * present, current NULL -- still reaches the mask-reset branch rather than
-    * early-returning, matching the old p_nav != NULL guard. */
+    * early-returning. */
    gboolean (*has_navigator)(gpointer p_host);
 } EnhanceUIHostOps;
+
+/* Continuation for enhance_ctrl_save_async: b_ok is TRUE on a real write. */
+typedef void (*EnhanceSaveDoneFn)(gboolean b_ok, gpointer p_data);
 
 /* Construct a controller bound to p_host. p_ops is borrowed for the
  * controller's lifetime (must outlive it). Creates the Enhancer engine. */
@@ -97,8 +98,11 @@ void enhance_ctrl_delete(EnhanceCtrl *p_ctrl);
  * widget too. */
 void enhance_ctrl_dispose(EnhanceCtrl *p_ctrl);
 
-/* --- engine presets (window's _load_engine_lists builds the merged list) -- */
-void enhance_ctrl_set_presets(EnhanceCtrl *p_ctrl, const GPtrArray *p_presets);
+/* --- engine presets --- */
+/* Feed the Preferences user presets (SettingsPair*) to the engine, which
+ * rebuilds built-ins + user presets itself (enhancer_set_user_presets). */
+void             enhance_ctrl_set_user_presets(EnhanceCtrl     *p_ctrl,
+                                               const GPtrArray *p_pairs);
 const GPtrArray *enhance_ctrl_get_presets(EnhanceCtrl *p_ctrl);
 guint8           enhance_ctrl_get_mask(EnhanceCtrl *p_ctrl);
 
@@ -119,17 +123,21 @@ GdkTexture *enhance_ctrl_override_texture(EnhanceCtrl *p_ctrl,
 void enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold);
 
 /* --- action entry points (the GActions stay window-side; these do the work) */
-/* `a`: open/close the enhance gallery window (preview mode) or compact
- * popover. A no-op if no folder is open. */
-void enhance_ctrl_toggle_open(EnhanceCtrl *p_ctrl);
+/* `a`: open/close the enhance gallery window (b_previews: thumbnail
+ * previews in their own window) or the compact popover. A no-op if no
+ * folder is open. */
+void enhance_ctrl_toggle_open(EnhanceCtrl *p_ctrl, gboolean b_previews);
 /* enhance-N (keys 1-8): toggle preset i_idx (0..7) on/off (layered), then
  * re-apply asynchronously. Out-of-range i_idx is a silent no-op. */
 void enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx);
 /* `s`: export the previewed image with the enabled-preset chain to a
- * non-colliding <stem>-enhanced[-<n>].<ext>. Returns TRUE on success, FALSE on
- * a real export failure OR when there is nothing to save (the caller tells
- * them apart via enhance_ctrl_can_save). Reports status itself. */
-gboolean enhance_ctrl_do_save(EnhanceCtrl *p_ctrl);
+ * non-colliding <stem>-enhanced[-<n>].<ext>, in a worker (the full decode +
+ * chain + encode takes seconds and used to freeze the UI). Reports status
+ * itself; fn_done (may be NULL) is called on the main thread with the
+ * outcome. Called with nothing to save it reports and completes with FALSE
+ * at once. */
+void enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
+                             gpointer p_done_data);
 /* TRUE iff there is actually an enhance preview to export right now (a
  * folder is open, a preset is enabled, and the preview belongs to a file).
  * Split out so the Save/Discard/Cancel gate can tell "nothing to save" (the

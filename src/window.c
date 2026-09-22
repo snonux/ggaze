@@ -1468,25 +1468,31 @@ _ec_cached_texture(gpointer p_host, GFile *p_file) {
    return (viewload_get_cached(GGAZE_WINDOW(p_host)->p_viewload, p_file));
 }
 
-static gboolean
-_ec_previews(gpointer p_host) {
-   return (settings_get_enhance_preview_thumbnails(
-      GGAZE_WINDOW(p_host)->p_settings));
+static void
+_ec_ensure_large_view(gpointer p_host) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_host);
+   if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
+      _set_view(p_win, GGAZE_VIEW_LARGE);
+   }
 }
 
 static GtkWidget *
-_ec_stack(gpointer p_host) {
+_ec_popover_parent(gpointer p_host) {
    return (GGAZE_WINDOW(p_host)->p_stack);
 }
 
-static GtkWidget *
-_ec_window_widget(gpointer p_host) {
-   return (GTK_WIDGET(p_host));
+static GtkWindow *
+_ec_transient_parent(gpointer p_host) {
+   return (GTK_WINDOW(p_host));
 }
 
-static gboolean
-_ec_is_disposed(gpointer p_host) {
-   return (GGAZE_WINDOW(p_host)->b_disposed);
+/* The gallery window is its own GtkRoot: give it this window's action group
+ * under the same "win" prefix and the same key table, so every shortcut
+ * works there exactly as in the main window. */
+static void
+_ec_bind_shortcuts(gpointer p_host, GtkWidget *p_toplevel) {
+   gtk_widget_insert_action_group(p_toplevel, "win", G_ACTION_GROUP(p_host));
+   shortcuts_install(p_toplevel);
 }
 
 static gboolean
@@ -1495,17 +1501,17 @@ _ec_has_navigator(gpointer p_host) {
 }
 
 static const EnhanceUIHostOps _ENHANCE_OPS = {
-   .show_texture           = _ec_show_texture,
-   .update_header          = _ec_update_header,
-   .show_status            = _ec_show_status,
-   .load_current           = _ec_load_current,
-   .get_current_file       = _ec_current_file,
-   .get_cached_texture     = _ec_cached_texture,
-   .get_preview_thumbnails = _ec_previews,
-   .get_stack              = _ec_stack,
-   .get_window_widget      = _ec_window_widget,
-   .is_disposed            = _ec_is_disposed,
-   .has_navigator          = _ec_has_navigator,
+   .show_texture       = _ec_show_texture,
+   .update_header      = _ec_update_header,
+   .show_status        = _ec_show_status,
+   .load_current       = _ec_load_current,
+   .ensure_large_view  = _ec_ensure_large_view,
+   .get_current_file   = _ec_current_file,
+   .get_cached_texture = _ec_cached_texture,
+   .popover_parent     = _ec_popover_parent,
+   .transient_parent   = _ec_transient_parent,
+   .bind_shortcuts     = _ec_bind_shortcuts,
+   .has_navigator      = _ec_has_navigator,
 };
 
 /* win.enhance (key 'a'): thumbnail mode opens a resizable gallery window;
@@ -1517,7 +1523,14 @@ static void
 _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   enhance_ctrl_toggle_open(GGAZE_WINDOW(p_data)->p_enhance_ctrl);
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (!_require_folder(p_win)) {
+      return;
+   }
+   gboolean b_previews =
+      p_win->p_settings != NULL &&
+      settings_get_enhance_preview_thumbnails(p_win->p_settings);
+   enhance_ctrl_toggle_open(p_win->p_enhance_ctrl, b_previews);
 }
 
 /* win.enhance-N (keys 1-8, always live -- not gated on the popover being
@@ -1557,11 +1570,7 @@ _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (!_require_folder(p_win)) {
       return;
    }
-   if (enhance_ctrl_get_mask(p_win->p_enhance_ctrl) == 0) {
-      _show_status(p_win, "Nothing to save (no enhance preset enabled)");
-      return;
-   }
-   enhance_ctrl_do_save(p_win->p_enhance_ctrl);
+   enhance_ctrl_save_async(p_win->p_enhance_ctrl, NULL, NULL);
 }
 
 /* Hold-Space compare (see window.h): TRUE shows the cached original; FALSE
@@ -1691,19 +1700,6 @@ _show_status(GgazeWindow *p_win, const char *c_msg) {
    info_overlay_show_status(p_win->p_info, c_msg);
 }
 
-#if GGAZE_HAVE_GEGL
-static void
-_preset_tmp_free(gpointer p) {
-   EnhancerPreset *d = (EnhancerPreset *)p;
-   if (d == NULL) {
-      return;
-   }
-   g_free(d->c_name);
-   g_free(d->c_graph);
-   g_free(d);
-}
-#endif
-
 /* Apply the scalar viewer preferences (background, scroll behavior) from the
  * settings wrapper to the large-view widget. Called at init and after the
  * Preferences dialog commits a change. */
@@ -1747,35 +1743,9 @@ _load_engine_lists(GgazeWindow *p_win) {
    }
 #if GGAZE_HAVE_GEGL
    if (p_win->p_enhance_ctrl != NULL) {
-      /* Rebuild the enhancer preset list as: the existing built-in presets
-       * (deep-copied) followed by the user-defined graph presets from
-       * settings. enhance_ctrl_set_presets deep-copies again into the
-       * engine's own array, so the temp array here owns and frees every
-       * entry. User-graph application is still TODO in enhancer_apply, but
-       * the list is plumbed so the popup (M10) and the Preferences UI see the
-       * configured entries.
-       */
-      const GPtrArray *p_cur = enhance_ctrl_get_presets(p_win->p_enhance_ctrl);
-      GPtrArray       *pp    = g_ptr_array_new_with_free_func(_preset_tmp_free);
-      for (guint i = 0; p_cur != NULL && i < p_cur->len; i++) {
-         const EnhancerPreset *pr = g_ptr_array_index((GPtrArray *)p_cur, i);
-         EnhancerPreset       *np = g_new0(EnhancerPreset, 1);
-         np->c_name               = g_strdup(pr->c_name);
-         np->c_graph              = g_strdup(pr->c_graph);
-         np->i_builtin            = pr->i_builtin;
-         g_ptr_array_add(pp, np);
-      }
+      /* The engine merges built-ins + these user presets itself. */
       GPtrArray *p_user = settings_get_enhance_presets(p_win->p_settings);
-      for (guint i = 0; i < p_user->len; i++) {
-         const SettingsPair *pr = g_ptr_array_index(p_user, i);
-         EnhancerPreset     *np = g_new0(EnhancerPreset, 1);
-         np->c_name             = g_strdup(pr->c_name);
-         np->c_graph            = g_strdup(pr->c_value);
-         np->i_builtin          = 0;
-         g_ptr_array_add(pp, np);
-      }
-      enhance_ctrl_set_presets(p_win->p_enhance_ctrl, pp);
-      g_ptr_array_unref(pp);
+      enhance_ctrl_set_user_presets(p_win->p_enhance_ctrl, p_user);
       g_ptr_array_unref(p_user);
    }
 #endif
@@ -2663,29 +2633,14 @@ _update_header(GgazeWindow *p_win) {
 #if GGAZE_HAVE_GEGL
    /* Append the enabled enhance preset names (comma-joined) when layered. */
    if (p_win->p_enhance_ctrl != NULL && c_title != NULL) {
-      guint8           u_mask = enhance_ctrl_get_mask(p_win->p_enhance_ctrl);
-      const GPtrArray *p_presets =
-         enhance_ctrl_get_presets(p_win->p_enhance_ctrl);
-      if (u_mask != 0 && p_presets != NULL) {
-         GString *p_str = g_string_new(NULL);
-         for (guint i = 0; i < p_presets->len && i < 8; i++) {
-            if ((u_mask & (guint8)(1u << i)) == 0) {
-               continue;
-            }
-            const EnhancerPreset *p_pr =
-               g_ptr_array_index((GPtrArray *)p_presets, i);
-            if (p_str->len > 0) {
-               g_string_append_c(p_str, ',');
-            }
-            g_string_append(p_str, p_pr->c_name);
-         }
-         if (p_str->len > 0) {
-            char *c_tmp =
-               g_strdup_printf("%s  \u00b7  %s", c_title, p_str->str);
-            g_free(c_title);
-            c_title = c_tmp;
-         }
-         g_string_free(p_str, TRUE);
+      char *c_presets =
+         enhancer_describe_mask(enhance_ctrl_get_presets(p_win->p_enhance_ctrl),
+                                enhance_ctrl_get_mask(p_win->p_enhance_ctrl));
+      if (c_presets != NULL) {
+         char *c_tmp = g_strdup_printf("%s  \u00b7  %s", c_title, c_presets);
+         g_free(c_title);
+         c_title = c_tmp;
+         g_free(c_presets);
       }
    }
 #endif
@@ -2889,23 +2844,25 @@ _sg_show_status(gpointer p_host, const char *c_msg) {
 }
 
 #if GGAZE_HAVE_GEGL
-static gboolean
-_sg_do_save(gpointer p_host) {
+/* The Save button (the SaveGate host's do_save op): completes fn_done with
+ * TRUE iff the user's action may proceed. "Nothing to save" is NOT a
+ * failure: the preview can legitimately be gone by the time the prompt is
+ * answered (the slideshow timer and the folder's GFileMonitor both run
+ * behind a modal dialog, and either can clear the mask), and there is then
+ * nothing left to protect. Reporting it and proceeding is the honest
+ * outcome. A real export failure completes with FALSE: it must not be
+ * silently downgraded to Discard -- the mask and preview stay so the user
+ * can retry, and the window stays alive so the error message is readable.
+ * The export itself runs in a worker (enhance_ctrl_save_async). */
+static void
+_sg_do_save(gpointer p_host, SaveGateSaveDoneFn fn_done, gpointer p_done_data) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_host);
-   /* The Save button (the SaveGate host's do_save op): returns TRUE iff the
-    * user's action may proceed. "Nothing to save" is NOT a failure: the
-    * preview can legitimately be gone by the time the prompt is answered
-    * (the slideshow timer and the folder's GFileMonitor both run behind a
-    * modal dialog, and either can clear the mask), and there is then nothing
-    * left to protect. Reporting it and proceeding is the honest outcome.
-    * A real export failure does return FALSE: it must not be silently
-    * downgraded to Discard -- the mask and preview stay so the user can
-    * retry, and the window stays alive so the error message is readable. */
    if (!enhance_ctrl_can_save(p_win->p_enhance_ctrl)) {
       _show_status(p_win, "Nothing to save \u2014 the preview is gone");
-      return (TRUE);
+      fn_done(TRUE, p_done_data);
+      return;
    }
-   return (enhance_ctrl_do_save(p_win->p_enhance_ctrl));
+   enhance_ctrl_save_async(p_win->p_enhance_ctrl, fn_done, p_done_data);
 }
 
 static void
@@ -2915,10 +2872,10 @@ _sg_discard(gpointer p_host) {
 #else /* !GGAZE_HAVE_GEGL */
 /* Without GEGL is_dirty is always FALSE, so the gate never prompts and these
  * are never called -- stubs that keep the ops table whole in every build. */
-static gboolean
-_sg_do_save(gpointer p_host) {
+static void
+_sg_do_save(gpointer p_host, SaveGateSaveDoneFn fn_done, gpointer p_done_data) {
    (void)p_host;
-   return (TRUE);
+   fn_done(TRUE, p_done_data);
 }
 
 static void
