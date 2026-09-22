@@ -124,7 +124,7 @@ mouse — header-bar buttons for the common ones, the `F10` menu for the rest.
 | Decode       | GdkPixbuf fallback + libjxl/libavif/libheif (feature options) |
 | Image proc.  | GEGL + babl (optional, feature-gated) — enhance, ICC, export copy |
 | Thumbnails   | freedesktop TMS, `~/.cache/thumbnails/` |
-| Packaging    | Fedora RPM + AppStream (Flatpak later) |
+| Packaging    | Fedora RPM + AppStream                  |
 | Testing      | `meson test` + gcov/lcov; ≥80% on plain-C modules |
 | Quality audit | `auditing-code-quality` skill at milestones (C: c-best-practices + find-code-bugs + SOLID + beyond-SOLID) |
 
@@ -148,11 +148,6 @@ See [tech-stack.md](tech-stack.md).
 | M9  | GEGL quick-enhance, crop/straighten/rotate (optional) | enhance done (tu0); crop/rotate/ICC not started | `enhancer`, `a` popover (layered presets) + hold-`Space` compare + non-destructive async preview + `s` save copy (no auto-save, prompt on navigate/trash/delete/move/open/quit) done; `c`/`R`/`[`/`]` tools and ICC via GEGL still open |
 | M10 | Polish & packaging         | not started | AppStream, RPM, man page, settings, keyboard-completeness audit, ≥80% coverage gate |
 
-Later / maybe: configurable keybindings, recursive walking, RAW embedded
-preview, burst grouping, RAW+JPEG pair hiding, GEGL transforms/artistic.
-
-See [roadmap.md](roadmap.md).
-
 ---
 
 ## Decisions log
@@ -166,17 +161,17 @@ Decisions made during planning. Newest first.
 | 30 | 2026-07-12 | **App ID `org.buetow.ggaze`** (was B). | Matches buetow.org domain. |
 | 31 | 2026-07-12 | **Custom viewer widget** (was L), not `GtkPicture`. | Cursor-centered zoom, pan clamp, hold-`Space` compare, tool overlays. |
 | 32 | 2026-07-12 | **Single instance** (was E); new `open`/drop replaces current folder+image. | Standard GNOME behavior; no window sprawl. |
-| 33 | 2026-07-12 | **Camera specifics** (was K): burst grouping deferred to "later"; hide RAW sidecars by default (toggle to reveal); default sort = filename (EXIF capture-time as a menu option); import folder = just a path. | KISS first; culling-friendly grid; filename ≈ shot order. |
+| 33 | 2026-07-12 | **Camera specifics** (was K): hide RAW sidecars by default (toggle to reveal); default sort = filename (EXIF capture-time as a menu option); import folder = just a path. | KISS first; culling-friendly grid; filename ≈ shot order. |
 | 34 | 2026-07-12 | **GEGL integration** (was U): optional meson feature; built-in presets programmatic, user presets as `gegl-graph` text; apply only when settled (not during scrub); "enhanced" badge; export `<stem>-enhanced.<ext>` same dir, collision suffix `-1`; dirty-prompt fires on `d`/`D`/`m`; no gegl-gtk. | Keeps core fast; KISS preset UI; explicit save. |
 | 35 | 2026-07-12 | **GEGL compose order** (was W): load → enhance(color) → rotate → straighten → crop → export; straighten auto-crop default on. | Crop the final framed image; remove rotated corners. |
-| 36 | 2026-07-12 | **Enhance presets** (was X+#4): superseded by implementation (tu0) — presets are **layered** (any number toggle on/off independently and compose in the preview graph), not a single active/replace preset; `0`/"Original" reset clears all. Curves via `gegl:contrast-curve`; no fine-adjust nudging in v1. Crop/straighten/rotate stacking on top is still planned but not yet built. | Layering turned out more useful than single-replace for comparing combinations; recorded here so the decision log matches what actually shipped. |
-| 37 | 2026-07-12 | **Milestone Leans locked**: C GdkPixbuf-first; G color via GEGL/sRGB-else; H scroll=zoom + `pan-when-zoomed` mode; M GSettings `a(ss)` destinations; N move+suffix; O 1-9,0,a-z (cap 36); P one-level undo; Q marks path-based/survive re-sort/clear on trash; R raw cmd+%f+GSubprocess; S /bin/sh -c single-quote+rescan; T 64-512px ±32px custom bucket; V PNG+uri-list union provider; Y EXIF normalize-to-identity, export tag=1; Z folder→grid/file→parent/many→first; AA 250ms debounce nearest; F flat default; J RPM+AppStream first. | Working defaults confirmed at each milestone. |
+| 36 | 2026-07-12 | **Enhance presets** (was X+#4): superseded by implementation (tu0) — presets are **layered** (any number toggle on/off independently and compose in the preview graph), not a single active/replace preset; `0`/"Original" reset clears all. Curves via `gegl:contrast-curve`; no fine-adjust nudging. Crop/straighten/rotate stacking on top is still planned but not yet built. | Layering turned out more useful than single-replace for comparing combinations; recorded here so the decision log matches what actually shipped. |
+| 37 | 2026-07-12 | **Milestone Leans locked**: C GdkPixbuf-first; G color via GEGL/sRGB-else; H scroll=zoom + `pan-when-zoomed` mode; M GSettings `a(ss)` destinations; N move+suffix; O 1-9,0,a-z (cap 36); P one-level undo; Q marks path-based/survive re-sort/clear on trash; R raw cmd+%f+GSubprocess; S /bin/sh -c single-quote+rescan; T 64-512px ±32px custom bucket; V PNG+uri-list union provider; Y EXIF normalize-to-identity; Z folder→grid/file→parent/many→first; AA 250ms debounce nearest; F flat default; J RPM+AppStream first. | Working defaults confirmed at each milestone. |
 | 40 | 2026-07-12 | Run the `auditing-code-quality` skill at each milestone + before release (C-adapted: `c-best-practices` + `find-code-bugs` + `solid-principles` + `beyond-solid-principles`, tracked via `agent-task-management`); fix all HIGH/MEDIUM findings. | Structured, well-factored project; catch defects + design smells early. |
 | 39 | 2026-07-12 | **≥80% unit-test coverage** on plain-C modules (navigator/detect/thumbnail/mover/opener/runner/enhancer/trash/settings) via gcov/lcov with a CI coverage gate; GTK widgets get smoke tests. | Quality floor; refactor safely. |
-| 38 | 2026-07-12 | **Gaps folded in**: mark count in header; window-geometry persistence; CLI `--version`/`--help` (+`--sort`/`--view` later); bulk `D` confirm >1; `scroll-behavior` = zoom/pan-when-zoomed/navigate; `Ctrl+c` copies the *displayed* image; export same ext + JPEG q95 (lossless later); `e` opens the *original* file; go-to-# skipped for v1. | Plan now complete before implementation. |
+| 38 | 2026-07-12 | **Gaps folded in**: mark count in header; CLI `--version`/`--help`; bulk `D` confirm >1; `scroll-behavior` = zoom/pan-when-zoomed/navigate; `Ctrl+c` copies the *displayed* image; export same ext + JPEG q95; `e` opens the *original* file; go-to-# not planned. | Plan now complete before implementation. |
 | 41 | 2026-08-06 | **Thumbnail persistence stays freedesktop-TMS** (`~/.cache/thumbnails/`), not a hidden `.ggaze` folder beside the pictures, as ix0's report suggested. ix0 found the cache had *always* been written but never read back — `_load_cached()` asked gdk-pixbuf for `Thumb::MTime` while its PNG loader exposes tEXt keys as `tEXt::Thumb::MTime` — so the fix is a one-key read fix plus a `Thumb::URI` cross-check, not a new storage location. | The entries were already on disk and correct; a private folder would have thrown away the cache shared with Nautilus/gthumb, written into (possibly read-only or synced) picture folders, and left the same read bug in place. |
 | 27 | 2026-07-12 | Open a folder arg (`ggaze dir/` → grid) and accept drag-and-drop of a file/folder onto the window; `o` dialog allows folders too. | Match gthumb flexibility; open anything from CLI, file manager, or drag. |
-| 26 | 2026-07-12 | Honor EXIF Orientation on load (upright display); manual rotate/straighten compose on top; export resets the tag to normal. | Portrait/tilted camera shots display correctly without manual fix. |
+| 26 | 2026-07-12 | Honor EXIF Orientation on load (upright display); manual rotate/straighten compose on top. | Portrait/tilted camera shots display correctly without manual fix. |
 | 25 | 2026-07-12 | Expand GEGL enhance presets: brightness, contrast, saturation, warm/cool, white balance, shadows/highlights, levels, clarity + artistic (B&W/sepia/vignette/softglow); strength tunable via `enhance-presets` gegl-graph text (no slider UI). | Cover the common quick fixes as one-shot presets; keep KISS. |
 | 24 | 2026-07-12 | Compare moved to `Space` (hold); zoom-fit folded into `0` (toggle fit/100%); `\` freed. | `Space` is the comfortable hold-to-compare key; one zoom toggle key. |
 | 23 | 2026-07-12 | Hold `Space` to flash the original image; release to return to the modified preview (before/after compare) to decide whether to `s` save. | Judge edits before saving; no accidental keeps. |
@@ -218,7 +213,6 @@ working Leans and per-milestone details live in
 - [tech-stack.md](tech-stack.md) — libraries, decode backends, deps
 - [coding-conventions.md](coding-conventions.md) — C style (c-best-practices skill)
 - [gegl.md](gegl.md) — GEGL quick-enhance & image-processing plan
-- [roadmap.md](roadmap.md) — milestone detail
 - [open-questions.md](open-questions.md) — undecided items
 - `PLAN.md` — this file (tracker)
 

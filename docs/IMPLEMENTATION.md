@@ -6,8 +6,8 @@ this page says *how* we build it, in what order, and what "done" means.
 
 ## Guiding principles
 
-1. **Every milestone ends runnable** (per [roadmap.md](roadmap.md)) — and every
-   commit within a milestone compiles + `meson test` passes.
+1. **Every milestone ends runnable** — and every commit within a milestone
+   compiles + `meson test` passes.
 2. **Plain-C modules first, GTK shell thin.** Build and unit-test the logic
    modules before (or alongside) the UI that consumes them, so coverage is
    natural rather than retrofit.
@@ -103,7 +103,7 @@ that cost a full investigation to learn, so they are written down here:
 | `test_grid_cull.c` | M7 | Grid view shows N cells; `d` bins one into `.Trash`, cell dims; `u` restores; counter reflects remaining; `Enter`→large on the right cell. |
 | `test_move_undo.c` | M8 | Mark 3 → `m`→dest2 → files gone from folder, present in dest; `u` moves back; collision suffixing. |
 | `test_runner_rescan.c` | M8 | `!` runs a script that writes a file into the dir; on exit the navigator rescans and the new file appears; injection-guard filename is single-quoted. |
-| `test_enhance_flow.c` | M9 (gated on `gegl`) | `a`→preset applies a preview off-thread (texture differs from raw); toggle-off restores the original; hold-`Space` compares and restores (incl. the flag not sticking when the mask is cleared mid-hold); `s` writes a collision-safe `-enhanced[-n].<ext>` with the original byte-identical (EXIF `Orientation=1` normalization is not implemented yet, so not asserted); a dirty preview blocks grid selection and native window close behind the Save/Discard/Cancel prompt — and the prompt itself is **answered** (`tests/helpers/gtk_helpers.h`): Cancel keeps the preview and releases the continuation, Discard/Save apply the deferred grid select / open / move, a **failed** Save (read-only folder) keeps the preview and aborts the continuation, repeated close-requests do not stack dialogs, and `t` `t` keeps a dirty preview on screen. |
+| `test_enhance_flow.c` | M9 (gated on `gegl`) | `a`→preset applies a preview off-thread (texture differs from raw); toggle-off restores the original; hold-`Space` compares and restores (incl. the flag not sticking when the mask is cleared mid-hold); `s` writes a collision-safe `-enhanced[-n].<ext>` with the original byte-identical; a dirty preview blocks grid selection and native window close behind the Save/Discard/Cancel prompt — and the prompt itself is **answered** (`tests/helpers/gtk_helpers.h`): Cancel keeps the preview and releases the continuation, Discard/Save apply the deferred grid select / open / move, a **failed** Save (read-only folder) keeps the preview and aborts the continuation, repeated close-requests do not stack dialogs, and `t` `t` keeps a dirty preview on screen. |
 | `test_grid_select_gate.c` | M9 | `gridview.c` routes every selection through the installed `GgazeGridSelectFunc` instead of `navigator_set_current_file` — a refusing gate blocks the change, an allowing one lets it through, and with **no** gate (or after uninstalling one) it falls back to `navigator_set_current_file` itself. No GEGL/window/dialog involved, so it runs in the minimal lane too. |
 | `test_clipboard_copy.c` | M8 | `Ctrl+c` with no marks → `image/png` on `GdkClipboard`; with marks → `text/uri-list`; paste back into a fake target. |
 | `test_full_lifecycle.c` | M10 | The elevator-pitch session scripted: open → walk → `i` → `d` ×k → mark → `m`→dest → `e`→program (use `true`) → `!`→script → quit. End-to-end smoke. |
@@ -358,8 +358,7 @@ bounded memory.
 - `src/clipboard.c/.h` — copies the **displayed** image (modified if a
   preview is active, else original) as `image/png` (decode in `GTask`) /
   marked files as `text/uri-list`; union provider for one file (decision V).
-  `Ctrl+Shift+c` (later) copies the original/path.
-- Popover pattern for move/open/scripts/(enhance later): `(hotkey, label)`
+- Popover pattern for move/open/scripts: `(hotkey, label)`
   rows + a capture-phase key controller firing on digit/letter, Esc cancels.
   In practice this landed as one popover built per action in `window.c`
   (`_action_open_external`/`_action_run_script`/`_action_move`), sharing only
@@ -387,8 +386,8 @@ bounded memory.
 **Status (tu0):** the enhance popover, async apply, hold-`Space`, reset,
 `s` export-copy, and the dirty Save/Discard/Cancel gate are done and wired
 into the window (see below). Crop (`c`), straighten (`R`), rotate 90
-(`[`/`]`), ICC color management, and EXIF `Orientation=1`-on-export are
-**not yet built** — tracked as follow-up work, not part of tu0's scope.
+(`[`/`]`) and ICC color management are **not yet built** — tracked as
+follow-up work, not part of tu0's scope.
 
 **Deliverables**
 - `meson` `gegl` feature; `src/enhancer.c/.h` plain-C.
@@ -398,8 +397,6 @@ into the window (see below). Crop (`c`), straighten (`R`), rotate 90
   (off the GTK main thread); `enhancer_export_chain` → `<stem>-enhanced.<ext>`
   same dir, collision-suffixed `-1`, `-2`, … (mirrors `mover.c`'s move
   collision suffixing); defaults to the original format (JPEG quality 95).
-  A format/quality chooser, lossless `jpegtran`/`exiftool` path, and EXIF
-  `Orientation=1` normalization on export are later.
 - Window: `a` opens a `GtkPopover` (same pattern as `m`/`e`/`!`, sharing their
   `_popup_hotkey_char`/`_popup_key_to_index` helpers) listing presets;
   presets are **layered** (multiple toggle on/off independently, composing
@@ -412,7 +409,8 @@ into the window (see below). Crop (`c`), straighten (`R`), rotate 90
   during `h`/`l` scrubbing.
 - Crop/straighten/rotate 90° and their graph composition (decision #35) are
   **not implemented** — future work; see the "Crop, straighten & rotate
-  tools" section above for the intended design.
+  tools" section in [ui-and-interactions.md](ui-and-interactions.md) for
+  the intended design.
 - Dirty flag: navigate (`h`/`l`/`g`/`G`/scroll), any grid/thumbnail
   selection (double-click/`Enter`, middle-click mark, `j`/`k` cursor move,
   toggle-to-large sync — routed through `ggaze_grid_set_select_func`'s gate
@@ -428,9 +426,8 @@ into the window (see below). Crop (`c`), straighten (`R`), rotate 90
   texture while held, restores the cached modified one on release — no GEGL
   recompute either way.
 - ICC color management via GEGL/babl (open question G) is **not yet wired**.
-- "GEGL not built in" status message (not yet a toast — this project has no
-  toast infra; reuses the info-overlay label) for `a`/`s` when the build has
-  no GEGL; safe no-op for the numeric preset hotkeys.
+- "GEGL not built in" status message (via the info-overlay label; this
+  project has no toast infra) for `a`/`s` when the build has no GEGL; safe no-op for the numeric preset hotkeys.
 
 **Tests**
 - Unit: `test_enhancer.c` (gated): each preset dims + non-zero; export file
@@ -457,9 +454,8 @@ move/open/quit; minimal build reports "GEGL not built in" cleanly. `c`/`R`/
 
 **Deliverables**
 - AppStream metainfo, app icons (symbolic + full).
-- Fedora RPM spec; optional Flatpak manifest.
+- Fedora RPM spec.
 - `ggaze(1)` man page (stub in M0, finalized here).
-- Window geometry persistence (GSettings `window-geometry`).
 - **Coverage gate → fail** at <80% on plain-C modules.
 - **Quality audit:** `auditing-code-quality` skill (C-adapted:
   c-best-practices + find-code-bugs + solid-principles + beyond-solid-principles),

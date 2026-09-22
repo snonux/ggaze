@@ -109,8 +109,7 @@ editing remains a non-goal.
   `Esc` discards directly
   (no prompt). Slideshow auto-advance discards a dirty preview silently
   instead of blocking on an unanswerable prompt.
-- Export format: defaults to the original extension (JPEG quality 95); a
-  format/quality chooser and a lossless `jpegtran`/`exiftool` path are later.
+- Export format: defaults to the original extension (JPEG quality 95).
 - Presets are configurable: `enhance-presets` GSettings `a(ss)` — ordered
   `(name, gegl-graph)` pairs. Order = hotkey order. Ships with sensible
   built-in defaults; user can add/edit in Preferences (`,`).
@@ -151,8 +150,7 @@ save a copy).
 contrast level, exposure stops) is editable in Preferences or via
 `gsettings` — no slider UI needed. The Curves preset uses a fixed curve shape
 (also editable in the graph text); a full interactive curve editor is out of
-scope — hand off to GIMP (`e`) for that. A later "fine adjust" mode could
-expose ± nudging of the active preset's main parameter.
+scope — hand off to GIMP (`e`) for that.
 
 Graph strings are illustrative. Built-in presets are built programmatically
 with `gegl_node_new_child`; user-authored presets can be stored as `gegl:gegl`
@@ -224,12 +222,9 @@ overwriting whatever the user is now looking at (last-write-wins).
   `gegl:tiff-load`/`-save`, `gegl:webp-load`/`-save`, `gegl:ppm-*`,
   `gegl:rgbe-*`, `gegl:gegl-buffer-load`/`-save`. Can augment GdkPixbuf on the
   enhance/export path (JXL/AVIF/HEIF still need their own libs).
-- **Thumbnail generation** — `gegl:load` → `gegl:scale-size` → save; an
-  alternative backend for the thumbnail cache.
 - **Transforms** — **crop** (`gegl:crop`), **straighten** (`gegl:rotate`) and
   **rotate 90°** (`gegl:rotate-on-center`) are in scope as tools
-  (`c`/`R`/`[`/`]`); lens correction (`gegl:lens-distortion`), red-eye
-  (`gegl:red-eye-removal`), and `gegl:scale-ratio` remain later/maybe.
+  (`c`/`R`/`[`/`]`).
 - **Tone mapping** — `gegl:reinhard-2005`, `gegl:mantiuk-2006`,
   `gegl:fattal-2002` (handy for linear/HDR-ish scenes).
 - **Artistic** (optional/fun) — `gegl:vignette`, `gegl:sepia`, `gegl:softglow`,

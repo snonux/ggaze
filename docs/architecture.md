@@ -97,7 +97,7 @@ ggaze
   them back. Exposes `mover_get_dests` (ordered, for the popup + hotkey
   assignment) and `mover_move(GList *paths, MoverDest *dest, GError **)`.
 - **opener** — owns the configured external-program list (loaded from
-  settings). Expands `%f` (and later `%F`) in the command and launches it
+  settings). Expands `%f` in the command and launches it
   detached via `GSubprocess` (`g_subprocess_new`). Exposes
   `opener_get_progs` (ordered, for the popup + hotkey assignment) and
   `opener_launch(GFile *file, OpenerProg *prog, GError **)`. Owns no GTK

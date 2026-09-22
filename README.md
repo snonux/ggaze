@@ -119,7 +119,6 @@ The full design lives in `docs/`:
 - [`docs/tech-stack.md`](docs/tech-stack.md) — libraries, decode backends, settings keys
 - [`docs/coding-conventions.md`](docs/coding-conventions.md) — C style
 - [`docs/gegl.md`](docs/gegl.md) — optional GEGL enhance plan
-- [`docs/roadmap.md`](docs/roadmap.md) — milestones
 - [`docs/open-questions.md`](docs/open-questions.md) — undecided items
 
 Contributing and agent workflow: see `AGENTS.md`.

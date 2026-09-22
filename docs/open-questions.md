@@ -34,7 +34,7 @@ locked in decision #37.
 
 ## F. Recursive directory walking
 - `ggaze folder/` → recurse into subdirs, or just flat siblings?
-- **Lean:** flat by default; add `--recursive` later.
+- **Lean:** flat; no recursive walking.
 
 ## G. Color management
 - Ignore sRGB-only for now; plan a later milestone for lcms2 + ICC.
@@ -55,26 +55,20 @@ locked in decision #37.
 - **Lean:** confirmed; `.Trash` lives with the shoot for easy inspection/emptying.
 
 ## J. Packaging targets
-- RPM first (Fedora native). Flatpak too? Copr repo?
-- **Lean:** RPM + AppStream; Flatpak later.
+- RPM (Fedora native).
+- **Lean:** RPM + AppStream.
 
 ## K. Camera-dump specifics
 - **RAW + JPEG pairs.** Many cameras shoot both. Show only the JPEG and hide
-  the matching `.RAF/.CR3/.NEF`? Or show RAW via embedded preview? Hide-pairs
-  is the culling-friendly choice.
-- **Burst grouping.** Auto-detect burst sequences (EXIF burst ID or
-  sub-second capture time clustering) and collapse them into a group, letting
-  `j`/`k` step group-by-group with an expand for within-burst? Big UX win for
-  the stated use case, but scope creep — decide whether it's M-something or
-  "later".
+  the matching `.RAF/.CR3/.NEF` — hide-pairs is the culling-friendly choice.
 - **Default sort.** Capture time (EXIF `DateTimeOriginal`) vs filename. Camera
   dumps are usually already named in shot order, so filename sort ≈ capture
   order; but capture-time sort is more robust after a burst of edits.
 - **Import folder.** Any integration with the camera-download location, or just
   "whatever path you point it at"? Lean: just a path.
-- **Decision:** burst grouping deferred to "later"; hide RAW sidecars by
-  default (toggle to reveal); default sort = filename (capture-time as a menu
-  option); import folder = just a path (decision #33).
+- **Decision:** hide RAW sidecars by default (toggle to reveal); default
+  sort = filename (capture-time as a menu option); import folder = just a path
+  (decision #33).
 
 ## L. Custom viewer widget vs GtkPicture
 - `GtkPicture` is simplest but limited zoom/pan. A custom `GtkWidget` gives
@@ -92,7 +86,7 @@ locked in decision #37.
 - `g_file_move` (rename / copy+delete) by default; a copy mode ("send a copy
   without removing") could be a modifier (`M` for copy?).
 - Collision: suffix `-1`, `-2`, … (never overwrite).
-- **Lean:** move + suffix; copy as a later option.
+- **Lean:** move + suffix.
 
 ## O. Auto-hotkey scheme past 10 destinations
 - `1`-`9`, `0`, then `a`-`z` gives 36 slots — plenty. Beyond that, a scrollable
@@ -100,9 +94,8 @@ locked in decision #37.
 - **Lean:** digits then letters; cap at a sane number.
 
 ## P. Undo depth
-- One level (`u` undoes the last `d` or `m`) is enough to start; a small stack
-  (10) is a cheap upgrade later.
-- **Lean:** one level now, stack later.
+- One level: `u` undoes the last `d` or `m`.
+- **Lean:** one level; no stack.
 
 ## Q. Marks vs re-sort / view switch / trash
 - Marks are path-based and held by the navigator: a re-sort reflows but keeps
@@ -110,14 +103,13 @@ locked in decision #37.
 - **Lean:** confirm during implementation.
 
 ## R. External programs — command format & launch
-- Store `name → command` pairs; command uses freedesktop `Exec` placeholders
-  (`%f` single file, `%F` multiple). Start with `%f` only; `%F` (marked set)
-  later.
+- Store `name → command` pairs; command uses the freedesktop `Exec`
+  placeholder (`%f` single file).
 - Launch via `GSubprocess` detached (non-blocking), or `g_app_info`?
   GSubprocess is simpler for raw commands; `g_app_info` is better if reusing
   `.desktop` entries.
-- **Lean:** raw command + `%f` + GSubprocess; revisit `.desktop` reuse later.
-- Should `e` apply to marks (`%F`)? **Lean:** current image first; marks later.
+- **Lean:** raw command + `%f` + GSubprocess.
+- `e` applies to the current image only.
 
 ## S. Shell scripts — execution model
 - Run via `/bin/sh -c "<cmd>"` (POSIX sh) or `bash -c`? Use the user's
@@ -126,11 +118,10 @@ locked in decision #37.
   rescan the directory (scripts may add/remove/move files). A destructive
   script could rename the current file away — rescan handles it (cursor falls
   back to nearest).
-- Placeholders: `%f` (current image), `%d` (current folder); `%F` (marked
-  set) later. **Shell injection:** single-quote substituted paths (filenames
+- Placeholders: `%f` (current image), `%d` (current folder). **Shell injection:** single-quote substituted paths (filenames
   can contain spaces, `$`, backticks) — or pass paths via env/argv instead of
   `sh -c`.
-- **Lean:** `/bin/sh -c`, single-quote paths, rescan on exit, `%f`/`%d` now.
+- **Lean:** `/bin/sh -c`, single-quote paths, rescan on exit, `%f`/`%d`.
 
 ## T. Thumbnail size — range, step, and cache
 - freedesktop TMS defines only 128 (normal) and 256 (large) cached sizes.
@@ -149,10 +140,9 @@ locked in decision #37.
 - **Apply timing:** only when paused on an image (not during `h`/`l` scrub);
   disable the preset during rapid navigation, reapply on settle. Confirm.
 - **Viewer path:** import decoded pixels → GeglBuffer (GdkPixbuf-source op or
-  babl), process, render output buffer → GdkTexture. Measure overhead; maybe
-  show a subtle "enhanced" badge in the header.
+  babl), process, render output buffer → GdkTexture.
 - **Export naming:** `<stem>-enhanced.<ext>`; collision → suffix `-1`. Same dir
-  as original by default; configurable later.
+  as original.
 - **gegl-gtk?** No — keep the custom viewer, render to GdkTexture.
 - **Save flow:** `s` = save enhanced copy; no auto-save; navigate-away (or
   quit, or `d`/`D`/`m`) with a dirty preview prompts Save/Discard/Cancel.
@@ -171,7 +161,6 @@ locked in decision #37.
   one file, so the target picks. Lean: yes.
 - Decode-for-PNG-copy runs in a `GTask` thread; cap size (downscale very
   large images?) — Lean: copy full-res, note the memory cost.
-- `Ctrl+Shift+c` to force copy-as-path (text) — later.
 
 ## W. Crop, straighten & rotate tools
 - **Crop rect UI:** overlay rectangle with handles; keyboard move
@@ -194,15 +183,12 @@ locked in decision #37.
 - Ship one-shot presets with sensible fixed strengths (brightness/contrast/
   saturation/etc.). Strength is editable in the `enhance-presets` gegl-graph
   text (Preferences / `gsettings`) — no slider UI, keeps KISS.
-- Later: a "fine adjust" mode that nudges the active preset's main parameter
-  with keys (which keys? `+`/`-` clash with zoom; maybe `H`/`L` or a sub-mode).
-  Lean: presets first; nudging only if asked.
 - **Curves:** GEGL has `gegl:contrast-curve` and `gegl:curve`; confirm the
   exact op name and how to embed a curve shape in the graph text. Interactive
   curve editing is out of scope (GIMP hand-off via `e`).
 - **Decision:** one active color preset (replace); crop/straighten/rotate
   stack; reset preview clears all; combine color presets via one `gegl-graph`
-  entry; curves via `gegl:contrast-curve`; no fine-adjust nudging in v1
+  entry; curves via `gegl:contrast-curve`; no fine-adjust nudging
   (decision #36).
 
 ## Y. EXIF orientation

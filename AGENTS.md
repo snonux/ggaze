@@ -182,7 +182,7 @@ src/loader/backends/       pixbuf.c jpeg.c jxl.c avif.c heif.c
 `docs/PLAN.md` (tracker + decisions log), `docs/IMPLEMENTATION.md` (execution
 plan + test-track tables + leak-check rules), `docs/architecture.md`,
 `docs/ui-and-interactions.md`, `docs/tech-stack.md`, `docs/gegl.md`,
-`docs/roadmap.md`, `docs/open-questions.md`. When docs disagree, the detail
+`docs/open-questions.md`. When docs disagree, the detail
 docs are authoritative and `PLAN.md` gets updated.
 
 ## Task workflow

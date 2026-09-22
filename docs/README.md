@@ -27,7 +27,6 @@ This folder contains **planning only**. No implementation yet.
 - [tech-stack.md](tech-stack.md) — libraries, build system, dependencies
 - [coding-conventions.md](coding-conventions.md) — C style (follows the c-best-practices skill)
 - [gegl.md](gegl.md) — GEGL quick-enhance & image-processing plan
-- [roadmap.md](roadmap.md) — milestones from skeleton to polish
 - [open-questions.md](open-questions.md) — decisions still to be made
 
 ## One-line summary
@@ -41,7 +40,6 @@ outright, `q` to leave.
 
 - `ggaze [FILE|FOLDER]` — open a file (large view) or a folder (grid).
 - `--version`, `--help`.
-- `--sort=name|time|size`, `--view=grid|large` (convenience/scripting; later).
 
 ## Working assumptions (correct me)
 

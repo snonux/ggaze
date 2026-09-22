@@ -14,9 +14,6 @@ The **KISS** part — things gthumb has that ggaze deliberately drops:
 - No batch-tools or editing toolbars; quick enhance is a popup, not a pane.
 - No location/path entry; the current folder is shown, not editable.
 
-Optional, off by default: a slim one-line status footer (filename · zoom ·
-size) for those who want it — toggled in settings, hidden otherwise.
-
 ## Window layout
 
 - `GtkApplicationWindow` holding a `GtkStack` with two views:
@@ -62,7 +59,7 @@ detail view and move from either.
   the hotkey to move the marked set (or the current image if none marked);
   `Esc` cancels. Order in settings = hotkey order.
 
-## Keybindings (default, all reassignable later via GSettings)
+## Keybindings (default)
 
 **Every GUI element has a corresponding hotkey, and it is shown on the
 element itself** — menu items print their key (e.g. `Move …   m`),
@@ -118,8 +115,7 @@ drift from the live bindings.
 | `?` / `F1`     | shortcuts overlay |
 | `q` / `Ctrl+q` | quit |
 
-Planned, not yet bound: `c` crop, `R` straighten, `[` / `]` rotate, `r`
-reload (the folder monitor reloads edited files automatically).
+Planned, not yet bound: `c` crop, `R` straighten, `[` / `]` rotate.
 
 `Esc` is *contextual back*: if there are marks, it clears them first; then in
 fullscreen it returns to large view, in large view it returns to the grid, in
@@ -133,7 +129,8 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
 - **Double-click** — toggle fit ↔ 100%.
 - **Middle-click** — toggle mark on a grid cell (grid view) / toggle
   fullscreen (large view).
-- **Touch pinch** — zoom; **swipe** — next/prev; **two-finger tap** — info.
+- **Touch pinch** — zoom; **swipe** — next/prev; **two-finger tap** — info
+  (planned; not yet implemented).
 
 ## Zoom behavior
 
@@ -159,8 +156,8 @@ Small card, top-left or bottom-right:
 - filename, dimensions, format, file size
 - EXIF: camera, lens, focal length, aperture, shutter, ISO, date taken,
   orientation (auto-applied on load)
-- shot number within the current burst group (once burst grouping lands)
 - color space (once color management lands)
+- a histogram for judging exposure (planned)
 Loaded lazily; never blocks display of the pixels.
 
 ## Grid view behavior
@@ -170,8 +167,7 @@ Loaded lazily; never blocks display of the pixels.
 - Trashed (`.Trash`) and permanently-deleted items stay listed but **dimmed**
   with a small badge, so you can see culling progress at a glance. (Toggle to
   hide them entirely via a menu option / setting.)
-- `h`/`l`/`j`/`k`, arrow keys, `g`/`G`, click, and type-to-search (jump by
-  filename prefix) all move the cursor: `h`/`l` prev/next cell, `j`/`k` row
+- `h`/`l`/`j`/`k`, arrow keys, `g`/`G`, and click all move the cursor: `h`/`l` prev/next cell, `j`/`k` row
   down/up. `Enter` opens large; `d`/`D` work here too.
 - Re-sorting (name / capture time / size) reflows the grid and keeps the
   current image visible.
@@ -220,8 +216,7 @@ Loaded lazily; never blocks display of the pixels.
   `GTask` thread so the UI doesn't block.
 - **Marks present** → copies the marked **files** as `text/uri-list` (plus a
   `text/plain` path list), so file-aware apps and file managers can paste them.
-- A toast confirms ("Copied image" / "Copied 3 files"). `Ctrl+Shift+c` (later)
-  copies the **original** (un-modified) image or the path.
+- A toast confirms ("Copied image" / "Copied 3 files").
 
 ## Opening in an external program
 
@@ -237,8 +232,7 @@ Loaded lazily; never blocks display of the pixels.
   Press `2` to launch that program with the current image's path; `Esc`
   cancels.
 - Acts on the **current image** (the **original file on disk**, not the
-  preview); a later option may pass the marked set (`%F`). To open the modified
-  version, export it first (`s`).
+  preview). To open the modified version, export it first (`s`).
 - Programs are configured in Preferences (`,`) as an ordered list of
   name → command pairs. The command uses freedesktop `Exec` placeholders:
   `%f` = the single current file path (e.g. `gimp %f`, `identify %f`).

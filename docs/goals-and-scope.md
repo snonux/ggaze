@@ -77,8 +77,7 @@
 - **Full image editing** (layers, masks, crop-save, annotate). Quick
   non-destructive enhance + export-copy via GEGL is in scope (goal 13); deep
   editing is not.
-- **RAW development.** May show embedded JPEG preview later, but no demosaic.
-  GEGL does not demosaic either.
+- **RAW development.** No demosaic (GEGL does not demosaic either).
 - **Library / catalog / albums / tags.** That is beets-for-photos, not this.
 - **Cloud / network sources.** Local files only.
 - **Batch processing in-app.** Bulk convert/resize is a job for the `!` runner

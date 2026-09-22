@@ -10,7 +10,7 @@
 | Object/async  | GLib / GObject / GTask                    | bundled with GTK                         |
 | Config        | GSettings + Gio                           | schema `org.buetow.ggaze` *(placeholder)* |
 | Build          | Meson + Ninja                             | GNOME/Fedora standard                    |
-| Packaging     | RPM (Fedora), optional Flatpak            | AppStream metainfo                       |
+| Packaging     | RPM (Fedora)                              | AppStream metainfo                       |
 | Conventions   | c-best-practices skill                   | see [coding-conventions.md](coding-conventions.md) |
 | Image proc.  | GEGL + babl *(optional, feature-gated)* | quick enhance, color mgmt, export copy; see [gegl.md](gegl.md) |
 | Clipboard    | GdkClipboard + GdkContentProvider        | `image/png` (pixels) and `text/uri-list` (files) for `Ctrl+c` |
@@ -23,22 +23,20 @@
 Tiered: a sniffed-format dispatcher selects a backend; GdkPixbuf is the
 fallback for anything common it already supports.
 
-- **GdkPixbuf** (fallback) — PNG, JPEG, GIF (animated via `GdkPixbufAnimation`),
-  WebP, TIFF, ICO.
+- **GdkPixbuf** (fallback) — PNG, JPEG, GIF, WebP, TIFF, ICO (first frame;
+  animated GIF/WebP playback is planned).
 - **libjpeg-turbo** (optional, direct) — faster JPEG + progressive first-scan
   low-res preview.
 - **libjxl** — JPEG XL.
 - **libavif** — AVIF.
 - **libheif** — HEIF / HEIC (and AVIF via libheif if libavif absent).
-- **libpng** — only if GdkPixbuf path is insufficient (unlikely first cut).
 - **GEGL loaders** (optional, if GEGL enabled) — `gegl:jpg/png/tiff/webp/…-load`
   can augment the enhance/export path and bring ICC-aware decode; JXL/AVIF/HEIF
   still need their own libs.
 - **EXIF orientation** — every backend honors the EXIF Orientation tag so the
   decoded texture is upright (GdkPixbuf: `gdk_pixbuf_apply_embedded_orientation`;
   others read the tag via libexif and rotate/flip). Manual rotate/straighten
-  compose on top; `s` export resets the tag to "normal" (1) to avoid
-  double-rotation in other apps.
+  compose on top.
 
 Each backend behind a `GgazeLoaderBackend` struct:
 `gboolean (*can_load)(const guint8 *head, gsize len);`
@@ -48,11 +46,10 @@ build (GdkPixbuf only) is possible.
 
 ## Progressive preview (low-res first)
 
-For large/slow images, show a quick low-res or progressive scan before the full
-frame is decoded. Concretely: libjpeg-turbo can yield a downscaled scan after
-reading only the header + a few MCU rows; libjxl supports partial decode. The
-loader API should allow streaming a low-res `GdkTexture` first, then replacing
-it. Treat as a later milestone, but design the loader signature for it now.
+For large/slow images, ggaze shows a quick low-res or progressive scan before
+the full frame is decoded. Concretely: the libjpeg-turbo backend yields a
+downscaled scan after reading only the header + a few MCU rows; the loader API
+streams a low-res `GdkTexture` first, then replaces it.
 
 ## Thumbnail cache
 
@@ -84,7 +81,7 @@ it. Treat as a later milestone, but design the loader signature for it now.
 - `slideshow-delay` — double (seconds)
 - `thumbnail-size` — int: grid thumbnail pixel size (resizable via `+`/`-`)
 - `hide-trashed`    — bool
-- `window-geometry` — `(iiib)` (width, height, fullscreen, maximized); persisted, restored on launch
+- `window-geometry` — `(iiib)` (width, height, fullscreen, maximized)
 - `destinations`    — `a(ss)`: ordered array of `(name, path)` pairs for the
   `m` move popup. List order determines auto-assigned hotkeys (`1`, `2`, …).
   Edited via the Preferences dialog (`,`) or `gsettings`.
