@@ -19,7 +19,9 @@ ggaze
 ├── enhancer.{c,h}        # (optional) GEGL quick-enhance presets; non-destructive apply + export copy
 ├── clipboard.{c,h}       # image/png (displayed texture) or file-URI content providers (no state)
 ├── viewload.{c,h}        # large-view load pipeline: texture LRU, one active load, prefetch, last-write-wins
-├── info-overlay.{c,h}    # EXIF card + status line over the stack (async info gather, auto-hide)
+├── info-overlay.{c,h}    # EXIF card + histogram + status line over the stack (async gather, auto-hide)
+├── histogram.{c,h}       # RGB/luminance binner over the displayed texture (plain C, subsampled)
+├── histogram-view.{c,h}  # GgazeHistogramView : GtkWidget — snapshot-drawn plot inside the card
 ├── save-gate.{c,h}       # Save/Discard/Cancel prompt gate every discarding continuation funnels through
 ├── delete-confirm.{c,h}  # >1-target permanent-delete confirm (captured targets, folder re-check)
 ├── dialog-util.{c,h}     # alert-dialog toplevel lookup shared by the two dialog modules

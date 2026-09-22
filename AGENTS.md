@@ -126,9 +126,9 @@ backend — gate code with `GGAZE_HAVE_*` from `ggaze-config.h` and toast
   whose path == `navigator.current` (**last-write-wins**).
 - Bounded `GdkTexture` LRU (cap 4) to bound memory.
 - Plain-C modules (`navigator`, `loader`, `detect`, `thumbnail`, `trash`,
-  `mover`, `opener`, `runner`, `enhancer`, `info`, `texturecache`,
-  `clipboard`, `viewload`, `pathutil`, `settings-pair`, `undo`) own no
-  GtkWidget and are unit-tested standalone.
+  `mover`, `opener`, `runner`, `enhancer`, `info`, `histogram`,
+  `texturecache`, `clipboard`, `viewload`, `pathutil`, `settings-pair`,
+  `undo`) own no GtkWidget and are unit-tested standalone.
 
 ## Memory (C has no GC)
 
@@ -144,7 +144,9 @@ src/main.c            entry, CLI, GtkApplication
 src/app.{c,h}         GApplication, single-instance, open (files or folder)
 src/window.{c,h}      GgazeWindow : layout (header bar + menu, grid/large/empty stack) and action routing
 src/viewload.{c,h}    large-view load pipeline: texture LRU, one active load, prefetch, last-write-wins
-src/info-overlay.{c,h} EXIF card + status line over the stack (async info gather)
+src/info-overlay.{c,h} EXIF card + histogram + status line over the stack (async gather)
+src/histogram.{c,h}   RGB/luminance binner over a texture (plain C, subsampled)
+src/histogram-view.{c,h} GgazeHistogramView : GtkWidget (snapshot-drawn plot on the card)
 src/viewer.{c,h}      GgazeViewer : GtkWidget (large canvas, zoom/pan)
 src/gridview.{c,h}    GgazeGrid (thumbnail overview; intent signals, no window action names)
 src/shortcuts.{c,h}   the ONE key table: bindings, ? help, header tooltips, menu labels

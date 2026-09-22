@@ -14,6 +14,11 @@
  * instance re-activation into a different folder) that the "changed" signal
  * alone does not cover.
  *
+ * And 0c2: the card carries an RGB/luminance histogram of the displayed
+ * texture, gathered in the same async request as the EXIF text. See
+ * test_info_shows_histogram() -- a plot for the image on screen, none from
+ * the grid, and a different plot after navigating to another image.
+ *
  * The window is built with g_object_new() (no "application" property): the
  * stack/header are constructed in ggaze_window_init, independent of the app
  * association. Setting GtkWindow:application requires the GApplication
@@ -35,6 +40,8 @@
 #include "window.h"
 
 #include "ggaze-config.h"
+#include "histogram-view.h"
+#include "histogram.h"
 #include "viewer.h"
 
 #if GGAZE_HAVE_GEGL
@@ -44,6 +51,7 @@
 #include <gio/gio.h>
 #include <glib.h>
 #include <gtk/gtk.h>
+#include <string.h>
 
 /* Windows built here are torn down with gtk_window_destroy(), never a plain
  * g_object_unref(): GTK4 hands the caller's reference to its internal
@@ -277,6 +285,89 @@ test_info_hides_on_reopen(void) {
    cleanup_temp_dir(c_dir2);
 }
 
+/* Fire `i`, wait for the card and return the plot's histogram, asserting the
+ * plot is up and was built from exactly u_samples pixels (the fixtures are
+ * small enough that every pixel is read, so the sample count IS the
+ * dimensions and pins the plot to the image on screen). */
+static const Histogram *
+show_info_expect_plot(GgazeWindow *p_win, guint64 u_samples) {
+   GtkWidget *p_plot = ggaze_window_get_info_histogram(p_win);
+   fire(p_win, "win.info");
+   wait_for_info(p_win);
+   g_assert_true(gtk_widget_get_visible(p_plot));
+   const Histogram *p_hist =
+      ggaze_histogram_view_get_histogram(GGAZE_HISTOGRAM_VIEW(p_plot));
+   g_assert_nonnull(p_hist);
+   g_assert_cmpuint(p_hist->u_samples, ==, u_samples);
+   g_assert_cmpuint(p_hist->u_peak, >, 0);
+   return (p_hist);
+}
+
+/* From the grid there is no displayed texture to judge, so `i` brings the
+ * card up (dimensions, EXIF) without a plot rather than with the viewer's
+ * leftovers. Expects the card to be down on entry. */
+static void
+assert_grid_card_has_no_plot(GgazeWindow *p_win) {
+   GtkWidget *p_plot = ggaze_window_get_info_histogram(p_win);
+   fire(p_win, "win.toggle-view");
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "grid");
+   fire(p_win, "win.info");
+   wait_for_info(p_win);
+   g_assert_false(gtk_widget_get_visible(p_plot));
+   g_assert_null(
+      ggaze_histogram_view_get_histogram(GGAZE_HISTOGRAM_VIEW(p_plot)));
+}
+
+/* 0c2: `i` in the large view shows a histogram of the displayed texture,
+ * built from the texture's actual pixels (plain.jpg is 6x3 -> 18 samples,
+ * rot6.jpg lands upright as 4x8 -> 32). Navigating away hides it with the
+ * card (gu0), and `i` on the new image yields the new image's plot, not a
+ * stale one; from the grid the card carries no plot at all. */
+static void
+test_info_shows_histogram(void) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-info-hist-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "plain.jpg"); /* A: 6x3, sorts first */
+   copy_fixture(c_dir, "rot6.jpg");  /* B: 4x8 upright, sorts second */
+
+   char        *c_p0  = g_build_filename(c_dir, "plain.jpg", NULL);
+   GFile       *p_f0  = g_file_new_for_path(c_p0);
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_f0);
+   wait_for_load(p_win);
+
+   GtkWidget *p_lbl  = ggaze_window_get_info_label(p_win);
+   GtkWidget *p_plot = ggaze_window_get_info_histogram(p_win);
+   g_assert_true(GGAZE_IS_HISTOGRAM_VIEW(p_plot));
+   g_assert_false(gtk_widget_get_visible(p_plot));
+
+   Histogram hist_a = *show_info_expect_plot(p_win, 6 * 3); /* A's bins */
+
+   fire(p_win, "win.next"); /* -> B: the card and its plot go with A */
+   g_assert_false(gtk_widget_get_visible(p_lbl));
+   g_assert_false(gtk_widget_get_visible(p_plot));
+   g_assert_null(
+      ggaze_histogram_view_get_histogram(GGAZE_HISTOGRAM_VIEW(p_plot)));
+   wait_for_load(p_win);
+
+   const Histogram *p_b = show_info_expect_plot(p_win, 4 * 8);
+   g_assert_cmpint(memcmp(hist_a.au_bins, p_b->au_bins, sizeof(hist_a.au_bins)),
+                   !=, 0);
+
+   fire(p_win, "win.info"); /* toggle B's card off before the grid check */
+   g_assert_false(gtk_widget_get_visible(p_lbl));
+   assert_grid_card_has_no_plot(p_win);
+
+   g_object_unref(p_f0);
+   g_free(c_p0);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+
 /* tu0 requirement 8: every new enhance UI entry point must stay safe when
  * GEGL is not built in, and say so clearly rather than silently no-op'ing or
  * crashing. Built (and run) in BOTH lanes (unlike tests/test_enhance_flow.c,
@@ -364,6 +455,7 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/window/info_hides_on_navigation",
                    test_info_hides_on_navigation);
    g_test_add_func("/window/info_hides_on_reopen", test_info_hides_on_reopen);
+   g_test_add_func("/window/info_shows_histogram", test_info_shows_histogram);
    g_test_add_func("/window/enhance_a_is_safe_with_and_without_gegl",
                    test_enhance_a_is_safe_with_and_without_gegl);
    return (g_test_run());

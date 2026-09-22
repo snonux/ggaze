@@ -65,6 +65,13 @@ void ggaze_window_clear_texture_cache(GgazeWindow *p_win);
  * screen for the newly-current file. */
 GtkWidget *ggaze_window_get_info_label(GgazeWindow *p_win);
 
+/* The info card's histogram plot (a GgazeHistogramView; see
+ * histogram-view.h). Visible only while the card shows a file whose texture
+ * was on screen when `i` was pressed. Exposed for the same reason as the
+ * label: tests assert that `i` produces a plot for the displayed image and
+ * that navigating to another image yields a different one. */
+GtkWidget *ggaze_window_get_info_histogram(GgazeWindow *p_win);
+
 /* The GdkContentProvider win.copy (Ctrl+c) would set on the clipboard, built
  * from the current window state WITHOUT touching the (display-backend-
  * dependent) system clipboard, so the copy decision is testable without a

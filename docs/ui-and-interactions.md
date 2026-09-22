@@ -159,9 +159,20 @@ Small card, top-left or bottom-right:
 - filename, dimensions, format, file size
 - EXIF: camera, lens, focal length, aperture, shutter, ISO, date taken,
   orientation (auto-applied on load)
+- **histogram** of the image on screen: red, green and blue as translucent
+  bars over a grey luminance (Rec.709) curve, 64 bins, one shared scale, for
+  judging exposure while culling. It is built from the *displayed* texture
+  (so an active enhance preview shows the preview's histogram) and only from
+  the large view; from the grid the card comes up without a plot rather than
+  with whatever the viewer last showed.
 - shot number within the current burst group (once burst grouping lands)
 - color space (once color management lands)
-Loaded lazily; never blocks display of the pixels.
+Loaded lazily; never blocks display of the pixels. The histogram is gathered
+in the same background task as the EXIF text, only once `i` is pressed, and
+large images are subsampled to at most 512×512 pixels before binning, so a
+100-megapixel photo costs the same as a small one. Navigating away hides the
+card (and its plot) with the previous file; `i` on the new image shows the
+new image's histogram.
 
 ## Grid view behavior
 

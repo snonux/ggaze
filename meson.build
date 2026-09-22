@@ -67,6 +67,8 @@ ggaze_src = files(
       'src/texturecache.c',
       'src/viewload.c',
       'src/info-overlay.c',
+      'src/histogram.c',
+      'src/histogram-view.c',
       'src/undo.c',
       'src/thumbnail.c',
       'src/trash.c',

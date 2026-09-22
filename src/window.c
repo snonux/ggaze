@@ -1464,16 +1464,26 @@ _slideshow_tick(gpointer p_data) {
 }
 
 /* `i`: toggle the EXIF/dimensions card for the current file (gathered
- * asynchronously by the InfoOverlay). */
+ * asynchronously by the InfoOverlay), with a histogram of the texture on
+ * screen. The texture is passed only from the large view: there the viewer
+ * holds either nothing (still decoding) or the current file's pixels
+ * (viewload's last-write-wins), including an active enhance preview, which
+ * is the exposure the user is actually judging. From the grid the card
+ * carries no plot rather than one for whatever the viewer last showed. */
 static void
 _show_info(GgazeWindow *p_win) {
    if (!_require_folder(p_win)) {
       return;
    }
    GFile *p_cur = navigator_get_current(p_win->p_nav);
-   if (p_cur != NULL) {
-      info_overlay_toggle_for_file(p_win->p_info, p_cur);
+   if (p_cur == NULL) {
+      return;
    }
+   GdkTexture *p_tex = NULL;
+   if (_get_view(p_win) == GGAZE_VIEW_LARGE) {
+      p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_win->p_viewer));
+   }
+   info_overlay_toggle_for_file(p_win->p_info, p_cur, p_tex);
 }
 
 /* Hide the info overlay because the current file changed: reached from
@@ -3255,6 +3265,12 @@ GtkWidget *
 ggaze_window_get_info_label(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
    return (info_overlay_get_label(p_win->p_info));
+}
+
+GtkWidget *
+ggaze_window_get_info_histogram(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
+   return (info_overlay_get_histogram(p_win->p_info));
 }
 
 /* The content provider win.copy would set on the clipboard, without touching

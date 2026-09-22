@@ -214,6 +214,18 @@ test_info = executable(
 )
 test('info', test_info, suite : 'unit', env : fixtures_env)
 
+# histogram: the plain-C RGB/luminance binner behind the info card's plot,
+# driven over hand-built pixel buffers and GdkMemoryTextures (no display).
+test_histogram = executable(
+   'test_histogram',
+   ['test_histogram.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [gtk4_dep, glib_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('histogram', test_histogram, suite : 'unit', env : fixtures_env)
+
 test_mover = executable(
    'test_mover', ['test_mover.c', ggaze_conf_h],
    include_directories : [inc, src_inc],
