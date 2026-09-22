@@ -1,8 +1,18 @@
-/* popup_list.c — shared hotkey list popover (see popup_list.h). */
+/*:*
+ * ggaze — shared hotkey list popover
+ *
+ * See popup_list.h.
+ *
+ * Copyright (c) 2026 ggaze contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *:*/
+
 #include "popup_list.h"
 
 #include <glib.h>
 #include <gtk/gtk.h>
+
+#include "settings-pair.h"
 
 struct PopupList {
    GtkWidget  *p_pop;      /* GtkPopover, parented to the caller's stack */
@@ -43,6 +53,12 @@ popup_list_key_to_index(guint u_keyval) {
    return (-1);
 }
 
+const char *
+popup_list_settings_pair_name(const GPtrArray *p_items, guint u_idx) {
+   const SettingsPair *p_pr = g_ptr_array_index((GPtrArray *)p_items, u_idx);
+   return (p_pr->c_name);
+}
+
 char *
 popup_list_row_label(guint u_idx, const char *c_name) {
    char c_hk = popup_list_hotkey_char(u_idx);
@@ -60,8 +76,14 @@ _on_closed(GtkPopover *p_pop, gpointer p_data) {
    popup_list_destroy(p_list->pp_storage);
 }
 
-/* Esc cancels; a bare digit/letter hotkey fires the matching row. Modified
- * keys (Ctrl+a, Shift+...) are propagated so they are not swallowed. */
+/* Esc cancels; a bare digit/letter hotkey fires the matching row. Every other
+ * unmodified key is swallowed: the popover is parented into the window's
+ * stack, so a key it propagates bubbles up to the window's GLOBAL-scope
+ * shortcuts -- with the chooser open, `d` used to trash the current image,
+ * `q` quit and `h`/`l` moved the target the popover's title still named.
+ * A modal chooser must answer only its own keys. Chords (Ctrl+..., Alt+...)
+ * still propagate; lock modifiers (Caps Lock, Num Lock) are ignored so the
+ * hotkeys keep working with Caps Lock on. */
 static gboolean
 _on_key_pressed(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
                 GdkModifierType e_state, gpointer p_data) {
@@ -72,15 +94,15 @@ _on_key_pressed(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
       popup_list_destroy(p_list->pp_storage);
       return (GDK_EVENT_STOP);
    }
-   if (e_state != 0) {
-      return (GDK_EVENT_PROPAGATE);
+   if ((e_state & gtk_accelerator_get_default_mod_mask() & ~GDK_SHIFT_MASK) !=
+       0) {
+      return (GDK_EVENT_PROPAGATE); /* a chord: not ours */
    }
-   gint i_idx = popup_list_key_to_index(u_keyval);
-   if (i_idx < 0 || (guint)i_idx >= p_list->u_count) {
-      return (GDK_EVENT_PROPAGATE); /* no row bound to that hotkey */
+   gint i_idx = popup_list_key_to_index(gdk_keyval_to_lower(u_keyval));
+   if (i_idx >= 0 && (guint)i_idx < p_list->u_count) {
+      p_list->fn_activate(p_list->p_user_data, (guint)i_idx);
    }
-   p_list->fn_activate(p_list->p_user_data, (guint)i_idx);
-   return (GDK_EVENT_STOP);
+   return (GDK_EVENT_STOP); /* bound or not, the key stops here */
 }
 
 /* Row click (mouse): fire the matching row's action. */
@@ -117,9 +139,10 @@ popup_list_new(GtkWidget *p_parent, PopupList **pp_storage, const char *c_title,
    g_signal_connect(GTK_POPOVER(p_list->p_pop), "closed",
                     G_CALLBACK(_on_closed), p_list);
 
-   /* Key controller on the popover (capture phase): the popover is its own
-    * native / shortcut scope, so this sees the hotkeys without the parent
-    * window's GLOBAL shortcuts intercepting them. */
+   /* Key controller on the popover (capture phase): it sees every key first
+    * and stops all but chords, so nothing leaks to the window's GLOBAL
+    * shortcuts (those are registered on the root, which the popover shares
+    * with the window). */
    GtkEventController *p_kc = gtk_event_controller_key_new();
    gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
    g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_on_key_pressed), p_list);

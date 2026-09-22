@@ -3,7 +3,8 @@
  *
  * GObject (no GtkWidget) holding the current folder listing: filter to
  * image MIME, sort (name/time/size), cursor + path-based marks, GFileMonitor
- * with debounce, nearest-fallback on current-file removal. Emits "changed".
+ * with debounce, nearest-fallback on current-file removal. Emits "changed"
+ * with a GgazeNavChange mask saying what changed.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -48,6 +49,7 @@ struct _Navigator {
    GFileMonitor *p_monitor;
    guint         u_debounce_ms;
    guint         u_debounce_id; /* 0 = none pending */
+   char         *c_error;       /* last enumerate failure, NULL if readable */
 };
 
 G_DEFINE_TYPE(Navigator, navigator, G_TYPE_OBJECT)
@@ -191,10 +193,12 @@ _is_live_index(Navigator *p_nav, guint u_index) {
    return (!g_hash_table_contains(p_nav->p_removed, p_file));
 }
 
-/* Re-read the directory, filter, hide-raw, sort, and commit; keep the current
- * file by path, falling back to the nearest by position if it is gone. */
-static void
-_relist(Navigator *p_nav) {
+/* Enumerate p_nav's folder into Entry structs (regular image files only,
+ * dotfiles skipped) and collect the lowercase stems of the JPEGs seen, for
+ * the RAW-sidecar pruning. Returns NULL (with c_error set) when the folder
+ * cannot be enumerated. */
+static GPtrArray *
+_enumerate_entries(Navigator *p_nav, GHashTable *p_jpeg_stems) {
    GError          *p_err  = NULL;
    GFileEnumerator *p_enum = g_file_enumerate_children(
       p_nav->p_dir,
@@ -202,30 +206,20 @@ _relist(Navigator *p_nav) {
       "time::modified,standard::size",
       G_FILE_QUERY_INFO_NONE, NULL, &p_err);
    if (p_enum == NULL) {
-      if (p_err != NULL) {
-         g_warning("navigator: enumerate failed: %s", p_err->message);
-         g_error_free(p_err);
-      }
-      return;
+      g_free(p_nav->c_error);
+      p_nav->c_error = g_strdup(p_err != NULL ? p_err->message : "?");
+      g_clear_error(&p_err);
+      return (NULL);
    }
-
-   GPtrArray  *p_entries = g_ptr_array_new_with_free_func(_entry_free);
-   GHashTable *p_jpeg_stems =
-      g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-
-   GFileInfo *p_info = NULL;
+   g_clear_pointer(&p_nav->c_error, g_free);
+   GPtrArray *p_entries = g_ptr_array_new_with_free_func(_entry_free);
+   GFileInfo *p_info    = NULL;
    while ((p_info = g_file_enumerator_next_file(p_enum, NULL, NULL)) != NULL) {
       const char *c_name = g_file_info_get_name(p_info);
-      if (c_name == NULL || c_name[0] == '.') {
-         g_object_unref(p_info);
-         continue;
-      }
-      if (g_file_info_get_file_type(p_info) != G_FILE_TYPE_REGULAR) {
-         g_object_unref(p_info);
-         continue;
-      }
-      const char *c_ct = g_file_info_get_content_type(p_info);
-      if (!_is_image_file(c_name, c_ct)) {
+      const char *c_ct   = g_file_info_get_content_type(p_info);
+      if (c_name == NULL || c_name[0] == '.' ||
+          g_file_info_get_file_type(p_info) != G_FILE_TYPE_REGULAR ||
+          !_is_image_file(c_name, c_ct)) {
          g_object_unref(p_info);
          continue;
       }
@@ -237,50 +231,46 @@ _relist(Navigator *p_nav) {
          p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED);
       p_e->i_size = (gint64)g_file_info_get_size(p_info);
       g_object_unref(p_info);
-
-      const char *c_ext = _ext_of(p_e->c_name); /* p_e->c_name is owned;
-                                                 * c_name was borrowed */
-      if (_is_jpeg_ext(c_ext)) {
-         char *c_stem = _stem_lower(p_e->c_name);
-         g_hash_table_add(p_jpeg_stems, c_stem);
+      if (_is_jpeg_ext(_ext_of(p_e->c_name))) {
+         g_hash_table_add(p_jpeg_stems, _stem_lower(p_e->c_name));
       }
       g_ptr_array_add(p_entries, p_e);
    }
    g_object_unref(p_enum);
+   return (p_entries);
+}
 
-   /* Drop RAW sidecars that have a JPEG twin (decision #33). */
-   if (p_nav->b_hide_raw) {
-      for (gsize u_i = p_entries->len; u_i > 0; u_i--) {
-         Entry      *p_e   = (Entry *)g_ptr_array_index(p_entries, u_i - 1);
-         const char *c_ext = _ext_of(p_e->c_name);
-         if (_is_raw_ext(c_ext)) {
-            char *c_stem = _stem_lower(p_e->c_name);
-            if (g_hash_table_contains(p_jpeg_stems, c_stem)) {
-               g_ptr_array_remove_index(p_entries, u_i - 1);
-            }
-            g_free(c_stem);
-         }
+/* Drop RAW sidecars that have a JPEG twin (decision #33). */
+static void
+_drop_raw_sidecars(GPtrArray *p_entries, GHashTable *p_jpeg_stems) {
+   for (gsize u_i = p_entries->len; u_i > 0; u_i--) {
+      Entry *p_e = (Entry *)g_ptr_array_index(p_entries, u_i - 1);
+      if (!_is_raw_ext(_ext_of(p_e->c_name))) {
+         continue;
       }
+      char *c_stem = _stem_lower(p_e->c_name);
+      if (g_hash_table_contains(p_jpeg_stems, c_stem)) {
+         g_ptr_array_remove_index(p_entries, u_i - 1);
+      }
+      g_free(c_stem);
    }
-   g_hash_table_unref(p_jpeg_stems);
+}
 
-   g_ptr_array_sort_with_data(p_entries, _compare_entries,
-                              GINT_TO_POINTER((gint)p_nav->e_sort));
-
-   /* Remember current by path, then commit. */
+/* Replace the listing with the sorted entries, keeping the cursor on the
+ * same file by path, else on the nearest position, else parked. */
+static void
+_commit_entries(Navigator *p_nav, GPtrArray *p_entries) {
    GFile *p_keep = NULL;
    if (p_nav->i_current >= 0 && (guint)p_nav->i_current < p_nav->p_files->len) {
       p_keep = g_object_ref(
          g_ptr_array_index(p_nav->p_files, (guint)p_nav->i_current));
    }
    gint i_old = p_nav->i_current;
-
    g_ptr_array_set_size(p_nav->p_files, 0);
    for (gsize u_i = 0; u_i < p_entries->len; u_i++) {
       Entry *p_e = (Entry *)g_ptr_array_index(p_entries, u_i);
       g_ptr_array_add(p_nav->p_files, g_object_ref(p_e->p_file));
    }
-
    if (p_keep != NULL) {
       gint i_found = _find_index_by_file(p_nav, p_keep);
       if (i_found >= 0) {
@@ -296,9 +286,12 @@ _relist(Navigator *p_nav) {
    } else if (p_nav->i_current < 0) {
       p_nav->i_current = 0;
    }
+}
 
-   /* Prune marks whose file is no longer in the listing (external delete via
-    * the monitor, or a rescan). Keeps marks consistent with the live folder. */
+/* Prune marks (and the `V` range anchor) whose file left the listing, so
+ * mark-based ops never target paths that no longer exist. */
+static void
+_prune_marks(Navigator *p_nav) {
    GHashTableIter iter;
    gpointer       p_key;
    g_hash_table_iter_init(&iter, p_nav->p_marks);
@@ -307,37 +300,55 @@ _relist(Navigator *p_nav) {
          g_hash_table_iter_remove(&iter);
       }
    }
-   /* The range anchor must also be a live marked file: drop it if its file
-    * left the listing (external delete / rescan), so `V` no-ops instead of
-    * range-marking from a stale path. */
    if (p_nav->p_last_mark != NULL &&
        _find_index_by_file(p_nav, p_nav->p_last_mark) < 0) {
       g_clear_object(&p_nav->p_last_mark);
    }
+}
 
-   /* Preserve removed (dimmed) items: keep them in the listing even if absent
-    * from disk (trashed/deleted this session); un-remove any that reappeared.
-    */
-   {
-      GHashTableIter riter;
-      gpointer       rkey;
-      g_hash_table_iter_init(&riter, p_nav->p_removed);
-      while (g_hash_table_iter_next(&riter, &rkey, NULL)) {
-         GFile *p_rf = (GFile *)rkey;
-         if (_find_index_by_file(p_nav, p_rf) < 0) {
-            g_ptr_array_add(p_nav->p_files, g_object_ref(p_rf));
-         } else {
-            g_hash_table_iter_remove(&riter);
-         }
+/* Keep removed (dimmed) items listed even though they left the disk
+ * (trashed/deleted this session); un-remove any that reappeared. */
+static void
+_reconcile_removed(Navigator *p_nav) {
+   GHashTableIter iter;
+   gpointer       p_key;
+   g_hash_table_iter_init(&iter, p_nav->p_removed);
+   while (g_hash_table_iter_next(&iter, &p_key, NULL)) {
+      GFile *p_rf = (GFile *)p_key;
+      if (_find_index_by_file(p_nav, p_rf) < 0) {
+         g_ptr_array_add(p_nav->p_files, g_object_ref(p_rf));
+      } else {
+         g_hash_table_iter_remove(&iter);
       }
    }
+}
 
+/* Re-read the directory, filter, hide-raw, sort, and commit; keep the current
+ * file by path, falling back to the nearest by position if it is gone. On an
+ * enumerate failure the listing is emptied (the folder is gone or
+ * unreadable) and navigator_get_error() says why. */
+static void
+_relist(Navigator *p_nav) {
+   GHashTable *p_jpeg_stems =
+      g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+   GPtrArray *p_entries = _enumerate_entries(p_nav, p_jpeg_stems);
+   if (p_entries == NULL) {
+      p_entries = g_ptr_array_new_with_free_func(_entry_free);
+   } else if (p_nav->b_hide_raw) {
+      _drop_raw_sidecars(p_entries, p_jpeg_stems);
+   }
+   g_hash_table_unref(p_jpeg_stems);
+   g_ptr_array_sort_with_data(p_entries, _compare_entries,
+                              GINT_TO_POINTER((gint)p_nav->e_sort));
+   _commit_entries(p_nav, p_entries);
+   _prune_marks(p_nav);
+   _reconcile_removed(p_nav);
    g_ptr_array_unref(p_entries);
 }
 
 static void
-_emit_changed(Navigator *p_nav) {
-   g_signal_emit(p_nav, u_changed_signal, 0);
+_emit_changed(Navigator *p_nav, guint u_flags) {
+   g_signal_emit(p_nav, u_changed_signal, 0, u_flags);
 }
 
 /* --- monitor / debounce -------------------------------------------------- */
@@ -347,7 +358,7 @@ _debounce_fire(gpointer p_data) {
    Navigator *p_nav     = (Navigator *)p_data;
    p_nav->u_debounce_id = 0;
    _relist(p_nav);
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_LISTING);
    return (G_SOURCE_REMOVE);
 }
 
@@ -403,6 +414,7 @@ navigator_dispose(GObject *p_obj) {
    g_clear_pointer(&p_nav->p_files, g_ptr_array_unref);
    g_clear_object(&p_nav->p_dir);
    g_clear_object(&p_nav->p_last_mark);
+   g_clear_pointer(&p_nav->c_error, g_free);
    G_OBJECT_CLASS(navigator_parent_class)->dispose(p_obj);
 }
 
@@ -410,9 +422,9 @@ static void
 navigator_class_init(NavigatorClass *p_klass) {
    GObjectClass *p_oc = G_OBJECT_CLASS(p_klass);
    p_oc->dispose      = navigator_dispose;
-   u_changed_signal =
-      g_signal_new("changed", G_TYPE_FROM_CLASS(p_klass), G_SIGNAL_RUN_LAST, 0,
-                   NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 0);
+   u_changed_signal   = g_signal_new(
+      "changed", G_TYPE_FROM_CLASS(p_klass), G_SIGNAL_RUN_LAST, 0, NULL, NULL,
+      g_cclosure_marshal_generic, G_TYPE_NONE, 1, G_TYPE_UINT);
 }
 
 static void
@@ -505,6 +517,34 @@ navigator_get_current(Navigator *p_nav) {
    return ((GFile *)g_ptr_array_index(p_nav->p_files, (guint)p_nav->i_current));
 }
 
+gboolean
+navigator_is_readable(Navigator *p_nav) {
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), FALSE);
+   return (p_nav->c_error == NULL);
+}
+
+const char *
+navigator_get_error(Navigator *p_nav) {
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), NULL);
+   return (p_nav->c_error);
+}
+
+guint
+navigator_get_live_position(Navigator *p_nav) {
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), 0);
+   if (p_nav->i_current < 0) {
+      return (0);
+   }
+   guint u_pos = 0;
+   for (guint u_i = 0;
+        u_i <= (guint)p_nav->i_current && u_i < p_nav->p_files->len; u_i++) {
+      if (_is_live_index(p_nav, u_i)) {
+         u_pos++;
+      }
+   }
+   return (u_pos);
+}
+
 guint
 navigator_get_remaining(Navigator *p_nav) {
    g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), 0);
@@ -536,8 +576,10 @@ navigator_mark_removed(Navigator *p_nav, GFile *p_file) {
    /* Emit when the removed set or the marks actually changed, so grid badges
     * and the header never go stale (e.g. re-marking a file already in
     * p_removed, then removing it again). */
-   if (b_removed_added || b_mark_changed) {
-      _emit_changed(p_nav);
+   guint u_flags = (b_removed_added ? GGAZE_NAV_REMOVED : 0) |
+                   (b_mark_changed ? GGAZE_NAV_MARKS : 0);
+   if (u_flags != 0) {
+      _emit_changed(p_nav, u_flags);
    }
 }
 
@@ -557,7 +599,7 @@ navigator_set_current(Navigator *p_nav, guint u_index) {
       return (FALSE);
    }
    p_nav->i_current = (gint)u_index;
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_CURSOR);
    return (TRUE);
 }
 
@@ -572,7 +614,7 @@ navigator_set_current_file(Navigator *p_nav, GFile *p_file) {
       return (FALSE);
    }
    p_nav->i_current = i;
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_CURSOR);
    return (TRUE);
 }
 
@@ -608,7 +650,7 @@ _advance(Navigator *p_nav, gint i_delta) {
             return (FALSE); /* the only live entry is the current one */
          }
          p_nav->i_current = i_cand;
-         _emit_changed(p_nav);
+         _emit_changed(p_nav, GGAZE_NAV_CURSOR);
          return (TRUE);
       }
    }
@@ -617,7 +659,7 @@ _advance(Navigator *p_nav, gint i_delta) {
    if (p_nav->i_current >= 0 &&
        !_is_live_index(p_nav, (guint)p_nav->i_current)) {
       p_nav->i_current = -1;
-      _emit_changed(p_nav);
+      _emit_changed(p_nav, GGAZE_NAV_CURSOR);
       return (TRUE);
    }
    return (FALSE);
@@ -653,7 +695,7 @@ _goto_edge(Navigator *p_nav, gboolean b_first) {
    /* No live entry: park at -1 if the cursor is on a removed one. */
    if (p_nav->i_current >= 0) {
       p_nav->i_current = -1;
-      _emit_changed(p_nav);
+      _emit_changed(p_nav, GGAZE_NAV_CURSOR);
       return (TRUE);
    }
    return (FALSE);
@@ -685,7 +727,7 @@ navigator_set_sort(Navigator *p_nav, GgazeSort e_sort) {
    }
    p_nav->e_sort = e_sort;
    _relist(p_nav);
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_LISTING);
 }
 
 gboolean
@@ -714,7 +756,7 @@ navigator_set_hide_raw(Navigator *p_nav, gboolean b_hide_raw) {
    }
    p_nav->b_hide_raw = b_hide_raw;
    _relist(p_nav);
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_LISTING);
 }
 
 /* --- marks --------------------------------------------------------------- */
@@ -768,7 +810,7 @@ navigator_mark_range(Navigator *p_nav, GFile *p_from, GFile *p_to) {
    for (gint i = i_lo; i <= i_hi; i++) {
       _mark_index(p_nav, (guint)i);
    }
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_MARKS);
 }
 
 void
@@ -777,7 +819,7 @@ navigator_mark_all(Navigator *p_nav) {
    for (guint u_i = 0; u_i < p_nav->p_files->len; u_i++) {
       _mark_index(p_nav, u_i);
    }
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_MARKS);
 }
 
 void
@@ -785,7 +827,7 @@ navigator_clear_marks(Navigator *p_nav) {
    g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
    g_hash_table_remove_all(p_nav->p_marks);
    g_clear_object(&p_nav->p_last_mark);
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_MARKS);
 }
 
 guint
@@ -821,7 +863,7 @@ void
 navigator_rescan(Navigator *p_nav) {
    g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
    _relist(p_nav);
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_LISTING);
 }
 
 gboolean
@@ -847,7 +889,7 @@ navigator_remove(Navigator *p_nav, GFile *p_file) {
    } else if (p_nav->i_current > i) {
       p_nav->i_current--;
    }
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_LISTING | GGAZE_NAV_CURSOR);
    return (TRUE);
 }
 
@@ -860,5 +902,5 @@ navigator_set_debounce_ms(Navigator *p_nav, guint u_ms) {
 void
 navigator_emit_changed(Navigator *p_nav) {
    g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
-   _emit_changed(p_nav);
+   _emit_changed(p_nav, GGAZE_NAV_ALL);
 }

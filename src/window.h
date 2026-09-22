@@ -4,11 +4,13 @@
 /*:*
  * ggaze — main window
  *
- * GgazeWindow : GtkApplicationWindow owns the layout: an AdwHeaderBar and a
- * GtkStack with two children (`grid`, `large`). The grid child is a placeholder
- * until M7; the large child is the GgazeViewer (M1). M2 adds a Navigator over
- * the current folder, a single GCancellable (last-write-wins), keybinding
- * shortcuts, and a file/folder drop target. See docs/architecture.md.
+ * GgazeWindow : GtkApplicationWindow owns the layout -- an AdwHeaderBar with
+ * navigation buttons and the main menu, and a GtkStack with the thumbnail
+ * grid, the large GgazeViewer and an empty-state page -- plus the action
+ * routing: every win.* action, the Navigator over the current folder, the
+ * drop target, and the helpers that own the real logic (viewload, info
+ * overlay, save gate, delete confirm, enhance controller).
+ * See docs/architecture.md.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -28,9 +30,16 @@ G_DECLARE_FINAL_TYPE(GgazeWindow, ggaze_window, GGAZE, WINDOW,
 GgazeWindow *ggaze_window_new(GgazeApp *p_app);
 
 /* Open p_arg (a file or a folder): for a file, list its parent folder with
- * p_arg current; for a folder, list it with the first image current. Loads the
- * current image into the viewer and switches the stack to "large". */
+ * p_arg current and show it in the large view; for a folder, list it and show
+ * the grid. A path that does not exist, or a file that is not an image of
+ * its folder, opens the folder and reports the problem on the status line. */
 void ggaze_window_open(GgazeWindow *p_win, GFile *p_arg);
+
+/* Open several files at once (CLI arguments, a multi-file drop): one file
+ * behaves like ggaze_window_open; several open the FIRST file's folder in
+ * the grid with that file current (decision #27). */
+void ggaze_window_open_files(GgazeWindow *p_win, GFile **pp_files,
+                             gint i_n_files);
 
 /* The GtkStack (grid/large) — the tests use this instead of
  * gtk_window_get_child (which now returns the wrapping GtkOverlay). */

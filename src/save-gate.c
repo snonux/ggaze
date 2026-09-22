@@ -5,6 +5,8 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "dialog-util.h"
+
 /* A gated continuation: the function to run once the (possible)
  * Save/Discard/Cancel prompt resolves, the data it acts on, and the notify
  * that releases that data. save_gate_maybe_save_then OWNS data for the whole
@@ -49,8 +51,7 @@ typedef struct {
                              * _save_prompt_outcome and save_gate_dispose. */
    GtkWindow *p_dlg_window; /* owned ref on the dialog's own toplevel, purely
                              * to keep it from being FREED under the GTask
-                             * that still points at it -- see
-                             * SaveGateHostOps.alert_dialog_window */
+                             * that still points at it -- see dialog-util.h */
 } _SaveCtx;
 
 /* How an outstanding prompt ended. Kept apart from the button index because
@@ -371,7 +372,8 @@ _save_prompt_show(SaveGate *p_gate, const _Request *p_req) {
                               p_req->fn == p_gate->p_ops->quit_continuation);
    gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_gate->p_host), p_ctx->p_cancel,
                            _save_dialog_cb, p_ctx);
-   p_ctx->p_dlg_window = p_gate->p_ops->alert_dialog_window(p_gate->p_host);
+   p_ctx->p_dlg_window =
+      dialog_util_newest_transient_for(GTK_WINDOW(p_gate->p_host));
 }
 
 /* Park p_req until the outstanding prompt is answered. Exactly one slot, and

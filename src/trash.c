@@ -105,6 +105,55 @@ trash_restore_last(Trash *p_t, GError **p_err) {
    return (b_ok);
 }
 
+guint
+trash_count(Trash *p_t) {
+   g_return_val_if_fail(p_t != NULL, 0);
+   GFile           *p_td = _trash_dir(p_t);
+   GFileEnumerator *p_e  = g_file_enumerate_children(
+      p_td, "standard::name", G_FILE_QUERY_INFO_NONE, NULL, NULL);
+   guint u_n = 0;
+   if (p_e != NULL) {
+      GFileInfo *p_info;
+      while ((p_info = g_file_enumerator_next_file(p_e, NULL, NULL)) != NULL) {
+         u_n++;
+         g_object_unref(p_info);
+      }
+      g_object_unref(p_e);
+   }
+   g_object_unref(p_td);
+   return (u_n);
+}
+
+gboolean
+trash_empty(Trash *p_t, guint *p_deleted, GError **p_err) {
+   g_return_val_if_fail(p_t != NULL, FALSE);
+   guint            u_done = 0;
+   gboolean         b_ok   = TRUE;
+   GFile           *p_td   = _trash_dir(p_t);
+   GFileEnumerator *p_e    = g_file_enumerate_children(
+      p_td, "standard::name", G_FILE_QUERY_INFO_NONE, NULL, NULL);
+   if (p_e != NULL) {
+      GFileInfo *p_info;
+      while (b_ok &&
+             (p_info = g_file_enumerator_next_file(p_e, NULL, NULL)) != NULL) {
+         GFile *p_f = g_file_get_child(p_td, g_file_info_get_name(p_info));
+         b_ok       = g_file_delete(p_f, NULL, p_err);
+         u_done += b_ok ? 1 : 0;
+         g_object_unref(p_f);
+         g_object_unref(p_info);
+      }
+      g_object_unref(p_e);
+   }
+   g_object_unref(p_td);
+   /* Whatever was restorable is gone now. */
+   g_clear_object(&p_t->p_last_src);
+   g_clear_object(&p_t->p_last_dst);
+   if (p_deleted != NULL) {
+      *p_deleted = u_done;
+   }
+   return (b_ok);
+}
+
 gboolean
 trash_can_undo(Trash *p_t) {
    g_return_val_if_fail(p_t != NULL, FALSE);

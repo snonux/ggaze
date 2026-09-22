@@ -31,6 +31,11 @@ typedef struct PopupList PopupList;
  * of editors / scripts / destinations / ...). */
 typedef const char *(*PopupListNameFn)(const GPtrArray *p_items, guint u_idx);
 
+/* The PopupListNameFn for an array of SettingsPair* (editors, scripts,
+ * destinations): the pair's display name. */
+const char *popup_list_settings_pair_name(const GPtrArray *p_items,
+                                          guint            u_idx);
+
 /* Fire the per-site action for index u_idx. The site is responsible for
  * closing the popover (popup_list_destroy on its stored field) in whatever
  * order it needs -- e.g. move closes BEFORE prompting Save/Discard/Cancel,
@@ -38,7 +43,9 @@ typedef const char *(*PopupListNameFn)(const GPtrArray *p_items, guint u_idx);
 typedef void (*PopupListActivateFn)(gpointer p_user_data, guint u_idx);
 
 /* Build a list popover parented to p_parent (the window's stack): a GtkPopover
- * (position TOP, pointing-to a 1x1 rect) with a capture-phase key controller,
+ * (position TOP, pointing-to a 1x1 rect) with a capture-phase key controller
+ * that answers Esc and the row hotkeys and swallows every other unmodified
+ * key (so the window's global shortcuts cannot fire under the chooser),
  * containing either c_empty_msg (when p_items is empty) or c_title followed
  * by one GtkButton row per item (capped at 36, the 1-9,0,a-z hotkey range),
  * labelled "<hotkey>  <name>" via p_name_fn. Esc and the popover "closed"

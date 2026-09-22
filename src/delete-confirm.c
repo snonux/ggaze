@@ -5,6 +5,8 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "dialog-util.h"
+
 /* Button indices of the confirm dialog, in the order delete_confirm_ask hands
  * them to gtk_alert_dialog_set_buttons(). */
 enum {
@@ -187,6 +189,7 @@ delete_confirm_ask(DeleteConfirm *p_dc, GList *p_files) {
    p_dc->p_cancel = (GCancellable *)g_object_ref(p_ctx->p_cancel);
    gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_dc->p_host), p_ctx->p_cancel,
                            _choose_cb, p_ctx);
-   p_ctx->p_dlg_window = p_dc->p_ops->alert_dialog_window(p_dc->p_host);
+   p_ctx->p_dlg_window =
+      dialog_util_newest_transient_for(GTK_WINDOW(p_dc->p_host));
    g_object_unref(p_dlg);
 }

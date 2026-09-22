@@ -1,11 +1,14 @@
 /*:*
  * ggaze — main window
  *
- * GgazeWindow : GtkApplicationWindow owns an AdwHeaderBar + a GtkStack with two
- * children ("grid" placeholder until M7, "large" = the GgazeViewer). M2 adds a
- * Navigator over the current folder, a single GCancellable (last-write-wins),
- * keybinding->action shortcuts, and a file/folder drop target. The header
- * title carries "filename · n/total". See docs/architecture.md.
+ * GgazeWindow : GtkApplicationWindow owns the layout (header bar with
+ * navigation buttons + main menu; a GtkStack with the grid, the large
+ * GgazeViewer and an empty-state page; the info overlay) and routes every
+ * win.* action to the helper that owns the logic: viewload (large-view
+ * loading), info-overlay (status/EXIF card), save-gate and delete-confirm
+ * (modal prompts), enhance-ctrl (GEGL), and the plain-C engines (navigator,
+ * trash, mover, opener, runner, undo). The header title carries
+ * "filename · n/total" over the live images. See docs/architecture.md.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -46,18 +49,19 @@
 #include "enhancer-gegl.h"
 #endif
 
-/* Which of trash/move most recently succeeded, so `u` (win.undo) knows which
- * engine's undo to prefer when both could theoretically still undo (decision
- * P: one unified undo, no explicit shared module — window.c already owns
- * both Trash and Mover, so it is the natural place to track the ordering). */
-/* unified-undo arbitration (Trash vs Mover) moved to undo.c; the window owns
- * an Undo* and records/resets/chooses through it. */
+/* The two views the stack can show, plus the empty-state page. Owning the
+ * stack child names here (and only here) keeps the "which view am I in"
+ * question out of the action handlers. */
+typedef enum {
+   GGAZE_VIEW_GRID,
+   GGAZE_VIEW_LARGE,
+   GGAZE_VIEW_EMPTY, /* no folder open / no images to show */
+} GgazeViewMode;
 
-/* The Save/Discard/Cancel prompt state machine lives in save-gate.c; the
- * window owns a SaveGate* and funnels every discard/overwrite continuation
- * through save_gate_maybe_save_then(). The _Request/_SaveCtx/_PromptOutcome
- * types and the b_save_prompt/p_prompt_cancel/b_prompt_quits/p_pending state
- * moved with it. */
+static const char *VIEW_NAMES[] = {"grid", "large", "empty"};
+
+/* How long a second Esc in the grid counts as "yes, quit" (ms). */
+#define GGAZE_ESC_QUIT_WINDOW_MS 2000
 
 struct _GgazeWindow {
    GtkApplicationWindow parent_instance;
@@ -82,10 +86,12 @@ struct _GgazeWindow {
    int          i_grid_size; /* current thumbnail size (64-512, decision T) */
    GtkWidget   *p_overlay; /* GtkOverlay wrapping the stack (for info label) */
    InfoOverlay *p_info;    /* info card + status line over the stack */
-   guint        u_slideshow; /* slideshow timeout id (0=off) */
-   gboolean     b_fullscreen;
-   guint        u_hdr_hide; /* fullscreen header auto-hide timeout */
-   gboolean     b_disposed; /* set in dispose; async callbacks check it */
+   guint        u_slideshow;     /* slideshow timeout id (0=off) */
+   gint64       i_esc_at;        /* monotonic us of the last grid Esc (two-step
+                                  * quit), 0 = none */
+   GtkWidget     *p_status_page; /* AdwStatusPage: the "empty" stack child */
+   GtkWidget     *p_menu_btn;    /* header-bar main menu (F10) */
+   gboolean       b_disposed;    /* set in dispose; async callbacks check it */
    DeleteConfirm *p_delete_confirm; /* bulk-delete confirm flow
                                      * (captured targets + outstanding
                                      * dialog + folder-identity re-check). */
@@ -122,9 +128,13 @@ static void     _show_status(GgazeWindow *p_win, const char *c_msg);
 static gboolean _slideshow_tick(gpointer p_data);
 static void     _apply_viewer_prefs(GgazeWindow *p_win);
 static void     _load_engine_lists(GgazeWindow *p_win);
-static void     _open_ext_destroy(GgazeWindow *p_win);
-static void     _run_script_destroy(GgazeWindow *p_win);
-static void     _move_destroy(GgazeWindow *p_win);
+static void     _set_grid_size(GgazeWindow *p_win, int i_size);
+static void     _update_empty_state(GgazeWindow *p_win);
+static void     _action_enter_large(GSimpleAction *p_a, GVariant *p_v,
+                                    gpointer p_data);
+static void _action_menu(GSimpleAction *p_a, GVariant *p_v, gpointer p_data);
+static void _action_empty_trash(GSimpleAction *p_a, GVariant *p_v,
+                                gpointer p_data);
 static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
 
 /* POPOVER KEYBOARD FOCUS -- who focuses the first row (dw0).
@@ -392,58 +402,6 @@ _files_include_current(GgazeWindow *p_win, GList *p_files) {
    return (FALSE);
 }
 
-/* --- modal alert dialogs: shared plumbing --------------------------------
- *
- * Both of this window's modal GtkAlertDialogs -- the GEGL Save/Discard/Cancel
- * prompt and the >1-target delete confirm -- need the same two things: a ref
- * on the private toplevel GTK put up for them (below), and a GCancellable the
- * window can cancel when it disposes (see _delete_confirm_dispose, and
- * _prompt_dispose in a GEGL build). This lives outside the GEGL block because
- * the delete confirm exists in every build -- so every Save-prompt name
- * mentioned from here on is a GEGL-only counterpart, cited to show the shared
- * pattern, not a symbol a minimal build has.
- */
-
-/* The GtkWindow gtk_alert_dialog_choose() has just presented for p_win,
- * reffed (transfer full). NULL only if GTK ever stops using a plain toplevel
- * for it.
- *
- * GtkAlertDialog keeps that window entirely private -- it exists only as the
- * dialog GTask's task data -- but it IS an ordinary toplevel, appended to
- * gtk_window_get_toplevels() by gtk_window_constructed(), so scanning that
- * model backwards for the newest window transient-for p_win finds it. Callers
- * call this immediately after choose(), when theirs is that newest one by
- * construction. What makes the backwards scan sufficient is that ordering
- * alone, not an enumeration of the alternatives: anything else transient-for
- * p_win (the other alert dialog, and _action_open's GtkFileDialog on the
- * non-portal path, where it really is a local toplevel) can only be OLDER, so
- * scanning from the end reaches ours first whatever else is up.
- *
- * Why a ref is needed at all: the dialog is transient-for p_win with
- * destroy-with-parent set, and GTK wires that to p_win's ::destroy, which
- * GtkWidget emits from dispose. Once dispose cancels the dialog, its GTask
- * completes in an IDLE -- i.e. after dispose has returned, and so after that
- * ::destroy already destroyed the dialog window and the toplevel list dropped
- * its last reference. The GTask still holds that window as a raw pointer (its
- * task data), so gtk_alert_dialog_choose_finish() calls gtk_window_destroy()
- * on it: without a reference of ours that is freed memory -- measured as
- * "assertion 'GTK_IS_WINDOW (window)' failed" the moment a cancel made that
- * callback run at all. With one, the window is merely destroyed-but-alive,
- * and the second gtk_window_destroy() returns at once because the window is
- * no longer in the toplevel list. Measured on gtk 4.22.4. */
-static GtkWindow *
-_alert_dialog_window(GgazeWindow *p_win) {
-   GListModel *p_tops = gtk_window_get_toplevels();
-   for (guint u = g_list_model_get_n_items(p_tops); u > 0; u--) {
-      GtkWindow *p_top = GTK_WINDOW(g_list_model_get_item(p_tops, u - 1));
-      if (gtk_window_get_transient_for(p_top) == GTK_WINDOW(p_win)) {
-         return (p_top);
-      }
-      g_object_unref(p_top);
-   }
-   return (NULL);
-}
-
 /* TRUE while the `D` >1-target delete-confirm dialog is outstanding.
  *
  * The cancellable slot IS the state -- there is no separate flag to drift out
@@ -510,12 +468,105 @@ _grid_select_gate(GgazeGrid *p_grid, GFile *p_file, gpointer p_data) {
    return (FALSE);
 }
 
+/* --- view mode ----------------------------------------------------------- */
+
+static GgazeViewMode
+_get_view(GgazeWindow *p_win) {
+   const char *c_cur =
+      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
+   for (gsize u = 0; u < G_N_ELEMENTS(VIEW_NAMES); u++) {
+      if (g_strcmp0(c_cur, VIEW_NAMES[u]) == 0) {
+         return ((GgazeViewMode)u);
+      }
+   }
+   return (GGAZE_VIEW_EMPTY);
+}
+
+static void
+_set_view(GgazeWindow *p_win, GgazeViewMode e_view) {
+   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack),
+                                    VIEW_NAMES[e_view]);
+}
+
+/* TRUE iff a folder is open; otherwise says so (the keys that need a folder
+ * used to no-op silently, which read as "the key does nothing"). */
+static gboolean
+_require_folder(GgazeWindow *p_win) {
+   if (p_win->p_nav != NULL) {
+      return (TRUE);
+   }
+   _show_status(p_win, "Nothing open \u2014 press o to open an image or O a "
+                       "folder");
+   return (FALSE);
+}
+
+/* Stop the slideshow if it runs, with a status line (any manual navigation,
+ * Esc, leaving the large view or replacing the folder stops it). */
+static void
+_slideshow_stop(GgazeWindow *p_win, const char *c_why) {
+   if (p_win->u_slideshow == 0) {
+      return;
+   }
+   g_source_remove(p_win->u_slideshow);
+   p_win->u_slideshow = 0;
+   if (c_why != NULL) {
+      _show_status(p_win, c_why);
+   }
+}
+
+/* Show the empty-state page when the folder has nothing live to show (no
+ * images, all trashed, unreadable), else bring the grid back if the empty
+ * page is up. The title keeps "<folder> · 0/N" through _update_header. */
+static void
+_update_empty_state(GgazeWindow *p_win) {
+   if (p_win->p_nav == NULL) {
+      return;
+   }
+   guint u_live = navigator_get_remaining(p_win->p_nav);
+   if (u_live > 0) {
+      if (_get_view(p_win) == GGAZE_VIEW_EMPTY) {
+         _set_view(p_win, GGAZE_VIEW_GRID);
+      }
+      return;
+   }
+   char *c_folder = g_file_get_basename(navigator_get_dir(p_win->p_nav));
+   guint u_total  = navigator_get_count(p_win->p_nav);
+   char *c_title  = NULL;
+   char *c_desc   = NULL;
+   if (!navigator_is_readable(p_win->p_nav)) {
+      c_title = g_strdup_printf("Cannot read %s", c_folder);
+      c_desc  = g_strdup(navigator_get_error(p_win->p_nav));
+   } else if (u_total > 0) {
+      c_title = g_strdup_printf("All %u images trashed", u_total);
+      c_desc  = g_strdup("Press u to restore the last one, "
+                         "o to open something else");
+   } else {
+      c_title = g_strdup_printf("No images in %s", c_folder);
+      c_desc  = g_strdup("Press o to open an image, O a folder, "
+                         "or drop one here");
+   }
+   adw_status_page_set_title(ADW_STATUS_PAGE(p_win->p_status_page), c_title);
+   adw_status_page_set_description(ADW_STATUS_PAGE(p_win->p_status_page),
+                                   c_desc);
+   _set_view(p_win, GGAZE_VIEW_EMPTY);
+   g_free(c_title);
+   g_free(c_desc);
+   g_free(c_folder);
+}
+
 /* --- actions ------------------------------------------------------------- */
+
+/* Manual navigation stops a running slideshow before the gate runs. */
+static void
+_stop_slideshow_for_nav(GgazeWindow *p_win) {
+   _slideshow_stop(p_win, "Slideshow stopped");
+}
 
 static void
 _action_prev(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
+   _stop_slideshow_for_nav(GGAZE_WINDOW(p_data));
    save_gate_maybe_save_then(GGAZE_WINDOW(p_data)->p_save_gate, _proceed_prev,
                              p_data, NULL);
 }
@@ -524,20 +575,37 @@ static void
 _action_next(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
+   _stop_slideshow_for_nav(GGAZE_WINDOW(p_data));
    save_gate_maybe_save_then(GGAZE_WINDOW(p_data)->p_save_gate, _proceed_next,
                              p_data, NULL);
 }
 
 static void
 _action_cursor_vertical(GgazeWindow *p_win, int i_direction) {
-   const char *c_cur =
-      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
-   if (g_strcmp0(c_cur, "grid") == 0 && p_win->p_grid != NULL) {
+   if (_get_view(p_win) == GGAZE_VIEW_GRID && p_win->p_grid != NULL) {
       ggaze_grid_move_cursor(p_win->p_grid, i_direction);
    } else {
       ggaze_viewer_pan(GGAZE_VIEWER(p_win->p_viewer), 0.0,
                        i_direction * GGAZE_VIEWER_PAN_STEP);
    }
+}
+
+/* Shift+H / Shift+L: horizontal pan in the large view (the grid has no
+ * horizontal cursor; Left/Right are prev/next everywhere). */
+static void
+_action_pan_left(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   ggaze_viewer_pan(GGAZE_VIEWER(GGAZE_WINDOW(p_data)->p_viewer),
+                    -GGAZE_VIEWER_PAN_STEP, 0.0);
+}
+
+static void
+_action_pan_right(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   ggaze_viewer_pan(GGAZE_VIEWER(GGAZE_WINDOW(p_data)->p_viewer),
+                    GGAZE_VIEWER_PAN_STEP, 0.0);
 }
 
 static void
@@ -558,6 +626,7 @@ static void
 _action_first(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
+   _stop_slideshow_for_nav(GGAZE_WINDOW(p_data));
    save_gate_maybe_save_then(GGAZE_WINDOW(p_data)->p_save_gate, _proceed_first,
                              p_data, NULL);
 }
@@ -566,6 +635,7 @@ static void
 _action_last(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
+   _stop_slideshow_for_nav(GGAZE_WINDOW(p_data));
    save_gate_maybe_save_then(GGAZE_WINDOW(p_data)->p_save_gate, _proceed_last,
                              p_data, NULL);
 }
@@ -686,6 +756,8 @@ _open_dialog_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    g_object_unref(p_data);
 }
 
+/* `o`: pick an image (filtered to image MIME types; "All files" stays
+ * available). */
 static void
 _action_open(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -693,8 +765,53 @@ _action_open(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    GgazeWindow   *p_win = GGAZE_WINDOW(p_data);
    GtkFileDialog *p_dlg = gtk_file_dialog_new();
    gtk_file_dialog_set_title(p_dlg, "Open image");
+   GtkFileFilter *p_images = gtk_file_filter_new();
+   gtk_file_filter_set_name(p_images, "Images");
+   gtk_file_filter_add_mime_type(p_images, "image/*");
+   GtkFileFilter *p_all = gtk_file_filter_new();
+   gtk_file_filter_set_name(p_all, "All files");
+   gtk_file_filter_add_pattern(p_all, "*");
+   GListStore *p_filters = g_list_store_new(GTK_TYPE_FILE_FILTER);
+   g_list_store_append(p_filters, p_images);
+   g_list_store_append(p_filters, p_all);
+   gtk_file_dialog_set_filters(p_dlg, G_LIST_MODEL(p_filters));
+   gtk_file_dialog_set_default_filter(p_dlg, p_images);
+   g_object_unref(p_filters);
+   g_object_unref(p_images);
+   g_object_unref(p_all);
    gtk_file_dialog_open(p_dlg, GTK_WINDOW(p_win), NULL, _open_dialog_cb,
                         g_object_ref(p_win));
+   g_object_unref(p_dlg);
+}
+
+static void
+_open_folder_dialog_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   GtkFileDialog *p_dlg = GTK_FILE_DIALOG(p_src);
+   GError        *p_err = NULL;
+   GFile *p_dir = gtk_file_dialog_select_folder_finish(p_dlg, p_res, &p_err);
+   if (p_dir != NULL) {
+      ggaze_window_open(GGAZE_WINDOW(p_data), p_dir);
+      g_object_unref(p_dir);
+   } else if (p_err != NULL) {
+      if (!g_error_matches(p_err, GTK_DIALOG_ERROR,
+                           GTK_DIALOG_ERROR_DISMISSED)) {
+         g_warning("ggaze: open-folder dialog failed: %s", p_err->message);
+      }
+      g_error_free(p_err);
+   }
+   g_object_unref(p_data);
+}
+
+/* `O`: pick a folder (opens in the grid). */
+static void
+_action_open_folder(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow   *p_win = GGAZE_WINDOW(p_data);
+   GtkFileDialog *p_dlg = gtk_file_dialog_new();
+   gtk_file_dialog_set_title(p_dlg, "Open folder");
+   gtk_file_dialog_select_folder(p_dlg, GTK_WINDOW(p_win), NULL,
+                                 _open_folder_dialog_cb, g_object_ref(p_win));
    g_object_unref(p_dlg);
 }
 
@@ -722,16 +839,25 @@ _do_trash_now(GgazeWindow *p_win, GFile *p_target) {
    GFile   *p_cur         = navigator_get_current(p_win->p_nav);
    gboolean b_was_current = (p_cur != NULL && g_file_equal(p_cur, p_target));
    GError  *p_err         = NULL;
+   char    *c_name        = g_file_get_basename(p_target);
    if (trash_bin(p_win->p_trash, p_target, &p_err)) {
       navigator_mark_removed(p_win->p_nav, p_target); /* dim; emits changed */
       if (b_was_current) {
          navigator_next(p_win->p_nav); /* advance; emits changed */
       }
       undo_record_trash(p_win->p_undo); /* for unified win.undo */
+      char *c_msg = g_strdup_printf("Trashed %s \u2014 u to undo", c_name);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
    } else {
-      g_warning("ggaze: trash failed: %s", p_err->message);
+      char *c_msg = g_strdup_printf("Trash failed for %s: %s", c_name,
+                                    p_err != NULL ? p_err->message : "?");
+      g_warning("ggaze: %s", c_msg);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
       g_clear_error(&p_err);
    }
+   g_free(c_name);
 }
 
 static gboolean
@@ -752,8 +878,10 @@ _action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   GFile       *p_cur =
-      p_win->p_nav != NULL ? navigator_get_current(p_win->p_nav) : NULL;
+   if (!_require_folder(p_win)) {
+      return;
+   }
+   GFile *p_cur = navigator_get_current(p_win->p_nav);
    save_gate_maybe_save_then(p_win->p_save_gate, _proceed_trash,
                              _file_ctx_new(p_win, p_cur), _file_ctx_free);
 }
@@ -803,9 +931,21 @@ _do_delete_files(GgazeWindow *p_win, GList *p_files) {
          u_failed++;
       }
    }
+   guint u_done = g_list_length(p_files) - u_failed;
    if (u_failed > 0) {
       char *c_msg = g_strdup_printf("Delete failed for %u file%s", u_failed,
                                     u_failed == 1 ? "" : "s");
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
+   } else if (u_done == 1) {
+      char *c_name = g_file_get_basename(G_FILE(p_files->data));
+      char *c_msg = g_strdup_printf("Deleted %s permanently (no undo)", c_name);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
+      g_free(c_name);
+   } else {
+      char *c_msg =
+         g_strdup_printf("Deleted %u files permanently (no undo)", u_done);
       _show_status(p_win, c_msg);
       g_free(c_msg);
    }
@@ -885,6 +1025,9 @@ _action_delete(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (!_require_folder(p_win)) {
+      return;
+   }
    save_gate_maybe_save_then(p_win->p_save_gate, _proceed_delete,
                              _files_ctx_new(p_win, _capture_targets(p_win)),
                              _files_ctx_free);
@@ -902,6 +1045,11 @@ _undo_trash(GgazeWindow *p_win) {
       _show_status(p_win, "Restored from Trash");
       undo_reset(p_win->p_undo);
    } else {
+      char *c_msg = g_strdup_printf("Undo failed: %s",
+                                    p_err != NULL ? p_err->message : "?");
+      g_warning("ggaze: trash %s", c_msg);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
       g_clear_error(&p_err);
    }
 }
@@ -922,9 +1070,11 @@ _undo_move(GgazeWindow *p_win) {
       _show_status(p_win, "Move undone");
       undo_reset(p_win->p_undo);
    } else {
-      if (p_err != NULL) {
-         g_warning("ggaze: move undo failed: %s", p_err->message);
-      }
+      char *c_msg = g_strdup_printf("Undo failed: %s",
+                                    p_err != NULL ? p_err->message : "?");
+      g_warning("ggaze: move %s", c_msg);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
       g_clear_error(&p_err);
    }
 }
@@ -945,7 +1095,7 @@ _action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (p_win->p_nav == NULL) {
+   if (!_require_folder(p_win)) {
       return;
    }
    gboolean b_trash_ok =
@@ -960,7 +1110,8 @@ _action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       _undo_trash(p_win);
       break;
    default:
-      break; /* neither engine can undo */
+      _show_status(p_win, "Nothing to undo");
+      break;
    }
 }
 
@@ -969,11 +1120,16 @@ _action_toggle_view(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   const char  *c_cur =
-      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
-   if (g_strcmp0(c_cur, "large") == 0) {
-      gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "grid");
+   if (!_require_folder(p_win)) {
       return;
+   }
+   if (_get_view(p_win) == GGAZE_VIEW_LARGE) {
+      _slideshow_stop(p_win, "Slideshow stopped");
+      _set_view(p_win, GGAZE_VIEW_GRID);
+      return;
+   }
+   if (_get_view(p_win) == GGAZE_VIEW_EMPTY) {
+      return; /* nothing to show large */
    }
    /* Leaving the grid: sync navigator.current to the highlighted cell so the
     * large view opens the selected image. Since tu0 that sync goes through
@@ -986,7 +1142,7 @@ _action_toggle_view(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
     * it here; _show_texture keeps an unanswered preview on screen. */
    gboolean b_moved =
       p_win->p_grid != NULL && ggaze_grid_sync_current(p_win->p_grid);
-   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+   _set_view(p_win, GGAZE_VIEW_LARGE);
    if (!b_moved) {
       _load_current(p_win);
    }
@@ -1004,10 +1160,8 @@ _action_mark(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (p_win->p_nav == NULL) {
       return;
    }
-   GFile      *p_target = NULL;
-   const char *c_cur =
-      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
-   if (g_strcmp0(c_cur, "grid") == 0 && p_win->p_grid != NULL) {
+   GFile *p_target = NULL;
+   if (_get_view(p_win) == GGAZE_VIEW_GRID && p_win->p_grid != NULL) {
       p_target = ggaze_grid_get_selected_file(p_win->p_grid);
    }
    if (p_target == NULL) {
@@ -1051,10 +1205,8 @@ _action_mark_range(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (p_anchor == NULL) {
       return;
    }
-   GFile      *p_target = NULL;
-   const char *c_cur =
-      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
-   if (g_strcmp0(c_cur, "grid") == 0 && p_win->p_grid != NULL) {
+   GFile *p_target = NULL;
+   if (_get_view(p_win) == GGAZE_VIEW_GRID && p_win->p_grid != NULL) {
       p_target = ggaze_grid_get_selected_file(p_win->p_grid);
    }
    if (p_target == NULL) {
@@ -1086,7 +1238,7 @@ _action_copy(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    GgazeWindow        *p_win  = GGAZE_WINDOW(p_data);
    GdkContentProvider *p_prov = ggaze_window_get_copy_provider(p_win);
    if (p_prov == NULL) {
-      g_warning("ggaze: copy \u2014 nothing to copy");
+      _show_status(p_win, "Nothing to copy");
       return;
    }
    GdkClipboard *p_clip = gtk_widget_get_clipboard(GTK_WIDGET(p_win));
@@ -1117,19 +1269,32 @@ _action_shortcuts(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    gtk_window_present(GTK_WINDOW(p_w));
 }
 
+/* Apply a thumbnail size (clamped to 64-512) to the grid and persist it, so
+ * +/- in the grid survive a restart as the schema promises. The
+ * changed::thumbnail-size handler compares against i_grid_size, so writing
+ * the value we already applied does not bounce. */
+static void
+_set_grid_size(GgazeWindow *p_win, int i_size) {
+   int i_sz           = CLAMP(i_size, 64, 512);
+   p_win->i_grid_size = i_sz;
+   if (p_win->p_grid != NULL) {
+      ggaze_grid_set_thumbnail_size(p_win->p_grid, i_sz);
+   }
+   if (p_win->p_settings != NULL &&
+       settings_get_thumbnail_size(p_win->p_settings) != i_sz) {
+      settings_set_thumbnail_size(p_win->p_settings, i_sz);
+   }
+}
+
 static void
 _action_zoom_in(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   const char  *c_cur =
-      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
-   if (g_strcmp0(c_cur, "large") == 0) {
+   if (_get_view(p_win) == GGAZE_VIEW_LARGE) {
       ggaze_viewer_zoom_in(GGAZE_VIEWER(p_win->p_viewer));
-   } else if (p_win->p_grid != NULL) {
-      int i_sz           = CLAMP(p_win->i_grid_size + 32, 64, 512);
-      p_win->i_grid_size = i_sz;
-      ggaze_grid_set_thumbnail_size(p_win->p_grid, i_sz);
+   } else {
+      _set_grid_size(p_win, p_win->i_grid_size + 32);
    }
 }
 
@@ -1138,14 +1303,24 @@ _action_zoom_out(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   const char  *c_cur =
-      gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
-   if (g_strcmp0(c_cur, "large") == 0) {
+   if (_get_view(p_win) == GGAZE_VIEW_LARGE) {
       ggaze_viewer_zoom_out(GGAZE_VIEWER(p_win->p_viewer));
-   } else if (p_win->p_grid != NULL) {
-      int i_sz           = CLAMP(p_win->i_grid_size - 32, 64, 512);
-      p_win->i_grid_size = i_sz;
-      ggaze_grid_set_thumbnail_size(p_win->p_grid, i_sz);
+   } else {
+      _set_grid_size(p_win, p_win->i_grid_size - 32);
+   }
+}
+
+/* `0`: toggle fit / 100% in the large view; reset the thumbnail size to the
+ * default in the grid. */
+static void
+_action_zoom_reset(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (_get_view(p_win) == GGAZE_VIEW_LARGE) {
+      ggaze_viewer_toggle_fit_100(GGAZE_VIEWER(p_win->p_viewer));
+   } else {
+      _set_grid_size(p_win, 128);
    }
 }
 
@@ -1156,12 +1331,12 @@ _action_fullscreen(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (p_win->b_fullscreen) {
+   /* Ask the window, not a private flag: a compositor-side toggle would
+    * otherwise desync the two. */
+   if (gtk_window_is_fullscreen(GTK_WINDOW(p_win))) {
       gtk_window_unfullscreen(GTK_WINDOW(p_win));
-      p_win->b_fullscreen = FALSE;
    } else {
       gtk_window_fullscreen(GTK_WINDOW(p_win));
-      p_win->b_fullscreen = TRUE;
    }
 }
 
@@ -1171,9 +1346,20 @@ _action_slideshow(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    if (p_win->u_slideshow != 0) {
-      g_source_remove(p_win->u_slideshow);
-      p_win->u_slideshow = 0;
+      _slideshow_stop(p_win, "Slideshow stopped");
    } else {
+      if (!_require_folder(p_win)) {
+         return;
+      }
+      if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
+         /* A slideshow is a large-view thing: enter it on the current image
+          * instead of making the grid highlight jump every few seconds. */
+         if (p_win->p_grid != NULL) {
+            ggaze_grid_sync_current(p_win->p_grid);
+         }
+         _set_view(p_win, GGAZE_VIEW_LARGE);
+         _load_current(p_win);
+      }
       gdouble d_delay = 3.0;
       if (p_win->p_settings != NULL) {
          d_delay = settings_get_slideshow_delay(p_win->p_settings);
@@ -1183,6 +1369,10 @@ _action_slideshow(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       }
       p_win->u_slideshow =
          g_timeout_add((guint)(d_delay * 1000.0), _slideshow_tick, p_win);
+      char *c_msg = g_strdup_printf(
+         "Slideshow started (%.0fs) \u2014 S or Esc to stop", d_delay);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
    }
 }
 
@@ -1193,40 +1383,48 @@ _action_info(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    _show_info(GGAZE_WINDOW(p_data));
 }
 
+/* Esc: one contextual step per press, in this order -- stop a running
+ * slideshow; discard an active enhance preview (said out loud: it used to
+ * vanish silently); leave fullscreen; clear marks; large -> grid; and in the
+ * grid quit, but only on a SECOND Esc within GGAZE_ESC_QUIT_WINDOW_MS (the
+ * first one says so), because `Esc Esc` from the large view is a common
+ * "get me out of here" reflex that must not exit the program. */
 static void
 _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->u_slideshow != 0) {
+      _slideshow_stop(p_win, "Slideshow stopped");
+      return;
+   }
 #if GGAZE_HAVE_GEGL
    if (enhance_ctrl_is_dirty(p_win->p_enhance_ctrl)) {
-      /* Esc's first job, ahead of every other contextual-back rung below: an
-       * active enhance preview is discarded outright, no Save/Discard/Cancel
-       * prompt (docs/ui-and-interactions.md "Quick enhance": Esc/re-press
-       * always discards directly). One contextual step per press, same as
-       * the mark-clear/fullscreen-exit rungs. */
       enhance_ctrl_discard(p_win->p_enhance_ctrl);
+      _show_status(p_win, "Enhance preview discarded");
       return;
    }
 #endif
-   if (p_win->b_fullscreen) {
+   if (gtk_window_is_fullscreen(GTK_WINDOW(p_win))) {
       gtk_window_unfullscreen(GTK_WINDOW(p_win));
-      p_win->b_fullscreen = FALSE;
-   } else if (p_win->p_nav != NULL &&
-              navigator_get_mark_count(p_win->p_nav) > 0) {
-      /* Contextual Esc: clear marks before backing out (docs/ui-and-
-       * interactions.md marks). Emits "changed" -> grid refreshes badges. */
-      navigator_clear_marks(p_win->p_nav);
-      _update_header(p_win);
-   } else {
-      const char *c_cur =
-         gtk_stack_get_visible_child_name(GTK_STACK(p_win->p_stack));
-      if (g_strcmp0(c_cur, "large") == 0) {
-         gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "grid");
-      } else {
-         gtk_window_close(GTK_WINDOW(p_win));
-      }
+      return;
    }
+   if (p_win->p_nav != NULL && navigator_get_mark_count(p_win->p_nav) > 0) {
+      navigator_clear_marks(p_win->p_nav); /* "changed" (marks) -> badges */
+      return;
+   }
+   if (_get_view(p_win) == GGAZE_VIEW_LARGE) {
+      _set_view(p_win, GGAZE_VIEW_GRID);
+      return;
+   }
+   gint64 i_now = g_get_monotonic_time();
+   if (p_win->i_esc_at != 0 &&
+       i_now - p_win->i_esc_at < (gint64)GGAZE_ESC_QUIT_WINDOW_MS * 1000) {
+      gtk_window_close(GTK_WINDOW(p_win));
+      return;
+   }
+   p_win->i_esc_at = i_now;
+   _show_status(p_win, "Press Esc again or q to quit");
 }
 
 /* --- Enhance controller host ops + action routing ----------------------- *
@@ -1334,6 +1532,16 @@ _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
    gint i_idx =
       (gint)g_ascii_strtoll(c_name + strlen("enhance-"), NULL, 10) - 1;
+   if (!_require_folder(p_win)) {
+      return;
+   }
+   if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
+      /* A stray digit in the grid used to yank the user into the large view
+       * with a preset applied and a now-dirty preview. */
+      _show_status(p_win, "Enhance presets apply in the large view \u2014 "
+                          "press Enter on the highlighted image first");
+      return;
+   }
    enhance_ctrl_toggle_preset(p_win->p_enhance_ctrl, i_idx);
 }
 
@@ -1346,7 +1554,7 @@ _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (p_win->p_nav == NULL) {
+   if (!_require_folder(p_win)) {
       return;
    }
    if (enhance_ctrl_get_mask(p_win->p_enhance_ctrl) == 0) {
@@ -1458,8 +1666,7 @@ _slideshow_tick(gpointer p_data) {
  * asynchronously by the InfoOverlay). */
 static void
 _show_info(GgazeWindow *p_win) {
-   if (p_win->p_nav == NULL) {
-      _show_status(p_win, "Nothing open \u2014 press o to open a file");
+   if (!_require_folder(p_win)) {
       return;
    }
    GFile *p_cur = navigator_get_current(p_win->p_nav);
@@ -1592,6 +1799,41 @@ _on_pref_changed(GSettings *p_gs, const char *c_key, gpointer p_data) {
    _apply_viewer_prefs(p_win);
 }
 
+/* The folder-shaped preferences (sort, wrap, RAW sidecars, hide trashed,
+ * thumbnail size) apply to the OPEN folder too, not only the next one: a
+ * user who changes "Sort order" in Preferences expects the grid to re-sort
+ * now. The navigator/grid setters are no-ops when the value is unchanged,
+ * so a Preferences write that matches the live state costs nothing. */
+static void
+_on_folder_pref_changed(GSettings *p_gs, const char *c_key, gpointer p_data) {
+   (void)p_gs;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_settings == NULL) {
+      return;
+   }
+   if (g_strcmp0(c_key, "thumbnail-size") == 0) {
+      int i_sz = settings_get_thumbnail_size(p_win->p_settings);
+      if (i_sz != p_win->i_grid_size) {
+         _set_grid_size(p_win, i_sz);
+      }
+      return;
+   }
+   if (p_win->p_nav == NULL) {
+      return;
+   }
+   if (g_strcmp0(c_key, "sort") == 0) {
+      navigator_set_sort(p_win->p_nav, settings_get_sort(p_win->p_settings));
+   } else if (g_strcmp0(c_key, "wrap") == 0) {
+      navigator_set_wrap(p_win->p_nav, settings_get_wrap(p_win->p_settings));
+   } else if (g_strcmp0(c_key, "hide-raw-sidecars") == 0) {
+      navigator_set_hide_raw(p_win->p_nav,
+                             settings_get_hide_raw(p_win->p_settings));
+   } else if (g_strcmp0(c_key, "hide-trashed") == 0 && p_win->p_grid != NULL) {
+      ggaze_grid_set_hide_trashed(p_win->p_grid,
+                                  settings_get_hide_trashed(p_win->p_settings));
+   }
+}
+
 /* Scroll-wheel navigate (GGAZE_SCROLL_NAVIGATE): advance the navigator,
  * prompting Save/Discard/Cancel first if an unsaved (GEGL) enhance preview is
  * active, same as the h/l/g/G actions (_action_prev/next/first/last). */
@@ -1638,30 +1880,13 @@ _action_preferences(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * program").
  */
 
-/* Synchronously tear down the current open-external popover (unparent +
- * clear the field). Safe to call when none is open. The popover's "closed"
- * handler (autohide / outside-click dismissal) also routes here. */
-static void
-_open_ext_destroy(GgazeWindow *p_win) {
-   popup_list_destroy(&p_win->p_open_ext_pop);
-}
-
-/* "closed" (outside-click / autohide dismissal): tear down synchronously. */
-/* Row name for the open-external popover: the configured editor's display
- * name. */
-static const char *
-_open_ext_name(const GPtrArray *p_progs, guint u_idx) {
-   const SettingsPair *p_pr = g_ptr_array_index((GPtrArray *)p_progs, u_idx);
-   return (p_pr->c_name);
-}
-
 /* Row click / hotkey: launch that editor on the original current file, then
  * close the popover. */
 static void
 _open_ext_activate(gpointer p_data, guint u_idx) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    ggaze_window_open_external_index(p_win, u_idx);
-   _open_ext_destroy(p_win);
+   popup_list_destroy(&p_win->p_open_ext_pop);
 }
 
 /* Build and pop up the open-external popover listing the configured editors
@@ -1672,12 +1897,12 @@ _action_open_external(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (p_win->p_nav == NULL) {
-      return; /* nothing open */
+   if (!_require_folder(p_win)) {
+      return;
    }
    /* Toggle: a second `e` while the popover is up just closes it. */
    if (p_win->p_open_ext_pop != NULL) {
-      _open_ext_destroy(p_win);
+      popup_list_destroy(&p_win->p_open_ext_pop);
       return;
    }
    const GPtrArray *p_progs =
@@ -1694,7 +1919,8 @@ _action_open_external(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    popup_list_new(p_win->p_stack, &p_win->p_open_ext_pop,
                   c_title != NULL ? c_title : "Open in:",
                   "No editors configured. Press , to open Preferences.",
-                  p_progs, _open_ext_name, _open_ext_activate, p_win);
+                  p_progs, popup_list_settings_pair_name, _open_ext_activate,
+                  p_win);
    g_free(c_title);
    /* Focuses the first editor row itself -- see "POPOVER KEYBOARD FOCUS"
     * near the top of this file. */
@@ -1720,9 +1946,13 @@ ggaze_window_open_external_index(GgazeWindow *p_win, guint u_idx) {
    GError             *p_err  = NULL;
    gboolean b_ok = opener_launch(p_win->p_opener, p_cur, p_prog, &p_err);
    if (!b_ok) {
-      g_warning("ggaze: open-external '%s' failed: %s",
-                p_prog->c_name != NULL ? p_prog->c_name : "(unnamed)",
-                p_err != NULL ? p_err->message : "(no detail)");
+      char *c_msg =
+         g_strdup_printf("Could not open in %s: %s",
+                         p_prog->c_name != NULL ? p_prog->c_name : "(unnamed)",
+                         p_err != NULL ? p_err->message : "(no detail)");
+      g_warning("ggaze: %s", c_msg);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
       g_clear_error(&p_err);
    }
    return (b_ok);
@@ -1821,28 +2051,13 @@ _run_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    _run_ctx_free(p_ctx);
 }
 
-/* Synchronously tear down the current run-script popover (unparent + clear
- * the field). Safe to call when none is open; the popover's "closed" handler
- * (autohide / outside-click) also routes here. */
-static void
-_run_script_destroy(GgazeWindow *p_win) {
-   popup_list_destroy(&p_win->p_run_script_pop);
-}
-
-/* Row name for the run-script popover: the configured script's display name. */
-static const char *
-_run_script_name(const GPtrArray *p_scripts, guint u_idx) {
-   const SettingsPair *p_sc = g_ptr_array_index((GPtrArray *)p_scripts, u_idx);
-   return (p_sc->c_name);
-}
-
 /* Row click / hotkey: run that script on the original current file + folder,
  * then close the popover. */
 static void
 _run_script_activate(gpointer p_data, guint u_idx) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    ggaze_window_run_script_index(p_win, u_idx);
-   _run_script_destroy(p_win);
+   popup_list_destroy(&p_win->p_run_script_pop);
 }
 
 /* Build and pop up the run-script popover listing the configured scripts
@@ -1853,19 +2068,20 @@ _action_run_script(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (p_win->p_nav == NULL) {
-      return; /* nothing open */
+   if (!_require_folder(p_win)) {
+      return;
    }
    /* Toggle: a second `!` while the popover is up just closes it. */
    if (p_win->p_run_script_pop != NULL) {
-      _run_script_destroy(p_win);
+      popup_list_destroy(&p_win->p_run_script_pop);
       return;
    }
    const GPtrArray *p_scripts =
       p_win->p_runner != NULL ? runner_get_scripts(p_win->p_runner) : NULL;
-   popup_list_new(p_win->p_stack, &p_win->p_run_script_pop, "Run script:",
-                  "No scripts configured. Press , to open Preferences.",
-                  p_scripts, _run_script_name, _run_script_activate, p_win);
+   popup_list_new(
+      p_win->p_stack, &p_win->p_run_script_pop,
+      "Run script:", "No scripts configured. Press , to open Preferences.",
+      p_scripts, popup_list_settings_pair_name, _run_script_activate, p_win);
    /* Focuses the first script row itself -- see "POPOVER KEYBOARD FOCUS"
     * near the top of this file. */
    popup_list_popup(p_win->p_run_script_pop);
@@ -2039,13 +2255,6 @@ ggaze_window_move_index(GgazeWindow *p_win, guint u_idx) {
    return (b_ok);
 }
 
-/* Synchronously tear down the current move popover (unparent + clear the
- * field). Safe to call when none is open. */
-static void
-_move_destroy(GgazeWindow *p_win) {
-   popup_list_destroy(&p_win->p_move_pop);
-}
-
 /* Captures the destination index AND the target set for the Save/Discard/
  * Cancel prompt's continuation (ggaze_window_move_index itself stays a plain,
  * synchronous, directly-testable function -- see window.h -- so the
@@ -2082,19 +2291,12 @@ _move_idx_ctx_free(gpointer p_data) {
  * current decision has to be captured with them). */
 static void
 _move_go(GgazeWindow *p_win, guint u_idx) {
-   _move_destroy(p_win);
+   popup_list_destroy(&p_win->p_move_pop);
    _MoveIdxCtx *p_ctx = g_new(_MoveIdxCtx, 1);
    _files_ctx_init(&p_ctx->t_base, p_win, _capture_targets(p_win));
    p_ctx->u_idx = u_idx;
    save_gate_maybe_save_then(p_win->p_save_gate, _proceed_move_idx, p_ctx,
                              _move_idx_ctx_free);
-}
-
-/* Row name for the move popover: the configured destination's display name. */
-static const char *
-_move_name(const GPtrArray *p_dests, guint u_idx) {
-   const SettingsPair *p_d = g_ptr_array_index((GPtrArray *)p_dests, u_idx);
-   return (p_d->c_name);
 }
 
 /* Row click / hotkey: close the popover, then move to that destination,
@@ -2113,11 +2315,11 @@ _action_move(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (p_win->p_nav == NULL || p_win->p_mover == NULL) {
+   if (!_require_folder(p_win) || p_win->p_mover == NULL) {
       return;
    }
    if (p_win->p_move_pop != NULL) {
-      _move_destroy(p_win);
+      popup_list_destroy(&p_win->p_move_pop);
       return;
    }
    GList *p_targets = _capture_targets(p_win);
@@ -2132,7 +2334,8 @@ _action_move(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       g_strdup_printf("Move %u image%s to:", u_count, u_count == 1 ? "" : "s");
    popup_list_new(p_win->p_stack, &p_win->p_move_pop, c_title,
                   "No destinations configured. Press , to open Preferences.",
-                  p_dests, _move_name, _move_activate, p_win);
+                  p_dests, popup_list_settings_pair_name, _move_activate,
+                  p_win);
    g_free(c_title);
    /* Focuses the first destination row itself -- see "POPOVER KEYBOARD
     * FOCUS" near the top of this file. */
@@ -2147,6 +2350,7 @@ static const GActionEntry ACTIONS[] = {
    {.name = "first", .activate = _action_first},
    {.name = "last", .activate = _action_last},
    {.name = "open", .activate = _action_open},
+   {.name = "open-folder", .activate = _action_open_folder},
    {.name = "open-external", .activate = _action_open_external},
    {.name = "run-script", .activate = _action_run_script},
    {.name = "move", .activate = _action_move},
@@ -2170,6 +2374,12 @@ static const GActionEntry ACTIONS[] = {
    {.name = "enhance-8", .activate = _action_enhance_n},
    {.name = "zoom-in", .activate = _action_zoom_in},
    {.name = "zoom-out", .activate = _action_zoom_out},
+   {.name = "zoom-reset", .activate = _action_zoom_reset},
+   {.name = "pan-left", .activate = _action_pan_left},
+   {.name = "pan-right", .activate = _action_pan_right},
+   {.name = "enter-large", .activate = _action_enter_large},
+   {.name = "menu", .activate = _action_menu},
+   {.name = "empty-trash", .activate = _action_empty_trash},
    {.name = "fullscreen", .activate = _action_fullscreen},
    {.name = "slideshow", .activate = _action_slideshow},
    {.name = "info", .activate = _action_info},
@@ -2193,20 +2403,50 @@ drop_cb(GtkDropTarget *p_t, const GValue *p_val, gdouble d_x, gdouble d_y,
    }
    GdkFileList *p_fl    = (GdkFileList *)g_value_get_boxed(p_val);
    GSList      *p_files = gdk_file_list_get_files(p_fl);
-   /* Decision Z: many files -> first file's folder with the first current. */
-   if (p_files != NULL) {
-      ggaze_window_open(p_win, G_FILE(p_files->data));
-      return (TRUE);
+   guint        u_n     = g_slist_length(p_files);
+   if (u_n == 0) {
+      return (FALSE);
    }
-   return (FALSE);
+   /* Decision Z: many files -> first file's folder in the grid. */
+   GFile **pp = g_new(GFile *, u_n);
+   guint   u  = 0;
+   for (GSList *p_it = p_files; p_it != NULL; p_it = p_it->next) {
+      pp[u++] = G_FILE(p_it->data);
+   }
+   ggaze_window_open_files(p_win, pp, (gint)u_n);
+   g_free(pp);
+   return (TRUE);
+}
+
+/* Drop highlight: a frame around the window content while a file list hovers
+ * over it, cleared when it leaves or drops. */
+static GdkDragAction
+_drop_enter_cb(GtkDropTarget *p_t, gdouble d_x, gdouble d_y, gpointer p_data) {
+   (void)p_t;
+   (void)d_x;
+   (void)d_y;
+   gtk_widget_add_css_class(GGAZE_WINDOW(p_data)->p_overlay, "ggaze-drop");
+   return (GDK_ACTION_COPY);
+}
+
+static void
+_drop_leave_cb(GtkDropTarget *p_t, gpointer p_data) {
+   (void)p_t;
+   gtk_widget_remove_css_class(GGAZE_WINDOW(p_data)->p_overlay, "ggaze-drop");
 }
 
 /* --- navigator changed -> reload ----------------------------------------- */
 
 static void
-nav_changed_cb(Navigator *p_nav, gpointer p_data) {
+nav_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
    (void)p_nav;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if ((u_flags & (GGAZE_NAV_CURSOR | GGAZE_NAV_LISTING)) == 0) {
+      /* Marks or the removed set changed: only the title (mark count,
+       * remaining count) is affected. */
+      _update_header(p_win);
+      return;
+   }
 #if GGAZE_HAVE_GEGL
    /* "changed" fires for every navigator rescan, not only an actual move to a
     * different current file -- notably, win.enhance-save writes the
@@ -2231,6 +2471,7 @@ nav_changed_cb(Navigator *p_nav, gpointer p_data) {
     * wins because it re-shows the label with its own fresh timer afterward. */
    _dismiss_info_for_nav(p_win);
    _load_current(p_win);
+   _update_empty_state(p_win);
 }
 
 /* Enter/double-click on a cell: switch to large view and show whatever
@@ -2243,8 +2484,90 @@ static void
 _on_grid_activate(GgazeGrid *p_grid, gpointer p_data) {
    (void)p_grid;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "large");
+   _set_view(p_win, GGAZE_VIEW_LARGE);
    _load_current(p_win);
+}
+
+/* Enter (global): in the grid, open the highlighted image large -- the same
+ * thing the flowbox's own Enter does, but through the shortcuts table so
+ * the `?` help lists it and it works when focus wandered off the grid. */
+static void
+_action_enter_large(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL || _get_view(p_win) != GGAZE_VIEW_GRID ||
+       p_win->p_grid == NULL) {
+      return;
+   }
+   ggaze_grid_sync_current(p_win->p_grid);
+   _on_grid_activate(p_win->p_grid, p_win);
+}
+
+/* F10 / the header-bar button: pop the main menu. */
+static void
+_action_menu(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_menu_btn != NULL) {
+      gtk_menu_button_popup(GTK_MENU_BUTTON(p_win->p_menu_btn));
+   }
+}
+
+/* Empty Trash confirm answered. p_data is a ref on the window. */
+static void
+_empty_trash_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   GError      *p_err = NULL;
+   int          i_btn =
+      gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(p_src), p_res, &p_err);
+   g_clear_error(&p_err);
+   if (i_btn == 1 && !p_win->b_disposed && p_win->p_trash != NULL) {
+      guint u_done = 0;
+      if (trash_empty(p_win->p_trash, &u_done, &p_err)) {
+         char *c_msg = g_strdup_printf("Emptied Trash (%u file%s)", u_done,
+                                       u_done == 1 ? "" : "s");
+         _show_status(p_win, c_msg);
+         g_free(c_msg);
+      } else {
+         char *c_msg =
+            g_strdup_printf("Empty Trash failed after %u: %s", u_done,
+                            p_err != NULL ? p_err->message : "?");
+         _show_status(p_win, c_msg);
+         g_free(c_msg);
+         g_clear_error(&p_err);
+      }
+      undo_reset(p_win->p_undo); /* the restorable file is gone */
+   }
+   g_object_unref(p_win);
+}
+
+/* `E` / main menu "Empty Trash": permanently delete the folder's .Trash
+ * contents after a confirm (no undo past this point). */
+static void
+_action_empty_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (!_require_folder(p_win) || p_win->p_trash == NULL) {
+      return;
+   }
+   guint u_n = trash_count(p_win->p_trash);
+   if (u_n == 0) {
+      _show_status(p_win, "Trash is already empty");
+      return;
+   }
+   GtkAlertDialog *p_dlg = gtk_alert_dialog_new(
+      "Permanently delete %u file%s in this folder's Trash?", u_n,
+      u_n == 1 ? "" : "s");
+   gtk_alert_dialog_set_detail(p_dlg, "This cannot be undone.");
+   gtk_alert_dialog_set_buttons(
+      p_dlg, (const char *[]){"Cancel", "Empty Trash", NULL});
+   gtk_alert_dialog_set_cancel_button(p_dlg, 0);
+   gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_win), NULL, _empty_trash_cb,
+                           g_object_ref(p_win));
+   g_object_unref(p_dlg);
 }
 
 /* --- load current into the viewer ---------------------------------------- */
@@ -2311,16 +2634,22 @@ _update_header(GgazeWindow *p_win) {
       GFile *p_cur       = navigator_get_current(p_win->p_nav);
       guint  u_remaining = navigator_get_remaining(p_win->p_nav);
       guint  u_total     = navigator_get_count(p_win->p_nav);
-      gint   i_idx       = navigator_get_current_index(p_win->p_nav);
       if (p_cur != NULL) {
+         /* "n/total" over LIVE entries on both sides: the position among
+          * the not-yet-trashed images over how many of those remain. The
+          * old listing-index numerator overtook the denominator ("6/5")
+          * as soon as anything was trashed. */
          char *c_name = g_file_get_basename(p_cur);
-         if (u_total > 0 && i_idx >= 0) {
-            c_title = g_strdup_printf("%s  \u00b7  %d/%u", c_name, i_idx + 1,
-                                      u_remaining);
-         } else {
-            c_title = g_strdup(c_name);
-         }
+         guint u_pos  = navigator_get_live_position(p_win->p_nav);
+         c_title =
+            g_strdup_printf("%s  \u00b7  %u/%u", c_name, u_pos, u_remaining);
          g_free(c_name);
+      } else {
+         /* Nothing current: keep the folder name and the count on screen
+          * instead of a bare "ggaze". */
+         char *c_folder = g_file_get_basename(navigator_get_dir(p_win->p_nav));
+         c_title = g_strdup_printf("%s  \u00b7  0/%u", c_folder, u_total);
+         g_free(c_folder);
       }
       /* Append the marked count so multi-selection is visible in the title. */
       guint u_marks = navigator_get_mark_count(p_win->p_nav);
@@ -2399,9 +2728,9 @@ ggaze_window_dispose(GObject *p_obj) {
       }
       g_clear_object(&p_win->p_nav);
    }
-   _open_ext_destroy(p_win);
-   _run_script_destroy(p_win);
-   _move_destroy(p_win);
+   popup_list_destroy(&p_win->p_open_ext_pop);
+   popup_list_destroy(&p_win->p_run_script_pop);
+   popup_list_destroy(&p_win->p_move_pop);
    _delete_confirm_dispose(p_win);
    save_gate_dispose(p_win->p_save_gate);
 #if GGAZE_HAVE_GEGL
@@ -2413,10 +2742,6 @@ ggaze_window_dispose(GObject *p_obj) {
    }
    info_overlay_dispose(p_win->p_info); /* timer + in-flight decode; no
                                          * widget touch after this */
-   if (p_win->u_hdr_hide != 0) {
-      g_source_remove(p_win->u_hdr_hide);
-      p_win->u_hdr_hide = 0;
-   }
    g_clear_pointer(&p_win->p_trash, trash_delete);
    g_clear_pointer(&p_win->p_thumb, thumbnail_delete);
    g_clear_pointer(&p_win->p_runner, runner_delete);
@@ -2482,6 +2807,10 @@ _ensure_css(void) {
              "  padding: 6px 10px;\n"
              "  border-radius: 6px;\n"
              "}\n"
+             "/* file list hovering over the window (drop target). */\n"
+             ".ggaze-drop {\n"
+             "  box-shadow: inset 0 0 0 3px #3584e4;\n"
+             "}\n"
              "/* enabled enhance preset row highlight. */\n"
              ".ggaze-enhance-on {\n"
              "  background-color: #3584e4;\n"
@@ -2530,11 +2859,6 @@ _dc_show_status(gpointer p_host, const char *c_msg) {
    _show_status(GGAZE_WINDOW(p_host), c_msg);
 }
 
-static GtkWindow *
-_dc_alert_dialog_window(gpointer p_host) {
-   return (_alert_dialog_window(GGAZE_WINDOW(p_host)));
-}
-
 static void
 _dc_perform_delete(gpointer p_host, GList *p_files) {
    _do_delete_files(GGAZE_WINDOW(p_host), p_files);
@@ -2547,10 +2871,9 @@ _dc_current_dir(gpointer p_host) {
 }
 
 static const DeleteConfirmHostOps _DELETE_CONFIRM_OPS = {
-   .show_status         = _dc_show_status,
-   .alert_dialog_window = _dc_alert_dialog_window,
-   .perform_delete      = _dc_perform_delete,
-   .current_dir         = _dc_current_dir,
+   .show_status    = _dc_show_status,
+   .perform_delete = _dc_perform_delete,
+   .current_dir    = _dc_current_dir,
 };
 
 /* --- SaveGate host ops (window side of the Save/Discard/Cancel gate) ----- */
@@ -2563,11 +2886,6 @@ _sg_is_dirty(gpointer p_host) {
 static void
 _sg_show_status(gpointer p_host, const char *c_msg) {
    _show_status(GGAZE_WINDOW(p_host), c_msg);
-}
-
-static GtkWindow *
-_sg_alert_dialog_window(gpointer p_host) {
-   return (_alert_dialog_window(GGAZE_WINDOW(p_host)));
 }
 
 #if GGAZE_HAVE_GEGL
@@ -2610,12 +2928,11 @@ _sg_discard(gpointer p_host) {
 #endif
 
 static const SaveGateHostOps _SAVE_GATE_OPS = {
-   .is_dirty            = _sg_is_dirty,
-   .do_save             = _sg_do_save,
-   .discard             = _sg_discard,
-   .show_status         = _sg_show_status,
-   .alert_dialog_window = _sg_alert_dialog_window,
-   .quit_continuation   = _proceed_quit,
+   .is_dirty          = _sg_is_dirty,
+   .do_save           = _sg_do_save,
+   .discard           = _sg_discard,
+   .show_status       = _sg_show_status,
+   .quit_continuation = _proceed_quit,
 };
 
 /* Cancellables, texture/thumbnail caches, per-folder trash/grid placeholders,
@@ -2652,6 +2969,16 @@ _init_engines_and_settings(GgazeWindow *p_win) {
             g_signal_connect(p_gs, c_sig, G_CALLBACK(_on_pref_changed), p_win);
             g_free(c_sig);
          }
+         static const char *FOLDER_KEYS[] = {
+            "sort",         "wrap",           "hide-raw-sidecars",
+            "hide-trashed", "thumbnail-size",
+         };
+         for (gsize i = 0; i < G_N_ELEMENTS(FOLDER_KEYS); i++) {
+            char *c_sig = g_strdup_printf("changed::%s", FOLDER_KEYS[i]);
+            g_signal_connect(p_gs, c_sig, G_CALLBACK(_on_folder_pref_changed),
+                             p_win);
+            g_free(c_sig);
+         }
       }
    }
 #if GGAZE_HAVE_GEGL
@@ -2680,37 +3007,153 @@ _init_info_overlay(GgazeWindow *p_win) {
 /* Header bar, the grid/large GtkStack (+ its info overlay), and the viewer
  * widget. Split out of ggaze_window_init to keep it under CLAUDE.md's
  * 50-line hard limit (tu0 review round 2, issue 5). */
+/* One header-bar icon button bound to a win.* action, with the title and
+ * live keys from the shortcuts table as its tooltip ("Next image (l / Right)").
+ */
+static GtkWidget *
+_header_button(const char *c_icon, const char *c_action) {
+   GtkWidget *p_btn = gtk_button_new_from_icon_name(c_icon);
+   gtk_actionable_set_action_name(GTK_ACTIONABLE(p_btn), c_action);
+   char *c_tip = shortcuts_tooltip_for_action(c_action);
+   gtk_widget_set_tooltip_text(p_btn, c_tip != NULL ? c_tip : c_action);
+   g_free(c_tip);
+   return (p_btn);
+}
+
+/* Append a menu item for c_action whose label comes from the shortcuts
+ * table (with the keys in parentheses), so menu and keys cannot drift. */
+static void
+_menu_add(GMenu *p_menu, const char *c_action, const char *c_fallback) {
+   const char *c_title = shortcuts_title_for_action(c_action);
+   char       *c_keys  = shortcuts_keys_for_action(c_action);
+   char       *c_label =
+      c_keys != NULL
+         ? g_strdup_printf("%s (%s)", c_title != NULL ? c_title : c_fallback,
+                           c_keys)
+         : g_strdup(c_title != NULL ? c_title : c_fallback);
+   g_menu_append(p_menu, c_label, c_action);
+   g_free(c_label);
+   g_free(c_keys);
+}
+
+/* The main menu (F10): every action, for mouse users and as a key legend. */
+static GMenuModel *
+_build_main_menu(void) {
+   GMenu *p_files = g_menu_new();
+   _menu_add(p_files, "win.open", "Open image");
+   _menu_add(p_files, "win.open-folder", "Open folder");
+   GMenu *p_edit = g_menu_new();
+   _menu_add(p_edit, "win.copy", "Copy");
+   _menu_add(p_edit, "win.move", "Move to...");
+   _menu_add(p_edit, "win.open-external", "Open in...");
+   _menu_add(p_edit, "win.run-script", "Run script...");
+   _menu_add(p_edit, "win.enhance", "Enhance");
+   GMenu *p_trash = g_menu_new();
+   _menu_add(p_trash, "win.trash", "Trash");
+   _menu_add(p_trash, "win.delete", "Delete permanently");
+   _menu_add(p_trash, "win.undo", "Undo");
+   _menu_add(p_trash, "win.empty-trash", "Empty Trash");
+   GMenu *p_view = g_menu_new();
+   _menu_add(p_view, "win.toggle-view", "Toggle grid / large");
+   _menu_add(p_view, "win.fullscreen", "Fullscreen");
+   _menu_add(p_view, "win.slideshow", "Slideshow");
+   _menu_add(p_view, "win.info", "Info overlay");
+   _menu_add(p_view, "win.mark-all", "Mark all");
+   GMenu *p_app = g_menu_new();
+   _menu_add(p_app, "win.preferences", "Preferences");
+   _menu_add(p_app, "win.shortcuts", "Keyboard shortcuts");
+   _menu_add(p_app, "win.quit", "Quit");
+   GMenu *p_menu = g_menu_new();
+   g_menu_append_section(p_menu, NULL, G_MENU_MODEL(p_files));
+   g_menu_append_section(p_menu, NULL, G_MENU_MODEL(p_edit));
+   g_menu_append_section(p_menu, NULL, G_MENU_MODEL(p_trash));
+   g_menu_append_section(p_menu, NULL, G_MENU_MODEL(p_view));
+   g_menu_append_section(p_menu, NULL, G_MENU_MODEL(p_app));
+   g_object_unref(p_files);
+   g_object_unref(p_edit);
+   g_object_unref(p_trash);
+   g_object_unref(p_view);
+   g_object_unref(p_app);
+   return (G_MENU_MODEL(p_menu));
+}
+
+/* Header bar (libadwaita, decision #29): prev/next/toggle on the left, the
+ * main menu on the right, every button tooltipped with its keys so the
+ * keyboard-first UI is discoverable with a mouse. */
+static void
+_init_header_bar(GgazeWindow *p_win) {
+   GtkWidget *p_header = adw_header_bar_new();
+   adw_header_bar_pack_start(
+      ADW_HEADER_BAR(p_header),
+      _header_button("go-previous-symbolic", "win.prev"));
+   adw_header_bar_pack_start(ADW_HEADER_BAR(p_header),
+                             _header_button("go-next-symbolic", "win.next"));
+   adw_header_bar_pack_start(
+      ADW_HEADER_BAR(p_header),
+      _header_button("view-grid-symbolic", "win.toggle-view"));
+   p_win->p_menu_btn = gtk_menu_button_new();
+   gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(p_win->p_menu_btn),
+                                 "open-menu-symbolic");
+   gtk_menu_button_set_primary(GTK_MENU_BUTTON(p_win->p_menu_btn), TRUE);
+   GMenuModel *p_model = _build_main_menu();
+   gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(p_win->p_menu_btn), p_model);
+   g_object_unref(p_model);
+   char *c_tip = shortcuts_tooltip_for_action("win.menu");
+   gtk_widget_set_tooltip_text(p_win->p_menu_btn, c_tip);
+   g_free(c_tip);
+   adw_header_bar_pack_end(ADW_HEADER_BAR(p_header), p_win->p_menu_btn);
+   adw_header_bar_pack_end(
+      ADW_HEADER_BAR(p_header),
+      _header_button("view-fullscreen-symbolic", "win.fullscreen"));
+   adw_header_bar_pack_end(
+      ADW_HEADER_BAR(p_header),
+      _header_button("media-playback-start-symbolic", "win.slideshow"));
+   gtk_window_set_titlebar(GTK_WINDOW(p_win), p_header);
+}
+
+/* The grid/large GtkStack (+ its info overlay), the empty-state page and the
+ * viewer widget. The "grid" child is created on open; until then the empty
+ * page tells a first-time user what to do instead of a placeholder label. */
 static void
 _init_stack_and_viewer(GgazeWindow *p_win) {
-   /* Header bar (libadwaita, decision #29). */
-   GtkWidget *p_header = adw_header_bar_new();
-   gtk_window_set_titlebar(GTK_WINDOW(p_win), p_header);
-
-   /* Two-view stack: "grid" is created on open; placeholder until then. */
    p_win->p_stack = gtk_stack_new();
    gtk_stack_set_transition_type(GTK_STACK(p_win->p_stack),
                                  GTK_STACK_TRANSITION_TYPE_CROSSFADE);
    _init_info_overlay(p_win);
 
-   GtkWidget *p_grid = gtk_label_new("grid");
-   gtk_widget_add_css_class(p_grid, "dim-label");
-   gtk_stack_add_named(GTK_STACK(p_win->p_stack), p_grid, "grid");
+   p_win->p_status_page = adw_status_page_new();
+   adw_status_page_set_icon_name(ADW_STATUS_PAGE(p_win->p_status_page),
+                                 "image-x-generic-symbolic");
+   adw_status_page_set_title(ADW_STATUS_PAGE(p_win->p_status_page),
+                             "Nothing open");
+   adw_status_page_set_description(
+      ADW_STATUS_PAGE(p_win->p_status_page),
+      "Press o to open an image, O a folder, or drop one here. "
+      "Press ? for the keyboard shortcuts.");
+   gtk_stack_add_named(GTK_STACK(p_win->p_stack), p_win->p_status_page,
+                       VIEW_NAMES[GGAZE_VIEW_EMPTY]);
+
+   GtkWidget *p_grid = gtk_label_new("");
+   gtk_stack_add_named(GTK_STACK(p_win->p_stack), p_grid,
+                       VIEW_NAMES[GGAZE_VIEW_GRID]);
 
    p_win->p_viewer = ggaze_viewer_new();
    gtk_widget_set_hexpand(p_win->p_viewer, TRUE);
    gtk_widget_set_vexpand(p_win->p_viewer, TRUE);
-   gtk_stack_add_named(GTK_STACK(p_win->p_stack), p_win->p_viewer, "large");
+   gtk_stack_add_named(GTK_STACK(p_win->p_stack), p_win->p_viewer,
+                       VIEW_NAMES[GGAZE_VIEW_LARGE]);
    g_signal_connect(p_win->p_viewer, "navigate",
                     G_CALLBACK(_on_viewer_navigate), p_win);
    _apply_viewer_prefs(p_win);
 
-   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack), "grid");
+   _set_view(p_win, GGAZE_VIEW_EMPTY);
 }
 
 static void
 ggaze_window_init(GgazeWindow *p_win) {
    _ensure_css();
    _init_engines_and_settings(p_win);
+   _init_header_bar(p_win);
    _init_stack_and_viewer(p_win);
 
    /* Actions + keybindings (decision #10/#12). */
@@ -2722,6 +3165,8 @@ ggaze_window_init(GgazeWindow *p_win) {
    GtkDropTarget *p_drop =
       gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
    g_signal_connect(p_drop, "drop", G_CALLBACK(drop_cb), p_win);
+   g_signal_connect(p_drop, "enter", G_CALLBACK(_drop_enter_cb), p_win);
+   g_signal_connect(p_drop, "leave", G_CALLBACK(_drop_leave_cb), p_win);
    gtk_widget_add_controller(GTK_WIDGET(p_win), GTK_EVENT_CONTROLLER(p_drop));
 
    /* Native window close (WM "X"/Alt+F4): gate it through the same
@@ -2870,6 +3315,34 @@ _open_rebuild_grid(GgazeWindow *p_win, gboolean b_hide_trashed) {
                        "grid");
 }
 
+/* After the folder is open: say when the requested file was not what the
+ * user thinks it is -- a path that does not exist, or a file that is not an
+ * image of this folder -- instead of silently showing the folder's first
+ * image under a title that never mentions the mistake. */
+static void
+_report_open_target(GgazeWindow *p_win, GFile *p_arg, gboolean b_is_dir) {
+   if (b_is_dir || p_win->p_nav == NULL) {
+      return;
+   }
+   char *c_name = g_file_get_basename(p_arg);
+   if (!g_file_query_exists(p_arg, NULL)) {
+      char *c_msg =
+         g_strdup_printf("%s not found \u2014 opened its folder", c_name);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
+   } else {
+      GFile *p_cur = navigator_get_current(p_win->p_nav);
+      if (p_cur == NULL || !g_file_equal(p_cur, p_arg)) {
+         char *c_msg = g_strdup_printf(
+            "%s is not an image in this folder \u2014 opened the folder",
+            c_name);
+         _show_status(p_win, c_msg);
+         g_free(c_msg);
+      }
+   }
+   g_free(c_name);
+}
+
 /* The actual open logic (was ggaze_window_open's whole body before tu0 added
  * the dirty-preview gate below). Kept as a separate static function so the
  * public entry point can defer it behind a Save/Discard/Cancel prompt
@@ -2897,6 +3370,8 @@ _open_now(GgazeWindow *p_win, GFile *p_arg) {
     * teardown/rebuild below avoids a window where new content is already
     * showing but the old overlay is still up. */
    _dismiss_info_for_nav(p_win);
+   _slideshow_stop(p_win, NULL);
+   p_win->i_esc_at = 0;
 
    _open_reset_existing_nav(p_win);
 
@@ -2915,9 +3390,10 @@ _open_now(GgazeWindow *p_win, GFile *p_arg) {
     * docs/ui-and-interactions.md 33-47); file arg → large view on that image.
     * _load_current is run either way so the large view is ready when toggled.
     */
-   gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack),
-                                    b_is_dir ? "grid" : "large");
+   _set_view(p_win, b_is_dir ? GGAZE_VIEW_GRID : GGAZE_VIEW_LARGE);
    _load_current(p_win);
+   _update_empty_state(p_win);
+   _report_open_target(p_win, p_arg, b_is_dir);
 }
 
 typedef struct {
@@ -2960,20 +3436,78 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
                              _open_ctx_free);
 }
 
+/* Several files: open the FIRST one's folder in the grid with it current
+ * (decision #27). One file: the usual large-view open. */
+static gboolean
+_proceed_open_many(gpointer p_data) {
+   _OpenCtx *p_ctx = (_OpenCtx *)p_data;
+   GFile    *p_dir = g_file_get_parent(p_ctx->p_arg);
+   if (p_dir == NULL) {
+      _open_now(p_ctx->p_win, p_ctx->p_arg);
+      return (G_SOURCE_REMOVE);
+   }
+   _open_now(p_ctx->p_win, p_dir);
+   if (p_ctx->p_win->p_nav != NULL) {
+      navigator_set_current_file(p_ctx->p_win->p_nav, p_ctx->p_arg);
+   }
+   g_object_unref(p_dir);
+   return (G_SOURCE_REMOVE);
+}
+
+void
+ggaze_window_open_files(GgazeWindow *p_win, GFile **pp_files, gint i_n_files) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   if (pp_files == NULL || i_n_files <= 0) {
+      return;
+   }
+   if (i_n_files == 1) {
+      ggaze_window_open(p_win, pp_files[0]);
+      return;
+   }
+   _OpenCtx *p_ctx = g_new(_OpenCtx, 1);
+   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->p_arg    = (GFile *)g_object_ref(pp_files[0]);
+   save_gate_maybe_save_then(p_win->p_save_gate, _proceed_open_many, p_ctx,
+                             _open_ctx_free);
+}
+
+/* Step the cursor by i_dir and give a cue at the folder edge: "Wrapped to
+ * first/last image" when wrap took the user around (easy to miss while
+ * culling, and the reason people re-review a folder), "First/Last image"
+ * when wrap is off and nothing happened. */
+static void
+_step(GgazeWindow *p_win, gint i_dir) {
+   if (p_win->p_nav == NULL) {
+      return;
+   }
+   gint     i_before = navigator_get_current_index(p_win->p_nav);
+   gboolean b_moved =
+      (i_dir > 0) ? navigator_next(p_win->p_nav) : navigator_prev(p_win->p_nav);
+   gint i_after = navigator_get_current_index(p_win->p_nav);
+   if (!b_moved) {
+      if (navigator_get_remaining(p_win->p_nav) > 1) {
+         _show_status(p_win, (i_dir > 0) ? "Last image" : "First image");
+      }
+      return;
+   }
+   if (i_before >= 0 && i_after >= 0 &&
+       ((i_dir > 0 && i_after < i_before) ||
+        (i_dir < 0 && i_after > i_before))) {
+      _show_status(p_win, (i_dir > 0) ? "Wrapped to first image"
+                                      : "Wrapped to last image");
+   }
+}
+
 void
 ggaze_window_prev(GgazeWindow *p_win) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));
-   if (p_win->p_nav != NULL) {
-      navigator_prev(p_win->p_nav); /* emits "changed" -> _load_current */
-   }
+   _step(p_win, -1); /* emits "changed" -> _load_current */
 }
 
 void
 ggaze_window_next(GgazeWindow *p_win) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));
-   if (p_win->p_nav != NULL) {
-      navigator_next(p_win->p_nav);
-   }
+   _step(p_win, 1);
 }
 
 void

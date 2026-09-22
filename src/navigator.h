@@ -31,6 +31,18 @@ typedef enum {
    GGAZE_SORT_SIZE
 } GgazeSort;
 
+/* What a "changed" emission is about (bit flags, several may be set). The
+ * signal used to carry nothing, so every consumer reconstructed the meaning
+ * from counters -- and got it wrong for a same-count listing change. */
+typedef enum {
+   GGAZE_NAV_CURSOR  = 1 << 0, /* navigator.current moved */
+   GGAZE_NAV_MARKS   = 1 << 1, /* the mark set / range anchor changed */
+   GGAZE_NAV_LISTING = 1 << 2, /* the listing was rebuilt (rescan, sort,
+                                * filter, monitor); cells may be new */
+   GGAZE_NAV_REMOVED = 1 << 3, /* the removed/dimmed set changed */
+   GGAZE_NAV_ALL     = 0xf,
+} GgazeNavChange;
+
 /* Construct a navigator over p_dir (file or folder; a file's parent is used by
  * the caller). Refs p_dir. Lists immediately. e_sort is the initial sort;
  * b_wrap controls prev/next wrap; b_hide_raw hides RAW sidecars when a JPEG
@@ -87,6 +99,15 @@ GFile *navigator_get_last_mark(Navigator *p_nav); /* (transfer none) */
 /* Re-read the directory; if the current file is gone, fall back to nearest;
  * emit "changed". */
 void navigator_rescan(Navigator *p_nav);
+
+/* FALSE iff the last (re)listing could not enumerate the folder (vanished,
+ * unreadable); navigator_get_error() then holds the reason. */
+gboolean    navigator_is_readable(Navigator *p_nav);
+const char *navigator_get_error(Navigator *p_nav); /* (transfer none) */
+
+/* 1-based position of the current file among the LIVE (not removed) entries,
+ * for the "n/total" title; 0 when nothing is current. */
+guint navigator_get_live_position(Navigator *p_nav);
 /* Remove p_file from the listing (used by trash/move); clear its mark; if it
  * was current, fall back to nearest; emit "changed". Returns TRUE if removed.
  */
@@ -102,7 +123,10 @@ gboolean navigator_is_removed(Navigator *p_nav, GFile *p_file);
 void     navigator_mark_removed(Navigator *p_nav, GFile *p_file);
 guint    navigator_get_removed_count(Navigator *p_nav);
 
-/* "changed" signal: emitted on sort/filter/rescan/remove/monitor event. */
+/* "changed" signal: void changed(Navigator *, guint u_flags, gpointer), where
+ * u_flags is a GgazeNavChange mask saying what changed. Emitted on every
+ * cursor move, mark change, listing rebuild and removed-set change. Test
+ * seam: emit it with GGAZE_NAV_ALL. */
 void navigator_emit_changed(Navigator *p_nav);
 
 G_END_DECLS

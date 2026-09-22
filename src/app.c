@@ -4,19 +4,20 @@
  * Implements GgazeApp (GgazeApp : AdwApplication : GtkApplication). Wires the
  * GApplication `open` signal (file or folder) and the default `activate`
  * (no-arg) path to a GgazeWindow, reusing the active window for the
- * single-instance "replace on new open" behaviour (decision #32). Real
- * file-vs-folder resolution is the navigator's job in M2; M0 just remembers
- * the path and titles the window. See docs/architecture.md.
+ * single-instance "replace on new open" behaviour (decision #32). File-vs-
+ * folder resolution is the window's/navigator's job. See
+ * docs/architecture.md.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
 #include "app.h"
-#include "window.h"
-#include "ggaze-config.h"
 
 #include <glib.h>
+
+#include "ggaze-config.h"
+#include "window.h"
 
 #if GGAZE_HAVE_GEGL
 #include <gegl.h>
@@ -60,10 +61,11 @@ ggaze_app_open(GApplication *p_app, GFile **p_files, gint n_files,
    (void)c_hint;
    GgazeApp    *p_app_self = GGAZE_APP(p_app);
    GgazeWindow *p_win      = _ensure_window(p_app_self);
-   /* open-question Z / decision #27: one file opens it; many files open the
-    * first file's folder with the first current (navigator wiring in M2). */
+   /* Decision #27 / open-question Z: one file opens it in the large view;
+    * several open the first file's folder in the grid with the first one
+    * current (the window decides, see ggaze_window_open_files). */
    if (n_files > 0 && p_files != NULL) {
-      ggaze_window_open(p_win, p_files[0]);
+      ggaze_window_open_files(p_win, p_files, n_files);
    }
    gtk_window_present(GTK_WINDOW(p_win));
 }

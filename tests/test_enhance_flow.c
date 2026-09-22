@@ -1788,9 +1788,11 @@ test_save_with_no_preview_left_reports_and_proceeds(void) {
    g_free(c_out);
    g_assert_false(g_file_test(fx.c_path, G_FILE_TEST_EXISTS)); /* still
                                                                 * trashed it */
+   /* The gate said "Nothing to save" and proceeded; the trash then reported
+    * its own outcome, which is the status the user is left looking at. */
    g_assert_cmpstr(
       gtk_label_get_text(GTK_LABEL(ggaze_window_get_info_label(fx.p_win))), ==,
-      "Nothing to save \u2014 the preview is gone"); /* ... and said why */
+      "Trashed plain.jpg \u2014 u to undo");
 
    fixture_teardown(&fx);
 }

@@ -370,10 +370,11 @@ test_shortcut_full_table_registered(void) {
       g_assert_cmpstr(shortcut_action_name(p_s), ==, CURSOR_KEYS[i].c_action);
       g_object_unref(p_s);
    }
-   /* The SHORTCUTS[] table has 43 rows now (some actions appear twice, e.g.
-    * win.prev for h and Left, win.cursor-down for j and Down, and win.zoom-in
-    * for plus and equal). */
-   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 43);
+   /* Every SHORTCUTS[] row with an action registers one shortcut; most
+    * actions appear at least twice (a vi-style key and a traditional one:
+    * h/Left/PageUp, g/Home, d/Delete, ...). The hold-Space help-only row does
+    * not. Keep this in step with the table. */
+   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 69);
    g_object_unref(p_sc);
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(200);
@@ -406,10 +407,11 @@ test_help_window_from_table(void) {
    GtkShortcutsWindow *p_w = shortcuts_build_help(NULL);
    g_assert_nonnull(p_w);
    g_assert_true(GTK_IS_SHORTCUTS_WINDOW(p_w));
-   /* 30 merged rows: the 43 SHORTCUTS[] rows collapse by merging shared titles
-    * within a group (h+Left, l+Right, j+Down, k+Up, plus+equal,
-    * minus+underscore, and enhance 1..8 -> one row each) down to 30. */
-   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 30);
+   /* Merged rows: the SHORTCUTS[] rows collapse by shared title within a
+    * group (each action's vi-style and traditional keys, and enhance 1..8,
+    * become one row each), plus the help-only hold-Space row. Keep in step
+    * with the table. */
+   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 38);
    gtk_window_destroy(GTK_WINDOW(p_w));
    drain_main(200);
 }

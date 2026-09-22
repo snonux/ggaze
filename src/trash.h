@@ -38,6 +38,15 @@ gboolean trash_restore_last(Trash *p_t, GError **p_err);
 
 gboolean trash_can_undo(Trash *p_t);
 
+/* Permanently delete every file in the folder's .Trash (the "Empty Trash"
+ * menu action). Stops at the first failure with p_err set; *p_deleted counts
+ * the files removed either way. Clears the one-level undo. A missing .Trash
+ * is an empty one (TRUE, 0 deleted). */
+gboolean trash_empty(Trash *p_t, guint *p_deleted, GError **p_err);
+
+/* Number of files currently in the folder's .Trash (0 when absent). */
+guint trash_count(Trash *p_t);
+
 G_END_DECLS
 
 #endif /* GGAZE_TRASH_H */

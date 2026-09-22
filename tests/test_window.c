@@ -154,10 +154,12 @@ test_stack_has_two_views(void) {
 
    GtkStack   *p_stack = GTK_STACK(p_child);
    GListModel *p_pages = G_LIST_MODEL(gtk_stack_get_pages(p_stack));
-   g_assert_cmpint(g_list_model_get_n_items(p_pages), ==, 2);
+   /* grid, large, and the empty-state page shown until something is open. */
+   g_assert_cmpint(g_list_model_get_n_items(p_pages), ==, 3);
    g_assert_nonnull(gtk_stack_get_child_by_name(p_stack, "grid"));
    g_assert_nonnull(gtk_stack_get_child_by_name(p_stack, "large"));
-   g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
+   g_assert_nonnull(gtk_stack_get_child_by_name(p_stack, "empty"));
+   g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "empty");
    g_object_unref(p_pages);
 
    gtk_window_destroy(GTK_WINDOW(p_win));

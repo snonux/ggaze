@@ -11,9 +11,10 @@
  * came from. This module owns that flow -- the captured target context, the
  * outstanding-dialog cancellable/slot, the folder-identity re-check and the
  * confirmed-delete -- so window.c's `D` path just asks it. The actual
- * permanent deletion (trash + navigator mark/advance) stays in window.c and
- * is invoked through the host ops, so the helper touches no GtkWidget and no
- * engine state directly.
+ * permanent deletion (trash + navigator mark/advance) stays with the host
+ * and is invoked through the host ops. The helper owns the GtkAlertDialog
+ * (the one widget the confirm is) and nothing else; p_host must be the
+ * GtkWindow the dialog is transient for.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -32,9 +33,6 @@ typedef struct DeleteConfirm DeleteConfirm;
 typedef struct {
    /* Transient status line (the window's info overlay). */
    void (*show_status)(gpointer p_host, const char *c_msg);
-   /* The GtkAlertDialog's own toplevel, ref'd so it is not freed under the
-    * GTask that still points at it (transfer-full). May return NULL. */
-   GtkWindow *(*alert_dialog_window)(gpointer p_host);
    /* Permanently delete the captured targets (transfer-none for p_files;
     * borrowed for the call) and advance the cursor if one was current. */
    void (*perform_delete)(gpointer p_host, GList *p_files);

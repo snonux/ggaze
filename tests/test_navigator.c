@@ -489,8 +489,9 @@ test_monitor_add(void) {
 }
 
 static void
-on_changed_cb(Navigator *p_nav, gpointer p_data) {
+on_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
    (void)p_nav;
+   g_assert_cmpuint(u_flags, !=, 0);
    (*(gint *)p_data)++;
 }
 

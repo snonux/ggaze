@@ -28,26 +28,51 @@ typedef struct {
  * order; within a group, rows that share a title (and so merge into one help
  * row) are kept adjacent. The binding controller does not depend on this
  * order — triggers are distinct — so reordering is safe. */
+/* Keyboard first (decision #7): every action has a vi-style key, listed
+ * first, AND a traditional one (cursor keys, Home/End, PageUp/PageDown,
+ * Delete, F-keys, Ctrl chords) so both habits work; the help merges the two
+ * into one row per action. */
 static const ShortcutEntry SHORTCUTS[] = {
-   /* Navigation (decision #7: vi-style + cursor keys) */
+   /* Navigation */
    {GDK_KEY_h, 0, "win.prev", "Previous image", "Navigation"},
    {GDK_KEY_Left, 0, "win.prev", "Previous image", "Navigation"},
+   {GDK_KEY_Page_Up, 0, "win.prev", "Previous image", "Navigation"},
    {GDK_KEY_l, 0, "win.next", "Next image", "Navigation"},
    {GDK_KEY_Right, 0, "win.next", "Next image", "Navigation"},
-   {GDK_KEY_j, 0, "win.cursor-down", "Cursor down one row (grid)",
+   {GDK_KEY_Page_Down, 0, "win.next", "Next image", "Navigation"},
+   {GDK_KEY_j, 0, "win.cursor-down", "Cursor down one row (grid) / pan down",
     "Navigation"},
-   {GDK_KEY_Down, 0, "win.cursor-down", "Cursor down one row (grid)",
+   {GDK_KEY_Down, 0, "win.cursor-down", "Cursor down one row (grid) / pan down",
     "Navigation"},
-   {GDK_KEY_k, 0, "win.cursor-up", "Cursor up one row (grid)", "Navigation"},
-   {GDK_KEY_Up, 0, "win.cursor-up", "Cursor up one row (grid)", "Navigation"},
+   {GDK_KEY_k, 0, "win.cursor-up", "Cursor up one row (grid) / pan up",
+    "Navigation"},
+   {GDK_KEY_Up, 0, "win.cursor-up", "Cursor up one row (grid) / pan up",
+    "Navigation"},
+   {GDK_KEY_H, GDK_SHIFT_MASK, "win.pan-left", "Pan left (large view)",
+    "Navigation"},
+   {GDK_KEY_Left, GDK_SHIFT_MASK, "win.pan-left", "Pan left (large view)",
+    "Navigation"},
+   {GDK_KEY_L, GDK_SHIFT_MASK, "win.pan-right", "Pan right (large view)",
+    "Navigation"},
+   {GDK_KEY_Right, GDK_SHIFT_MASK, "win.pan-right", "Pan right (large view)",
+    "Navigation"},
    {GDK_KEY_g, 0, "win.first", "First image", "Navigation"},
+   {GDK_KEY_Home, 0, "win.first", "First image", "Navigation"},
    {GDK_KEY_G, GDK_SHIFT_MASK, "win.last", "Last image", "Navigation"},
+   {GDK_KEY_End, 0, "win.last", "Last image", "Navigation"},
    /* View */
    {GDK_KEY_t, 0, "win.toggle-view", "Toggle large / grid", "View"},
+   {GDK_KEY_Return, 0, "win.enter-large", "Open highlighted image (grid)",
+    "View"},
    {GDK_KEY_f, 0, "win.fullscreen", "Fullscreen", "View"},
-   {GDK_KEY_S, GDK_SHIFT_MASK, "win.slideshow", "Slideshow", "View"},
-   {GDK_KEY_i, 0, "win.info", "Info overlay", "View"},
+   {GDK_KEY_F11, 0, "win.fullscreen", "Fullscreen", "View"},
+   {GDK_KEY_S, GDK_SHIFT_MASK, "win.slideshow", "Start / stop slideshow",
+    "View"},
+   {GDK_KEY_F5, 0, "win.slideshow", "Start / stop slideshow", "View"},
+   {GDK_KEY_i, 0, "win.info", "Toggle info overlay", "View"},
+   {GDK_KEY_F10, 0, "win.menu", "Main menu", "View"},
    {GDK_KEY_comma, 0, "win.preferences", "Preferences", "View"},
+   {GDK_KEY_comma, GDK_CONTROL_MASK, "win.preferences", "Preferences", "View"},
    /* Selection (marks) */
    {GDK_KEY_v, 0, "win.mark", "Toggle mark on highlighted",
     "Selection (marks)"},
@@ -55,44 +80,74 @@ static const ShortcutEntry SHORTCUTS[] = {
     "Range-mark from last mark to current", "Selection (marks)"},
    {GDK_KEY_a, GDK_CONTROL_MASK, "win.mark-all", "Mark all",
     "Selection (marks)"},
-   {GDK_KEY_Escape, 0, "win.back", "Clear marks / back", "Selection (marks)"},
+   {GDK_KEY_Escape, 0, "win.back",
+    "Stop slideshow / discard preview / clear marks / back to grid / "
+    "quit (press twice in the grid)",
+    "Selection (marks)"},
    /* Files */
-   {GDK_KEY_o, 0, "win.open", "Open", "Files"},
+   {GDK_KEY_o, 0, "win.open", "Open image", "Files"},
+   {GDK_KEY_o, GDK_CONTROL_MASK, "win.open", "Open image", "Files"},
+   {GDK_KEY_O, GDK_SHIFT_MASK, "win.open-folder", "Open folder", "Files"},
+   {GDK_KEY_O, GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.open-folder",
+    "Open folder", "Files"},
    {GDK_KEY_e, 0, "win.open-external", "Open in external program", "Files"},
    {GDK_KEY_exclam, 0, "win.run-script", "Run a configured shell script",
     "Files"},
    {GDK_KEY_m, 0, "win.move", "Move marked/current to a destination", "Files"},
    {GDK_KEY_d, 0, "win.trash", "Trash", "Files"},
+   {GDK_KEY_Delete, 0, "win.trash", "Trash", "Files"},
    {GDK_KEY_D, GDK_SHIFT_MASK, "win.delete", "Delete permanently", "Files"},
+   {GDK_KEY_Delete, GDK_SHIFT_MASK, "win.delete", "Delete permanently",
+    "Files"},
    {GDK_KEY_u, 0, "win.undo", "Undo last trash or move", "Files"},
+   {GDK_KEY_z, GDK_CONTROL_MASK, "win.undo", "Undo last trash or move",
+    "Files"},
+   {GDK_KEY_E, GDK_SHIFT_MASK, "win.empty-trash",
+    "Empty this folder's Trash (asks first)", "Files"},
    {GDK_KEY_c, GDK_CONTROL_MASK, "win.copy", "Copy image / marked files",
     "Files"},
    {GDK_KEY_q, 0, "win.quit", "Quit", "Files"},
+   {GDK_KEY_q, GDK_CONTROL_MASK, "win.quit", "Quit", "Files"},
    /* Enhance */
-   {GDK_KEY_a, 0, "win.enhance", "Toggle the enhance side panel", "Enhance"},
+   {GDK_KEY_a, 0, "win.enhance", "Open / close the enhance chooser", "Enhance"},
    {GDK_KEY_1, 0, "win.enhance-1",
-    "Toggle enhance preset 1-8 (layered); 0 = Original", "Enhance"},
+    "Toggle enhance preset 1-8 (layered, large view)", "Enhance"},
    {GDK_KEY_2, 0, "win.enhance-2",
-    "Toggle enhance preset 1-8 (layered); 0 = Original", "Enhance"},
+    "Toggle enhance preset 1-8 (layered, large view)", "Enhance"},
    {GDK_KEY_3, 0, "win.enhance-3",
-    "Toggle enhance preset 1-8 (layered); 0 = Original", "Enhance"},
+    "Toggle enhance preset 1-8 (layered, large view)", "Enhance"},
    {GDK_KEY_4, 0, "win.enhance-4",
-    "Toggle enhance preset 1-8 (layered); 0 = Original", "Enhance"},
+    "Toggle enhance preset 1-8 (layered, large view)", "Enhance"},
    {GDK_KEY_5, 0, "win.enhance-5",
-    "Toggle enhance preset 1-8 (layered); 0 = Original", "Enhance"},
+    "Toggle enhance preset 1-8 (layered, large view)", "Enhance"},
    {GDK_KEY_6, 0, "win.enhance-6",
-    "Toggle enhance preset 1-8 (layered); 0 = Original", "Enhance"},
+    "Toggle enhance preset 1-8 (layered, large view)", "Enhance"},
    {GDK_KEY_7, 0, "win.enhance-7",
-    "Toggle enhance preset 1-8 (layered); 0 = Original", "Enhance"},
+    "Toggle enhance preset 1-8 (layered, large view)", "Enhance"},
    {GDK_KEY_8, 0, "win.enhance-8",
-    "Toggle enhance preset 1-8 (layered); 0 = Original", "Enhance"},
+    "Toggle enhance preset 1-8 (layered, large view)", "Enhance"},
    {GDK_KEY_s, 0, "win.enhance-save", "Save enhanced copy", "Enhance"},
+   {GDK_KEY_space, 0, NULL, "Hold to compare with the original", "Enhance"},
    /* Zoom */
-   {GDK_KEY_plus, 0, "win.zoom-in", "Zoom in", "Zoom"},
-   {GDK_KEY_equal, 0, "win.zoom-in", "Zoom in", "Zoom"},
-   {GDK_KEY_minus, 0, "win.zoom-out", "Zoom out", "Zoom"},
-   {GDK_KEY_underscore, 0, "win.zoom-out", "Zoom out", "Zoom"},
-   {GDK_KEY_question, 0, "win.shortcuts", "Show this help", "Zoom"},
+   {GDK_KEY_plus, 0, "win.zoom-in", "Zoom in (large) / bigger thumbnails",
+    "Zoom"},
+   {GDK_KEY_equal, 0, "win.zoom-in", "Zoom in (large) / bigger thumbnails",
+    "Zoom"},
+   {GDK_KEY_minus, 0, "win.zoom-out", "Zoom out (large) / smaller thumbnails",
+    "Zoom"},
+   {GDK_KEY_underscore, 0, "win.zoom-out",
+    "Zoom out (large) / smaller thumbnails", "Zoom"},
+   {GDK_KEY_plus, GDK_CONTROL_MASK, "win.zoom-in",
+    "Zoom in (large) / bigger thumbnails", "Zoom"},
+   {GDK_KEY_minus, GDK_CONTROL_MASK, "win.zoom-out",
+    "Zoom out (large) / smaller thumbnails", "Zoom"},
+   {GDK_KEY_0, 0, "win.zoom-reset",
+    "Toggle fit / 100% (large), reset thumbnail size (grid)", "Zoom"},
+   {GDK_KEY_0, GDK_CONTROL_MASK, "win.zoom-reset",
+    "Toggle fit / 100% (large), reset thumbnail size (grid)", "Zoom"},
+   /* Help */
+   {GDK_KEY_question, 0, "win.shortcuts", "Show this help", "Help"},
+   {GDK_KEY_F1, 0, "win.shortcuts", "Show this help", "Help"},
 };
 
 void
@@ -110,6 +165,9 @@ shortcuts_install(GtkWidget *p_widget) {
    gtk_shortcut_controller_set_scope(GTK_SHORTCUT_CONTROLLER(p_ctrl),
                                      GTK_SHORTCUT_SCOPE_GLOBAL);
    for (gsize u_i = 0; u_i < G_N_ELEMENTS(SHORTCUTS); u_i++) {
+      if (SHORTCUTS[u_i].c_action == NULL) {
+         continue; /* help-only row (hold-Space has its own controller) */
+      }
       GtkShortcut *p_s =
          gtk_shortcut_new(GTK_SHORTCUT_TRIGGER(gtk_keyval_trigger_new(
                              SHORTCUTS[u_i].u_keyval, SHORTCUTS[u_i].e_mods)),
@@ -118,6 +176,53 @@ shortcuts_install(GtkWidget *p_widget) {
                                            p_s);
    }
    gtk_widget_add_controller(p_widget, GTK_EVENT_CONTROLLER(p_ctrl));
+}
+
+const char *
+shortcuts_title_for_action(const char *c_action) {
+   g_return_val_if_fail(c_action != NULL, NULL);
+   for (gsize u_i = 0; u_i < G_N_ELEMENTS(SHORTCUTS); u_i++) {
+      if (g_strcmp0(SHORTCUTS[u_i].c_action, c_action) == 0) {
+         return (SHORTCUTS[u_i].c_title);
+      }
+   }
+   return (NULL);
+}
+
+char *
+shortcuts_keys_for_action(const char *c_action) {
+   g_return_val_if_fail(c_action != NULL, NULL);
+   GString *p_out = g_string_new(NULL);
+   for (gsize u_i = 0; u_i < G_N_ELEMENTS(SHORTCUTS); u_i++) {
+      if (g_strcmp0(SHORTCUTS[u_i].c_action, c_action) != 0) {
+         continue;
+      }
+      char *c_label = gtk_accelerator_get_label(SHORTCUTS[u_i].u_keyval,
+                                                SHORTCUTS[u_i].e_mods);
+      if (p_out->len > 0) {
+         g_string_append(p_out, " / ");
+      }
+      g_string_append(p_out, c_label);
+      g_free(c_label);
+   }
+   if (p_out->len == 0) {
+      g_string_free(p_out, TRUE);
+      return (NULL);
+   }
+   return (g_string_free(p_out, FALSE));
+}
+
+char *
+shortcuts_tooltip_for_action(const char *c_action) {
+   const char *c_title = shortcuts_title_for_action(c_action);
+   char       *c_keys  = shortcuts_keys_for_action(c_action);
+   if (c_title == NULL) {
+      return (c_keys);
+   }
+   char *c_tip = c_keys != NULL ? g_strdup_printf("%s (%s)", c_title, c_keys)
+                                : g_strdup(c_title);
+   g_free(c_keys);
+   return (c_tip);
 }
 
 /* --- help window (built from the same SHORTCUTS[] table) -----------------
@@ -186,6 +291,7 @@ _help_rows_for_group(const char *c_group) {
           g_strcmp0(SHORTCUTS[u_i].c_group, c_group) != 0) {
          continue;
       }
+      /* One-keystroke rows are merged by title (h Left, 1..8, ...). */
       char *c_accel =
          gtk_accelerator_name(SHORTCUTS[u_i].u_keyval, SHORTCUTS[u_i].e_mods);
       HelpRow *p_row = NULL;

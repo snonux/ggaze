@@ -298,9 +298,11 @@ test_bulk_delete_all_clears_viewer(void) {
    g_list_free_full(p_captured, (GDestroyNotify)g_object_unref);
    drain_main(500);
 
-   /* No current cursor: the title falls back to "ggaze" (no filename) and
-    * the viewer cleared (no stale pixels for a nonexistent file). */
-   g_assert_cmpstr(gtk_window_get_title(GTK_WINDOW(p_win)), ==, "ggaze");
+   /* No current cursor: the title keeps the folder name with a 0/3 count
+    * (it used to fall back to a bare "ggaze") and the viewer is cleared (no
+    * stale pixels for a nonexistent file). */
+   g_assert_true(
+      g_str_has_suffix(gtk_window_get_title(GTK_WINDOW(p_win)), "0/3"));
    g_assert_null(viewer_texture(p_win));
    /* The grid still lists all three entries (dimmed). */
    g_assert_cmpint(ggaze_grid_get_count(window_grid(p_win)), ==, 3);

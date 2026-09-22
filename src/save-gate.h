@@ -59,9 +59,6 @@ typedef struct {
    void (*discard)(gpointer p_host);
    /* Transient status line (the window's info overlay). */
    void (*show_status)(gpointer p_host, const char *c_msg);
-   /* The GtkAlertDialog's own toplevel, ref'd so it is not freed under the
-    * GTask that still points at it (transfer full). May return NULL. */
-   GtkWindow *(*alert_dialog_window)(gpointer p_host);
    /* The continuation that closes the window, compared by IDENTITY to decide
     * whether a queued request must not be retried after the answer (a closing
     * window can honour no request). May be NULL when the host has no such

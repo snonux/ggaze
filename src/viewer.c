@@ -349,54 +349,6 @@ scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
    return (TRUE);
 }
 
-static gboolean
-key_cb(GtkEventControllerKey *p_key, guint u_keyval, guint u_keycode,
-       GdkModifierType e_state, gpointer p_data) {
-   GgazeViewer *p_v = GGAZE_VIEWER(p_data);
-   (void)p_key;
-   (void)u_keycode;
-   (void)e_state;
-   gboolean b_handled = TRUE;
-
-   switch (u_keyval) {
-   case GDK_KEY_plus:
-   case GDK_KEY_equal:
-      ggaze_viewer_zoom_in(p_v);
-      break;
-   case GDK_KEY_minus:
-   case GDK_KEY_underscore:
-      ggaze_viewer_zoom_out(p_v);
-      break;
-   case GDK_KEY_0:
-      ggaze_viewer_toggle_fit_100(p_v);
-      break;
-   case GDK_KEY_j:
-   case GDK_KEY_Down:
-      ggaze_viewer_pan(p_v, 0.0, GGAZE_VIEWER_PAN_STEP);
-      break;
-   case GDK_KEY_k:
-   case GDK_KEY_Up:
-      ggaze_viewer_pan(p_v, 0.0, -GGAZE_VIEWER_PAN_STEP);
-      break;
-   case GDK_KEY_Left:
-      g_signal_emit(p_v, u_navigate_sig, 0, -1);
-      break;
-   case GDK_KEY_Right:
-      g_signal_emit(p_v, u_navigate_sig, 0, 1);
-      break;
-   case GDK_KEY_H:
-      ggaze_viewer_pan(p_v, -GGAZE_VIEWER_PAN_STEP, 0.0);
-      break;
-   case GDK_KEY_L:
-      ggaze_viewer_pan(p_v, GGAZE_VIEWER_PAN_STEP, 0.0);
-      break;
-   default:
-      b_handled = FALSE;
-      break;
-   }
-   return (b_handled);
-}
-
 static void
 ggaze_viewer_init(GgazeViewer *p_v) {
    p_v->p_texture = NULL;
@@ -418,11 +370,11 @@ ggaze_viewer_init(GgazeViewer *p_v) {
       gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
    gtk_widget_add_controller(GTK_WIDGET(p_v), p_scroll);
    g_signal_connect(p_scroll, "scroll", G_CALLBACK(scroll_cb), p_v);
-
-   GtkEventController *p_key = gtk_event_controller_key_new();
-   gtk_event_controller_set_propagation_phase(p_key, GTK_PHASE_CAPTURE);
-   gtk_widget_add_controller(GTK_WIDGET(p_v), p_key);
-   g_signal_connect(p_key, "key-pressed", G_CALLBACK(key_cb), p_v);
+   /* No key controller here: every key (zoom, pan, 0 = fit toggle, arrows)
+    * is bound in shortcuts.c's single table to a win.* action the window
+    * routes to the public methods below. A second, focus-dependent binding
+    * set in the widget used to shadow that table and drift from the `?`
+    * help. */
 }
 
 /* --- public API ----------------------------------------------------------- */
