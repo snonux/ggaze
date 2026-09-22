@@ -25,8 +25,13 @@ TextureCache *texturecache_new(guint u_cap);
 void          texturecache_delete(TextureCache *p_cache);
 
 /* Look up p_file; returns its GdkTexture (transfer none) or NULL, and marks it
- * most-recently-used. */
+ * most-recently-used. An entry whose file changed on disk since it was put
+ * (mtime or size differ, or the file is gone) is evicted and NULL returned,
+ * so in-place edits never show stale pixels. */
 GdkTexture *texturecache_get(TextureCache *p_cache, GFile *p_file);
+
+/* Drop p_file's entry if present. */
+void texturecache_remove(TextureCache *p_cache, GFile *p_file);
 
 /* Store p_tex for p_file (refs both); evicts the least-recently-used entry if
  * the cache is over capacity. Replaces an existing entry. */

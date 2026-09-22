@@ -23,8 +23,7 @@
 #include "clipboard.h"
 #include "gridview.h"
 #include "delete-confirm.h"
-#include "info.h"
-#include "loader/loader.h"
+#include "info-overlay.h"
 #include "mover.h"
 #include "navigator.h"
 #include "opener.h"
@@ -35,11 +34,11 @@
 #include "save-gate.h"
 #include "settings.h"
 #include "shortcuts.h"
-#include "texturecache.h"
 #include "thumbnail.h"
 #include "trash.h"
 #include "undo.h"
 #include "viewer.h"
+#include "viewload.h"
 #include "enhance-ctrl.h"
 #if GGAZE_HAVE_GEGL
 #include "enhance-ui.h"
@@ -67,28 +66,26 @@ struct _GgazeWindow {
    Mover               *p_mover;    /* configured move destinations */
    Opener              *p_opener;   /* configured external editors */
    Runner              *p_runner;   /* configured shell scripts */
-   GCancellable        *p_cancel;   /* visible load; cancelled on each nav */
-   GCancellable *p_prefetch_cancel; /* prefetch round; cancelled on new round */
-   TextureCache *p_cache;           /* bounded LRU of decoded GdkTextures */
-   Thumbnail    *p_thumb;           /* TMS thumbnail cache */
-   Trash        *p_trash;           /* ./Trash bin for the current folder */
-   GtkWidget    *p_stack;           /* GtkStack: grid / large (viewer) */
+   ViewLoad            *p_viewload; /* large-view load pipeline: texture LRU,
+                                     * one-active-load cancel, prefetch,
+                                     * last-write-wins (viewload.h) */
+   Thumbnail *p_thumb;              /* TMS thumbnail cache */
+   Trash     *p_trash;              /* ./Trash bin for the current folder */
+   GtkWidget *p_stack;              /* GtkStack: grid / large (viewer) */
    PopupList *p_open_ext_pop;   /* `e` open-external popover (NULL when none) */
    PopupList *p_run_script_pop; /* `!` run-script popover (NULL when none) */
    PopupList *p_move_pop;       /* `m` move-to-destination popover (NULL when
                                  * none) */
-   Undo         *p_undo;        /* unified-undo coordinator (Trash vs Mover) */
-   GtkWidget    *p_viewer;      /* GgazeViewer — the large view */
-   GgazeGrid    *p_grid;      /* the thumbnail grid (the "grid" stack child) */
-   int           i_grid_size; /* current thumbnail size (64-512, decision T) */
-   GtkWidget    *p_overlay; /* GtkOverlay wrapping the stack (for info label) */
-   GtkWidget    *p_info_lbl;    /* info overlay label (auto-hides) */
-   guint         u_info_hide;   /* info auto-hide timeout id (0=none) */
-   GCancellable *p_info_cancel; /* outstanding async info_new() decode */
-   guint         u_slideshow;   /* slideshow timeout id (0=off) */
-   gboolean      b_fullscreen;
-   guint         u_hdr_hide; /* fullscreen header auto-hide timeout */
-   gboolean      b_disposed; /* set in dispose; async callbacks check it */
+   Undo        *p_undo;         /* unified-undo coordinator (Trash vs Mover) */
+   GtkWidget   *p_viewer;       /* GgazeViewer — the large view */
+   GgazeGrid   *p_grid;      /* the thumbnail grid (the "grid" stack child) */
+   int          i_grid_size; /* current thumbnail size (64-512, decision T) */
+   GtkWidget   *p_overlay; /* GtkOverlay wrapping the stack (for info label) */
+   InfoOverlay *p_info;    /* info card + status line over the stack */
+   guint        u_slideshow; /* slideshow timeout id (0=off) */
+   gboolean     b_fullscreen;
+   guint        u_hdr_hide; /* fullscreen header auto-hide timeout */
+   gboolean     b_disposed; /* set in dispose; async callbacks check it */
    DeleteConfirm *p_delete_confirm; /* bulk-delete confirm flow
                                      * (captured targets + outstanding
                                      * dialog + folder-identity re-check). */
@@ -115,18 +112,13 @@ struct _GgazeWindow {
 G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
 
 /* --- forward decls ------------------------------------------------------- */
-static void _load_current(GgazeWindow *p_win);
-static void _prefetch(GgazeWindow *p_win);
-static void _show_texture(GgazeWindow *p_win, GdkTexture *p_tex);
-static void _update_header(GgazeWindow *p_win);
-static void _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
-static void _show_info(GgazeWindow *p_win);
-static void _info_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
-                         GCancellable *p_cancel);
-static void _info_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data);
-static void _hide_info(GgazeWindow *p_win);
-static void _dismiss_info_for_nav(GgazeWindow *p_win);
-static void _show_status(GgazeWindow *p_win, const char *c_msg);
+static void     _load_current(GgazeWindow *p_win);
+static void     _show_texture(GgazeWindow *p_win, GdkTexture *p_tex);
+static void     _update_header(GgazeWindow *p_win);
+static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
+static void     _show_info(GgazeWindow *p_win);
+static void     _dismiss_info_for_nav(GgazeWindow *p_win);
+static void     _show_status(GgazeWindow *p_win, const char *c_msg);
 static gboolean _slideshow_tick(gpointer p_data);
 static void     _apply_viewer_prefs(GgazeWindow *p_win);
 static void     _load_engine_lists(GgazeWindow *p_win);
@@ -1275,10 +1267,7 @@ _ec_current_file(gpointer p_host) {
 
 static GdkTexture *
 _ec_cached_texture(gpointer p_host, GFile *p_file) {
-   if (p_file == NULL) {
-      return (NULL);
-   }
-   return (texturecache_get(GGAZE_WINDOW(p_host)->p_cache, p_file));
+   return (viewload_get_cached(GGAZE_WINDOW(p_host)->p_viewload, p_file));
 }
 
 static gboolean
@@ -1465,161 +1454,34 @@ _slideshow_tick(gpointer p_data) {
    return (G_SOURCE_CONTINUE);
 }
 
-static gboolean
-_info_hide_tick(gpointer p_data) {
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   /* Just fired: don't call g_source_remove on our own (already-firing)
-    * source below, only zero the id so a future show/hide can tell no timer
-    * is pending. */
-   p_win->u_info_hide = 0;
-   _hide_info(p_win);
-   return (G_SOURCE_REMOVE);
-}
-
-/* Cancel the info-overlay auto-hide timer if one is pending. Every path that
- * changes the overlay's state (a fresh show, a status message reusing the
- * same label, or a navigation-triggered hide) must call this before touching
- * u_info_hide again, so a stale timer can never fire after the state has
- * already moved on and hide/re-hide something it no longer owns. Safe to
- * call when none is pending (u_info_hide == 0 guard). */
-static void
-_info_cancel_timer(GgazeWindow *p_win) {
-   if (p_win->u_info_hide != 0) {
-      g_source_remove(p_win->u_info_hide);
-      p_win->u_info_hide = 0;
-   }
-}
-
+/* `i`: toggle the EXIF/dimensions card for the current file (gathered
+ * asynchronously by the InfoOverlay). */
 static void
 _show_info(GgazeWindow *p_win) {
    if (p_win->p_nav == NULL) {
+      _show_status(p_win, "Nothing open \u2014 press o to open a file");
       return;
    }
    GFile *p_cur = navigator_get_current(p_win->p_nav);
-   if (p_cur == NULL) {
-      return;
-   }
-   /* info_new() decodes the image for its dimensions (gdk_pixbuf_new_from_
-    * file) and reads EXIF; running that synchronously on the GTK main thread
-    * froze the whole UI on large non-JPEG images (PNG/TIFF/WebP -- only
-    * JPEG had a header-dimension guard). Run it in a GTask worker and apply
-    * the result on the main thread when it lands. Navigation and a second
-    * `i` cancel any in-flight request, so a stale result never lands on a
-    * different current file (last-write-wins via cancellation). */
-   g_cancellable_cancel(p_win->p_info_cancel);
-   g_clear_object(&p_win->p_info_cancel);
-   p_win->p_info_cancel = g_cancellable_new();
-   GTask *p_task        = g_task_new(G_OBJECT(p_win), p_win->p_info_cancel,
-                                     _info_done_cb, g_object_ref(p_win));
-   g_task_set_task_data(p_task, g_object_ref(p_cur), g_object_unref);
-   g_task_run_in_thread(p_task, _info_thread);
-   g_object_unref(p_task);
-}
-
-/* Cancel any in-flight async info decode (navigation / dispose / a new `i`).
- * The cancelled task's completion callback is a no-op (g_task_propagate_
- * pointer returns NULL on cancel), so the label is left to the caller to
- * hide (or to a fresh _show_info to repopulate). */
-static void
-_info_cancel_async(GgazeWindow *p_win) {
-   if (p_win->p_info_cancel != NULL) {
-      g_cancellable_cancel(p_win->p_info_cancel);
-      g_clear_object(&p_win->p_info_cancel);
+   if (p_cur != NULL) {
+      info_overlay_toggle_for_file(p_win->p_info, p_cur);
    }
 }
 
-/* GTask worker (off the main thread): build the GgazeInfo for the captured
- * file. Touches no GtkWidget, so it is safe off-thread. */
-static void
-_info_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
-             GCancellable *p_cancel) {
-   (void)p_src;
-   GFile     *p_file = (GFile *)p_task_data;
-   GgazeInfo *p_info = info_new(p_file);
-   if (p_info == NULL) {
-      g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_FAILED,
-                              "info: gather failed");
-      return;
-   }
-   /* If superseded (navigation / a new `i` / dispose) cancelled the request,
-    * free the result HERE rather than returning it: the completion callback is
-    * a no-op on cancel and may not run before the main loop drains (e.g. in
-    * tests), so returning it would leak the GgazeInfo when the task never
-    * finalizes. The decode itself is not interruptible, so a request that is
-    * cancelled mid-decode still finishes the decode and then drops the result
-    * here. */
-   if (g_cancellable_is_cancelled(p_cancel)) {
-      info_delete(p_info);
-      g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
-                              "info: cancelled");
-      return;
-   }
-   g_task_return_pointer(p_task, p_info, (GDestroyNotify)info_delete);
-}
-
-/* GTask completion (main thread): apply the result iff the request was not
- * superseded (cancelled) and the window is still alive. Holds an owned
- * window ref so a window closed mid-decode does not dangle. */
-static void
-_info_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
-   (void)p_src;
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   g_object_unref(p_win); /* the ref taken in _show_info */
-   if (p_win->b_disposed) {
-      return;
-   }
-   GError    *p_err  = NULL;
-   GgazeInfo *p_info = g_task_propagate_pointer(G_TASK(p_res), &p_err);
-   g_clear_error(&p_err);
-   if (p_info == NULL) {
-      return; /* cancelled or gather failed: leave the label as-is */
-   }
-   char *c_text = info_format(p_info);
-   gtk_label_set_text(GTK_LABEL(p_win->p_info_lbl), c_text);
-   g_free(c_text);
-   info_delete(p_info); /* propagate transferred ownership to us */
-   gtk_widget_set_visible(p_win->p_info_lbl, TRUE);
-   _info_cancel_timer(p_win);
-   p_win->u_info_hide = g_timeout_add_seconds(5, _info_hide_tick, p_win);
-}
-
-static void
-_hide_info(GgazeWindow *p_win) {
-   gtk_widget_set_visible(p_win->p_info_lbl, FALSE);
-}
-
-/* Hide the info overlay in response to the current file changing. Reached
- * from two call sites: (1) nav_changed_cb, the choke point that prev/next/
- * first/last, slideshow auto-advance, grid selection, trash/delete/move
- * advancing past a target, and rescan-after-undo all funnel through via
- * Navigator's "changed" signal; and (2) ggaze_window_open(), called directly
- * (not via that signal) because opening a new folder/file into an existing
- * window doesn't reliably emit "changed" -- see the comment on
- * _open_build_navigator() for why. The overlay must never keep showing a
- * PREVIOUS file's EXIF/dimensions after a new one is displayed, so this
- * cancels any pending auto-hide timer (there is nothing left for it to hide)
- * and hides the label unconditionally; a subsequent _show_status call later
- * in the same handler chain (e.g. move/undo's status line) re-shows it with
- * its own fresh timer, so this never fights a legitimate immediate re-show.
- */
+/* Hide the info overlay because the current file changed: reached from
+ * nav_changed_cb (the choke point every navigation path funnels through)
+ * and from _open_now (which does not reliably emit "changed"). The card must
+ * never keep showing a PREVIOUS file's data over the new one; a status line
+ * shown right after re-shows the label with its own fresh timer. */
 static void
 _dismiss_info_for_nav(GgazeWindow *p_win) {
-   _info_cancel_async(p_win);
-   _info_cancel_timer(p_win);
-   _hide_info(p_win);
+   info_overlay_dismiss(p_win->p_info);
 }
 
-/* Show a brief transient status line in the info overlay label (the project
- * has no toast infrastructure yet; see docs/ui-and-interactions.md). Reuses
- * the info label + its auto-hide timer so a copy confirms visually without a
- * separate widget. The label is positioned over the stack and visible in both
- * large and grid views. */
+/* Transient status line (the project's toast): visible in both views. */
 static void
 _show_status(GgazeWindow *p_win, const char *c_msg) {
-   gtk_label_set_text(GTK_LABEL(p_win->p_info_lbl), c_msg);
-   gtk_widget_set_visible(p_win->p_info_lbl, TRUE);
-   _info_cancel_timer(p_win);
-   p_win->u_info_hide = g_timeout_add_seconds(2, _info_hide_tick, p_win);
+   info_overlay_show_status(p_win->p_info, c_msg);
 }
 
 #if GGAZE_HAVE_GEGL
@@ -2399,195 +2261,48 @@ _show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
     * hit, progressive partial, full async result, hold-Space, the finished
     * enhance itself -- which is why the enhance-preview override lives here
     * rather than at any single call site (tu0 review round 2, findings c/e).
-    * Point-patching _on_grid_activate was not enough: _load_current only
+    * Point-patching _on_grid_activate was not enough: the pipeline only
     * paints synchronously on a texturecache HIT, so on a miss the async
-    * _load_finish_cb landed after the restore and the plain original won the
-    * race; and the view toggle (`t`, `t`) never had the patch at all. */
+    * finish landed after the restore and the plain original won the race;
+    * and the view toggle (`t`, `t`) never had the patch at all. */
 #if GGAZE_HAVE_GEGL
    p_tex = enhance_ctrl_override_texture(p_win->p_enhance_ctrl, p_tex);
 #endif
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
 }
 
-/* Prefetch callback: just cache the result (never touches the viewer). p_data
- * is a ref on the window (released here) so the window outlives the load. */
-static void
-_prefetch_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
-   (void)p_src;
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   GError      *p_err = NULL;
-   GdkTexture  *p_tex = loader_load_finish(p_res, &p_err);
-   if (p_tex != NULL) {
-      GFile *p_file = (GFile *)g_task_get_source_object((GTask *)p_res);
-      texturecache_put(p_win->p_cache, p_file, p_tex);
-      g_object_unref(p_tex);
-   } else {
-      g_clear_error(&p_err);
-   }
-   g_object_unref(p_win);
-}
-
-/* --- M6: progressive low-res preview ------------------------------------ */
-
-/* One LoadCtx per loader_load_async call. It carries the source GFile
- * identity so the main-thread progress/finish callbacks can enforce
- * last-write-wins: a result whose file no longer equals navigator.current
- * is dropped instead of overwriting the viewer. The GTask always invokes
- * _load_finish_cb (even on cancellation), which is the sole owner that frees
- * the ctx, so the refs are balanced regardless of whether progress fired. */
-typedef struct {
-   GgazeWindow *p_win;  /* ref'd; outlives the load */
-   GFile       *p_file; /* ref'd; the file being loaded */
-} LoadCtx;
-
-typedef struct {
-   GgazeWindow *p_win;
-   GFile       *p_file;
-   GdkTexture  *p_tex;
-} ProgressInvoke;
-
-static void
-_load_ctx_free(LoadCtx *p_ctx) {
-   if (p_ctx == NULL) {
-      return;
-   }
-   g_object_unref(p_ctx->p_win);
-   g_object_unref(p_ctx->p_file);
-   g_free(p_ctx);
-}
-
-static gboolean
-_on_progress_main(gpointer p_data) {
-   ProgressInvoke *p_pi = (ProgressInvoke *)p_data;
-   /* Last-write-wins: show the partial only if its source file is still the
-    * current one. A stale partial from a superseded (cancelled) load is
-    * dropped here so it cannot overwrite the viewer while another image is
-    * current; the full result replaces it in _load_finish_cb. */
-   GFile *p_cur = navigator_get_current(p_pi->p_win->p_nav);
-   if (p_cur != NULL && g_file_equal(p_cur, p_pi->p_file)) {
-      /* Through _show_texture, not straight to the viewer, so a partial of
-       * the original cannot flash over an active enhance preview either. */
-      _show_texture(p_pi->p_win, p_pi->p_tex);
-   }
-   g_object_unref(p_pi->p_tex);
-   g_object_unref(p_pi->p_file);
-   g_object_unref(p_pi->p_win);
-   g_free(p_pi);
-   return (G_SOURCE_REMOVE);
-}
-
-static void
-_load_progress_cb(GdkTexture *p_partial, gpointer p_data) {
-   LoadCtx        *p_ctx = (LoadCtx *)p_data;
-   ProgressInvoke *p_pi  = g_new(ProgressInvoke, 1);
-   p_pi->p_win           = (GgazeWindow *)g_object_ref(p_ctx->p_win);
-   p_pi->p_file          = (GFile *)g_object_ref(p_ctx->p_file);
-   p_pi->p_tex           = (GdkTexture *)g_object_ref(p_partial);
-   g_main_context_invoke_full(NULL, G_PRIORITY_DEFAULT, _on_progress_main, p_pi,
-                              NULL);
-}
-
-/* Visible-load callback: show only if this is still the current file
- * (last-write-wins), then cache it and prefetch neighbours. */
-static void
-_load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
-   (void)p_src;
-   LoadCtx     *p_ctx = (LoadCtx *)p_data;
-   GgazeWindow *p_win = p_ctx->p_win;
-   GError      *p_err = NULL;
-   GdkTexture  *p_tex = loader_load_finish(p_res, &p_err);
-   if (p_tex == NULL) {
-      if (p_err != NULL &&
-          !g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-         char *c_name = g_file_get_basename(
-            (GFile *)g_task_get_source_object((GTask *)p_res));
-         g_warning("ggaze: failed to load %s: %s", c_name, p_err->message);
-         g_free(c_name);
-      }
-      g_clear_error(&p_err);
-      _load_ctx_free(p_ctx);
-      return;
-   }
-   GFile *p_loaded = (GFile *)g_task_get_source_object((GTask *)p_res);
-   GFile *p_cur    = navigator_get_current(p_win->p_nav);
-   if (p_cur != NULL && g_file_equal(p_cur, p_loaded)) {
-      _show_texture(p_win, p_tex);
-      texturecache_put(p_win->p_cache, p_loaded, p_tex);
-      _prefetch(p_win);
-   }
-   g_object_unref(p_tex);
-   _load_ctx_free(p_ctx);
-}
-
-/* Prefetch the next/previous images into the cache (not shown). Cancels the
- * previous prefetch round so at most two prefetch loads are in flight. */
-static void
-_prefetch(GgazeWindow *p_win) {
-   if (p_win->p_nav == NULL) {
-      return;
-   }
-   g_cancellable_cancel(p_win->p_prefetch_cancel);
-   g_clear_object(&p_win->p_prefetch_cancel);
-   p_win->p_prefetch_cancel = g_cancellable_new();
-
-   gint  i_idx = navigator_get_current_index(p_win->p_nav);
-   guint u_n   = navigator_get_count(p_win->p_nav);
-   if (u_n == 0) {
-      return;
-   }
-   for (gint i_delta = -1; i_delta <= 1; i_delta += 2) {
-      gint i_j = i_idx + i_delta;
-      if (i_j < 0 || i_j >= (gint)u_n) {
-         continue;
-      }
-      GFile *p_file = navigator_get_file(p_win->p_nav, (guint)i_j);
-      if (p_file != NULL && texturecache_get(p_win->p_cache, p_file) == NULL) {
-         loader_load_async(p_file, p_win->p_prefetch_cancel, NULL, NULL,
-                           _prefetch_finish_cb, g_object_ref(p_win));
-      }
-   }
-}
-
+/* Show navigator.current through the ViewLoad pipeline (texture LRU, one
+ * active load, prefetch, last-write-wins -- see viewload.h). */
 static void
 _load_current(GgazeWindow *p_win) {
    if (p_win->p_nav == NULL) {
       return;
    }
-   GFile *p_cur = navigator_get_current(p_win->p_nav);
-   if (p_cur == NULL) {
-      ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), NULL);
-      _update_header(p_win);
-      return;
-   }
-
-   /* Cache hit: show immediately, no async load. */
-   GdkTexture *p_cached = texturecache_get(p_win->p_cache, p_cur);
-   if (p_cached != NULL) {
-      /* Cancel any in-flight visible load for a now-stale path. */
-      g_cancellable_cancel(p_win->p_cancel);
-      g_clear_object(&p_win->p_cancel);
-      p_win->p_cancel = g_cancellable_new();
-      _show_texture(p_win, p_cached);
-      _update_header(p_win);
-      _prefetch(p_win);
-      return;
-   }
-
-   /* Cache miss: cancel the previous visible load, start a new async load.
-    * Last-write-wins is enforced in _load_progress_cb (partial) and
-    * _load_finish_cb (full result), both via the LoadCtx's source GFile. The
-    * single LoadCtx is shared by both callbacks and freed in _load_finish_cb,
-    * which the GTask always invokes. */
-   g_cancellable_cancel(p_win->p_cancel);
-   g_clear_object(&p_win->p_cancel);
-   p_win->p_cancel = g_cancellable_new();
-   LoadCtx *p_ctx  = g_new(LoadCtx, 1);
-   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
-   p_ctx->p_file   = (GFile *)g_object_ref(p_cur);
-   loader_load_async(p_cur, p_win->p_cancel, _load_progress_cb, p_ctx,
-                     _load_finish_cb, p_ctx);
-   _update_header(p_win);
+   viewload_load_current(p_win->p_viewload);
 }
+
+/* --- ViewLoad host ops (the pipeline's view back into the window) ------- */
+
+static void
+_vl_show_texture(gpointer p_host, GdkTexture *p_tex) {
+   _show_texture(GGAZE_WINDOW(p_host), p_tex);
+}
+
+static void
+_vl_update_header(gpointer p_host) {
+   _update_header(GGAZE_WINDOW(p_host));
+}
+
+static void
+_vl_show_status(gpointer p_host, const char *c_msg) {
+   _show_status(GGAZE_WINDOW(p_host), c_msg);
+}
+
+static const ViewLoadHostOps _VIEWLOAD_OPS = {
+   .show_texture  = _vl_show_texture,
+   .update_header = _vl_update_header,
+   .show_status   = _vl_show_status,
+};
 
 static void
 _update_header(GgazeWindow *p_win) {
@@ -2676,6 +2391,7 @@ static void
 ggaze_window_dispose(GObject *p_obj) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_obj);
    p_win->b_disposed = TRUE; /* async callbacks check this before touching UI */
+   viewload_dispose(p_win->p_viewload); /* cancels loads; before the nav */
    if (p_win->p_nav != NULL) {
       g_signal_handlers_disconnect_by_data(p_win->p_nav, p_win);
       if (p_win->p_grid != NULL) {
@@ -2683,10 +2399,6 @@ ggaze_window_dispose(GObject *p_obj) {
       }
       g_clear_object(&p_win->p_nav);
    }
-   g_cancellable_cancel(p_win->p_prefetch_cancel);
-   g_clear_object(&p_win->p_prefetch_cancel);
-   g_cancellable_cancel(p_win->p_cancel);
-   g_clear_object(&p_win->p_cancel);
    _open_ext_destroy(p_win);
    _run_script_destroy(p_win);
    _move_destroy(p_win);
@@ -2699,16 +2411,12 @@ ggaze_window_dispose(GObject *p_obj) {
       g_source_remove(p_win->u_slideshow);
       p_win->u_slideshow = 0;
    }
-   _info_cancel_timer(p_win); /* just cancels the pending timer, no widget
-                                  touch -- safe to call during dispose */
-   _info_cancel_async(p_win); /* cancel an in-flight info decode so its
-                               * completion callback no-ops instead of touching
-                               * the destroyed label */
+   info_overlay_dispose(p_win->p_info); /* timer + in-flight decode; no
+                                         * widget touch after this */
    if (p_win->u_hdr_hide != 0) {
       g_source_remove(p_win->u_hdr_hide);
       p_win->u_hdr_hide = 0;
    }
-   g_clear_pointer(&p_win->p_cache, texturecache_delete);
    g_clear_pointer(&p_win->p_trash, trash_delete);
    g_clear_pointer(&p_win->p_thumb, thumbnail_delete);
    g_clear_pointer(&p_win->p_runner, runner_delete);
@@ -2730,17 +2438,20 @@ ggaze_window_class_init(GgazeWindowClass *p_klass) {
    p_obj_class->finalize     = ggaze_window_finalize;
 }
 
-/* p_delete_confirm, p_save_gate and p_enhance_ctrl are freed here (not in
- * dispose): a pending dialog's ctx (and the enhance controller's in-flight
- * async ctx) holds an owned ref to the WINDOW, so the window object -- and
- * thus these helpers -- outlive the dialog. Dispose only cancels them
- * (delete_confirm_dispose / save_gate_dispose / enhance_ctrl_dispose);
- * finalize frees the helpers once the last ctx has dropped its window ref. */
+/* p_delete_confirm, p_save_gate, p_viewload, p_info and p_enhance_ctrl are
+ * freed here (not in dispose): a pending dialog's ctx (and the enhance
+ * controller's in-flight async ctx) holds an owned ref to the WINDOW, so the
+ * window object -- and thus these helpers -- outlive the dialog. Dispose only
+ * cancels them (delete_confirm_dispose / save_gate_dispose /
+ * enhance_ctrl_dispose); finalize frees the helpers once the last ctx has
+ * dropped its window ref. */
 static void
 ggaze_window_finalize(GObject *p_obj) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_obj);
    g_clear_pointer(&p_win->p_delete_confirm, delete_confirm_delete);
    g_clear_pointer(&p_win->p_save_gate, save_gate_delete);
+   g_clear_pointer(&p_win->p_viewload, viewload_delete);
+   g_clear_pointer(&p_win->p_info, info_overlay_delete);
 #if GGAZE_HAVE_GEGL
    g_clear_pointer(&p_win->p_enhance_ctrl, enhance_ctrl_delete);
 #endif
@@ -2763,6 +2474,13 @@ _ensure_css(void) {
              "  border: 2px solid #3584e4;\n"
              "  border-radius: 4px;\n"
              "  background-color: rgba(53, 132, 228, 0.15);\n"
+             "}\n"
+             "/* status line / EXIF card over the picture. */\n"
+             ".ggaze-info {\n"
+             "  background-color: rgba(0, 0, 0, 0.7);\n"
+             "  color: #ffffff;\n"
+             "  padding: 6px 10px;\n"
+             "  border-radius: 6px;\n"
              "}\n"
              "/* enabled enhance preset row highlight. */\n"
              ".ggaze-enhance-on {\n"
@@ -2906,20 +2624,18 @@ static const SaveGateHostOps _SAVE_GATE_OPS = {
  * it under CLAUDE.md's 50-line hard limit (tu0 review round 2, issue 5). */
 static void
 _init_engines_and_settings(GgazeWindow *p_win) {
-   p_win->p_cancel          = g_cancellable_new();
-   p_win->p_prefetch_cancel = g_cancellable_new();
-   p_win->p_cache           = texturecache_new(4);
-   p_win->p_thumb           = thumbnail_new();
-   p_win->p_trash           = NULL; /* created on open */
-   p_win->p_grid            = NULL; /* created on open */
-   p_win->i_grid_size       = 128;
-   p_win->p_settings        = settings_new();
-   p_win->p_mover           = mover_new();
-   p_win->p_opener          = opener_new();
-   p_win->p_runner          = runner_new();
-   p_win->p_undo            = undo_new();
-   p_win->p_delete_confirm  = delete_confirm_new(&_DELETE_CONFIRM_OPS, p_win);
-   p_win->p_save_gate       = save_gate_new(&_SAVE_GATE_OPS, p_win);
+   p_win->p_viewload       = viewload_new(&_VIEWLOAD_OPS, p_win, 4);
+   p_win->p_thumb          = thumbnail_new();
+   p_win->p_trash          = NULL; /* created on open */
+   p_win->p_grid           = NULL; /* created on open */
+   p_win->i_grid_size      = 128;
+   p_win->p_settings       = settings_new();
+   p_win->p_mover          = mover_new();
+   p_win->p_opener         = opener_new();
+   p_win->p_runner         = runner_new();
+   p_win->p_undo           = undo_new();
+   p_win->p_delete_confirm = delete_confirm_new(&_DELETE_CONFIRM_OPS, p_win);
+   p_win->p_save_gate      = save_gate_new(&_SAVE_GATE_OPS, p_win);
    if (p_win->p_settings != NULL) {
       p_win->i_grid_size =
          CLAMP(settings_get_thumbnail_size(p_win->p_settings), 64, 512);
@@ -2955,12 +2671,7 @@ static void
 _init_info_overlay(GgazeWindow *p_win) {
    p_win->p_overlay = gtk_overlay_new();
    gtk_overlay_set_child(GTK_OVERLAY(p_win->p_overlay), p_win->p_stack);
-   p_win->p_info_lbl = gtk_label_new("");
-   gtk_widget_add_css_class(p_win->p_info_lbl, "ggaze-info");
-   gtk_widget_set_margin_start(p_win->p_info_lbl, 12);
-   gtk_widget_set_margin_top(p_win->p_info_lbl, 12);
-   gtk_widget_set_visible(p_win->p_info_lbl, FALSE);
-   gtk_overlay_add_overlay(GTK_OVERLAY(p_win->p_overlay), p_win->p_info_lbl);
+   p_win->p_info = info_overlay_new(GTK_OVERLAY(p_win->p_overlay));
    gtk_widget_set_hexpand(p_win->p_overlay, TRUE);
    gtk_widget_set_vexpand(p_win->p_overlay, TRUE);
    gtk_window_set_child(GTK_WINDOW(p_win), p_win->p_overlay);
@@ -3041,6 +2752,7 @@ _open_reset_existing_nav(GgazeWindow *p_win) {
    if (p_win->p_grid != NULL) {
       ggaze_grid_detach(p_win->p_grid);
    }
+   viewload_set_navigator(p_win->p_viewload, NULL);
    g_clear_object(&p_win->p_nav);
 }
 
@@ -3076,6 +2788,7 @@ static void
 _open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
                       GgazeSort e_sort, gboolean b_wrap, gboolean b_hide_raw) {
    p_win->p_nav = navigator_new(p_dir, e_sort, b_wrap, b_hide_raw);
+   viewload_set_navigator(p_win->p_viewload, p_win->p_nav);
    g_clear_pointer(&p_win->p_trash, trash_delete);
    mover_clear_last(p_win->p_mover);
    undo_reset(p_win->p_undo);
@@ -3288,15 +3001,13 @@ ggaze_window_get_stack(GgazeWindow *p_win) {
 void
 ggaze_window_clear_texture_cache(GgazeWindow *p_win) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));
-   if (p_win->p_cache != NULL) {
-      texturecache_clear(p_win->p_cache);
-   }
+   viewload_clear_cache(p_win->p_viewload);
 }
 
 GtkWidget *
 ggaze_window_get_info_label(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
-   return (p_win->p_info_lbl);
+   return (info_overlay_get_label(p_win->p_info));
 }
 
 /* The content provider win.copy would set on the clipboard, without touching

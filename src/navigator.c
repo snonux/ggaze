@@ -372,6 +372,12 @@ monitor_changed_cb(GFileMonitor *p_mon, GFile *p_other, GFile *p_src,
    case G_FILE_MONITOR_EVENT_MOVED_IN:
    case G_FILE_MONITOR_EVENT_MOVED_OUT:
    case G_FILE_MONITOR_EVENT_RENAMED:
+   /* A file rewritten in place (external editor, `!` script) must reach the
+    * window too: the rescan re-emits "changed", the large view reloads and
+    * the texture cache's mtime check drops the stale decode. The debounce
+    * folds the burst of CHANGED events a save produces into one rescan. */
+   case G_FILE_MONITOR_EVENT_CHANGED:
+   case G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT:
       _schedule_debounce((Navigator *)p_data);
       break;
    default:

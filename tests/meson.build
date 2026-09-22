@@ -274,6 +274,19 @@ test_texturecache = executable(
 )
 test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)
 
+# viewload: the large-view load pipeline (texture LRU, one active load,
+# prefetch, last-write-wins, failure reporting) driven headless with a fake
+# host over a temp folder of fixtures.
+test_viewload = executable(
+   'test_viewload',
+   ['test_viewload.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('viewload', test_viewload, suite : 'unit', env : fixtures_env)
+
 # --- integration track (needs a display; CI uses xvfb-run) ---
 #
 # Lane determinism (1w0) -- why these tests are NOT pinned to a backend.

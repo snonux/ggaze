@@ -13,6 +13,7 @@
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 
 static GdkTexture *
 mk_tex(void) {
@@ -93,11 +94,43 @@ test_replace_and_miss(void) {
    texturecache_delete(p_c);
 }
 
+/* An entry for a real file is evicted once the file changes on disk (size
+ * here), so in-place edits are never served stale; a synthetic path that
+ * cannot be stat'ed is trusted as before. */
+static void
+test_stale_entry_evicted(void) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-tc-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   char *c_path = g_build_filename(c_dir, "img.bin", NULL);
+   g_assert_true(g_file_set_contents(c_path, "one", -1, NULL));
+   GFile        *p_f = g_file_new_for_path(c_path);
+   TextureCache *p_c = texturecache_new(4);
+   GdkTexture   *p_t = mk_tex();
+   texturecache_put(p_c, p_f, p_t);
+   g_assert_true(texturecache_get(p_c, p_f) == p_t);
+   g_assert_true(g_file_set_contents(c_path, "rewritten", -1, NULL));
+   g_assert_null(texturecache_get(p_c, p_f)); /* stale: evicted */
+   g_assert_cmpuint(texturecache_get_size(p_c), ==, 0);
+   texturecache_put(p_c, p_f, p_t);
+   texturecache_remove(p_c, p_f);
+   g_assert_null(texturecache_get(p_c, p_f));
+   g_object_unref(p_t);
+   texturecache_delete(p_c);
+   g_object_unref(p_f);
+   g_remove(c_path);
+   g_rmdir(c_dir);
+   g_free(c_path);
+   g_free(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
    g_test_add_func("/texturecache/cap_and_evict", test_cap_and_evict);
    g_test_add_func("/texturecache/lru_order", test_lru_order);
    g_test_add_func("/texturecache/replace_and_miss", test_replace_and_miss);
+   g_test_add_func("/texturecache/stale_entry_evicted",
+                   test_stale_entry_evicted);
    return (g_test_run());
 }
