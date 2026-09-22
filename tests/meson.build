@@ -811,10 +811,12 @@ if gegl_dep.found()
    # plain lane needs 69.5 s for the same set), so 180 s is ~2.5x headroom --
    # generous enough for a loaded CI box, tight enough that a real hang is
    # caught in three minutes rather than five. Re-measure this when the
-   # subtest count grows: the margin shrinks with every one added.
+   # subtest count grows: the margin shrinks with every one added. wb2 added
+   # 15 tool subtests (54 in all): 85 s in the plain lane, so the budget is
+   # now 360 s -- the same ~2.5x headroom over the slower ASan lane.
    test('enhance_flow', test_enhance_flow,
       suite : 'integration', env : fixtures_env, depends : ggaze_gschemas,
-      timeout : 180, is_parallel : false)
+      timeout : 360, is_parallel : false)
 endif
 
 subdir('integration')

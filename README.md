@@ -7,7 +7,7 @@ and KISS — no library, no database, no sidecars. The layout nods to gthumb
 (header bar, thumbnail grid, full-window viewer) without the weight.
 
 > **Status:** usable for its core job (browse, cull, move, open externally,
-> run scripts, quick GEGL enhance). Crop/straighten/rotate are still planned.
+> run scripts, quick GEGL enhance, crop / straighten / rotate 90°).
 
 ## Quick start
 
@@ -52,7 +52,10 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `!`               | run a shell script popup |
 | `Ctrl+c`          | copy image (or marked files) to the clipboard |
 | `a`, `1`–`8`, `0`  | quick GEGL enhance side panel · toggle preset · original (optional) |
-| `s` / `Ctrl+S`     | save an enhanced copy (original is never modified; a saved preview no longer prompts) |
+| `c`               | crop tool (GEGL): drag or `h`/`l`/`j`/`k` move, `H`/`L`/`J`/`K` resize, `1`–`4` aspect, `0` free; `Enter` applies, `Esc` cancels |
+| `R`               | straighten tool (GEGL): drag along the horizon or `h`/`l` nudge ±0.5°, `A` auto-crop; `Enter` / `Esc` |
+| `]` / `[`         | rotate 90° clockwise / counter-clockwise (GEGL, non-destructive; repeat for 180°/270°) |
+| `s` / `Ctrl+S`     | save an enhanced copy — presets, crop, straighten and rotation composed (original is never modified; a saved preview no longer prompts) |
 | `Space` (hold)     | compare original vs modified |
 | `f` / `F11`        | fullscreen |
 | `S` / `F5`         | slideshow |
@@ -61,9 +64,6 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `F10`             | main menu |
 | `?` / `F1`         | shortcuts overlay |
 | `q` / `Ctrl+q`     | quit |
-
-Crop / straighten / rotate (`c`, `R`, `[`, `]`) are planned, not yet
-implemented.
 
 Full keybindings and mouse/touch gestures: `docs/ui-and-interactions.md`.
 

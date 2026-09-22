@@ -92,7 +92,7 @@ drift from the live bindings.
 | `g` / `Home`   | first image |
 | `G` / `End`    | last image |
 | `Enter`        | grid → large (open highlighted) |
-| `Esc`          | one step back: stop slideshow → discard enhance preview → leave fullscreen → clear marks → large → grid; in the grid a second `Esc` within 2 s quits |
+| `Esc`          | one step back: cancel a crop/straighten tool → stop slideshow → close the enhance panel → discard the preview → leave fullscreen → clear marks → large → grid; in the grid a second `Esc` within 2 s quits |
 | `t`            | toggle grid ↔ large |
 | `+` / `=`, `Ctrl++` | zoom in (large) / grow thumbnails (grid) |
 | `-` / `_`, `Ctrl+-` | zoom out (large) / shrink thumbnails (grid) |
@@ -110,6 +110,9 @@ drift from the live bindings.
 | `!`            | run a shell script → popup (e.g. `usbimport`) |
 | `a`            | quick enhance → side panel beside the image (GEGL) |
 | `1`–`8` / `0`  | toggle enhance preset N (layered, large view) / back to original (panel open) |
+| `c`            | crop tool (GEGL): rectangle overlay; `Enter` applies, `Esc` cancels — see "Crop, straighten & rotate tools" |
+| `R`            | straighten tool (GEGL): horizon drag / `h` `l` nudge ±0.5°, `A` auto-crop; `Enter` / `Esc` |
+| `]` / `[`      | rotate 90° clockwise / counter-clockwise (GEGL, one-shot; repeat for 180°/270°) |
 | `u` / `Ctrl+z` | undo last `d` / `m` (restore from `.Trash` or move back) |
 | `o` / `Ctrl+o` | open image dialog (image filter) |
 | `O` / `Ctrl+Shift+o` | open folder dialog |
@@ -118,8 +121,8 @@ drift from the live bindings.
 | `?` / `F1`     | shortcuts overlay |
 | `q` / `Ctrl+q` | quit |
 
-Planned, not yet bound: `c` crop, `R` straighten, `[` / `]` rotate, `r`
-reload (the folder monitor reloads edited files automatically).
+Planned, not yet bound: `r` reload (the folder monitor reloads edited files
+automatically).
 
 `Esc` is *contextual back*: if there are marks, it clears them first; then in
 fullscreen it returns to large view, in large view it returns to the grid, in
@@ -375,25 +378,44 @@ Loaded lazily; never blocks display of the pixels.
 
 ## Crop, straighten & rotate tools (GEGL)
 
-Non-destructive, like enhance — they add ops to the live preview graph; `s`
-exports the result and navigating away prompts Save/Discard/Cancel. Large view
-only; in grid, `c`/`R` first switch to large on the selected cell. If GEGL is
-not built in, all show the "GEGL not built in" toast.
+Non-destructive, like enhance — they add ops to the same live preview graph
+(compose order, decision #35: colour presets → rotate 90° → straighten →
+crop); `s` exports the composed result and navigating away prompts
+Save/Discard/Cancel exactly as for a preset. The title names what is on
+screen (`… · Auto-fix · 90° CW, crop`). Large view only; in the grid `c`,
+`R`, `[` and `]` first open the highlighted image large. If GEGL is not
+built in, all four report "GEGL not built in".
 
-- **`c` → crop tool:** overlay an adjustable crop rectangle on the image.
-  - Mouse: drag inside to move, drag edges/corners to resize.
-  - Keyboard: `h`/`l`/`j`/`k` move the rectangle; `H`/`L`/`J`/`K` resize the
-    edges; `1`-`4` set aspect ratio (1:1, 3:2, 4:3, 16:9), `0` free.
-  - `Enter` applies (`gegl:crop`), `Esc` cancels.
-- **`R` → straighten tool:** level the horizon.
-  - Mouse: drag a line along the horizon; the image rotates to align it.
-  - Keyboard: `h`/`l` (or `+`/`-`) nudge the angle by ±0.5°; a grid overlay
-    helps. Optional auto-crop to remove the rotated corners.
-  - `Enter` applies (`gegl:rotate`), `Esc` cancels.
+- **`c` → crop tool:** a rectangle overlay on the image (outside dimmed,
+  rule-of-thirds lines, corner handles), starting as the whole image — or as
+  the crop already applied, so it can be adjusted rather than redrawn.
+  - Mouse: drag inside to move, drag an edge or corner to resize.
+  - Keyboard: `h`/`l`/`j`/`k` move the rectangle; `H`/`L` move its right
+    edge, `J`/`K` its bottom edge (1 % of the image per press); `1`-`4` lock
+    the aspect ratio (1:1, 3:2, 4:3, 16:9), `0` frees it.
+  - `Enter` applies (`gegl:crop`; a rectangle still covering the whole image
+    removes the crop), `Esc` or `c` again cancels and restores. `Enter` is
+    refused while the preview under the rectangle is still rendering.
+- **`R` → straighten tool:** level the horizon; a grid overlay helps.
+  - Mouse: drag a line along the horizon; the image rotates to level it
+    (the angle adds to the current one).
+  - Keyboard: `h` / `-` nudge counter-clockwise, `l` / `+` clockwise, by
+    0.5°, within ±45°; `A` toggles the auto-crop of the rotated corners
+    (default on, decision #35; off keeps the whole rotated bounding box).
+  - Every change renders live (`gegl:rotate` about the centre); `Enter`
+    keeps it, `Esc` or `R` again restores the angle the tool started with.
 - **`[` / `]` → rotate 90°:** one-shot, no overlay — `]` clockwise, `[`
-  counterclockwise; repeat to reach 180°/270°. Non-destructive
-  (`gegl:rotate-on-center`); `s` exports the rotated copy.
-- All compose with enhance presets in the same preview graph.
+  counterclockwise; repeat to reach 180°/270°, four presses are the original
+  again. Non-destructive (`gegl:rotate`, an exact pixel permutation); a crop
+  already applied turns with the image.
+- The tool keys are **modal**: while a tool is active they belong to it
+  (`h` moves the rectangle instead of going to the previous image), the
+  other tool's key and `[`/`]` are refused until `Enter`/`Esc`, and any key
+  not listed keeps its usual meaning. Navigating away, or leaving the large
+  view, ends a tool without applying it. `?` lists the tool keys under
+  *Tools*.
+- All compose with enhance presets in the same preview graph; hold `Space`
+  compares against the original as usual.
 
 ## Compare original vs modified (hold)
 
@@ -410,7 +432,8 @@ Hotkeys are not hidden — each is printed on the element it triggers:
 
 - **Menu items** show their key right-aligned, e.g. `Copy   Ctrl+c`,
   `Move …   m`, `Open in …   e`, `Scripts …   !`, `Enhance …   a`,
-  `Crop …   c`, `Straighten …   R`, `Rotate 90°   ] / [`, `Save enhanced copy …
+  `Crop   c`, `Straighten   R`, `Rotate 90° clockwise   ]`, `Rotate 90°
+  counter-clockwise   [`, `Save enhanced copy …
   s`, `Show original (hold)   Space`, `Slideshow   S`, `Trash   d`, `Delete   D`,
   `Preferences …   ,`, `Fullscreen   f`.
 - **Header-bar buttons** show the key in the tooltip (plus an underline

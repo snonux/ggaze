@@ -127,8 +127,8 @@ backend — gate code with `GGAZE_HAVE_*` from `ggaze-config.h` and toast
 - Bounded `GdkTexture` LRU (cap 4) to bound memory.
 - Plain-C modules (`navigator`, `loader`, `detect`, `thumbnail`, `trash`,
   `mover`, `opener`, `runner`, `enhancer`, `info`, `texturecache`,
-  `clipboard`, `viewload`, `pathutil`, `settings-pair`, `undo`) own no
-  GtkWidget and are unit-tested standalone.
+  `clipboard`, `viewload`, `pathutil`, `settings-pair`, `undo`, `croprect`,
+  `transform`) own no GtkWidget and are unit-tested standalone.
 
 ## Memory (C has no GC)
 
@@ -145,7 +145,7 @@ src/app.{c,h}         GApplication, single-instance, open (files or folder)
 src/window.{c,h}      GgazeWindow : layout (header bar + menu, grid/large/empty stack) and action routing
 src/viewload.{c,h}    large-view load pipeline: texture LRU, one active load, prefetch, last-write-wins
 src/info-overlay.{c,h} EXIF card + status line over the stack (async info gather)
-src/viewer.{c,h}      GgazeViewer : GtkWidget (large canvas, zoom/pan)
+src/viewer.{c,h}      GgazeViewer : GtkWidget (large canvas, zoom/pan, tool overlay hook)
 src/gridview.{c,h}    GgazeGrid (thumbnail overview; intent signals, no window action names)
 src/shortcuts.{c,h}   the ONE key table: bindings, ? help, header tooltips, menu labels
 src/popup_list.{c,h}  shared hotkey list popover (e / ! / m)
@@ -165,6 +165,9 @@ src/enhancer.{c,h}    optional GEGL presets (built-in table + user graphs), expo
 src/enhancer-gegl.h   the GEGL buffer/texture/export operations (sync + async)
 src/enhance-ctrl.{c,h} optional enhance feature controller (mask, previews, side panel, saved flag, async save)
 src/enhance-ui.{c,h}  optional pure enhance side-panel widget construction
+src/croprect.{c,h}    crop rectangle rules (move/resize/aspect/hit/drag/quarter turn), plain C
+src/transform.{c,h}   rotate 90 / straighten / crop state + the sizes the tools and the chain share
+src/tool-ctrl.{c,h}   optional modal crop (c) / straighten (R) session: viewer overlay, keys, drags
 src/clipboard.{c,h}   image/png (displayed texture) or file-URI content providers
 src/thumbnail.{c,h}   freedesktop TMS cache (bounded pool)
 src/texturecache.{c,h} bounded LRU of decoded GdkTextures (mtime/size validated)

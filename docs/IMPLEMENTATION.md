@@ -103,7 +103,7 @@ that cost a full investigation to learn, so they are written down here:
 | `test_grid_cull.c` | M7 | Grid view shows N cells; `d` bins one into `.Trash`, cell dims; `u` restores; counter reflects remaining; `Enter`→large on the right cell. |
 | `test_move_undo.c` | M8 | Mark 3 → `m`→dest2 → files gone from folder, present in dest; `u` moves back; collision suffixing. |
 | `test_runner_rescan.c` | M8 | `!` runs a script that writes a file into the dir; on exit the navigator rescans and the new file appears; injection-guard filename is single-quoted. |
-| `test_enhance_flow.c` | M9 (gated on `gegl`) | `a`→preset applies a preview off-thread (texture differs from raw); toggle-off restores the original; hold-`Space` compares and restores (incl. the flag not sticking when the mask is cleared mid-hold); `s` writes a collision-safe `-enhanced[-n].<ext>` with the original byte-identical (EXIF `Orientation=1` normalization is not implemented yet, so not asserted); a dirty preview blocks grid selection and native window close behind the Save/Discard/Cancel prompt — and the prompt itself is **answered** (`tests/helpers/gtk_helpers.h`): Cancel keeps the preview and releases the continuation, Discard/Save apply the deferred grid select / open / move, a **failed** Save (read-only folder) keeps the preview and aborts the continuation, repeated close-requests do not stack dialogs, and `t` `t` keeps a dirty preview on screen. |
+| `test_enhance_flow.c` | M9 (gated on `gegl`) | `a`→preset applies a preview off-thread (texture differs from raw); toggle-off restores the original; hold-`Space` compares and restores (incl. the flag not sticking when the mask is cleared mid-hold); `s` writes a collision-safe `-enhanced[-n].<ext>` with the original byte-identical (EXIF `Orientation=1` normalization is not implemented yet, so not asserted); a dirty preview blocks grid selection and native window close behind the Save/Discard/Cancel prompt — and the prompt itself is **answered** (`tests/helpers/gtk_helpers.h`): Cancel keeps the preview and releases the continuation, Discard/Save apply the deferred grid select / open / move, a **failed** Save (read-only folder) keeps the preview and aborts the continuation, repeated close-requests do not stack dialogs, and `t` `t` keeps a dirty preview on screen. wb2: the `c`/`R`/`[`/`]` tools on a generated 400×300 PNG — quarter turns wrap to the original and export the turned copy, a turn composes with a preset and is gated by the prompt, crop keys / aspect presets / drags commit on `Enter` and `Esc` restores, straighten nudges and the horizon drag level live with auto-crop on and off, a tool refuses the other tool and the turns, `Enter` is refused while the base preview renders, a crop turns with the image, navigation / leaving the large view abandon a tool. `test_window.c` (both lanes) covers the GEGL-disabled keys. |
 | `test_grid_select_gate.c` | M9 | `gridview.c` routes every selection through the installed `GgazeGridSelectFunc` instead of `navigator_set_current_file` — a refusing gate blocks the change, an allowing one lets it through, and with **no** gate (or after uninstalling one) it falls back to `navigator_set_current_file` itself. No GEGL/window/dialog involved, so it runs in the minimal lane too. |
 | `test_clipboard_copy.c` | M8 | `Ctrl+c` with no marks → `image/png` on `GdkClipboard`; with marks → `text/uri-list`; paste back into a fake target. |
 | `test_full_lifecycle.c` | M10 | The elevator-pitch session scripted: open → walk → `i` → `d` ×k → mark → `m`→dest → `e`→program (use `true`) → `!`→script → quit. End-to-end smoke. |
@@ -384,11 +384,12 @@ bounded memory.
 
 ## M9 — GEGL quick-enhance, crop/straighten/rotate, compare (optional)
 
-**Status (tu0):** the enhance popover, async apply, hold-`Space`, reset,
-`s` export-copy, and the dirty Save/Discard/Cancel gate are done and wired
-into the window (see below). Crop (`c`), straighten (`R`), rotate 90
-(`[`/`]`), ICC color management, and EXIF `Orientation=1`-on-export are
-**not yet built** — tracked as follow-up work, not part of tu0's scope.
+**Status (tu0 + wb2):** the enhance side panel, async apply, hold-`Space`,
+reset, `s` export-copy, and the dirty Save/Discard/Cancel gate are done and
+wired into the window (tu0), and the crop (`c`), straighten (`R`) and
+rotate 90 (`[`/`]`) tools ride the same preview graph (wb2, see below). ICC
+color management and EXIF `Orientation=1`-on-export are **not yet built** —
+tracked as follow-up work.
 
 **Deliverables**
 - `meson` `gegl` feature; `src/enhancer.c/.h` plain-C.
@@ -410,9 +411,19 @@ into the window (see below). Crop (`c`), straighten (`R`), rotate 90
   resulting `GdkTexture`; last-write-wins via a generation counter (a newer
   apply/discard/navigation supersedes a still-in-flight one). Not applied
   during `h`/`l` scrubbing.
-- Crop/straighten/rotate 90° and their graph composition (decision #35) are
-  **not implemented** — future work; see the "Crop, straighten & rotate
-  tools" section above for the intended design.
+- Crop/straighten/rotate 90° (wb2): one plain-C `Transform`
+  (`transform.{c,h}`, with the crop rectangle rules in `croprect.{c,h}`)
+  that the enhancer appends after the presets in decision #35's order, for
+  the preview and the export alike; `enhance-ctrl.c` owns it beside the
+  mask (active/dirty/saved/override all read one "has work" predicate), so a
+  turn or crop is gated, saved and discarded exactly like a preset.
+  `tool-ctrl.{c,h}` is the modal `c`/`R` session: it draws on the viewer's
+  overlay hook (`ggaze_viewer_set_overlay`: a draw callback with the image's
+  on-screen geometry and a drag callback that takes over from panning),
+  claims its keys in a capture-phase controller ahead of the global
+  shortcut table, and edits the Transform through
+  `enhance_ctrl_set_transform`. `[`/`]` need no tool
+  (`enhance_ctrl_rotate_quarter`). Behaviour: docs/ui-and-interactions.md.
 - Dirty flag: navigate (`h`/`l`/`g`/`G`/scroll), any grid/thumbnail
   selection (double-click/`Enter`, middle-click mark, `j`/`k` cursor move,
   toggle-to-large sync — routed through `ggaze_grid_set_select_func`'s gate
@@ -435,7 +446,11 @@ into the window (see below). Crop (`c`), straighten (`R`), rotate 90
 **Tests**
 - Unit: `test_enhancer.c` (gated): each preset dims + non-zero; export file
   written + original untouched; format selection by extension; stale-dest
-  and unsupported-extension rejection.
+  and unsupported-extension rejection; the transform on the chain pixel by
+  pixel (quarter turns as permutations, crops in base coordinates, the
+  straighten's analytic sizes, a turned export). `test_croprect.c` and
+  `test_transform.c` (every lane, no GEGL): the rectangle rules and the
+  angle / size maths.
 - Integration: `test_enhance_flow.c` (gated `if gegl_dep.found()`): async
   apply swaps the texture without touching the original (byte-identical),
   toggle-off resets to the original, hold-Space compares then restores,

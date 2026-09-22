@@ -161,26 +161,49 @@ graph text and parsed with `gegl_node_new_from_xml`.
 ## Crop, straighten & rotate tools
 
 Same non-destructive model as enhance (live preview graph + `s` to export a
-copy), but interactive (crop/straighten) or one-shot (rotate):
+copy), but interactive (crop/straighten) or one-shot (rotate). The state is
+one plain-C value, `Transform` (`transform.h`: quarter turns, a clockwise
+straighten angle in 0.5° steps within ±45°, the auto-crop flag, and a
+`CropRect` in the coordinates of the image *after* the turn and straighten),
+which the enhancer appends to the chain after the colour presets in decision
+#35's order — the same chain for the async preview and the `s` export:
 
-- **`c` — crop** (`gegl:crop`): adjustable rectangle; aspect-ratio presets;
-  mouse drag or keyboard (`h`/`l`/`j`/`k` move, `H`/`L`/`J`/`K` resize); `Enter`
-  apply.
-- **`R` — straighten** (`gegl:rotate`): drag a horizon line or nudge the
-  angle (`h`/`l`, ±0.5°) with a grid overlay; optional auto-crop of rotated
-  corners; `Enter` apply.
-- **`[` / `]` — rotate 90°** (`gegl:rotate-on-center`): one-shot CCW/CW; repeat
-  for 180°/270°. No overlay.
-- Compose with enhance presets in the same graph. Large view only; GEGL
-  required.
+- **`[` / `]` — rotate 90°**: `gegl:rotate` with origin (0, 0) and the
+  *nearest* sampler, which makes a quarter turn an exact pixel permutation
+  (`gegl:rotate-on-center` about a non-integer centre would resample). One-
+  shot, no overlay; repeat for 180°/270°; an applied crop turns with the
+  image (`croprect_rotate_quarter`).
+- **`R` — straighten**: `gegl:rotate` about the image centre, then a
+  `gegl:crop` to the analytic size — the largest inscribed rectangle
+  (`transform_autocrop_size`, auto-crop on) or the rotated bounding box
+  (`transform_rotated_size`, auto-crop off). GEGL pads a rotation's extent
+  by a pixel or two for the sampler; cropping to the analytic size is what
+  makes the preview exactly `transform_base_size` of the original, so the
+  crop tool can lay its rectangle out on that size before the preview has
+  rendered. Drag a horizon line or nudge (`h`/`l`, `-`/`+`) with a grid
+  overlay; every change renders live.
+- **`c` — crop**: `gegl:crop` of the rectangle, intersected with the base
+  image and snapped to whole pixels (`transform_effective_crop`). Interactive
+  overlay (`tool-ctrl.c` draws it on the viewer's overlay hook); mouse drag or
+  keyboard; `Enter` applies.
+- GEGL's positive `degrees` turn the image counter-clockwise on screen
+  (y down; measured with a 3×2 probe on gegl 0.4.72), so the enhancer negates
+  the Transform's clockwise angles.
+- Large view only; GEGL required (without it the keys report "GEGL not
+  built in"). Keys and behaviour: docs/ui-and-interactions.md "Crop,
+  straighten & rotate tools".
 
 ## Module
 
 `enhancer.{c,h}` → `Enhancer` (+ `EnhancerPreset`). Plain-C, no GtkWidget,
 unit-testable. The synchronous API (`enhancer_load`/`enhancer_apply_chain`/
 `enhancer_buffer_to_texture`/`enhancer_export_chain`) is what the async
-wrapper below composes; `window.c` calls the async form so GEGL's CPU-heavy
-processing runs in a `GTask` worker, off the GTK main thread (tu0).
+wrapper below composes; `enhance-ctrl.c` calls the async form so GEGL's
+CPU-heavy processing runs in a `GTask` worker, off the GTK main thread
+(tu0). Every chain call takes the geometric `Transform` (nullable = identity)
+beside the preset mask; `croprect.{c,h}` and `transform.{c,h}` are the
+GEGL-free geometry those tools and the chain share, `tool-ctrl.{c,h}` the
+interactive crop/straighten session over the viewer.
 
 `enhancer_load` does NOT use `gegl:load` (which ignores EXIF Orientation):
 it loads through ggaze's own orientation-aware loader (`loader_load`, every
@@ -190,19 +213,22 @@ preview thumbnails render upright for portrait phone JPEGs etc.
 
 ```c
 const GPtrArray *enhancer_get_presets(Enhancer *p_e);
-GeglBuffer      *enhancer_apply_chain(Enhancer *p_e, GeglBuffer *p_in,
+GeglBuffer      *enhancer_apply_chain(GeglBuffer *p_in,
                                       const GPtrArray *p_presets, guint8 u_mask,
-                                      GError **p_err);
-gboolean         enhancer_export_chain(Enhancer *p_e, GeglBuffer *p_in,
+                                      const Transform *p_xf, GError **p_err);
+gboolean         enhancer_export_chain(GeglBuffer *p_in,
                                        const GPtrArray *p_presets, guint8 u_mask,
-                                       GFile *p_out, GError **p_err);
+                                       const Transform *p_xf, GFile *p_out,
+                                       GError **p_err);
 
-/* Async: load + apply_chain + buffer_to_texture in a GTask worker. */
-void       enhancer_apply_chain_async(Enhancer *p_e, GFile *p_file,
-                                      const GPtrArray *p_presets, guint8 u_mask,
+/* Async: load + apply_chain + buffer_to_texture in a GTask worker; finish
+ * also reports the original's upright size (the crop tool's base). */
+void       enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
+                                      guint8 u_mask, const Transform *p_xf,
                                       GCancellable *p_cancel,
                                       GAsyncReadyCallback p_cb, gpointer p_data);
-GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, GError **p_err);
+GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, gint *p_orig_w,
+                                        gint *p_orig_h, GError **p_err);
 ```
 
 Viewer integration: when a preset is active, the decoded pixels are imported
@@ -226,10 +252,10 @@ overwriting whatever the user is now looking at (last-write-wins).
   enhance/export path (JXL/AVIF/HEIF still need their own libs).
 - **Thumbnail generation** — `gegl:load` → `gegl:scale-size` → save; an
   alternative backend for the thumbnail cache.
-- **Transforms** — **crop** (`gegl:crop`), **straighten** (`gegl:rotate`) and
-  **rotate 90°** (`gegl:rotate-on-center`) are in scope as tools
-  (`c`/`R`/`[`/`]`); lens correction (`gegl:lens-distortion`), red-eye
-  (`gegl:red-eye-removal`), and `gegl:scale-ratio` remain later/maybe.
+- **Transforms** — **crop** (`gegl:crop`), **straighten** and **rotate 90°**
+  (both `gegl:rotate`, see above) ship as the `c`/`R`/`[`/`]` tools; lens
+  correction (`gegl:lens-distortion`), red-eye (`gegl:red-eye-removal`), and
+  `gegl:scale-ratio` remain later/maybe.
 - **Tone mapping** — `gegl:reinhard-2005`, `gegl:mantiuk-2006`,
   `gegl:fattal-2002` (handy for linear/HDR-ish scenes).
 - **Artistic** (optional/fun) — `gegl:vignette`, `gegl:sepia`, `gegl:softglow`,
