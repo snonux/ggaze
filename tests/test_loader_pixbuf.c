@@ -37,6 +37,7 @@
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
+#include <string.h>
 #include <unistd.h>
 
 static GdkTexture *
@@ -398,6 +399,28 @@ test_pixbuf_util(void) {
    g_object_unref(p_rgba);
 }
 
+/* loader_peek_dimensions() says "unknown" for a non-local GFile (no path to
+ * hand gdk-pixbuf; decided before any I/O) and for a local file that clears
+ * the truncation gate but that gdk-pixbuf cannot parse (64 bytes of text
+ * carry no signature, so the gate imposes nothing and gdk-pixbuf's header
+ * parse is what fails). */
+static void
+test_peek_dimensions_unknown_cases(void) {
+   int    i_w = -1, i_h = -1;
+   GFile *p_remote = g_file_new_for_uri("http://localhost.invalid/x.png");
+   g_assert_false(loader_peek_dimensions(p_remote, &i_w, &i_h));
+   g_object_unref(p_remote);
+
+   guint8 text[64];
+   memset(text, 'x', sizeof(text));
+   gchar *c_path = write_tmp(text, sizeof(text));
+   GFile *p_file = g_file_new_for_path(c_path);
+   g_assert_false(loader_peek_dimensions(p_file, &i_w, &i_h));
+   g_object_unref(p_file);
+   unlink(c_path);
+   g_free(c_path);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -416,6 +439,8 @@ main(int i_argc, char **c_argv) {
                    test_truncated_thumbnail_and_peek);
    g_test_add_func("/loader/pixbuf/thumbnail_and_peek_still_work",
                    test_thumbnail_and_peek_still_work);
+   g_test_add_func("/loader/pixbuf/peek_dimensions_unknown_cases",
+                   test_peek_dimensions_unknown_cases);
    g_test_add_func("/loader/pixbuf/oversized_jpeg", test_oversized_jpeg);
    g_test_add_func("/loader/pixbuf/rgba_png", test_rgba_png);
    g_test_add_func("/loader/pixbuf/empty_file_sets_error",
