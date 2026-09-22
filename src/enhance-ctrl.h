@@ -5,14 +5,19 @@
  * ggaze — Enhance/GEGL UI orchestration controller
  *
  * Owns the entire GEGL "enhance" feature's state and orchestration: the
- * preset mask, the in-flight apply/preview cancellables and generation
- * counters, the cached enhanced texture, the hold-Space compare flag, the
- * file the preview applies to, the saved-already flag, the enhance side
- * panel and every card/picture it is built of, and the Enhancer engine
- * itself. window.c forwards only the a/s/digit/Space/0/Esc actions and a
- * few choke-point queries (is_dirty, override_texture, nav_changed); every
- * other enhance concern lives here (SRP: window.c is layout + action
- * routing, this module is the enhance feature).
+ * preset mask, the geometric Transform (rotate 90 / straighten / crop,
+ * decision #35 -- the same live preview graph, so a turn and a preset
+ * compose and one Save exports both), the in-flight apply/preview
+ * cancellables and generation counters, the cached enhanced texture, the
+ * hold-Space compare flag, the file the preview applies to, the
+ * saved-already flag, the enhance side panel and every card/picture it is
+ * built of, and the Enhancer engine itself. window.c forwards only the
+ * a/s/digit/Space/0/Esc/[/] actions and a few choke-point queries
+ * (is_dirty, override_texture, nav_changed); the interactive crop and
+ * straighten tools (tool-ctrl.c) edit the Transform through
+ * enhance_ctrl_set_transform; every other enhance concern lives here (SRP:
+ * window.c is layout + action routing, this module is the enhance
+ * feature).
  *
  * The panel sits BESIDE the large view, inside the window's own widget tree
  * (the host hands over a slot to put it in), so the image keeps the whole
@@ -49,7 +54,8 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
-#include "enhancer.h" /* Enhancer, EnhancerPreset, GPtrArray of presets */
+#include "enhancer.h"  /* Enhancer, EnhancerPreset, GPtrArray of presets */
+#include "transform.h" /* the rotate/straighten/crop state (decision #35) */
 
 G_BEGIN_DECLS
 
@@ -115,8 +121,36 @@ void             enhance_ctrl_set_user_presets(EnhanceCtrl     *p_ctrl,
 const GPtrArray *enhance_ctrl_get_presets(EnhanceCtrl *p_ctrl);
 guint8           enhance_ctrl_get_mask(EnhanceCtrl *p_ctrl);
 
+/* --- the geometric transform (rotate 90 / straighten / crop) ------------- */
+/* The current Transform (borrowed; the identity when none is active). */
+const Transform *enhance_ctrl_get_transform(EnhanceCtrl *p_ctrl);
+
+/* Replace the Transform and re-apply the preview asynchronously (a new,
+ * unsaved generation), exactly like toggling a preset. A transform equal
+ * in effect to the current one (transform_equal) is stored but triggers no
+ * re-apply, so a tool that pushes its working state on every nudge never
+ * renders twice for nothing. With an empty mask and the identity the
+ * original is restored. */
+void enhance_ctrl_set_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf);
+
+/* `]` (i_dir > 0) / `[` (i_dir < 0): one more quarter turn, one-shot, then
+ * re-apply. An active crop turns with the image. */
+void enhance_ctrl_rotate_quarter(EnhanceCtrl *p_ctrl, gint i_dir);
+
+/* TRUE while an apply is in flight, i.e. the texture on screen predates the
+ * current mask/transform. The crop tool refuses to commit a rectangle laid
+ * out over a stale image. */
+gboolean enhance_ctrl_is_pending(EnhanceCtrl *p_ctrl);
+
+/* The size of the base image the crop rectangle refers to (the original
+ * after the current turn and straighten, crop ignored --
+ * transform_base_size), or FALSE when the original's size is not known yet
+ * (no apply has landed for this file and its texture is not cached). */
+gboolean enhance_ctrl_get_base_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
+
 /* --- state queries --- */
-/* TRUE iff a GEGL enhance preview is on screen (mask != 0), saved or not. */
+/* TRUE iff a GEGL preview is on screen (a preset enabled or a non-identity
+ * transform), saved or not. */
 gboolean enhance_ctrl_is_active(EnhanceCtrl *p_ctrl);
 
 /* TRUE iff a GEGL enhance preview is active AND has not been exported since

@@ -177,8 +177,15 @@ transform_effective_crop(const Transform *p_t, gdouble d_base_w,
    if (!p_t->b_crop || d_base_w < 1.0 || d_base_h < 1.0) {
       return (FALSE);
    }
+   /* An intersection, not croprect_clamp: the tool's minimum size is a UI
+    * rule, and growing a rectangle here would crop pixels the user never
+    * chose (it also broke a 4x2 unit fixture, where the minimum is the
+    * whole image). */
    *p_out = p_t->t_crop;
-   croprect_clamp(p_out, d_base_w, d_base_h);
+   croprect_intersect(p_out, d_base_w, d_base_h);
+   if (p_out->d_w < 0.5 || p_out->d_h < 0.5) {
+      return (FALSE);
+   }
    croprect_round(p_out);
    return (p_out->d_w >= 1.0 && p_out->d_h >= 1.0);
 }

@@ -96,6 +96,19 @@ croprect_clamp(CropRect *p_r, gdouble d_w, gdouble d_h) {
 }
 
 void
+croprect_intersect(CropRect *p_r, gdouble d_w, gdouble d_h) {
+   g_return_if_fail(p_r != NULL);
+   gdouble d_l = CLAMP(p_r->d_x, 0.0, MAX(d_w, 0.0));
+   gdouble d_t = CLAMP(p_r->d_y, 0.0, MAX(d_h, 0.0));
+   gdouble d_r = CLAMP(p_r->d_x + p_r->d_w, 0.0, MAX(d_w, 0.0));
+   gdouble d_b = CLAMP(p_r->d_y + p_r->d_h, 0.0, MAX(d_h, 0.0));
+   p_r->d_x    = d_l;
+   p_r->d_y    = d_t;
+   p_r->d_w    = MAX(d_r - d_l, 0.0);
+   p_r->d_h    = MAX(d_b - d_t, 0.0);
+}
+
+void
 croprect_move(CropRect *p_r, gdouble d_dx, gdouble d_dy, gdouble d_w,
               gdouble d_h) {
    g_return_if_fail(p_r != NULL);

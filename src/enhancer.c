@@ -15,6 +15,8 @@
 
 #include "enhancer.h"
 
+#include <math.h>
+
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <string.h>
@@ -23,6 +25,7 @@
 #include "ggaze-config.h"
 #include "loader/loader.h" /* orientation-aware load -> upright texture */
 #include "pathutil.h"
+#include "transform.h"
 
 struct Enhancer {
    GPtrArray *p_presets;
@@ -336,17 +339,111 @@ _append_preset(GeglNode *p_graph, GeglNode *p_prev,
    return (NULL);
 }
 
-/* Run p_in through the presets enabled in u_mask (all of them when p_mask is
- * ~0) and return the sink buffer. gegl:buffer-sink allocates the output
- * itself: handing it a pre-created buffer leaked one GeglBuffer per apply
- * (the sink replaced the pointer). */
-static GeglBuffer *
-_run_chain(GeglBuffer *p_in, const GPtrArray *p_presets, guint8 u_mask,
-           GError **p_err) {
-   GeglNode *p_graph = gegl_node_new();
-   GeglNode *p_prev  = gegl_node_new_child(
-      p_graph, "operation", "gegl:buffer-source", "buffer", p_in, NULL);
-   gboolean b_any = FALSE;
+/* --- geometric transform nodes (decision #35) ---------------------------
+ *
+ * Measured with a 3x2 probe on gegl 0.4.72: gegl:rotate's positive degrees
+ * turn the image COUNTER-clockwise on screen (y down), and its output extent
+ * is offset -- with origin 0,0 a +90 turn lands at x=0,y=-3, and a small
+ * angle about the centre gets a bounding box padded by a pixel or two for
+ * the sampler. So the Transform's clockwise angles are negated here, and
+ * every op that needs coordinates (auto-crop, the user's crop) reads the
+ * live bounding box of its input node and offsets by its origin, cropping
+ * to the analytic transform_base_size so the output is exactly the size the
+ * crop tool laid its rectangle out on. */
+
+/* A gegl:crop of the analytic size d_w x d_h centred in p_prev's bounding
+ * box (the straighten turns about the centre, so that is where the kept
+ * pixels are). Whole-pixel offsets: an integer crop cannot be truer than
+ * that. */
+static GeglNode *
+_append_centred_crop(GeglNode *p_graph, GeglNode *p_prev, gdouble d_w,
+                     gdouble d_h) {
+   GeglRectangle t_bbox = gegl_node_get_bounding_box(p_prev);
+   gdouble       d_x    = t_bbox.x + floor((t_bbox.width - d_w) / 2.0);
+   gdouble       d_y    = t_bbox.y + floor((t_bbox.height - d_h) / 2.0);
+   GeglNode     *p_crop =
+      gegl_node_new_child(p_graph, "operation", "gegl:crop", "x", d_x, "y", d_y,
+                          "width", d_w, "height", d_h, NULL);
+   gegl_node_link(p_prev, p_crop);
+   return (p_crop);
+}
+
+/* `[` / `]`: i_quarter clockwise quarter turns. Origin (0, 0) with the
+ * nearest sampler makes it a pure pixel permutation -- no resampling blur,
+ * which a centre origin would introduce for an odd width - height. */
+static GeglNode *
+_append_quarter_turn(GeglNode *p_graph, GeglNode *p_prev, gint i_quarter) {
+   GeglNode *p_rot = gegl_node_new_child(
+      p_graph, "operation", "gegl:rotate", "degrees", -90.0 * i_quarter,
+      "origin-x", 0.0, "origin-y", 0.0, "sampler", GEGL_SAMPLER_NEAREST, NULL);
+   gegl_node_link(p_prev, p_rot);
+   return (p_rot);
+}
+
+/* `R`: the straighten angle about the image centre, then a crop to either
+ * the largest inscribed rectangle (auto-crop) or the rotated bounding box
+ * -- both the analytic sizes transform_base_size promises. */
+static GeglNode *
+_append_straighten(GeglNode *p_graph, GeglNode *p_prev, const Transform *p_xf) {
+   GeglRectangle t_bbox = gegl_node_get_bounding_box(p_prev);
+   GeglNode     *p_rot  = gegl_node_new_child(
+      p_graph, "operation", "gegl:rotate", "degrees", -p_xf->d_degrees,
+      "origin-x", t_bbox.x + t_bbox.width / 2.0, "origin-y",
+      t_bbox.y + t_bbox.height / 2.0, NULL);
+   gegl_node_link(p_prev, p_rot);
+   gdouble d_w, d_h;
+   if (p_xf->b_autocrop) {
+      transform_autocrop_size(t_bbox.width, t_bbox.height, p_xf->d_degrees,
+                              &d_w, &d_h);
+   } else {
+      transform_rotated_size(t_bbox.width, t_bbox.height, p_xf->d_degrees, &d_w,
+                             &d_h);
+   }
+   return (_append_centred_crop(p_graph, p_rot, d_w, d_h));
+}
+
+/* `c`: the user's crop, clamped into the base image it was drawn on
+ * (transform_effective_crop) and offset by that image's origin. An empty
+ * result (the base shrank under it) skips the crop rather than emitting
+ * nothing. */
+static GeglNode *
+_append_user_crop(GeglNode *p_graph, GeglNode *p_prev, const Transform *p_xf) {
+   GeglRectangle t_bbox = gegl_node_get_bounding_box(p_prev);
+   CropRect      t_crop;
+   if (!transform_effective_crop(p_xf, t_bbox.width, t_bbox.height, &t_crop)) {
+      return (p_prev);
+   }
+   GeglNode *p_crop = gegl_node_new_child(
+      p_graph, "operation", "gegl:crop", "x", t_bbox.x + t_crop.d_x, "y",
+      t_bbox.y + t_crop.d_y, "width", t_crop.d_w, "height", t_crop.d_h, NULL);
+   gegl_node_link(p_prev, p_crop);
+   return (p_crop);
+}
+
+/* Append p_xf's ops after p_prev in decision #35's order; returns the new
+ * tail (p_prev itself for NULL / the identity). */
+static GeglNode *
+_append_transform(GeglNode *p_graph, GeglNode *p_prev, const Transform *p_xf) {
+   if (p_xf == NULL || transform_is_identity(p_xf)) {
+      return (p_prev);
+   }
+   if (p_xf->i_quarter != 0) {
+      p_prev = _append_quarter_turn(p_graph, p_prev, p_xf->i_quarter);
+   }
+   if (p_xf->d_degrees != 0.0) {
+      p_prev = _append_straighten(p_graph, p_prev, p_xf);
+   }
+   if (p_xf->b_crop) {
+      p_prev = _append_user_crop(p_graph, p_prev, p_xf);
+   }
+   return (p_prev);
+}
+
+/* Append the presets enabled in u_mask after p_prev; returns the new tail,
+ * or NULL with p_err. *p_any is set when at least one was appended. */
+static GeglNode *
+_append_presets(GeglNode *p_graph, GeglNode *p_prev, const GPtrArray *p_presets,
+                guint8 u_mask, gboolean *p_any, GError **p_err) {
    for (guint u = 0; u < p_presets->len && u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
       if ((u_mask & (guint8)(1u << u)) == 0) {
          continue;
@@ -354,15 +451,37 @@ _run_chain(GeglBuffer *p_in, const GPtrArray *p_presets, guint8 u_mask,
       p_prev = _append_preset(
          p_graph, p_prev, g_ptr_array_index((GPtrArray *)p_presets, u), p_err);
       if (p_prev == NULL) {
-         g_object_unref(p_graph);
          return (NULL);
       }
-      b_any = TRUE;
+      *p_any = TRUE;
+   }
+   return (p_prev);
+}
+
+/* Run p_in through the presets enabled in u_mask (all of them when p_mask is
+ * ~0) and then the transform p_xf (nullable), and return the sink buffer.
+ * gegl:buffer-sink allocates the output itself: handing it a pre-created
+ * buffer leaked one GeglBuffer per apply (the sink replaced the pointer). */
+static GeglBuffer *
+_run_chain(GeglBuffer *p_in, const GPtrArray *p_presets, guint8 u_mask,
+           const Transform *p_xf, GError **p_err) {
+   GeglNode *p_graph = gegl_node_new();
+   GeglNode *p_prev  = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-source", "buffer", p_in, NULL);
+   gboolean b_any = FALSE;
+   p_prev = _append_presets(p_graph, p_prev, p_presets, u_mask, &b_any, p_err);
+   if (p_prev == NULL) {
+      g_object_unref(p_graph);
+      return (NULL);
+   }
+   if (p_xf != NULL && !transform_is_identity(p_xf)) {
+      p_prev = _append_transform(p_graph, p_prev, p_xf);
+      b_any  = TRUE;
    }
    if (!b_any) {
       g_object_unref(p_graph);
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                  "enhancer: no preset enabled");
+                  "enhancer: no preset enabled and no transform");
       return (NULL);
    }
    GeglBuffer *p_out  = NULL;
@@ -380,10 +499,10 @@ _run_chain(GeglBuffer *p_in, const GPtrArray *p_presets, guint8 u_mask,
 
 GeglBuffer *
 enhancer_apply_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
-                     guint8 u_mask, GError **p_err) {
+                     guint8 u_mask, const Transform *p_xf, GError **p_err) {
    g_return_val_if_fail(p_in != NULL, NULL);
    g_return_val_if_fail(p_presets != NULL, NULL);
-   return (_run_chain(p_in, p_presets, u_mask, p_err));
+   return (_run_chain(p_in, p_presets, u_mask, p_xf, p_err));
 }
 
 GeglBuffer *
@@ -394,7 +513,7 @@ enhancer_apply(GeglBuffer *p_in, const EnhancerPreset *p_preset,
    /* A chain of one: the preset is index 0 of a one-entry list. */
    GPtrArray *p_one = g_ptr_array_new();
    g_ptr_array_add(p_one, (gpointer)p_preset);
-   GeglBuffer *p_out = _run_chain(p_in, p_one, 1, p_err);
+   GeglBuffer *p_out = _run_chain(p_in, p_one, 1, NULL, p_err);
    g_ptr_array_unref(p_one);
    return (p_out);
 }
@@ -490,14 +609,17 @@ enhancer_export(GeglBuffer *p_in, const EnhancerPreset *p_preset, GFile *p_out,
    return (b_ok);
 }
 
-/* Export p_in with the enabled-preset chain (u_mask) composed, to p_out. */
+/* Export p_in with the enabled-preset chain (u_mask) and the transform
+ * composed, to p_out. */
 gboolean
 enhancer_export_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
-                      guint8 u_mask, GFile *p_out, GError **p_err) {
+                      guint8 u_mask, const Transform *p_xf, GFile *p_out,
+                      GError **p_err) {
    g_return_val_if_fail(p_in != NULL, FALSE);
    g_return_val_if_fail(p_out != NULL, FALSE);
    g_return_val_if_fail(p_presets != NULL, FALSE);
-   GeglBuffer *p_buf = enhancer_apply_chain(p_in, p_presets, u_mask, p_err);
+   GeglBuffer *p_buf =
+      enhancer_apply_chain(p_in, p_presets, u_mask, p_xf, p_err);
    if (p_buf == NULL) {
       return (FALSE);
    }
@@ -513,6 +635,8 @@ typedef struct {
    GFile     *p_out;     /* owned */
    GPtrArray *p_presets; /* owned deep copy */
    guint8     u_mask;
+   Transform  t_xf; /* by value: a snapshot the tools cannot nudge under
+                     * the worker */
 } _ExportReq;
 
 static void
@@ -537,7 +661,7 @@ _export_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
    gboolean    b_ok  = FALSE;
    if (p_buf != NULL) {
       b_ok = enhancer_export_chain(p_buf, p_req->p_presets, p_req->u_mask,
-                                   p_req->p_out, &p_err);
+                                   &p_req->t_xf, p_req->p_out, &p_err);
       g_object_unref(p_buf);
    }
    if (!b_ok) {
@@ -551,10 +675,21 @@ _export_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
    }
 }
 
+/* Copy p_xf into *p_dst, the identity when p_xf is NULL. */
+static void
+_snapshot_transform(Transform *p_dst, const Transform *p_xf) {
+   if (p_xf != NULL) {
+      *p_dst = *p_xf;
+   } else {
+      transform_init(p_dst);
+   }
+}
+
 void
 enhancer_export_chain_async(GFile *p_src, const GPtrArray *p_presets,
-                            guint8 u_mask, GFile *p_out, GCancellable *p_cancel,
-                            GAsyncReadyCallback p_cb, gpointer p_data) {
+                            guint8 u_mask, const Transform *p_xf, GFile *p_out,
+                            GCancellable *p_cancel, GAsyncReadyCallback p_cb,
+                            gpointer p_data) {
    g_return_if_fail(G_IS_FILE(p_src));
    g_return_if_fail(G_IS_FILE(p_out));
    _ExportReq *p_req = g_new0(_ExportReq, 1);
@@ -562,7 +697,8 @@ enhancer_export_chain_async(GFile *p_src, const GPtrArray *p_presets,
    p_req->p_out      = (GFile *)g_object_ref(p_out);
    p_req->p_presets  = _presets_copy(p_presets);
    p_req->u_mask     = u_mask;
-   GTask *p_task     = g_task_new(p_src, p_cancel, p_cb, p_data);
+   _snapshot_transform(&p_req->t_xf, p_xf);
+   GTask *p_task = g_task_new(p_src, p_cancel, p_cb, p_data);
    g_task_set_task_data(p_task, p_req, (GDestroyNotify)_export_req_free);
    g_task_run_in_thread(p_task, _export_thread);
    g_object_unref(p_task);
@@ -693,7 +829,22 @@ typedef struct {
    GFile     *p_file;    /* owned */
    GPtrArray *p_presets; /* owned deep copy (thread-safe snapshot) */
    guint8     u_mask;
+   Transform  t_xf; /* by value: a snapshot (see _ExportReq) */
 } _AsyncApplyReq;
+
+/* The worker's result: the texture plus the original's upright size, which
+ * the controller records for the crop tool (see the finish doc). */
+typedef struct {
+   GdkTexture *p_tex; /* owned */
+   gint        i_orig_w;
+   gint        i_orig_h;
+} _ApplyResult;
+
+static void
+_apply_result_free(_ApplyResult *p_res) {
+   g_clear_object(&p_res->p_tex);
+   g_free(p_res);
+}
 
 static void
 _async_apply_req_free(_AsyncApplyReq *p_req) {
@@ -713,45 +864,64 @@ _apply_chain_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
    if (g_task_return_error_if_cancelled(p_task)) {
       return; /* superseded before the worker even started */
    }
-   GError     *p_err = NULL;
-   GeglBuffer *p_buf = enhancer_load(p_req->p_file, &p_err);
-   GdkTexture *p_tex = NULL;
+   GError       *p_err = NULL;
+   GeglBuffer   *p_buf = enhancer_load(p_req->p_file, &p_err);
+   _ApplyResult *p_res = g_new0(_ApplyResult, 1);
    if (p_buf != NULL) {
-      GeglBuffer *p_enh =
-         enhancer_apply_chain(p_buf, p_req->p_presets, p_req->u_mask, &p_err);
+      p_res->i_orig_w   = gegl_buffer_get_width(p_buf);
+      p_res->i_orig_h   = gegl_buffer_get_height(p_buf);
+      GeglBuffer *p_enh = enhancer_apply_chain(
+         p_buf, p_req->p_presets, p_req->u_mask, &p_req->t_xf, &p_err);
       if (p_enh != NULL) {
-         p_tex = enhancer_buffer_to_texture(p_enh, &p_err);
+         p_res->p_tex = enhancer_buffer_to_texture(p_enh, &p_err);
          g_object_unref(p_enh);
       }
       g_object_unref(p_buf);
    }
    (void)p_cancel;
-   if (p_tex == NULL) {
+   if (p_res->p_tex == NULL) {
+      _apply_result_free(p_res);
       g_task_return_error(p_task, p_err);
    } else {
-      g_task_return_pointer(p_task, p_tex, (GDestroyNotify)g_object_unref);
+      g_task_return_pointer(p_task, p_res, (GDestroyNotify)_apply_result_free);
    }
 }
 
 void
 enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
-                           guint8 u_mask, GCancellable *p_cancel,
-                           GAsyncReadyCallback p_cb, gpointer p_data) {
+                           guint8 u_mask, const Transform *p_xf,
+                           GCancellable *p_cancel, GAsyncReadyCallback p_cb,
+                           gpointer p_data) {
    g_return_if_fail(p_file != NULL);
    _AsyncApplyReq *p_req = g_new0(_AsyncApplyReq, 1);
    p_req->p_file         = (GFile *)g_object_ref(p_file);
    p_req->p_presets      = _presets_copy(p_presets);
    p_req->u_mask         = u_mask;
-   GTask *p_task         = g_task_new(p_file, p_cancel, p_cb, p_data);
+   _snapshot_transform(&p_req->t_xf, p_xf);
+   GTask *p_task = g_task_new(p_file, p_cancel, p_cb, p_data);
    g_task_set_task_data(p_task, p_req, (GDestroyNotify)_async_apply_req_free);
    g_task_run_in_thread(p_task, _apply_chain_thread);
    g_object_unref(p_task);
 }
 
 GdkTexture *
-enhancer_apply_chain_finish(GAsyncResult *p_res, GError **p_err) {
+enhancer_apply_chain_finish(GAsyncResult *p_res, gint *p_orig_w, gint *p_orig_h,
+                            GError **p_err) {
    g_return_val_if_fail(G_IS_TASK(p_res), NULL);
-   return ((GdkTexture *)g_task_propagate_pointer((GTask *)p_res, p_err));
+   _ApplyResult *p_out =
+      (_ApplyResult *)g_task_propagate_pointer((GTask *)p_res, p_err);
+   if (p_out == NULL) {
+      return (NULL);
+   }
+   if (p_orig_w != NULL) {
+      *p_orig_w = p_out->i_orig_w;
+   }
+   if (p_orig_h != NULL) {
+      *p_orig_h = p_out->i_orig_h;
+   }
+   GdkTexture *p_tex = g_steal_pointer(&p_out->p_tex);
+   _apply_result_free(p_out);
+   return (p_tex);
 }
 
 typedef struct {

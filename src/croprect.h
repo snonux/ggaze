@@ -69,6 +69,12 @@ gboolean croprect_equal(const CropRect *p_a, const CropRect *p_b);
  * this, so a rectangle is valid after any sequence of calls. */
 void croprect_clamp(CropRect *p_r, gdouble d_w, gdouble d_h);
 
+/* Cut p_r down to the part inside the d_w x d_h image -- a plain
+ * intersection with no minimum size (what the GEGL crop wants: a rectangle
+ * drawn on a base that has since shrunk keeps the pixels it still covers).
+ * The result can be empty (d_w or d_h zero); the caller checks. */
+void croprect_intersect(CropRect *p_r, gdouble d_w, gdouble d_h);
+
 /* Translate by (d_dx, d_dy), sliding along the image edge rather than
  * leaving it (the size is preserved). */
 void croprect_move(CropRect *p_r, gdouble d_dx, gdouble d_dy, gdouble d_w,

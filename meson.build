@@ -124,12 +124,13 @@ ggaze_lib = static_library('ggaze',
    ggaze_src,
    include_directories : [inc, src_inc],
    dependencies : [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep,
-      libexif_dep] + ggaze_extra_deps,
+      libexif_dep, m_dep] + ggaze_extra_deps,
    c_args : ggaze_c_args,
    install : false,
 )
 
-ggaze_deps = [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep, libexif_dep]
+ggaze_deps = [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep, libexif_dep,
+   m_dep]
 
 subdir('src')
 subdir('data')

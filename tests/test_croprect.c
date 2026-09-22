@@ -58,6 +58,20 @@ test_clamp_keeps_inside_and_min_size(void) {
 }
 
 static void
+test_intersect_is_a_plain_cut(void) {
+   CropRect r = {-10, 5, 30, 400}; /* hangs off the left and the bottom */
+   croprect_intersect(&r, W, H);
+   assert_rect(&r, 0, 5, 20, H - 5);
+   CropRect s = {390, 295, 2, 2}; /* smaller than the minimum: kept as is */
+   croprect_intersect(&s, W, H);
+   assert_rect(&s, 390, 295, 2, 2);
+   CropRect t = {500, 0, 10, 10}; /* entirely outside: empty, not moved */
+   croprect_intersect(&t, W, H);
+   g_assert_cmpfloat(t.d_w, ==, 0);
+   g_assert_cmpfloat(t.d_x, ==, W);
+}
+
+static void
 test_move_slides_along_the_edge(void) {
    CropRect r = {100, 100, 100, 50};
    croprect_move(&r, 10, -20, W, H);
@@ -204,6 +218,8 @@ main(int i_argc, char **c_argv) {
                    test_init_full_and_is_full);
    g_test_add_func("/croprect/clamp_keeps_inside_and_min_size",
                    test_clamp_keeps_inside_and_min_size);
+   g_test_add_func("/croprect/intersect_is_a_plain_cut",
+                   test_intersect_is_a_plain_cut);
    g_test_add_func("/croprect/move_slides_along_the_edge",
                    test_move_slides_along_the_edge);
    g_test_add_func("/croprect/resize_edges_anchor_opposite_edge",

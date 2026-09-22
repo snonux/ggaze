@@ -16,6 +16,7 @@
 
 #include "enhance-ui.h"
 #include "enhancer-gegl.h"
+#include "transform.h"
 
 /* Thin wrappers over the host vtable so the body reads like the old
  * window.c code (which called _show_texture / _update_header / ... directly).
@@ -45,8 +46,18 @@ struct EnhanceCtrl {
 
    Enhancer *p_enhancer;     /* GEGL preset engine (always non-NULL) */
    guint8    u_enhance_mask; /* bit i -> preset i enabled (layered) */
-   gboolean  b_disposed;     /* set by enhance_ctrl_dispose */
-   gboolean  b_saved;        /* the preview on screen was exported by `s`
+   Transform t_xf;           /* rotate 90 / straighten / crop, applied after
+                              * the presets in the same graph (decision #35);
+                              * the identity when none */
+   gint i_orig_w;            /* the ORIGINAL's upright size, recorded from
+                              * the last landed apply (0 = not known yet);
+                              * transform_base_size of it is the image the
+                              * crop rectangle lives on */
+   gint     i_orig_h;
+   gboolean b_apply_pending; /* an apply is in flight: what is on screen
+                              * predates u_enhance_mask/t_xf */
+   gboolean b_disposed;      /* set by enhance_ctrl_dispose */
+   gboolean b_saved;         /* the preview on screen was exported by `s`
                               * and the mask has not changed since -- it is
                               * then active but no longer dirty, so moving
                               * on does not prompt for it */
@@ -148,7 +159,17 @@ enhance_ctrl_new(const EnhanceUIHostOps *p_ops, gpointer p_host) {
    p_ctrl->p_host           = p_host;
    p_ctrl->p_enhancer       = enhancer_new();
    p_ctrl->p_enhance_cancel = g_cancellable_new();
+   transform_init(&p_ctrl->t_xf);
    return (p_ctrl);
+}
+
+/* TRUE iff there is anything to preview: a preset enabled or a transform
+ * that is not the identity. The one definition of "active" every state
+ * query, the texture override and the apply path share. */
+static gboolean
+_has_work(EnhanceCtrl *p_ctrl) {
+   return (p_ctrl->u_enhance_mask != 0 ||
+           !transform_is_identity(&p_ctrl->t_xf));
 }
 
 void
@@ -216,7 +237,7 @@ enhance_ctrl_get_mask(EnhanceCtrl *p_ctrl) {
 gboolean
 enhance_ctrl_is_active(EnhanceCtrl *p_ctrl) {
    g_return_val_if_fail(p_ctrl != NULL, FALSE);
-   return (p_ctrl->p_enhancer != NULL && p_ctrl->u_enhance_mask != 0);
+   return (p_ctrl->p_enhancer != NULL && _has_work(p_ctrl));
 }
 
 gboolean
@@ -233,8 +254,8 @@ enhance_ctrl_is_open(EnhanceCtrl *p_ctrl) {
 
 GdkTexture *
 enhance_ctrl_override_texture(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
-   if (p_ctrl == NULL || p_ctrl->u_enhance_mask == 0 ||
-       p_ctrl->p_enhance_tex == NULL || p_ctrl->b_hold_original) {
+   if (p_ctrl == NULL || !_has_work(p_ctrl) || p_ctrl->p_enhance_tex == NULL ||
+       p_ctrl->b_hold_original) {
       return (p_tex);
    }
    return (p_ctrl->p_enhance_tex);
@@ -244,7 +265,7 @@ void
 enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold) {
    g_return_if_fail(p_ctrl != NULL);
    if (!_has_navigator(p_ctrl) || p_ctrl->p_enhancer == NULL ||
-       p_ctrl->u_enhance_mask == 0 || p_ctrl->b_hold_original == b_hold) {
+       !_has_work(p_ctrl) || p_ctrl->b_hold_original == b_hold) {
       return;
    }
    p_ctrl->b_hold_original = b_hold;
@@ -299,7 +320,7 @@ gboolean
 enhance_ctrl_can_save(EnhanceCtrl *p_ctrl) {
    g_return_val_if_fail(p_ctrl != NULL, FALSE);
    return (_has_navigator(p_ctrl) && p_ctrl->p_enhancer != NULL &&
-           p_ctrl->u_enhance_mask != 0 && p_ctrl->p_enhance_file != NULL);
+           _has_work(p_ctrl) && p_ctrl->p_enhance_file != NULL);
 }
 
 /* Per-export context: the destination (for the report), the generation the
@@ -328,8 +349,7 @@ _save_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    gboolean     b_ok   = enhancer_export_chain_finish(p_res, &p_err);
    if (!_disposed(p_ctrl)) {
       _save_report(p_ctrl, p_req->p_out, b_ok, p_err);
-      if (b_ok && p_req->u_gen == p_ctrl->u_enhance_gen &&
-          p_ctrl->u_enhance_mask != 0) {
+      if (b_ok && p_req->u_gen == p_ctrl->u_enhance_gen && _has_work(p_ctrl)) {
          p_ctrl->b_saved = TRUE;
          g_free(p_ctrl->c_saved_name);
          p_ctrl->c_saved_name = g_file_get_basename(p_req->p_out);
@@ -355,7 +375,7 @@ enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
                         gpointer p_done_data) {
    g_return_if_fail(p_ctrl != NULL);
    if (!enhance_ctrl_can_save(p_ctrl)) {
-      _show_status(p_ctrl, "Nothing to save (no enhance preset enabled)");
+      _show_status(p_ctrl, "Nothing to save (no preset or transform active)");
       if (fn_done != NULL) {
          fn_done(FALSE, p_done_data);
       }
@@ -386,7 +406,7 @@ enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
    g_free(c_name);
    enhancer_export_chain_async(p_ctrl->p_enhance_file,
                                enhancer_get_presets(p_ctrl->p_enhancer),
-                               p_ctrl->u_enhance_mask, p_out,
+                               p_ctrl->u_enhance_mask, &p_ctrl->t_xf, p_out,
                                p_ctrl->p_save_cancel, _save_done_cb, p_req);
 }
 
@@ -411,7 +431,7 @@ _sync_panel(EnhanceCtrl *p_ctrl) {
    }
    if (p_ctrl->p_state != NULL) {
       enhance_ui_set_save_state(p_ctrl->p_state, p_ctrl->p_save_btn,
-                                p_ctrl->u_enhance_mask != 0, p_ctrl->b_saved,
+                                _has_work(p_ctrl), p_ctrl->b_saved,
                                 p_ctrl->c_saved_name);
    }
 }
@@ -450,13 +470,16 @@ _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    _Req        *p_req  = (_Req *)p_data;
    EnhanceCtrl *p_ctrl = p_req->p_ctrl;
    GError      *p_err  = NULL;
-   GdkTexture  *p_tex  = enhancer_apply_chain_finish(p_res, &p_err);
+   gint         i_w    = 0;
+   gint         i_h    = 0;
+   GdkTexture  *p_tex  = enhancer_apply_chain_finish(p_res, &i_w, &i_h, &p_err);
    if (_disposed(p_ctrl) || p_req->u_gen != p_ctrl->u_enhance_gen) {
       g_clear_object(&p_tex);
       g_clear_error(&p_err);
       _req_free(p_req);
       return;
    }
+   p_ctrl->b_apply_pending = FALSE;
    if (p_tex == NULL) {
       g_warning("ggaze: enhance failed: %s",
                 p_err != NULL ? p_err->message : "(no detail)");
@@ -464,6 +487,10 @@ _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       _show_status(p_ctrl, "Enhance failed");
       _discard(p_ctrl); /* back to the original; also bumps the gen */
    } else {
+      /* The worker decoded the original: remember its size for the crop
+       * tool / the next quarter turn (see i_orig_w). */
+      p_ctrl->i_orig_w = i_w;
+      p_ctrl->i_orig_h = i_h;
       g_set_object(&p_ctrl->p_enhance_tex, p_tex);
       _show_texture(p_ctrl, p_tex);
       g_object_unref(p_tex);
@@ -506,15 +533,18 @@ _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
    p_req->b_hint        = p_ctrl->p_panel == NULL && !p_ctrl->b_hint_shown;
    p_ctrl->b_hint_shown = p_ctrl->b_hint_shown || p_req->b_hint;
    const GPtrArray *p_presets = enhancer_get_presets(p_ctrl->p_enhancer);
+   p_ctrl->b_apply_pending    = TRUE;
    enhancer_apply_chain_async(p_file, p_presets, p_ctrl->u_enhance_mask,
-                              p_ctrl->p_enhance_cancel, _apply_done_cb, p_req);
+                              &p_ctrl->t_xf, p_ctrl->p_enhance_cancel,
+                              _apply_done_cb, p_req);
 }
 
-/* Apply the enabled-preset chain (u_enhance_mask) to the current image as a
- * live preview, off the GTK main thread (enhancer_apply_chain_async: GEGL
- * processing is CPU-heavy, AGENTS.md "Decode runs in GTask threads"). An empty
- * mask restores the original synchronously (texturecache is cheap, no GEGL
- * involved). */
+/* Apply the enabled-preset chain (u_enhance_mask) and the transform to the
+ * current image as a live preview, off the GTK main thread
+ * (enhancer_apply_chain_async: GEGL processing is CPU-heavy, AGENTS.md
+ * "Decode runs in GTask threads"). Nothing active (empty mask, identity
+ * transform) restores the original synchronously (texturecache is cheap,
+ * no GEGL involved). */
 static void
 _apply_async(EnhanceCtrl *p_ctrl) {
    if (!_has_navigator(p_ctrl) || p_ctrl->p_enhancer == NULL) {
@@ -522,16 +552,17 @@ _apply_async(EnhanceCtrl *p_ctrl) {
    }
    _apply_begin(p_ctrl);
    _sync_panel(p_ctrl);
-   if (p_ctrl->u_enhance_mask == 0) {
-      /* Canonical "mask went empty" site -- every path that clears it
-       * (Esc/discard, the Original card, `0`, and the easy-to-miss one:
-       * toggling the LAST enabled preset back off via win.enhance-N or a
-       * card) funnels through here. Force the hold-compare flag off:
-       * set_hold_original no-ops once nothing is active, so a Space RELEASE
-       * arriving after the mask was cleared out from under a still-held key
-       * would otherwise leave the flag stuck TRUE and swallow the next press
-       * (tu0 review round 2, issue 4). */
+   if (!_has_work(p_ctrl)) {
+      /* Canonical "nothing left active" site -- every path that clears the
+       * state (Esc/discard, the Original card, `0`, the fourth quarter turn,
+       * and the easy-to-miss one: toggling the LAST enabled preset back off
+       * via win.enhance-N or a card) funnels through here. Force the
+       * hold-compare flag off: set_hold_original no-ops once nothing is
+       * active, so a Space RELEASE arriving after the mask was cleared out
+       * from under a still-held key would otherwise leave the flag stuck
+       * TRUE and swallow the next press (tu0 review round 2, issue 4). */
       p_ctrl->b_hold_original = FALSE;
+      p_ctrl->b_apply_pending = FALSE; /* the gen bump dropped any worker */
       g_clear_object(&p_ctrl->p_enhance_tex);
       _load_current(p_ctrl); /* restore original (texturecache is fast) */
       _update_header(p_ctrl);
@@ -539,8 +570,10 @@ _apply_async(EnhanceCtrl *p_ctrl) {
    }
    GFile *p_file = _current_file(p_ctrl);
    if (p_file == NULL) {
-      p_ctrl->u_enhance_mask  = 0;
-      p_ctrl->b_hold_original = FALSE; /* see the mask==0 branch above */
+      p_ctrl->u_enhance_mask = 0;
+      transform_init(&p_ctrl->t_xf);
+      p_ctrl->b_hold_original = FALSE; /* see the nothing-active branch */
+      p_ctrl->b_apply_pending = FALSE;
       _sync_panel(p_ctrl);
       _update_header(p_ctrl);
       return;
@@ -557,12 +590,90 @@ _apply_async(EnhanceCtrl *p_ctrl) {
  * preview only drops in-memory state. */
 static void
 _discard(EnhanceCtrl *p_ctrl) {
-   p_ctrl->u_enhance_mask  = 0;
+   p_ctrl->u_enhance_mask = 0;
+   transform_init(&p_ctrl->t_xf);   /* a discard drops the turn/crop too */
    p_ctrl->b_hold_original = FALSE; /* belt-and-braces: _apply_async's
-                                     * mask==0 branch below also does this,
+                                     * nothing-active branch also does this,
                                      * but it early-returns without a
                                      * navigator/enhancer (issue 4) */
    _apply_async(p_ctrl);
+}
+
+/* --- the geometric transform --------------------------------------------- */
+
+const Transform *
+enhance_ctrl_get_transform(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, NULL);
+   return (&p_ctrl->t_xf);
+}
+
+void
+enhance_ctrl_set_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf) {
+   g_return_if_fail(p_ctrl != NULL && p_xf != NULL);
+   gboolean b_same = transform_equal(&p_ctrl->t_xf, p_xf);
+   p_ctrl->t_xf    = *p_xf;
+   if (b_same) {
+      return; /* stored (e.g. the auto-crop flag at 0 degrees), no render */
+   }
+   _apply_async(p_ctrl);
+}
+
+/* The original's size, from the last landed apply or -- before any apply,
+ * the common case for the very first `]` or `c` -- from the texturecache
+ * entry the viewer is showing. FALSE when neither knows it. */
+static gboolean
+_orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h) {
+   if (p_ctrl->i_orig_w <= 0 || p_ctrl->i_orig_h <= 0) {
+      GFile      *p_cur = _current_file(p_ctrl);
+      GdkTexture *p_tex = p_cur != NULL ? _cached_texture(p_ctrl, p_cur) : NULL;
+      if (p_tex == NULL) {
+         return (FALSE);
+      }
+      p_ctrl->i_orig_w = gdk_texture_get_width(p_tex);
+      p_ctrl->i_orig_h = gdk_texture_get_height(p_tex);
+   }
+   *p_w = p_ctrl->i_orig_w;
+   *p_h = p_ctrl->i_orig_h;
+   return (TRUE);
+}
+
+gboolean
+enhance_ctrl_get_base_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h) {
+   g_return_val_if_fail(p_ctrl != NULL && p_w != NULL && p_h != NULL, FALSE);
+   gint i_ow, i_oh;
+   if (!_has_navigator(p_ctrl) || !_orig_size(p_ctrl, &i_ow, &i_oh)) {
+      return (FALSE);
+   }
+   gdouble d_w, d_h;
+   transform_base_size(&p_ctrl->t_xf, i_ow, i_oh, &d_w, &d_h);
+   *p_w = (gint)d_w;
+   *p_h = (gint)d_h;
+   return (TRUE);
+}
+
+void
+enhance_ctrl_rotate_quarter(EnhanceCtrl *p_ctrl, gint i_dir) {
+   g_return_if_fail(p_ctrl != NULL);
+   if (!_has_navigator(p_ctrl) || p_ctrl->p_enhancer == NULL) {
+      return;
+   }
+   Transform t_new = p_ctrl->t_xf;
+   gint      i_bw  = 0;
+   gint      i_bh  = 0;
+   if (t_new.b_crop && !enhance_ctrl_get_base_size(p_ctrl, &i_bw, &i_bh)) {
+      /* Cannot turn a crop without knowing the image it sits on; a crop
+       * only exists once an apply landed, so this is theoretical -- drop
+       * the crop rather than turn it into nonsense. */
+      t_new.b_crop = FALSE;
+   }
+   transform_rotate_quarter(&t_new, i_dir, i_bw, i_bh);
+   enhance_ctrl_set_transform(p_ctrl, &t_new);
+}
+
+gboolean
+enhance_ctrl_is_pending(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   return (p_ctrl->b_apply_pending);
 }
 
 void
@@ -789,7 +900,11 @@ enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl) {
    gboolean b_same = (p_cur != NULL && p_ctrl->p_enhance_file != NULL &&
                       g_file_equal(p_cur, p_ctrl->p_enhance_file));
    if (!b_same) {
-      p_ctrl->u_enhance_mask  = 0;
+      p_ctrl->u_enhance_mask = 0;
+      transform_init(&p_ctrl->t_xf);
+      p_ctrl->i_orig_w        = 0; /* another image, another size */
+      p_ctrl->i_orig_h        = 0;
+      p_ctrl->b_apply_pending = FALSE;
       p_ctrl->b_saved         = FALSE;
       p_ctrl->b_hint_shown    = FALSE;
       p_ctrl->b_hold_original = FALSE; /* mask cleared without going through
