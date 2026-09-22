@@ -736,6 +736,22 @@ test_zero_height_jpeg_peek_is_false(void) {
    g_assert_cmpuint(u_opens, ==, 3);
 }
 
+/* A JPEG with no SOF at all (SOI, an APP0, then zero fill to the end of
+ * the file): detect's scan reaches the end of the WHOLE file without a
+ * frame header, a definitive "nothing to size here" that cannot hide a
+ * large declared size, so the peek defers to gdk-pixbuf's header parse
+ * (third open) -- the same courtesy loader_load_pixbuf_scaled() extends to
+ * such a file -- which then fails it. Distinct from the padded case below,
+ * where the scan ran out of PREFIX, not file. */
+static void
+test_sofless_jpeg_peek_defers_to_pixbuf(void) {
+   guint8 jpg[64] = {0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F',
+                     'I',  'F',  0,    1,    1,    0,    0,   0};
+   guint  u_opens = 0;
+   g_assert_false(_peek_via_fifo(jpg, &u_opens));
+   g_assert_cmpuint(u_opens, ==, 3);
+}
+
 /* A SOF pushed past the 64 KB peek prefix by a maximal filler segment:
  * detect reports GGAZE_JPEG_PEEK_INCONCLUSIVE, and the peek fails closed
  * (FALSE, fast) like the thumbnail path does for the same file, instead of
@@ -1057,6 +1073,8 @@ main(int i_argc, char **c_argv) {
                    test_oversized_jpeg_peek_skips_pixbuf);
    g_test_add_func("/loader/pixbuf/zero_height_jpeg_peek_is_false",
                    test_zero_height_jpeg_peek_is_false);
+   g_test_add_func("/loader/pixbuf/sofless_jpeg_peek_defers_to_pixbuf",
+                   test_sofless_jpeg_peek_defers_to_pixbuf);
    g_test_add_func("/loader/pixbuf/padded_past_prefix_jpeg_peek_refused",
                    test_padded_past_prefix_jpeg_peek_refused);
    g_test_add_func("/loader/pixbuf/load_async", test_load_async);
