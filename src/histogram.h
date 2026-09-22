@@ -7,14 +7,21 @@
  * Bins the pixels of a decoded image into HISTOGRAM_BINS buckets per channel
  * (red, green, blue, Rec.709 luminance) so the info card (`i`) can show an
  * exposure histogram while culling. Plain-C: no GtkWidget, no display; the
- * only GDK use is reading pixels out of an immutable GdkTexture, which is
- * safe from the GTask worker info-overlay.c runs it in. Drawing is the
+ * only GDK use is reading pixels out of an immutable GdkMemoryTexture, which
+ * is safe from the GTask worker info-overlay.c runs it in. Drawing is the
  * histogram-view widget's job.
  *
- * Large images are downsampled BEFORE binning: histogram_new_from_texture()
- * picks a sampling stride so at most HISTOGRAM_MAX_SAMPLES pixels are read,
- * which keeps a 100-megapixel photo at the same cost as a small one. The
- * shape of a histogram is statistically identical on a regular subsample.
+ * Cost model. Binning is subsampled: histogram_new_from_texture() picks a
+ * stride so at most HISTOGRAM_MAX_SAMPLES pixels are read whatever the image
+ * size (the shape of a histogram is statistically identical on a regular
+ * subsample). Getting at the pixels is where the size could bite: GDK has no
+ * region or scaled download, so the pixels are read in the texture's NATIVE
+ * layout, which GdkTextureDownloader hands back without a copy for a
+ * GdkMemoryTexture (every texture the loader and the enhancer produce). Only
+ * a texture in a layout the binner cannot read (16-bit, float) is converted,
+ * and that copy is bounded: above HISTOGRAM_MAX_CONVERT_PIXELS there is no
+ * plot, and the buffer is g_try_malloc'd so an allocation failure means "no
+ * plot" too, never an abort.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -33,6 +40,11 @@ G_BEGIN_DECLS
  * is chosen above it so binning never scales with the image. */
 #define HISTOGRAM_MAX_SAMPLES (512u * 512u)
 
+/* Largest texture (in pixels) the converting fallback will copy: 32 MP is a
+ * 128 MiB transient buffer, the most the card is allowed to cost on top of
+ * the texture itself. The native (copy-free) path has no such limit. */
+#define HISTOGRAM_MAX_CONVERT_PIXELS (32u * 1024u * 1024u)
+
 typedef enum {
    HISTOGRAM_CHANNEL_R = 0,
    HISTOGRAM_CHANNEL_G,
@@ -42,7 +54,7 @@ typedef enum {
 } HistogramChannel;
 
 typedef struct {
-   guint32 au_bins[HISTOGRAM_CHANNEL_COUNT][HISTOGRAM_BINS];
+   guint32 u_bins[HISTOGRAM_CHANNEL_COUNT][HISTOGRAM_BINS];
    guint32 u_peak;    /* highest bin count over all channels (plot scale) */
    guint64 u_samples; /* pixels binned (0 = empty histogram) */
    guint   u_step;    /* sampling stride used, 1 = every pixel */
@@ -54,19 +66,28 @@ Histogram *histogram_new(void);
 /* Bin an 8-bit pixel buffer. e_format selects the byte order; supported are
  * the 8-bit RGB(A)/BGR(A) layouts (premultiplied variants included -- alpha
  * is ignored, a photo is opaque). u_stride is the row pitch in bytes.
- * Every u_step-th pixel of every u_step-th row is read (0 means 1).
+ * Every u_step-th pixel of every u_step-th row is read (0 means 1; anything
+ * above INT_MAX is clamped to it, which still reads pixel (0,0)).
  * Returns NULL for a NULL buffer, a zero/negative dimension, a stride
  * shorter than one row, or an unsupported format. */
 Histogram *histogram_new_from_pixels(const guint8 *p_pixels, int i_width,
                                      int i_height, gsize u_stride,
                                      GdkMemoryFormat e_format, guint u_step);
 
-/* Bin a GdkTexture: downloads it as R8G8B8A8 and samples it with a stride
- * that keeps the read pixels within HISTOGRAM_MAX_SAMPLES. NULL for a NULL
- * texture or one with a zero dimension. GDK converts through premultiplied
- * alpha on the way out, so a fully transparent pixel bins as black -- a
- * photo is opaque, and that is what the viewer composites anyway. */
+/* Bin a GdkMemoryTexture, sampled with a stride that keeps the read pixels
+ * within HISTOGRAM_MAX_SAMPLES; see the file comment for how the pixels are
+ * reached. NULL for a NULL texture, a texture that is not a GdkMemoryTexture
+ * (a GL/dmabuf texture cannot be downloaded off the main thread without its
+ * context), one with a zero dimension, or one whose layout must be converted
+ * and is larger than HISTOGRAM_MAX_CONVERT_PIXELS / cannot be allocated. */
 Histogram *histogram_new_from_texture(GdkTexture *p_tex);
+
+/* histogram_new_from_texture() with the conversion budget as a parameter
+ * (u_max_convert_pixels), so the bound is unit-testable on a small texture.
+ * The budget applies only to the converting fallback, never to a texture
+ * read in its native layout. */
+Histogram *histogram_new_from_texture_full(GdkTexture *p_tex,
+                                           guint64     u_max_convert_pixels);
 
 void histogram_delete(Histogram *p_hist);
 

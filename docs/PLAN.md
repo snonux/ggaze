@@ -140,7 +140,7 @@ See [tech-stack.md](tech-stack.md).
 | M1  | Show one image (zoom/pan)    | not started | custom viewer widget, GdkPixbuf backend, EXIF orientation on load |
 | M2  | Walk the directory          | not started | navigator, `h`/`l` prev/next, folder arg + drag-drop open, `GFileMonitor` auto-refresh, wrap, header counter |
 | M3  | Responsive + prefetch       | not started | GTask decode, 2–3 slot LRU, cancel-in-flight |
-| M4  | Fullscreen + slideshow + info | not started | `f`, `s`, `i` EXIF overlay |
+| M4  | Fullscreen + slideshow + info | done; histogram added (0c2) | `f`, `s`, `i` EXIF overlay; `i` card also plots an RGB/luminance histogram of the displayed texture (task 0c2: `histogram.{c,h}` plain-C binner + `histogram-view.{c,h}` snapshot widget, gathered in the info overlay's GTask; plot only when the texture provably belongs to the current file) |
 | M5  | Modern formats             | not started | JXL/AVIF/HEIF backends, animated GIF/WebP |
 | M6  | Progressive low-res preview | not started | libjpeg-turbo early low-res scan |
 | M7  | Thumbnail cache + grid view | not started | TMS cache + `gridview`, dim trashed items |
@@ -161,6 +161,7 @@ Decisions made during planning. Newest first.
 
 | # | Date       | Decision                                                                 | Rationale                         |
 |---|------------|--------------------------------------------------------------------------|-----------------------------------|
+| 42 | 2026-09-22 | **Info-card histogram (0c2)**: RGB + Rec.709 luminance, 64 bins, subsampled binning (≤512×512 samples), read from the texture's native memory without a copy; the card plots only a texture that viewload/texturecache (or the enhance override) vouch for as the current file's, else no plot. | Exposure judgement while culling at constant cost; last-write-wins must hold for the plot as it does for the picture. |
 | 28 | 2026-07-12 | Folder monitoring via `GFileMonitor` (GIO): external adds/deletes/moves refresh the grid live (debounced); removed current file falls back to nearest. | New shots from usbimport/etc. appear without manual reload. |
 | 29 | 2026-07-12 | **UI toolkit: libadwaita** (was A). GNOME-native header bar/dark viewer/system theme; no theming overrides. | Native Fedora look per the gthumb-but-KISS direction. |
 | 30 | 2026-07-12 | **App ID `org.buetow.ggaze`** (was B). | Matches buetow.org domain. |

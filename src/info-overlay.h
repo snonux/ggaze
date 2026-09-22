@@ -51,11 +51,16 @@ void info_overlay_delete(InfoOverlay *p_io);
 void info_overlay_show_status(InfoOverlay *p_io, const char *c_msg);
 
 /* Gather + show the EXIF/dimensions card for p_file, with a histogram of
- * p_tex when one is given (the texture the viewer is displaying for that
- * file; NULL -- grid view, still decoding -- shows the card without a plot).
- * Async; cancels any request still in flight, last-write-wins. Stays up for
- * 5 s. The texture is never binned before `i` is pressed, so the plot can
- * neither block the UI nor delay the first paint of the picture. */
+ * p_tex when one is given. p_tex must be a texture of p_file's pixels (or
+ * an enhance preview of them); the overlay cannot check that, so the caller
+ * proves it -- window.c passes the displayed texture only when viewload's
+ * cache entry for navigator.current (or the enhance override of it) IS the
+ * displayed texture, and NULL otherwise (grid view, a decode still in
+ * flight with the previous picture still up), which shows the card without
+ * a plot rather than with another file's. Async; cancels any request still
+ * in flight, last-write-wins. Stays up for 5 s. The texture is never binned
+ * before `i` is pressed, so the plot can neither block the UI nor delay the
+ * first paint of the picture. */
 void info_overlay_show_for_file(InfoOverlay *p_io, GFile *p_file,
                                 GdkTexture *p_tex);
 

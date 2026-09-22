@@ -1463,13 +1463,39 @@ _slideshow_tick(gpointer p_data) {
    return (G_SOURCE_CONTINUE);
 }
 
+/* The texture the card may plot for p_cur: the one on screen, but only when
+ * it provably belongs to p_cur. The viewer alone cannot say whose pixels it
+ * shows -- on a texturecache miss viewload keeps the PREVIOUS picture up
+ * until the new decode lands (viewload_load_current), so during that window
+ * `i` would pair the new file's EXIF with the old file's histogram, and the
+ * card would keep that stale plot after the load landed. The mapping lives
+ * in viewload's cache (the entry for p_cur is p_cur's decoded texture, or
+ * NULL while still decoding) and in the enhance override, which swaps in the
+ * preview of that same file. The displayed texture must be one of those two
+ * to be plotted; anything else means "still decoding" -> no plot. The grid
+ * never plots: there is no displayed texture to judge there. */
+static GdkTexture *
+_info_texture_for(GgazeWindow *p_win, GFile *p_cur) {
+   if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
+      return (NULL);
+   }
+   GdkTexture *p_shown =
+      ggaze_viewer_get_texture(GGAZE_VIEWER(p_win->p_viewer));
+   GdkTexture *p_owned = viewload_get_cached(p_win->p_viewload, p_cur);
+   if (p_shown == NULL || p_owned == NULL) {
+      return (NULL);
+   }
+#if GGAZE_HAVE_GEGL
+   p_owned = enhance_ctrl_override_texture(p_win->p_enhance_ctrl, p_owned);
+#endif
+   return (p_shown == p_owned ? p_shown : NULL);
+}
+
 /* `i`: toggle the EXIF/dimensions card for the current file (gathered
  * asynchronously by the InfoOverlay), with a histogram of the texture on
- * screen. The texture is passed only from the large view: there the viewer
- * holds either nothing (still decoding) or the current file's pixels
- * (viewload's last-write-wins), including an active enhance preview, which
- * is the exposure the user is actually judging. From the grid the card
- * carries no plot rather than one for whatever the viewer last showed. */
+ * screen when _info_texture_for() can vouch that it is the current file's
+ * (including an active enhance preview, which is the exposure the user is
+ * actually judging); otherwise the card comes up without a plot. */
 static void
 _show_info(GgazeWindow *p_win) {
    if (!_require_folder(p_win)) {
@@ -1479,11 +1505,8 @@ _show_info(GgazeWindow *p_win) {
    if (p_cur == NULL) {
       return;
    }
-   GdkTexture *p_tex = NULL;
-   if (_get_view(p_win) == GGAZE_VIEW_LARGE) {
-      p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_win->p_viewer));
-   }
-   info_overlay_toggle_for_file(p_win->p_info, p_cur, p_tex);
+   info_overlay_toggle_for_file(p_win->p_info, p_cur,
+                                _info_texture_for(p_win, p_cur));
 }
 
 /* Hide the info overlay because the current file changed: reached from

@@ -4,8 +4,15 @@
  * Bins hand-built pixel buffers and GdkMemoryTextures (no display needed)
  * and asserts the exact per-channel counts, the byte-order handling across
  * the supported layouts, stride padding, stride-based subsampling and the
- * sampling budget. Negative cases: NULL buffer, zero / negative dimensions,
- * a too-short stride, an unsupported pixel format, a NULL texture.
+ * sampling budget. Single-primary pixels pin red and blue to their own
+ * channels through every texture path (native RGBA, native premultiplied
+ * BGRA -- GDK_MEMORY_DEFAULT on little-endian, which a straight-RGBA read
+ * once swapped -- and the 16-bit / float conversion path). Negative cases:
+ * NULL buffer, zero / negative dimensions, a too-short stride, an
+ * unsupported pixel format, a step above INT_MAX, a NULL texture, a
+ * converted texture over the copy budget. A non-memory texture (GL, dmabuf)
+ * is not constructible without a display, so that refusal is inspected, not
+ * run.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -31,10 +38,10 @@ assert_reference_bins(const Histogram *p_hist) {
    g_assert_cmpuint(p_hist->u_peak, ==, 2);
    for (guint u_ch = HISTOGRAM_CHANNEL_R; u_ch <= HISTOGRAM_CHANNEL_B; u_ch++) {
       /* each primary is 255 in two pixels (its own + white), 0 in the rest */
-      g_assert_cmpuint(p_hist->au_bins[u_ch][BIN(255)], ==, 2);
-      g_assert_cmpuint(p_hist->au_bins[u_ch][BIN(0)], ==, 2);
+      g_assert_cmpuint(p_hist->u_bins[u_ch][BIN(255)], ==, 2);
+      g_assert_cmpuint(p_hist->u_bins[u_ch][BIN(0)], ==, 2);
    }
-   const guint32 *p_lum = p_hist->au_bins[HISTOGRAM_CHANNEL_LUM];
+   const guint32 *p_lum = p_hist->u_bins[HISTOGRAM_CHANNEL_LUM];
    g_assert_cmpuint(p_lum[BIN(54)], ==, 1);  /* red */
    g_assert_cmpuint(p_lum[BIN(182)], ==, 1); /* green */
    g_assert_cmpuint(p_lum[BIN(19)], ==, 1);  /* blue */
@@ -91,8 +98,8 @@ test_layouts_agree(void) {
          a_cases[u].p_px, 2, 2, a_cases[u].u_stride, a_cases[u].e_fmt, 1);
       g_assert_nonnull(p_hist);
       assert_reference_bins(p_hist);
-      g_assert_cmpmem(p_hist->au_bins, sizeof(p_hist->au_bins), p_ref->au_bins,
-                      sizeof(p_ref->au_bins));
+      g_assert_cmpmem(p_hist->u_bins, sizeof(p_hist->u_bins), p_ref->u_bins,
+                      sizeof(p_ref->u_bins));
       histogram_delete(p_hist);
    }
    histogram_delete(p_ref);
@@ -129,8 +136,8 @@ test_step_subsamples(void) {
    g_assert_nonnull(p_two);
    g_assert_cmpuint(p_two->u_step, ==, 2);
    g_assert_cmpuint(p_two->u_samples, ==, 4);
-   g_assert_cmpuint(p_two->au_bins[HISTOGRAM_CHANNEL_R][BIN(255)], ==, 4);
-   g_assert_cmpuint(p_two->au_bins[HISTOGRAM_CHANNEL_R][BIN(0)], ==, 0);
+   g_assert_cmpuint(p_two->u_bins[HISTOGRAM_CHANNEL_R][BIN(255)], ==, 4);
+   g_assert_cmpuint(p_two->u_bins[HISTOGRAM_CHANNEL_R][BIN(0)], ==, 0);
    histogram_delete(p_two);
 
    Histogram *p_all =
@@ -138,10 +145,10 @@ test_step_subsamples(void) {
    g_assert_nonnull(p_all);
    g_assert_cmpuint(p_all->u_step, ==, 1);
    g_assert_cmpuint(p_all->u_samples, ==, 16);
-   g_assert_cmpuint(p_all->au_bins[HISTOGRAM_CHANNEL_R][BIN(255)], ==, 4);
-   g_assert_cmpuint(p_all->au_bins[HISTOGRAM_CHANNEL_R][BIN(0)], ==, 12);
+   g_assert_cmpuint(p_all->u_bins[HISTOGRAM_CHANNEL_R][BIN(255)], ==, 4);
+   g_assert_cmpuint(p_all->u_bins[HISTOGRAM_CHANNEL_R][BIN(0)], ==, 12);
    /* the peak is over ALL channels: green and blue are 0 in every pixel */
-   g_assert_cmpuint(p_all->au_bins[HISTOGRAM_CHANNEL_G][BIN(0)], ==, 16);
+   g_assert_cmpuint(p_all->u_bins[HISTOGRAM_CHANNEL_G][BIN(0)], ==, 16);
    g_assert_cmpuint(p_all->u_peak, ==, 16);
    histogram_delete(p_all);
 }
@@ -164,6 +171,21 @@ test_rejects_bad_input(void) {
       histogram_new_from_pixels(RGBA_2X2, 1, 1, 8, GDK_MEMORY_R16G16B16A16, 1));
 }
 
+/* A step above INT_MAX used to go negative through the (int) loop
+ * increment and walk the rows backwards off the buffer. It is clamped to
+ * INT_MAX now, which still reads exactly pixel (0,0). */
+static void
+test_step_above_int_max_is_clamped(void) {
+   Histogram *p_hist = histogram_new_from_pixels(
+      RGBA_2X2, 2, 2, 8, GDK_MEMORY_R8G8B8A8, G_MAXUINT);
+   g_assert_nonnull(p_hist);
+   g_assert_cmpuint(p_hist->u_step, ==, (guint)G_MAXINT);
+   g_assert_cmpuint(p_hist->u_samples, ==, 1);
+   g_assert_cmpuint(p_hist->u_bins[HISTOGRAM_CHANNEL_R][BIN(255)], ==, 1);
+   g_assert_cmpuint(p_hist->u_bins[HISTOGRAM_CHANNEL_G][BIN(0)], ==, 1);
+   histogram_delete(p_hist);
+}
+
 static void
 test_step_for_budget(void) {
    g_assert_cmpuint(histogram_step_for(0, 0), ==, 1);
@@ -184,7 +206,7 @@ test_step_for_budget(void) {
 }
 
 static GdkTexture *
-texture_from(const guint8 *p_px, gsize u_len, int i_w, int i_h,
+texture_from(gconstpointer p_px, gsize u_len, int i_w, int i_h,
              GdkMemoryFormat e_fmt, gsize u_stride) {
    GBytes     *p_b = g_bytes_new(p_px, u_len);
    GdkTexture *p_t = gdk_memory_texture_new(i_w, i_h, e_fmt, p_b, u_stride);
@@ -192,8 +214,8 @@ texture_from(const guint8 *p_px, gsize u_len, int i_w, int i_h,
    return (p_t);
 }
 
-/* A small texture bins like its pixel buffer, whatever GDK stores it as
- * (the download converts to straight RGBA). */
+/* A small texture bins like its pixel buffer, whatever layout GDK stores
+ * it in (read natively, no conversion, for every 8-bit layout). */
 static void
 test_from_texture_matches_pixels(void) {
    g_assert_null(histogram_new_from_texture(NULL));
@@ -241,11 +263,97 @@ test_from_texture_downsamples(void) {
                       (guint64)((i_h + u_step - 1) / u_step);
    g_assert_cmpuint(p_hist->u_samples, ==, u_expect);
    g_assert_cmpuint(p_hist->u_samples, <=, HISTOGRAM_MAX_SAMPLES);
-   g_assert_cmpuint(p_hist->au_bins[HISTOGRAM_CHANNEL_G][BIN(200)], ==,
+   g_assert_cmpuint(p_hist->u_bins[HISTOGRAM_CHANNEL_G][BIN(200)], ==,
                     u_expect);
    g_assert_cmpuint(p_hist->u_peak, ==, u_expect);
    histogram_delete(p_hist);
    g_object_unref(p_tex);
+}
+
+/* One pure-primary pixel: its own channel has the top bin, the two others
+ * the bottom bin, and luminance lands in the bin only that primary can
+ * produce (54 for red, 19 for blue). Not invariant under an R/B swap. */
+static void
+assert_single_primary(const Histogram *p_hist, HistogramChannel e_own,
+                      guint u_lum) {
+   g_assert_nonnull(p_hist);
+   g_assert_cmpuint(p_hist->u_samples, ==, 1);
+   for (guint u_ch = HISTOGRAM_CHANNEL_R; u_ch <= HISTOGRAM_CHANNEL_B; u_ch++) {
+      g_assert_cmpuint(p_hist->u_bins[u_ch][BIN(255)], ==, u_ch == e_own);
+      g_assert_cmpuint(p_hist->u_bins[u_ch][BIN(0)], ==, u_ch != e_own);
+   }
+   g_assert_cmpuint(p_hist->u_bins[HISTOGRAM_CHANNEL_LUM][BIN(u_lum)], ==, 1);
+}
+
+/* Red and blue stay on their own channels through every texture path:
+ * native 8-bit RGBA and premultiplied BGRA (GDK_MEMORY_DEFAULT on
+ * little-endian -- reading it as straight RGBA swapped R and B), and the
+ * converting fallback for 16-bit and float layouts. */
+static void
+test_texture_primaries_not_swapped(void) {
+   const guint8  c_red_rgba[4]   = {255, 0, 0, 255};
+   const guint8  c_blue_rgba[4]  = {0, 0, 255, 255};
+   const guint8  c_red_bgra[4]   = {0, 0, 255, 255};
+   const guint8  c_blue_bgra[4]  = {255, 0, 0, 255};
+   const guint16 c_red_16[4]     = {0xFFFF, 0, 0, 0xFFFF};
+   const guint16 c_blue_16[4]    = {0, 0, 0xFFFF, 0xFFFF};
+   const float   c_red_float[4]  = {1.f, 0.f, 0.f, 1.f};
+   const float   c_blue_float[4] = {0.f, 0.f, 1.f, 1.f};
+   struct {
+      const void      *p_px;
+      gsize            u_len;
+      GdkMemoryFormat  e_fmt;
+      HistogramChannel e_own;
+      guint            u_lum;
+   } a_cases[] = {
+      {c_red_rgba, 4, GDK_MEMORY_R8G8B8A8, HISTOGRAM_CHANNEL_R, 54},
+      {c_blue_rgba, 4, GDK_MEMORY_R8G8B8A8, HISTOGRAM_CHANNEL_B, 19},
+      {c_red_bgra, 4, GDK_MEMORY_B8G8R8A8_PREMULTIPLIED, HISTOGRAM_CHANNEL_R,
+       54},
+      {c_blue_bgra, 4, GDK_MEMORY_B8G8R8A8_PREMULTIPLIED, HISTOGRAM_CHANNEL_B,
+       19},
+      {c_red_16, 8, GDK_MEMORY_R16G16B16A16, HISTOGRAM_CHANNEL_R, 54},
+      {c_blue_16, 8, GDK_MEMORY_R16G16B16A16_PREMULTIPLIED, HISTOGRAM_CHANNEL_B,
+       19},
+      {c_red_float, 16, GDK_MEMORY_R32G32B32A32_FLOAT, HISTOGRAM_CHANNEL_R, 54},
+      {c_blue_float, 16, GDK_MEMORY_R32G32B32A32_FLOAT_PREMULTIPLIED,
+       HISTOGRAM_CHANNEL_B, 19},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(a_cases); u++) {
+      GdkTexture *p_tex  = texture_from(a_cases[u].p_px, a_cases[u].u_len, 1, 1,
+                                        a_cases[u].e_fmt, a_cases[u].u_len);
+      Histogram  *p_hist = histogram_new_from_texture(p_tex);
+      assert_single_primary(p_hist, a_cases[u].e_own, a_cases[u].u_lum);
+      histogram_delete(p_hist);
+      g_object_unref(p_tex);
+   }
+}
+
+/* The copy budget bounds only the converting fallback: a 16-bit 2x2 texture
+ * (4 pixels) is refused at a budget of 3 and read at 4 -- and then bins
+ * like the 8-bit reference -- while a native 8-bit texture ignores the
+ * budget entirely because no copy is made for it. */
+static void
+test_from_texture_convert_budget(void) {
+   const guint16 c_px16[16] = {0xFFFF, 0,      0,      0xFFFF, 0,      0xFFFF,
+                               0,      0xFFFF, 0,      0,      0xFFFF, 0xFFFF,
+                               0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+   GdkTexture   *p_16 =
+      texture_from(c_px16, sizeof(c_px16), 2, 2, GDK_MEMORY_R16G16B16A16, 16);
+   g_assert_null(histogram_new_from_texture_full(p_16, 3));
+   Histogram *p_hist = histogram_new_from_texture_full(p_16, 4);
+   g_assert_nonnull(p_hist);
+   assert_reference_bins(p_hist);
+   histogram_delete(p_hist);
+   g_object_unref(p_16);
+
+   GdkTexture *p_rgba =
+      texture_from(RGBA_2X2, sizeof(RGBA_2X2), 2, 2, GDK_MEMORY_R8G8B8A8, 8);
+   p_hist = histogram_new_from_texture_full(p_rgba, 1);
+   g_assert_nonnull(p_hist);
+   assert_reference_bins(p_hist);
+   histogram_delete(p_hist);
+   g_object_unref(p_rgba);
 }
 
 int
@@ -259,10 +367,16 @@ main(int argc, char **argv) {
                    test_stride_padding_ignored);
    g_test_add_func("/histogram/step_subsamples", test_step_subsamples);
    g_test_add_func("/histogram/rejects_bad_input", test_rejects_bad_input);
+   g_test_add_func("/histogram/step_above_int_max_is_clamped",
+                   test_step_above_int_max_is_clamped);
    g_test_add_func("/histogram/step_for_budget", test_step_for_budget);
    g_test_add_func("/histogram/from_texture_matches_pixels",
                    test_from_texture_matches_pixels);
    g_test_add_func("/histogram/from_texture_downsamples",
                    test_from_texture_downsamples);
+   g_test_add_func("/histogram/texture_primaries_not_swapped",
+                   test_texture_primaries_not_swapped);
+   g_test_add_func("/histogram/from_texture_convert_budget",
+                   test_from_texture_convert_budget);
    return (g_test_run());
 }

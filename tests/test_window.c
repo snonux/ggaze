@@ -17,7 +17,12 @@
  * And 0c2: the card carries an RGB/luminance histogram of the displayed
  * texture, gathered in the same async request as the EXIF text. See
  * test_info_shows_histogram() -- a plot for the image on screen, none from
- * the grid, and a different plot after navigating to another image.
+ * the grid, a different plot after navigating to another image, and no plot
+ * left behind by `i` toggling the card off; test_info_no_plot_while_loading()
+ * -- `i` during a texturecache-miss decode (the previous picture still on
+ * screen) must not pair the new file's text with the old file's plot; and
+ * test_status_clears_plot() -- a status line taking over the card carries no
+ * plot under it.
  *
  * The window is built with g_object_new() (no "application" property): the
  * stack/header are constructed in ggaze_window_init, independent of the app
@@ -320,6 +325,67 @@ assert_grid_card_has_no_plot(GgazeWindow *p_win) {
       ggaze_histogram_view_get_histogram(GGAZE_HISTOGRAM_VIEW(p_plot)));
 }
 
+/* The plot is down and holds no histogram (the card may still be up). */
+static void
+assert_no_plot(GgazeWindow *p_win) {
+   GtkWidget *p_plot = ggaze_window_get_info_histogram(p_win);
+   g_assert_false(gtk_widget_get_visible(p_plot));
+   g_assert_null(
+      ggaze_histogram_view_get_histogram(GGAZE_HISTOGRAM_VIEW(p_plot)));
+}
+
+/* Drain until the viewer shows a texture other than p_old with the given
+ * dimensions (an async decode landed). wait_for_load() cannot serve here:
+ * on a texturecache miss the viewer keeps the previous texture up, so
+ * "non-NULL" is true throughout. The caller must hold its own ref on p_old:
+ * with the cache cleared the viewer's ref is the last one, a progressive
+ * partial replacing it frees it, and the final texture can then land at the
+ * very same address -- which a bare pointer comparison mistakes for "not
+ * changed". The dimensions tell the final texture from a partial. */
+static void
+wait_for_texture_change(GgazeWindow *p_win, GdkTexture *p_old, int i_w,
+                        int i_h) {
+   for (guint u = 0; u < 3000; u++) {
+      GdkTexture *p_tex = viewer_texture(p_win);
+      if (p_tex != NULL && p_tex != p_old &&
+          gdk_texture_get_width(p_tex) == i_w &&
+          gdk_texture_get_height(p_tex) == i_h) {
+         break;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(viewer_texture(p_win) != p_old);
+   g_assert_cmpint(gdk_texture_get_width(viewer_texture(p_win)), ==, i_w);
+   drain_main(200);
+}
+
+/* Open a fresh two-image folder (A plain.jpg 6x3, B rot6.jpg 4x8 upright)
+ * on a new window showing A. *pc_dir receives the temp dir to clean up. */
+static GgazeWindow *
+open_two_image_folder(char **pc_dir) {
+   GError *p_err = NULL;
+   *pc_dir       = g_dir_make_tmp("ggaze-info-hist-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(*pc_dir, "plain.jpg"); /* A: 6x3, sorts first */
+   copy_fixture(*pc_dir, "rot6.jpg");  /* B: 4x8 upright, sorts second */
+   char        *c_p0  = g_build_filename(*pc_dir, "plain.jpg", NULL);
+   GFile       *p_f0  = g_file_new_for_path(c_p0);
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_f0);
+   wait_for_load(p_win);
+   g_object_unref(p_f0);
+   g_free(c_p0);
+   return (p_win);
+}
+
+static void
+close_window_and_folder(GgazeWindow *p_win, char *c_dir) {
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+
 /* 0c2: `i` in the large view shows a histogram of the displayed texture,
  * built from the texture's actual pixels (plain.jpg is 6x3 -> 18 samples,
  * rot6.jpg lands upright as 4x8 -> 32). Navigating away hides it with the
@@ -327,45 +393,87 @@ assert_grid_card_has_no_plot(GgazeWindow *p_win) {
  * stale one; from the grid the card carries no plot at all. */
 static void
 test_info_shows_histogram(void) {
-   GError *p_err = NULL;
-   char   *c_dir = g_dir_make_tmp("ggaze-info-hist-XXXXXX", &p_err);
-   g_assert_no_error(p_err);
-   copy_fixture(c_dir, "plain.jpg"); /* A: 6x3, sorts first */
-   copy_fixture(c_dir, "rot6.jpg");  /* B: 4x8 upright, sorts second */
-
-   char        *c_p0  = g_build_filename(c_dir, "plain.jpg", NULL);
-   GFile       *p_f0  = g_file_new_for_path(c_p0);
-   GgazeWindow *p_win = new_window();
-   ggaze_window_open(p_win, p_f0);
-   wait_for_load(p_win);
-
-   GtkWidget *p_lbl  = ggaze_window_get_info_label(p_win);
-   GtkWidget *p_plot = ggaze_window_get_info_histogram(p_win);
-   g_assert_true(GGAZE_IS_HISTOGRAM_VIEW(p_plot));
-   g_assert_false(gtk_widget_get_visible(p_plot));
+   char        *c_dir = NULL;
+   GgazeWindow *p_win = open_two_image_folder(&c_dir);
+   GtkWidget   *p_lbl = ggaze_window_get_info_label(p_win);
+   g_assert_true(
+      GGAZE_IS_HISTOGRAM_VIEW(ggaze_window_get_info_histogram(p_win)));
+   assert_no_plot(p_win);
 
    Histogram hist_a = *show_info_expect_plot(p_win, 6 * 3); /* A's bins */
 
    fire(p_win, "win.next"); /* -> B: the card and its plot go with A */
    g_assert_false(gtk_widget_get_visible(p_lbl));
-   g_assert_false(gtk_widget_get_visible(p_plot));
-   g_assert_null(
-      ggaze_histogram_view_get_histogram(GGAZE_HISTOGRAM_VIEW(p_plot)));
+   assert_no_plot(p_win);
    wait_for_load(p_win);
 
    const Histogram *p_b = show_info_expect_plot(p_win, 4 * 8);
-   g_assert_cmpint(memcmp(hist_a.au_bins, p_b->au_bins, sizeof(hist_a.au_bins)),
+   g_assert_cmpint(memcmp(hist_a.u_bins, p_b->u_bins, sizeof(hist_a.u_bins)),
                    !=, 0);
 
-   fire(p_win, "win.info"); /* toggle B's card off before the grid check */
+   /* `i` again toggles B's card off, and the plot goes with it: the widget
+    * holds no histogram, not merely a hidden one. */
+   fire(p_win, "win.info");
    g_assert_false(gtk_widget_get_visible(p_lbl));
+   assert_no_plot(p_win);
    assert_grid_card_has_no_plot(p_win);
 
-   g_object_unref(p_f0);
-   g_free(c_p0);
-   gtk_window_destroy(GTK_WINDOW(p_win));
-   drain_main(300);
-   cleanup_temp_dir(c_dir);
+   close_window_and_folder(p_win, c_dir);
+}
+
+/* Review finding on 0c2: on a texturecache miss viewload keeps the PREVIOUS
+ * picture on screen until the new decode lands, so `i` fired in that window
+ * used to pair B's EXIF text with A's histogram -- and kept it after B
+ * landed. Now the card comes up without a plot while B is decoding, stays
+ * plot-free once B lands (the card is not re-gathered by a load), and a
+ * fresh `i` on the landed B plots B. */
+static void
+test_info_no_plot_while_loading(void) {
+   char        *c_dir = NULL;
+   GgazeWindow *p_win = open_two_image_folder(&c_dir);
+   GtkWidget   *p_lbl = ggaze_window_get_info_label(p_win);
+   GdkTexture  *p_a   = g_object_ref(viewer_texture(p_win)); /* see wait */
+
+   ggaze_window_clear_texture_cache(p_win); /* B must decode async */
+   fire(p_win, "win.next");
+   g_assert_true(viewer_texture(p_win) == p_a); /* A still up: the race */
+   fire(p_win, "win.info");
+   wait_for_info(p_win);
+   /* B's text (rot6.jpg stores 8x4; the card prints stored dimensions,
+    * the texture lands upright as 4x8), and no plot of A under it. */
+   g_assert_nonnull(
+      g_strstr_len(gtk_label_get_text(GTK_LABEL(p_lbl)), -1, "8×4"));
+   assert_no_plot(p_win);
+
+   wait_for_texture_change(p_win, p_a, 4, 8); /* B lands, upright */
+   g_assert_true(gtk_widget_get_visible(p_lbl));
+   assert_no_plot(p_win); /* still not A's plot */
+
+   fire(p_win, "win.info"); /* off ... */
+   g_assert_false(gtk_widget_get_visible(p_lbl));
+   show_info_expect_plot(p_win, 4 * 8); /* ... and on: B's own plot */
+
+   g_object_unref(p_a);
+   close_window_and_folder(p_win, c_dir);
+}
+
+/* A status line reuses the card while it is up (here "Trash is already
+ * empty" from `E` on a folder without a .Trash): the text is no longer about
+ * the file, so the plot must go with it rather than sit under the status. */
+static void
+test_status_clears_plot(void) {
+   char        *c_dir = NULL;
+   GgazeWindow *p_win = open_two_image_folder(&c_dir);
+   GtkWidget   *p_lbl = ggaze_window_get_info_label(p_win);
+
+   show_info_expect_plot(p_win, 6 * 3);
+   fire(p_win, "win.empty-trash");
+   g_assert_true(gtk_widget_get_visible(p_lbl));
+   g_assert_nonnull(g_strstr_len(gtk_label_get_text(GTK_LABEL(p_lbl)), -1,
+                                 "Trash is already empty"));
+   assert_no_plot(p_win);
+
+   close_window_and_folder(p_win, c_dir);
 }
 
 /* tu0 requirement 8: every new enhance UI entry point must stay safe when
@@ -456,6 +564,9 @@ main(int i_argc, char **c_argv) {
                    test_info_hides_on_navigation);
    g_test_add_func("/window/info_hides_on_reopen", test_info_hides_on_reopen);
    g_test_add_func("/window/info_shows_histogram", test_info_shows_histogram);
+   g_test_add_func("/window/info_no_plot_while_loading",
+                   test_info_no_plot_while_loading);
+   g_test_add_func("/window/status_clears_plot", test_status_clears_plot);
    g_test_add_func("/window/enhance_a_is_safe_with_and_without_gegl",
                    test_enhance_a_is_safe_with_and_without_gegl);
    return (g_test_run());

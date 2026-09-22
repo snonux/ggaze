@@ -47,7 +47,7 @@ _draw_channel(GtkSnapshot *p_snap, const Histogram *p_hist,
               float f_h) {
    float f_bin_w = f_w / (float)HISTOGRAM_BINS;
    for (guint u = 0; u < HISTOGRAM_BINS; u++) {
-      guint32 u_count = p_hist->au_bins[e_ch][u];
+      guint32 u_count = p_hist->u_bins[e_ch][u];
       if (u_count == 0) {
          continue;
       }
