@@ -1156,17 +1156,23 @@ enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx) {
  * i_orig_w/h used to stay stale then (the crop tool laid its rectangle out
  * on the old size). The texture cache's stamp tells such a rescan from the
  * one a save's "-enhanced" copy causes, with no second stat: its get
- * re-checks mtime/size and evicts a stale entry, so the original still
- * describes the file iff the cache still hands it out. Evicted (stale, or
- * aged out of the LRU): forget size and identity -- the reload that follows
- * this signal decodes the file as it is now and shows it, which is where
- * it is learned again -- and say so (TRUE), since a preview rendered from
- * the old contents has to be rendered again. Still cached but not the
- * object known here (a decode the viewer has not shown yet -- a
- * neighbour's prefetch of this very file that landed while its own
- * visible load is still in flight): take it, and tell the tool as the
- * choke point does (_learn_original; a crop tool used to stay laid out on
- * the previous base until the visible load showed its own decode).
+ * re-checks the stamp (mtime to the nanosecond, size, inode -- so a
+ * same-second rewrite to the same byte count is a rewrite too, fd2) and
+ * evicts a stale entry, so the original still describes the file iff the
+ * cache still hands it out. The stamp errs only toward "changed": where
+ * the inode is not stable across queries (some FUSE mounts) every rescan
+ * reads as a rewrite and costs a re-render of an active preview, never a
+ * wrong picture; a same-size rewrite within one coarse mtime tick is the
+ * one it misses (texturecache.h). Evicted (stale, or aged out of the LRU):
+ * forget size and identity -- the reload that follows this signal decodes
+ * the file as it is now and shows it, which is where it is learned again
+ * -- and say so (TRUE), since a preview rendered from the old contents has
+ * to be rendered again. Still cached but not the object known here (a
+ * decode the viewer has not shown yet -- a neighbour's prefetch of this
+ * very file that landed while its own visible load is still in flight):
+ * take it, and tell the tool as the choke point does (_learn_original; a
+ * crop tool used to stay laid out on the previous base until the visible
+ * load showed its own decode).
  * Unchanged: nothing to do, and a crop tool open over the file keeps its
  * rectangle. This is the one deliberate cache lookup left in this
  * controller, and it runs on a rescan only. */

@@ -48,7 +48,7 @@ ggaze
 ├── tool-ctrl.{c,h}       # the modal c / R tool session over the viewer (GEGL only)
 ├── navigator.{c,h}       # directory listing, sort, filter, prev/next, wrap, marks, monitor; "changed" carries flags
 ├── thumbnail.{c,h}      # freedesktop thumbnail cache (normal/large/x-large), bounded pool
-├── texturecache.{c,h}   # bounded LRU of decoded textures, mtime/size-validated
+├── texturecache.{c,h}   # bounded LRU of decoded textures, stamp-validated
 ├── settings.{c,h}       # GSettings schema wrapper
 ├── prefs.{c,h}          # Preferences dialog
 └── shortcuts.{c,h}      # the ONE key table: bindings, ? help, header tooltips, menu labels
@@ -326,7 +326,18 @@ feels instant.
   `GCancellable` so a rapid `jjjj` cancels stale work).
 - Thumbnail I/O on a low-priority thread or `GThreadPool`.
 - A bounded LRU of decoded `GdkTexture`s (e.g. 4) to bound memory on large
-  folders / huge images. An animated GIF/WebP is one entry like any still —
+  folders / huge images. Every entry carries the file's stamp (mtime to
+  the nanosecond where the filesystem records it, byte count, inode) as
+  the cache miss read it BEFORE the decode started, and a `get` re-checks
+  it with one query: a file rewritten in place -- even within the same
+  second to the same byte count -- or atomically replaced is evicted and
+  decoded afresh, never shown stale, and a rewrite landing mid-decode
+  costs a redundant decode rather than a stale hit. Limits: many
+  kernels/filesystems stamp mtimes from the coarse clock (1-4 ms ticks),
+  so a same-size rewrite within one tick is still a hit; a whole-second
+  filesystem falls back to seconds + size; grid thumbnails validate on
+  the spec's whole-second `Thumb::MTime` + size (decision #47).
+  An animated GIF/WebP is one entry like any still —
   its first frame, with the other frames riding on that texture and
   evicted with it; what such an entry may hold is bounded by the playback
   budget in `loader/animation.h` (frames × canvas ≤ the still cap, a canvas
@@ -334,14 +345,13 @@ feels instant.
   texture of its own on the `GTask` thread; playback on the main thread
   only picks which texture to draw (plus the renderer's one-time upload of
   each frame).
-  The enhance controller may hold two more outside
-  that cap — the current file's original as the viewer last showed it (the
-  identity the tools and hold-`Space` compare against, learned at the
-  window's texture choke point) and the rendered preview — bounded to those
-  two, and released on navigation (an open or a drop of another file
-  included: the open path runs the same identity reset, since a file that
-  sorts first in its folder never emits "changed"), on a rewrite's rescan,
-  and in dispose.
+  The enhance controller may hold two more outside that cap — the current
+  file's original as the viewer last showed it (the identity the tools
+  and hold-`Space` compare against, learned at the window's texture choke
+  point) and the rendered preview — bounded to those two, and released
+  on navigation (an open or a drop of another file included: the open
+  path runs the same identity reset, since a file that sorts first in its
+  folder never emits "changed"), on a rewrite's rescan, and in dispose.
 
 ## Threading / cancellation invariant
 
