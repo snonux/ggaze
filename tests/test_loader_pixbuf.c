@@ -55,6 +55,7 @@
 #include <unistd.h>
 
 #include "ggaze-config.h"
+#include "loader/animation.h"
 #include "loader/detect.h"
 #include "mem_file.h"
 #include "open_counter.h"
@@ -1480,6 +1481,452 @@ test_peek_dimensions_unknown_cases(void) {
    g_free(c_path);
 }
 
+/* --- animated GIF / WebP (yb2) ------------------------------------------- */
+
+/* The top-left pixel of p_tex as straight RGB. gdk_texture_download()
+ * writes the WHOLE texture as premultiplied BGRA; the fixtures are
+ * opaque, so B G R _ is it. */
+static void
+texture_rgb0(GdkTexture *p_tex, guint8 *p_r, guint8 *p_g, guint8 *p_b) {
+   gsize   u_stride = 4u * (gsize)gdk_texture_get_width(p_tex);
+   guint8 *p_px = g_malloc0(u_stride * (gsize)gdk_texture_get_height(p_tex));
+   gdk_texture_download(p_tex, p_px, u_stride);
+   *p_b = p_px[0];
+   *p_g = p_px[1];
+   *p_r = p_px[2];
+   g_free(p_px);
+}
+
+/* The first frame of the animated fixtures is solid (0, 255, 0)
+ * (tests/fixtures/gen.py ANIM_FRAME_RGB[0]); every other frame's green is
+ * far below that. */
+static void
+assert_is_first_frame(GdkTexture *p_tex) {
+   guint8 u_r, u_g, u_b;
+   texture_rgb0(p_tex, &u_r, &u_g, &u_b);
+   g_assert_cmpuint(u_g, >, 240);
+   g_assert_cmpuint(u_r, <, 16);
+}
+
+/* Copy of p_tex's pixels (premultiplied BGRA, tightly packed). */
+static guint8 *
+texture_bytes(GdkTexture *p_tex, gsize *p_len) {
+   gsize u_stride = 4u * (gsize)gdk_texture_get_width(p_tex);
+   *p_len         = u_stride * (gsize)gdk_texture_get_height(p_tex);
+   guint8 *p_px   = g_malloc0(*p_len);
+   gdk_texture_download(p_tex, p_px, u_stride);
+   return (p_px);
+}
+
+/* What the LOADER returns for an animated fixture: the first frame,
+ * canvas-sized, with the other three frames attached as textures of their
+ * own that really differ from it -- and the first frame is still the
+ * first frame, byte for byte, after every other frame has been read.
+ * That last check is review finding 1 of yb2: on gdk-pixbuf 2.42 the GIF
+ * loader composites every frame into one shared buffer, and a first-frame
+ * texture wrapping that buffer read back as the LAST frame composited. */
+static void
+assert_fixture_animates(const char *c_name) {
+   GdkTexture *p_tex = load_fixture(c_name);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 8);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 6);
+   assert_is_first_frame(p_tex);
+   gsize   u_len    = 0;
+   guint8 *p_before = texture_bytes(p_tex, &u_len);
+
+   const GgazeAnimation *p_anim = animation_lookup(p_tex);
+   g_assert_nonnull(p_anim);
+   g_assert_cmpuint(animation_get_n_frames(p_anim), ==, 4);
+   for (guint u = 1; u < 4; u++) {
+      GdkTexture *p_f = animation_get_frame(p_anim, u);
+      g_assert_cmpint(gdk_texture_get_width(p_f), ==, 8);
+      guint8 u_r, u_g, u_b;
+      texture_rgb0(p_f, &u_r, &u_g, &u_b);
+      g_assert_cmpuint(u_g, <, 230); /* not frame 0 */
+      g_assert_cmpint(animation_get_delay_ms(p_anim, u), >=,
+                      GGAZE_ANIM_MIN_DELAY_MS);
+   }
+   gsize   u_len_after = 0;
+   guint8 *p_after     = texture_bytes(p_tex, &u_len_after);
+   g_assert_cmpmem(p_before, u_len, p_after, u_len_after);
+   assert_is_first_frame(p_tex);
+   g_free(p_before);
+   g_free(p_after);
+   g_object_unref(p_tex);
+}
+
+static void
+test_animated_gif_attaches_animation(void) {
+   if (_pixbuf_module_usable("gif")) {
+      assert_fixture_animates("anim.gif");
+   }
+}
+
+/* A GIF whose frame delays are 0 ms is still an animation: the decoders
+ * turn 0 ms into 100 ms (gdk-pixbuf 2.42's io-gif.c and glycin alike,
+ * measured; animation.h), so that is what every frame plays at. A 10 ms
+ * delay does reach ggaze's own 20 ms clamp (glycin reports it as 10) and
+ * plays at 20 ms. */
+static void
+test_short_delay_gifs_attach_animation(void) {
+   static const struct {
+      const char *c_name;
+      gint        i_delay_ms;
+   } st_cases[2] = {
+      {"zerodelay.gif", 100},
+      {"fastdelay.gif", GGAZE_ANIM_MIN_DELAY_MS},
+   };
+   if (!_pixbuf_module_usable("gif")) {
+      return;
+   }
+   for (gsize u = 0; u < G_N_ELEMENTS(st_cases); u++) {
+      assert_fixture_animates(st_cases[u].c_name);
+      GdkTexture           *p_tex  = load_fixture(st_cases[u].c_name);
+      const GgazeAnimation *p_anim = animation_lookup(p_tex);
+      for (guint u_f = 0; u_f < 4; u_f++) {
+         g_assert_cmpint(animation_get_delay_ms(p_anim, u_f), ==,
+                         st_cases[u].i_delay_ms);
+      }
+      g_object_unref(p_tex);
+   }
+}
+
+/* The play count read from the container rides on the animation (the
+ * iterators loop for ever whatever the file says): anim.gif loops (0),
+ * once.gif has no NETSCAPE2.0 block and plays once, once.webp's ANIM
+ * count is 1. The WebP half needs a frame-capable webp module. */
+static void
+test_animation_play_count(void) {
+   static const struct {
+      const char *c_name;
+      const char *c_module;
+      guint       u_plays;
+   } st_cases[3] = {
+      {"anim.gif", "gif", 0},
+      {"once.gif", "gif", 1},
+      {"once.webp", "webp", 1},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(st_cases); u++) {
+      if (!_pixbuf_module_usable(st_cases[u].c_module)) {
+         continue;
+      }
+      GdkTexture           *p_tex  = load_fixture(st_cases[u].c_name);
+      const GgazeAnimation *p_anim = animation_lookup(p_tex);
+      if (p_anim != NULL) { /* NULL: a webp module without frames */
+         g_assert_cmpuint(animation_get_plays(p_anim), ==, st_cases[u].u_plays);
+      } else {
+         g_assert_cmpstr(st_cases[u].c_module, ==, "webp");
+      }
+      g_object_unref(p_tex);
+   }
+}
+
+/* An animation over the playback budget -- manyframes.gif, one frame over
+ * GGAZE_ANIM_MAX_FRAMES and cheap to decode -- takes the still path: the
+ * first frame at the canvas size, nothing attached (animation.h). */
+static void
+test_over_budget_animation_is_still(void) {
+   if (!_pixbuf_module_usable("gif")) {
+      return;
+   }
+   GdkTexture *p_tex = load_fixture("manyframes.gif");
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 8);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 6);
+   g_assert_null(animation_lookup(p_tex));
+   assert_is_first_frame(p_tex);
+   g_object_unref(p_tex);
+}
+
+/* WebP is an optional module (skipped when absent, like everywhere in this
+ * suite); one that is present but decodes no frames -- an older
+ * webp-pixbuf-loader -- yields the still with nothing attached, which is
+ * the documented fallback, reported here as a skip rather than a failure
+ * because it is a property of the machine's gdk-pixbuf, not of ggaze. */
+static void
+test_animated_webp_attaches_animation(void) {
+   if (!_pixbuf_module_usable("webp")) {
+      return;
+   }
+   GdkTexture *p_tex = load_fixture("anim.webp");
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 8);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 6);
+   gboolean b_frames = (animation_lookup(p_tex) != NULL);
+   g_object_unref(p_tex);
+   if (!b_frames) {
+      g_test_skip("the webp gdk-pixbuf module here decodes no frames; the "
+                  "still is shown (documented fallback)");
+      return;
+   }
+   assert_fixture_animates("anim.webp");
+}
+
+/* A single-frame GIF is a still: nothing attached, the same texture the
+ * still path always made. */
+static void
+test_single_frame_gif_has_no_animation(void) {
+   if (!_pixbuf_module_usable("gif")) {
+      return;
+   }
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = load_bytes(TINY_GIF, sizeof(TINY_GIF), &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_tex);
+   g_assert_null(animation_lookup(p_tex));
+   g_object_unref(p_tex);
+}
+
+/* webp-pixbuf-loader 0.2.x (Debian trixie ships 0.2.7) cannot iterate an
+ * animated WebP cut mid-frame, and says so from inside
+ * gdk_pixbuf_loader_write()/close() -- before any ggaze code sees the
+ * result -- with two messages, measured on trixie: this g_warning() of
+ * its own (no log domain), and then a GdkPixbuf CRITICAL from handing the
+ * NULL iterator it got on to gdk_pixbuf_animation_iter_get_pixbuf(). The
+ * decode then fails and the loader answers with an error, which is what
+ * the subtest asserts. Both messages are the module's, not ggaze's, and
+ * g_test makes every warning and critical fatal, so the truncation subtest
+ * lets exactly these two through while it decodes (review finding 3 of
+ * yb2) and fails on any other warning or critical.
+ *
+ * How, and why this way (measured on GLib 2.88; review finding 6):
+ *   - The messages must not be fatal in the first place. With GLib's own
+ *     default handler in test mode a fatal message is reported as TAP
+ *     "not ok ... Bail out!" by that handler, before a
+ *     g_test_log_set_fatal_handler() would be asked whether to abort. So
+ *     for the duration of the decode warnings and criticals are taken out
+ *     of the always-fatal mask.
+ *   - A message can arrive by two roads. One made with the classic API
+ *     (g_warning, g_return_if_fail's critical) goes through g_logv to the
+ *     default handler, which _webp_noise_log_cb replaces for the decode.
+ *     One made with the structured API (g_log_structured, or g_warning in
+ *     code built with G_LOG_USE_STRUCTURED, which a module may be) goes
+ *     straight to the log writer and never meets a handler, so a writer
+ *     (_webp_noise_writer) filters it too. GLib allows ONE writer per
+ *     process (g_log_set_writer_func aborts on a second call), so it is
+ *     installed once in main() and filters only while
+ *     b_webp_noise_filter is set; the rest of the time it is
+ *     g_log_writer_default, i.e. what GLib would have done without it.
+ * Both roads drop the two known messages and let anything else through,
+ * printed, FAILING the subtest (g_test_fail_printf) if it is a warning or
+ * a critical, so no other message slips by unnoticed. An unexpected
+ * classic message fails ONCE: _webp_noise_log_cb hands it to
+ * g_log_default_handler, which forwards it to the log writer
+ * (g_log_structured_array), and it is the writer that fails it. */
+static const char *const WEBP_MODULE_NOISE[] = {
+   "Could not instantiate WebP implementation of GdkPixbufAnimationIter",
+   "gdk_pixbuf_animation_iter_get_pixbuf: assertion "
+   "'GDK_IS_PIXBUF_ANIMATION_ITER (iter)' failed",
+};
+
+/* Set while a truncated WebP decodes. The decode itself is synchronous on
+ * the main thread, but the writer is the whole process's and a decoder
+ * may log from a thread of its own (glycin's workers do), so the flag is
+ * read and written atomically. */
+static gint b_webp_noise_filter = FALSE;
+
+/* Known messages dropped so far, on either road (the filter's self-test
+ * counts them). Atomic for the same reason as the flag above. */
+static gint i_webp_noise_dropped = 0;
+
+static gboolean
+_is_webp_module_noise(const gchar *c_message) {
+   for (gsize u = 0; u < G_N_ELEMENTS(WEBP_MODULE_NOISE); u++) {
+      if (c_message != NULL && strstr(c_message, WEBP_MODULE_NOISE[u])) {
+         return (TRUE);
+      }
+   }
+   return (FALSE);
+}
+
+/* A warning or critical that is not the known noise fails the subtest. */
+static void
+_fail_if_unexpected(GLogLevelFlags e_level, const gchar *c_message) {
+   if ((e_level & (G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL)) != 0) {
+      g_test_fail_printf("unexpected message while decoding: %s", c_message);
+   }
+}
+
+/* The classic-API road (see above). Anything that is not the noise goes
+ * on to g_log_default_handler, which prints it through the log writer --
+ * and the writer, filtering while this handler is installed, is what
+ * fails the subtest for it, so this handler does not fail it a second
+ * time. */
+static void
+_webp_noise_log_cb(const gchar *c_domain, GLogLevelFlags e_level,
+                   const gchar *c_message, gpointer p_data) {
+   (void)p_data;
+   if (_is_webp_module_noise(c_message)) {
+      g_atomic_int_inc(&i_webp_noise_dropped);
+      return;
+   }
+   g_log_default_handler(c_domain, e_level, c_message, NULL);
+}
+
+/* The MESSAGE field of a structured message as a string (transfer full),
+ * or NULL. A field's length is -1 for a NUL-terminated value. */
+static gchar *
+_log_field_message(const GLogField *p_fields, gsize u_fields) {
+   for (gsize u = 0; u < u_fields; u++) {
+      if (g_strcmp0(p_fields[u].key, "MESSAGE") == 0) {
+         return ((p_fields[u].length < 0)
+                    ? g_strdup(p_fields[u].value)
+                    : g_strndup(p_fields[u].value, p_fields[u].length));
+      }
+   }
+   return (NULL);
+}
+
+/* The structured road (see above): the process's one log writer. */
+static GLogWriterOutput
+_webp_noise_writer(GLogLevelFlags e_level, const GLogField *p_fields,
+                   gsize u_fields, gpointer p_data) {
+   if (g_atomic_int_get(&b_webp_noise_filter)) {
+      gchar   *c_msg   = _log_field_message(p_fields, u_fields);
+      gboolean b_noise = _is_webp_module_noise(c_msg);
+      if (!b_noise) {
+         _fail_if_unexpected(e_level, c_msg);
+      }
+      g_free(c_msg);
+      if (b_noise) {
+         g_atomic_int_inc(&i_webp_noise_dropped);
+         return (G_LOG_WRITER_HANDLED);
+      }
+   }
+   return (g_log_writer_default(e_level, p_fields, u_fields, p_data));
+}
+
+/* Decode with the known module noise let through (see above); every other
+ * warning or critical still fails the subtest. */
+static void
+_with_webp_noise_filtered(void (*fn_decode)(const guint8 *, gsize),
+                          const guint8 *p_buf, gsize u_len) {
+   GLogLevelFlags e_fatal = g_log_set_always_fatal(G_LOG_FATAL_MASK);
+   GLogFunc       fn_prev = g_log_set_default_handler(_webp_noise_log_cb, NULL);
+   g_atomic_int_set(&b_webp_noise_filter, TRUE);
+   fn_decode(p_buf, u_len);
+   g_atomic_int_set(&b_webp_noise_filter, FALSE);
+   g_log_set_default_handler(fn_prev, NULL);
+   g_log_set_always_fatal(e_fatal);
+}
+
+/* Stands in for a decode that logs the module's noise down both roads:
+ * the classic API (a g_warning with no domain, as webp-pixbuf-loader
+ * does) and the structured one (as a module built with
+ * G_LOG_USE_STRUCTURED would), at warning and critical level. */
+static void
+_emit_webp_noise(const guint8 *p_buf, gsize u_len) {
+   (void)p_buf;
+   (void)u_len;
+   g_log(NULL, G_LOG_LEVEL_WARNING, "%s", WEBP_MODULE_NOISE[0]);
+   g_log(NULL, G_LOG_LEVEL_CRITICAL, "%s", WEBP_MODULE_NOISE[1]);
+   g_log_structured("GdkPixbuf", G_LOG_LEVEL_WARNING, "MESSAGE", "%s",
+                    WEBP_MODULE_NOISE[0]);
+   g_log_structured("GdkPixbuf", G_LOG_LEVEL_CRITICAL, "MESSAGE", "%s",
+                    WEBP_MODULE_NOISE[1]);
+}
+
+/* The filter itself (review finding 6): the known noise is dropped on
+ * both roads -- all four messages counted as dropped, none aborting the
+ * run or failing this subtest -- and the filter is off again afterwards. */
+static void
+test_webp_noise_filter_catches_both_roads(void) {
+   gint i_before = g_atomic_int_get(&i_webp_noise_dropped);
+   _with_webp_noise_filtered(_emit_webp_noise, NULL, 0);
+   g_assert_cmpint(g_atomic_int_get(&i_webp_noise_dropped) - i_before, ==, 4);
+   g_assert_false(g_atomic_int_get(&b_webp_noise_filter));
+   g_assert_false(g_test_failed());
+}
+
+/* One fixture cut in half through the loader: an answer within the budget
+ * -- the first frame or an error, never a hang. */
+static void
+assert_half_file_answers(const guint8 *p_buf, gsize u_len) {
+   gint64      i_start = g_get_monotonic_time();
+   GError     *p_err   = NULL;
+   GdkTexture *p_tex   = load_bytes(p_buf, u_len / 2, &p_err);
+   g_assert_cmpfloat((g_get_monotonic_time() - i_start) / 1e6, <, 5.0);
+   if (p_tex != NULL) {
+      g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 8);
+      g_object_unref(p_tex);
+   } else {
+      g_assert_nonnull(p_err);
+   }
+   g_clear_error(&p_err);
+}
+
+/* The decode gate still refuses a truncated animation exactly as it
+ * refuses any truncated file: a GIF/WebP shorter than its signature's
+ * minimum is INVALID_DATA before any decoder runs; one cut mid-frame
+ * (past the minimum) is left to the decoder, which must answer within
+ * the budget -- with the first frame or an error, never a hang. The WebP
+ * half needs a webp module (optional, like everywhere in this suite). */
+static void
+test_truncated_animation_is_gated(void) {
+   const char *c_names[2]   = {"anim.gif", "anim.webp"};
+   const char *c_modules[2] = {"gif", "webp"};
+   for (gsize u = 0; u < G_N_ELEMENTS(c_names); u++) {
+      const gchar *c_dir  = g_getenv("GGAZE_FIXTURES_DIR");
+      gchar       *c_path = g_build_filename(c_dir, c_names[u], NULL);
+      gchar       *c_buf  = NULL;
+      gsize        u_len  = 0;
+      g_assert_true(g_file_get_contents(c_path, &c_buf, &u_len, NULL));
+      g_free(c_path);
+      assert_unsupported((const guint8 *)c_buf, 12); /* under the minimum */
+      if (_pixbuf_module_usable(c_modules[u])) {
+         _with_webp_noise_filtered(assert_half_file_answers,
+                                   (const guint8 *)c_buf, u_len);
+      }
+      g_free(c_buf);
+   }
+}
+
+/* The grid's thumbnail of an animation is its first frame (the scaled
+ * decode never sees the animation), at the canvas's aspect: the at-scale
+ * path fits a small picture UP to the requested box, so 8x6 comes back as
+ * 64x48. */
+static void
+test_scaled_animation_is_first_frame(void) {
+   if (!_pixbuf_module_usable("gif")) {
+      return;
+   }
+   const gchar *c_dir  = g_getenv("GGAZE_FIXTURES_DIR");
+   gchar       *c_path = g_build_filename(c_dir, "anim.gif", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GError      *p_err  = NULL;
+   GdkPixbuf   *p_pix  = loader_load_pixbuf_scaled(p_file, 64, NULL, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_pix);
+   g_assert_cmpint(gdk_pixbuf_get_width(p_pix), ==, 64);
+   g_assert_cmpint(gdk_pixbuf_get_height(p_pix), ==, 48);
+   const guchar *p_px = gdk_pixbuf_get_pixels(p_pix);
+   g_assert_cmpuint(p_px[1], >, 240); /* G of (0, 255, 0) */
+   g_assert_cmpuint(p_px[0], <, 16);  /* R */
+   g_object_unref(p_pix);
+   g_object_unref(p_file);
+   g_free(c_path);
+}
+
+static void
+_add_animation_tests(void) {
+   g_test_add_func("/loader/pixbuf/animated_gif_attaches_animation",
+                   test_animated_gif_attaches_animation);
+   g_test_add_func("/loader/pixbuf/short_delay_gifs_attach_animation",
+                   test_short_delay_gifs_attach_animation);
+   g_test_add_func("/loader/pixbuf/animated_webp_attaches_animation",
+                   test_animated_webp_attaches_animation);
+   g_test_add_func("/loader/pixbuf/single_frame_gif_has_no_animation",
+                   test_single_frame_gif_has_no_animation);
+   g_test_add_func("/loader/pixbuf/truncated_animation_is_gated",
+                   test_truncated_animation_is_gated);
+   g_test_add_func("/loader/pixbuf/scaled_animation_is_first_frame",
+                   test_scaled_animation_is_first_frame);
+   g_test_add_func("/loader/pixbuf/animation_play_count",
+                   test_animation_play_count);
+   g_test_add_func("/loader/pixbuf/over_budget_animation_is_still",
+                   test_over_budget_animation_is_still);
+   g_test_add_func("/loader/pixbuf/webp_noise_filter_catches_both_roads",
+                   test_webp_noise_filter_catches_both_roads);
+}
+
 /* Registration is split by theme so no function approaches the 50-line
  * mark (c-best-practices). */
 static void
@@ -1558,9 +2005,13 @@ _add_stream_tests(void) {
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
+   /* Before anything logs: GLib takes one writer per process (see
+    * _webp_noise_writer). */
+   g_log_set_writer_func(_webp_noise_writer, NULL, NULL);
    _add_fixture_tests();
    _add_gate_tests();
    _add_peek_tests();
    _add_stream_tests();
+   _add_animation_tests();
    return (g_test_run());
 }

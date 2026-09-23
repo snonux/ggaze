@@ -313,12 +313,107 @@ bounded memory.
 **Deliverables**
 - `src/loader/backends/jxl.c`, `avif.c`, `heif.c` behind meson features;
   register into the dispatcher.
-- Animated GIF/WebP via `GdkPixbufAnimation` → `GdkPaintable`.
+- Animated GIF/WebP playback (task yb2, decision #46) — done. Not a
+  `GdkPaintable` after all: the pixbuf backend decodes a multi-frame
+  GIF/WebP as a `GdkPixbufAnimation`, walks its frames on the worker into
+  one owned `GdkTexture` each (`pixbuf_util_animation_to_texture`: copied
+  out of the decoder's buffer, which gdk-pixbuf 2.42 shares between all
+  frames) and returns the **first frame** as the one `GdkTexture` the rest
+  of the app expects, with the other frames and every delay attached to it
+  (`src/loader/animation.{c,h}`: `GgazeAnimation`, `animation_attach` /
+  `animation_lookup`, GObject qdata, one quark). `GgazeViewer` alone looks
+  for them and plays them: a tick callback on the frame clock hands the
+  frame time to `animation_playback_advance` (plain C: schedule, stall
+  resync, the file's play count) and draws the frame that is due at the
+  first frame's geometry, only while mapped and the frame clock runs; the
+  tick is on the clock only near a frame change (a timeout re-adds it
+  40 ms before), it ends on the last frame once the file's plays are done
+  (a GIF without a NETSCAPE2.0 block plays once, a WebP its ANIM count),
+  restarts from the first frame on every `set_texture`, remap and hold
+  release, and holds it while a crop / straighten tool is up. So the
+  texture LRU, prefetch, last-write-wins, the grid (first frame at scale),
+  the histogram, the enhance graph, the tools, the clipboard and
+  hold-`Space` are all unchanged and all operate on the first frame. Which
+  files take the animated path is decided by a **decoder-free probe** of
+  the bytes (`animation_probe`: GIF block walk / WebP RIFF chunk walk,
+  frames + canvas + loop count) and a **playback budget**
+  (`animation_within_budget`: frames × canvas ≤ 32 Mi pixels = 128 MiB,
+  canvas ≤ 4 Mi pixels, ≤ 1000 frames; the memory arithmetic and the
+  measured figures are at `GGAZE_ANIM_MAX_PIXELS`); anything else goes
+  down the still path byte-for-byte as before. Frame delays are clamped to
+  `GGAZE_ANIM_MIN_DELAY_MS` (20 ms) — which a 10 ms delay on glycin
+  reaches; a 0 ms one never does (both decoders make it 100 ms).
 
 **Tests**
 - Extend `test_detect` + `test_loader_*` per backend, feature-gated.
+- Unit (yb2): `test_animation.c` (TAP) — the probe over `anim.gif` /
+  `anim.webp` / `zerodelay.gif`, the loop count (`/probe/fixture_plays`,
+  `/probe/gif_loop_count`: NETSCAPE2.0 / ANIMEXTS1.0, N → N + 1 plays,
+  first block wins, foreign and cut extensions; `/probe/webp_loop_count`),
+  `manyframes.gif` one frame over the frame cap, EVERY prefix of the
+  animated fixtures (truncation
+  never over-reads, counts monotonically), over hand-built containers (a
+  local colour table, an extension cut short, a VP8X flag with no ANMF
+  frames, a chunk size past the end), the budget at each boundary (pixels,
+  the 1000-frame cap incl. a 200 000-frame 1 × 1 probe, the 4 Mi-pixel
+  canvas cap) and with a frame count that would wrap 32 bits, the delay
+  clamp, the animation decode (still → static animation, garbage → error),
+  the frame store and attach/lookup including the frames dying with their
+  first frame, and the frame walk (`/animation/to_texture_*`: every frame
+  its own texture with the file's colours and delays, the first frame
+  intact after the rest were taken, a frame count, a pre-set cancel, a
+  static decode, 0 ms delays arriving as 100 ms, `fastdelay.gif`'s 10 ms
+  clamped to 20, the play count carried, a sub-2 ms first frame through
+  a `GdkPixbufSimpleAnim`). `test_animation_playback.c` (TAP) — the
+  playback schedule over a fake clock: anchor and due times, the average
+  rate kept under late calls, the stall resync, play counts 1 and 2
+  holding the last frame, delay -1, the clamp in the schedule.
+  `test_loader_pixbuf.c` `/loader/pixbuf/animated_gif_attaches_animation`,
+  `/short_delay_gifs_attach_animation` (0 ms → 100 ms, 10 ms → 20 ms),
+  `/animated_webp_attaches_animation`
+  (skipped where the webp module is absent or frame-less; each asserts the
+  first-frame texture is byte-identical after every frame was read),
+  `/single_frame_gif_has_no_animation`, `/truncated_animation_is_gated`
+  (the decode gate refuses a truncated animation; a mid-frame cut answers
+  within budget; the WebP half runs only with a webp module and tolerates
+  exactly webp-pixbuf-loader 0.2.7's two messages, on the classic and the
+  structured log road alike — `/webp_noise_filter_catches_both_roads`),
+  `/scaled_animation_is_first_frame`, `/animation_play_count` (anim.gif
+  0, once.gif 1, once.webp 1), `/over_budget_animation_is_still`
+  (`manyframes.gif`: first frame, nothing attached).
+  `test_viewload.c` `/viewload/animation_rides_with_the_texture` (miss,
+  neighbour prefetch and hit all hand out the same first-frame object with
+  the animation on it; the still next to it carries none).
+- Integration (yb2): `test_viewer.c` `/viewer/animation_plays_and_keeps_
+  first_frame_texture` (same object AND same pixels after six frame
+  changes), `/animation_survives_zoom_pan_and_overlay` (the overlay hook
+  sees the canvas geometry while frames play), `/still_image_does_not_
+  animate`, `/still_after_animation_stops_playback`, `/hold_first_frame_
+  pauses_and_resumes`, `/animation_pauses_while_unmapped` (the grid page
+  over the viewer stops playback, coming back restarts it),
+  `/fast_delay_plays_at_the_clamp` (`fastdelay.gif`: frame changes over
+  one second ≤ W / 20 ms + 2, and at least one),
+  `/play_once_gif_holds_last_frame`, `/play_once_webp_holds_last_frame`
+  (ends on the last frame, nothing scheduled),
+  `/slow_animation_ticks_only_near_frames` (`slow.gif`, 500 ms frames:
+  ≤ 8 ticks per due frame, measured 8 in 1.4 s; a tick every vblank
+  measured 86), `/unmapped_viewer_holds_first_frame`.
+  `test_window.c` `/window/info_plots_animation_first_frame` (the `i` card
+  plots the first frame, and a plot gathered afresh after the frames
+  played still does). `test_enhance_flow.c` `/enhance_flow/crop_tool_
+  holds_animation_first_frame` (GEGL lanes: the crop tool holds frame 1;
+  Esc and an applied "no crop" both let it play on).
+- Verified against gdk-pixbuf 2.42.12 + webp-pixbuf-loader 0.2.7 (Debian
+  trixie container, minimal build): the animation, loader_pixbuf,
+  viewload, viewer and window suites pass; with the frame copy removed,
+  the first-frame assertions of all four fail (the texture reads back as
+  the last frame, green 75 instead of 255).
 
-**Acceptance:** JXL/AVIF/HEIF open when built; minimal build still green.
+**Acceptance:** JXL/AVIF/HEIF open when built; minimal build still green;
+animated GIF (and WebP where gdk-pixbuf decodes its frames) plays in the
+large view, grid thumbnails and every other consumer use the first frame,
+static images unchanged, rapid `h`/`l` scrubbing stays instant (an
+animation is one cache entry like any still).
 
 ---
 

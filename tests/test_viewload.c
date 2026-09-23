@@ -21,6 +21,7 @@
 #include <glib/gstdio.h>
 
 #include "ggaze-config.h"
+#include "loader/animation.h"
 #include "navigator.h"
 
 /* --- fake host ----------------------------------------------------------- */
@@ -355,10 +356,68 @@ test_dispose_mid_load(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* An animated GIF goes through the pipeline as one texture -- its first
+ * frame with the animation attached -- and nothing about the pipeline
+ * changes for it (yb2): the miss shows the object the cache holds, the
+ * animation is on that object, a neighbour prefetch caches it the same
+ * way, and a hit hands back the same object, animation still attached.
+ * The still next to it carries none. */
+static void
+test_animation_rides_with_the_texture(void) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-viewload-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "anim.gif", "a.gif");
+   copy_fixture(c_dir, "small.png", "b.png");
+   GFile     *p_dir = g_file_new_for_path(c_dir);
+   Navigator *p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, FALSE, TRUE);
+   FakeHost   st_h  = {0};
+   ViewLoad  *p_vl  = viewload_new(&FAKE_OPS, &st_h, 4);
+   viewload_set_navigator(p_vl, p_nav);
+
+   viewload_load_current(p_vl); /* a.gif: miss */
+   GFile *p_a = navigator_get_current(p_nav);
+   pump_until_cached(p_vl, p_a);
+   g_assert_nonnull(st_h.p_shown);
+   g_assert_true(st_h.p_shown == viewload_get_cached(p_vl, p_a));
+   g_assert_nonnull(animation_lookup(st_h.p_shown));
+   g_assert_cmpint(gdk_texture_get_width(st_h.p_shown), ==, 8);
+   GdkTexture *p_first = (GdkTexture *)g_object_ref(st_h.p_shown);
+
+   /* b.png: a hit if a.gif's neighbour prefetch landed, else a miss whose
+    * prefetch twin may cache it before the visible load shows it -- so
+    * wait for the SHOW, not just the cache entry. */
+   g_assert_true(navigator_next(p_nav));
+   viewload_load_current(p_vl);
+   GFile *p_b = navigator_get_current(p_nav);
+   for (guint u = 0; u < 3000 && st_h.p_shown != viewload_get_cached(p_vl, p_b);
+        u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(st_h.p_shown == viewload_get_cached(p_vl, p_b));
+   g_assert_null(animation_lookup(st_h.p_shown)); /* a still */
+
+   g_assert_true(navigator_prev(p_nav)); /* a.gif: hit, same object */
+   viewload_load_current(p_vl);
+   g_assert_true(st_h.p_shown == p_first);
+   g_assert_nonnull(animation_lookup(st_h.p_shown));
+   pump(100);
+
+   g_object_unref(p_first);
+   viewload_delete(p_vl);
+   fake_host_clear(&st_h);
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
    g_test_add_func("/viewload/miss_then_hit", test_miss_then_hit);
+   g_test_add_func("/viewload/animation_rides_with_the_texture",
+                   test_animation_rides_with_the_texture);
    g_test_add_func("/viewload/png_shows_no_partial", test_png_shows_no_partial);
    g_test_add_func("/viewload/last_write_wins", test_last_write_wins);
    g_test_add_func("/viewload/failure_clears_and_reports",

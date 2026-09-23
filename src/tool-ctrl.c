@@ -319,6 +319,7 @@ _leave(ToolCtrl *p_tc) {
    GgazeViewer *p_v = _viewer(p_tc);
    if (p_v != NULL) {
       ggaze_viewer_set_overlay(p_v, NULL, NULL, NULL);
+      ggaze_viewer_hold_first_frame(p_v, FALSE); /* an animation plays on */
    }
 }
 
@@ -337,6 +338,10 @@ _begin(ToolCtrl *p_tc, GgazeTool e_tool) {
    p_tc->t_saved = *enhance_ctrl_get_transform(p_tc->p_ec);
    p_tc->t_work  = p_tc->t_saved;
    ggaze_viewer_set_overlay(_viewer(p_tc), _draw_cb, _drag_cb, p_tc);
+   /* The tool frames and applies against the first frame of an animation
+    * (the texture the controller renders from), so that is what it shows
+    * (viewer.h ggaze_viewer_hold_first_frame). */
+   ggaze_viewer_hold_first_frame(_viewer(p_tc), TRUE);
    return (TRUE);
 }
 

@@ -150,7 +150,17 @@ _prefetch_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
 }
 
 /* Prefetch the next/previous images into the cache (not shown). Cancels the
- * previous prefetch round so at most two prefetch loads are in flight. */
+ * previous prefetch round so at most two prefetch loads are in flight.
+ *
+ * An animated neighbour is prefetched with ALL its frames, deliberately
+ * (task yb2, second review): the loader has no first-frame-only mode, and
+ * one would put an entry in the cache that a hit could not play, so the
+ * visible load would have to decode the file again on arrival -- no
+ * saving, plus a second kind of cache entry to tell apart. What that
+ * costs is bounded by the playback budget (loader/animation.h
+ * GGAZE_ANIM_MAX_PIXELS: at most 128 MiB held per animation, about twice
+ * that at the decode's peak), and a superseded round stops at the next
+ * frame boundary, where the walk checks its cancellable. */
 static void
 _prefetch(ViewLoad *p_vl) {
    if (p_vl->p_nav == NULL) {

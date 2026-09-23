@@ -53,6 +53,7 @@
 #include "ggaze-config.h"
 #include "histogram-view.h"
 #include "histogram.h"
+#include "loader/animation.h"
 #include "viewer.h"
 
 #if GGAZE_HAVE_GEGL
@@ -438,6 +439,60 @@ test_info_shows_histogram(void) {
    close_window_and_folder(p_win, c_dir);
 }
 
+/* yb2: on an animated GIF the `i` card plots the FIRST frame -- the one
+ * texture the window, the cache and the viewer agree on -- also when the
+ * card is raised again after the frames have played, because the frames
+ * never become "the texture" and the first frame's pixels never change
+ * (review finding 1: on gdk-pixbuf 2.42 they used to be the GIF loader's
+ * shared composite buffer, so a gather after playback binned a later
+ * frame). anim.gif's first frame is solid (0, 255, 0): all 48 samples in
+ * green's top bin and red's bottom one; every later frame bins elsewhere
+ * (tests/fixtures/gen.py ANIM_FRAME_RGB). */
+static void
+assert_first_frame_plot(const Histogram *p_h) {
+   g_assert_cmpuint(p_h->u_bins[HISTOGRAM_CHANNEL_G][HISTOGRAM_BINS - 1], ==,
+                    48);
+   g_assert_cmpuint(p_h->u_bins[HISTOGRAM_CHANNEL_R][0], ==, 48);
+}
+
+static void
+test_info_plots_animation_first_frame(void) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-info-anim-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "anim.gif");
+   char        *c_path = g_build_filename(c_dir, "anim.gif", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GgazeWindow *p_win  = new_window();
+   gtk_window_present(GTK_WINDOW(p_win)); /* mapped: the frames play */
+   ggaze_window_open(p_win, p_file);
+   wait_for_load(p_win);
+   g_object_unref(p_file);
+   g_free(c_path);
+
+   GdkTexture *p_tex = viewer_texture(p_win);
+   g_assert_nonnull(animation_lookup(p_tex));
+   assert_first_frame_plot(show_info_expect_plot(p_win, 8 * 6));
+
+   /* Let the playback move on past the first frame... */
+   GtkStack    *p_stack = ggaze_window_get_stack(p_win);
+   GgazeViewer *p_v =
+      GGAZE_VIEWER(gtk_stack_get_child_by_name(p_stack, "large"));
+   for (guint u = 0; u < 3000 && ggaze_viewer_get_frame(p_v) == p_tex; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(ggaze_viewer_get_frame(p_v) != p_tex); /* playing */
+   g_assert_true(viewer_texture(p_win) == p_tex);
+   /* ... then drop the plot and gather it afresh: a NEW histogram of the
+    * texture as it is now, not the one kept from before playback. */
+   fire(p_win, "win.info"); /* off */
+   assert_no_plot(p_win);
+   assert_first_frame_plot(show_info_expect_plot(p_win, 8 * 6));
+
+   close_window_and_folder(p_win, c_dir);
+}
+
 /* Review finding on 0c2: on a texturecache miss viewload keeps the PREVIOUS
  * picture on screen until the new decode lands, so `i` fired in that window
  * used to pair B's EXIF text with A's histogram -- and kept it after B
@@ -691,6 +746,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/window/info_shows_histogram", test_info_shows_histogram);
    g_test_add_func("/window/info_shows_color_space",
                    test_info_shows_color_space);
+   g_test_add_func("/window/info_plots_animation_first_frame",
+                   test_info_plots_animation_first_frame);
    g_test_add_func("/window/info_no_plot_while_loading",
                    test_info_no_plot_while_loading);
    g_test_add_func("/window/status_clears_plot", test_status_clears_plot);

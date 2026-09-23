@@ -18,6 +18,18 @@
  * tool-ctrl.c does, in image pixels, and this is where those become widget
  * pixels.
  *
+ * And it PLAYS an animated GIF/WebP (M5, task yb2): the texture it is
+ * given is that file's first frame with the other frames attached
+ * (loader/animation.h), and the viewer alone steps through them -- on the
+ * frame clock while mapped, at each frame's own delay, as many times as
+ * the file says, restarting from the first frame whenever the texture is
+ * set, holding it while a tool asks
+ * (ggaze_viewer_hold_first_frame). Everything else in the app, and every
+ * other accessor here, keeps seeing the first frame: zoom, pan and the
+ * overlay geometry are the canvas's; ggaze_viewer_get_texture() is what
+ * the cache, the histogram and hold-Space compare against; only
+ * ggaze_viewer_get_frame() says what is on screen right now.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -36,10 +48,42 @@ G_DECLARE_FINAL_TYPE(GgazeViewer, ggaze_viewer, GGAZE, VIEWER, GtkWidget)
 GtkWidget *ggaze_viewer_new(void);
 
 /* Take p_texture (refs it; the caller still owns its own ref and should unref
- * when done). Resets to fit-to-window, clears pan. NULL clears the display. */
+ * when done). Resets to fit-to-window, clears pan. NULL clears the display.
+ * A texture with an animation attached (animation_lookup) starts playing
+ * from its first frame, if the widget is mapped; whatever played before
+ * stops. */
 void ggaze_viewer_set_texture(GgazeViewer *p_viewer, GdkTexture *p_texture);
 GdkTexture *
 ggaze_viewer_get_texture(GgazeViewer *p_viewer); /* (transfer none) */
+
+/* The texture actually being drawn: the current animation frame while one
+ * plays, else the texture itself (transfer none; NULL with no texture).
+ * For tests and for anyone who needs the pixels on screen rather than the
+ * file's picture. */
+GdkTexture *ggaze_viewer_get_frame(GgazeViewer *p_viewer);
+
+/* TRUE while a next frame is scheduled (a tick callback on the frame
+ * clock, or the timeout that puts it back before the next frame): an
+ * animation is attached, the widget is mapped, no hold is on and the
+ * animation has not ended -- on a frame that holds for ever, or on its
+ * last frame once the file's plays are done. */
+gboolean ggaze_viewer_is_animating(GgazeViewer *p_viewer);
+
+/* How many times the animation tick callback has run in this widget's
+ * life (every run counted, whichever animation it played). A test seam:
+ * nothing in the app reads it; a slow animation must keep the frame clock
+ * ticking only near its frame changes, and a fast one's ticks are the
+ * clock's measured rate (tests/test_viewer.c, yb2). */
+guint ggaze_viewer_get_tick_count(GgazeViewer *p_viewer);
+
+/* Hold (TRUE) or release (FALSE) an animation on its first frame. The
+ * crop / straighten tools hold while they are up: they lay out and apply
+ * against the first frame -- the texture everything but the viewer sees
+ * -- so the picture under the rectangle or the horizon line must be that
+ * frame, not whichever one is playing. The hold outlives set_texture (a
+ * render landing under the tool) and releasing restarts playback from the
+ * first frame if the widget is mapped. A still is unaffected either way. */
+void ggaze_viewer_hold_first_frame(GgazeViewer *p_viewer, gboolean b_hold);
 
 /* Zoom + pan actions (also reachable via the on-widget controllers). */
 void ggaze_viewer_zoom_in(GgazeViewer *p_viewer);
