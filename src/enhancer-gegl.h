@@ -52,10 +52,13 @@ GeglBuffer *enhancer_apply_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
  * G_IO_ERROR_NOT_SUPPORTED. Success is verified by a real stat of the output
  * (not pre-existence). Colour (decision #45): the PNG and JPEG savers embed
  * the buffer's colour space as its ICC profile -- for a source with an
- * embedded profile, that profile byte for byte; WebP cannot carry one, and
- * its saver reads the pixels as sRGB (babl converts a buffer in another
- * space on the way out). An sRGB buffer exports exactly as before. Returns
- * TRUE on success. */
+ * embedded profile, a profile EQUIVALENT to it (the same curves, primaries
+ * within babl's tolerance): its own bytes when babl made the space from
+ * it, the bytes of an earlier equivalent profile when babl answered with
+ * that one's space (enhancer.c, "export"); WebP cannot carry one, and its
+ * saver reads the pixels as sRGB (babl converts a buffer in another space
+ * on the way out). An sRGB buffer exports exactly as before. Returns TRUE
+ * on success. */
 gboolean enhancer_export(GeglBuffer *p_in, const EnhancerPreset *p_preset,
                          GFile *p_out, GError **p_err);
 
@@ -94,9 +97,12 @@ GeglBuffer *enhancer_load(GFile *p_file, GError **p_err);
 /* Whether enhancer_load() may decode p_file colour-managed, as far as the
  * file's headers tell: a local PNG / JPEG (a JPEG only in a build with
  * the `jpeg` feature) within the size caps, GEGL's loader op installed,
- * an embedded profile the managed path vouches for (icc_profile_is_sane,
- * babl, within the per-process profile cap) to a space other than sRGB,
- * for the image's number of colour components. The completeness checks
+ * an embedded profile the managed path vouches for (icc_babl_kind, babl,
+ * within the per-process profile cap) to a space other than sRGB, for the
+ * image's number of colour components. It asks babl through the render's
+ * own verdict table, so a new profile the card meets first takes its slot
+ * (GGAZE_ENHANCER_MAX_PROFILES) here, once, and the enhance of that file
+ * then finds the verdict kept. The completeness checks
  * are NOT run (they read the whole file: ~150 ms on average for a camera
  * file) -- a file whose data turns out broken, a truncated scan say, still
  * falls back to the loader path -- so this is the cheap answer behind the
@@ -195,19 +201,34 @@ void enhancer_test_set_load_hook(EnhancerTestHook p_hook, gpointer p_data);
 guint enhancer_test_loader_decodes(void);
 
 /* Distinct embedded profiles the managed path hands to babl per process
- * (enhancer.c, "which profiles babl sees"): babl's space and tone-curve
- * tables hold 100 entries each, are never freed, and a full space table
- * crashes the next babl_space_from_icc(). Past the cap a new profile is
- * declined (its file decodes on the loader path, sRGB). */
+ * that may grow babl's tables (enhancer.c, "which profiles babl sees"):
+ * babl's space and tone-curve tables hold 100 entries each, are never
+ * freed, and a full space table crashes the next babl_space_from_icc().
+ * Past the cap a new profile is declined (its file decodes on the loader
+ * path, sRGB). A profile babl provably adds nothing for (an sRGB one, one
+ * equivalent to a profile already counted) costs no slot, and one babl
+ * would decline outright is never handed to it. */
 #define GGAZE_ENHANCER_MAX_PROFILES 16u
 
-/* Test seam: whether the managed path would apply the profile p_icc
- * (icc_profile_is_sane, the CMYK LCMS check, babl, not sRGB), through the
- * same per-process verdict table and cap as a file's profile. */
+/* How many slot-free verdicts (above) are kept, the oldest dropped first:
+ * with the slots' own, the verdict table never holds more than
+ * GGAZE_ENHANCER_MAX_PROFILES + this many profiles. */
+#define GGAZE_ENHANCER_MAX_FREE_VERDICTS 64u
+
+/* Test seam: the space the managed path would apply for the profile p_icc
+ * (icc_babl_kind, the CMYK LCMS check, babl, not sRGB), through the same
+ * per-process verdict table and cap as a file's profile; NULL when it
+ * would not manage it. Lets a test convert pixels through that space. */
+const Babl *enhancer_test_profile_space(GBytes *p_icc);
+
+/* Test seam: enhancer_test_profile_space(p_icc) != NULL. */
 gboolean enhancer_test_profile_is_managed(GBytes *p_icc);
 
 /* Test seam: profiles counted against GGAZE_ENHANCER_MAX_PROFILES so far. */
 guint enhancer_test_profile_slots(void);
+
+/* Test seam: verdicts the table keeps right now (slots and slot-free). */
+guint enhancer_test_profile_verdicts(void);
 
 G_END_DECLS
 

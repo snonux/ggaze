@@ -25,6 +25,7 @@
 #include "ggaze-config.h"
 #include "enhancer-gegl.h"
 #include "icc.h"
+#include "icc_build.h"
 #include "loader/intact.h"
 #include "loader/loader.h"
 #include "mem_file.h"
@@ -1068,6 +1069,280 @@ test_cmyk_profile_lcms_cannot_open_is_declined(void) {
    }
 }
 
+/* --- babl's own crashes and asserts (xb2 review 4) ----------------------
+ *
+ * Well-formed profiles babl 0.1.128 crashes or aborts on (each reproduced
+ * against it): a 'para' whose reserved byte makes babl read it as a huge
+ * 'curv', curves too long for the 64 KiB buffer babl writes every new
+ * space's profile into, and 'para' break points outside babl's assertion.
+ * Each must be declined -- the card, the render, the managed original --
+ * before babl sees it, costing no slot. Built as swapped.png with its
+ * iCCP replaced (icc_build.h), so every lane's build can decode it. */
+
+/* p_icc zlib-compressed, as an iCCP chunk's data wants it. */
+static GBytes *
+zlib_bytes(GBytes *p_icc) {
+   GConverter *p_z =
+      G_CONVERTER(g_zlib_compressor_new(G_ZLIB_COMPRESSOR_FORMAT_ZLIB, -1));
+   GOutputStream *p_mem = g_memory_output_stream_new_resizable();
+   GOutputStream *p_out = g_converter_output_stream_new(p_mem, p_z);
+   gsize          u_len = 0;
+   const void    *p_d   = g_bytes_get_data(p_icc, &u_len);
+   g_assert_true(
+      g_output_stream_write_all(p_out, p_d, u_len, NULL, NULL, NULL));
+   g_assert_true(g_output_stream_close(p_out, NULL, NULL));
+   GBytes *p_zb =
+      g_memory_output_stream_steal_as_bytes(G_MEMORY_OUTPUT_STREAM(p_mem));
+   g_object_unref(p_out);
+   g_object_unref(p_mem);
+   g_object_unref(p_z);
+   return (p_zb);
+}
+
+/* swapped.png with its iCCP chunk carrying p_icc instead. */
+static GByteArray *
+png_with_profile(GBytes *p_icc) {
+   GByteArray *p_a  = fixture_bytes("swapped.png");
+   gsize       u_at = png_chunk_at(p_a, "iCCP");
+   g_byte_array_remove_range(p_a, (guint)u_at, be32(p_a->data + u_at) + 12);
+   GBytes       *p_z    = zlib_bytes(p_icc);
+   gsize         u_zlen = 0;
+   const guint8 *p_zd   = g_bytes_get_data(p_z, &u_zlen);
+   GByteArray   *p_ch   = g_byte_array_new();
+   guint8        c_len[4];
+   put32(c_len, (guint32)(7 + u_zlen));
+   g_byte_array_append(p_ch, c_len, 4);
+   g_byte_array_append(p_ch, (const guint8 *)"iCCPggaze\0\0", 11);
+   g_byte_array_append(p_ch, p_zd, (guint)u_zlen);
+   g_byte_array_append(p_ch, (const guint8 *)"\0\0\0\0", 4); /* CRC */
+   bytes_insert(p_a, u_at, p_ch->data, p_ch->len);
+   png_fix_crc(p_a, u_at);
+   g_byte_array_unref(p_ch);
+   g_bytes_unref(p_z);
+   return (p_a);
+}
+
+/* p_icc (taken) declined everywhere without a slot or a verdict. */
+static void
+assert_built_profile_declined(const char *c_what, GBytes *p_icc) {
+   g_test_message("declined: %s", c_what);
+   guint u_slots    = enhancer_test_profile_slots();
+   guint u_verdicts = enhancer_test_profile_verdicts();
+   g_assert_false(enhancer_test_profile_is_managed(p_icc));
+   GByteArray *p_png = png_with_profile(p_icc);
+   assert_profile_declined("crasher.png", p_png);
+   g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots);
+   g_assert_cmpuint(enhancer_test_profile_verdicts(), ==, u_verdicts);
+   g_byte_array_unref(p_png);
+   g_bytes_unref(p_icc);
+}
+
+/* An RGB profile whose three curves are p_trc (taken). */
+static GBytes *
+rgb_of(const char *c_desc, GBytes *p_trc) {
+   GBytes *p_icc = icc_build_rgb(c_desc, p_trc, p_trc, p_trc);
+   g_bytes_unref(p_trc);
+   return (p_icc);
+}
+
+/* An RGB profile of three distinct u_n-point curves. */
+static GBytes *
+rgb_of_three(const char *c_desc, guint32 u_n) {
+   GBytes *p_r   = icc_build_curv(u_n, 1.61);
+   GBytes *p_g   = icc_build_curv(u_n, 1.71);
+   GBytes *p_b   = icc_build_curv(u_n, 1.91);
+   GBytes *p_icc = icc_build_rgb(c_desc, p_r, p_g, p_b);
+   g_bytes_unref(p_r);
+   g_bytes_unref(p_g);
+   g_bytes_unref(p_b);
+   return (p_icc);
+}
+
+/* A type 3 / 4 'para' with break point d and slope c (the sRGB curve's
+ * other parameters). */
+static GBytes *
+para_cd(guint16 u_fn, double f_c, double f_d) {
+   const double P[7] = {2.4, 1 / 1.055, 0.055 / 1.055, f_c, f_d, 0.0, 0.0};
+   return (icc_build_para(u_fn, P, u_fn == 3 ? 5 : 7));
+}
+
+static void
+test_babl_crashers_are_declined(void) {
+   GBytes     *p_para = para_cd(3, 1 / 12.92, 0.04045);
+   GByteArray *p_arr  = g_bytes_unref_to_array(p_para);
+   p_arr->data[4]     = 1; /* the review's SIGSEGV */
+   p_arr->data[10]    = 0xff;
+   p_arr->data[11]    = 0xff;
+   assert_built_profile_declined(
+      "para reserved byte",
+      rgb_of("reserved", g_byte_array_free_to_bytes(p_arr)));
+   assert_built_profile_declined("shared 65536-point curve",
+                                 rgb_of("65536", icc_build_curv(65536, 1.7)));
+   assert_built_profile_declined("32768-point curve",
+                                 rgb_of("32768", icc_build_curv(32768, 1.7)));
+   assert_built_profile_declined("three 11000-point curves",
+                                 rgb_of_three("11000", 11000));
+   assert_built_profile_declined("three 20000-point curves",
+                                 rgb_of_three("20000", 20000));
+   assert_built_profile_declined("para d = 1.0",
+                                 rgb_of("d1", para_cd(3, 1 / 12.92, 1.0)));
+   assert_built_profile_declined("para d = -0.1",
+                                 rgb_of("dneg", para_cd(3, 1 / 12.92, -0.1)));
+   assert_built_profile_declined("para c < 0",
+                                 rgb_of("cneg", para_cd(3, -0.5, 0.04)));
+   assert_built_profile_declined("para 4 c * d = 1.2",
+                                 rgb_of("cd", para_cd(4, 30.0, 0.04)));
+   const double CIE[3] = {2.2, 1.0, 0.0};
+   assert_built_profile_declined("para type 1",
+                                 rgb_of("cie", icc_build_para(1, CIE, 3)));
+}
+
+/* p_icc (taken) managed: babl takes it, and swapped.png carrying it
+ * decodes in its space -- babl built the space and its profile copy (the
+ * 64 KiB buffer) without incident. */
+static void
+assert_built_profile_managed(const char *c_what, GBytes *p_icc) {
+   g_test_message("managed: %s", c_what);
+   g_assert_true(enhancer_test_profile_is_managed(p_icc));
+   GByteArray *p_png  = png_with_profile(p_icc);
+   GFile      *p_file = temp_file("builtok.png", p_png);
+   g_assert_true(enhancer_would_manage(p_file));
+   GeglBuffer *p_buf = load_ok(p_file);
+   g_assert_false(is_srgb(p_buf));
+   g_object_unref(p_buf);
+   drop_temp(p_file);
+   g_byte_array_unref(p_png);
+   g_bytes_unref(p_icc);
+}
+
+/* What real profiles carry still gets through: 4096- and 1024-point
+ * curves, three distinct or shared, and 'para' types 0, 3 and 4. */
+static void
+test_real_size_curves_are_managed(void) {
+   assert_built_profile_managed("three 4096-point curves",
+                                rgb_of_three("4096", 4096));
+   assert_built_profile_managed("shared 1024-point curve",
+                                rgb_of("1024", icc_build_curv(1024, 1.83)));
+   assert_built_profile_managed("para 4",
+                                rgb_of("para4", para_cd(4, 0.5, 0.04)));
+   const double G[1] = {1.93};
+   assert_built_profile_managed("para 0",
+                                rgb_of("para0", icc_build_para(0, G, 1)));
+}
+
+/* --- the slot accounting (xb2 review 4) ---------------------------------
+ *
+ * A slot is what a profile may add to babl's fixed tables. One babl
+ * answers with a space it already had costs none -- unless it carries a
+ * curve that space does not use, which babl parses and keeps all the
+ * same. Profiles babl declines outright never reach it; and the verdicts
+ * babl gives without a slot are kept only up to
+ * GGAZE_ENHANCER_MAX_FREE_VERDICTS. */
+
+/* Whether p_icc (taken) is managed and cost u_want slots. */
+static void
+assert_slots(GBytes *p_icc, gboolean b_managed, guint u_want) {
+   guint u_was = enhancer_test_profile_slots();
+   g_assert_true(enhancer_test_profile_is_managed(p_icc) == b_managed);
+   g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_was + u_want);
+   g_bytes_unref(p_icc);
+}
+
+static void
+test_slot_accounting(void) {
+   GBytes     *p_c     = icc_build_curv(1, 1.37);
+   GBytes     *p_k     = icc_build_curv(1, 1.53);
+   IccBuildTag t_k[]   = {{"kTRC", p_k}};
+   IccBuildTag t_rgb[] = {{"rTRC", p_k}, {"gTRC", p_k}, {"bTRC", p_k}};
+   assert_slots(icc_build_rgb("slot a", p_c, p_c, p_c), TRUE, 1);
+   assert_slots(icc_build_rgb("slot b", p_c, p_c, p_c), TRUE, 0);
+   assert_slots(icc_build_rgb_with("slot k", p_c, p_c, p_c, t_k, 1), TRUE, 1);
+   assert_slots(icc_build_gray("grey a", p_c), TRUE, 1);
+   assert_slots(icc_build_gray("grey b", p_c), TRUE, 0);
+   assert_slots(icc_build_gray_with("grey rgb", p_c, t_rgb, 3), TRUE, 1);
+   GFile  *p_file = fixture("srgb-icc.png"); /* babl's own sRGB: free */
+   GBytes *p_srgb = icc_read_embedded(p_file, NULL);
+   g_object_unref(p_file);
+   GByteArray *p_arr = g_bytes_unref_to_array(p_srgb);
+   p_arr->data[p_arr->len - 1] ^= 1; /* bytes of its own, same space */
+   assert_slots(g_byte_array_free_to_bytes(p_arr), FALSE, 0);
+   g_bytes_unref(p_c);
+   g_bytes_unref(p_k);
+}
+
+/* A profile of class c_class, space c_space, PCS c_pcs with swapped.png's
+ * tags, less bTRC when b_no_blue, plus A2B0 and B2A0 when b_clut. */
+static GBytes *
+declinable(const char *c_class, const char *c_pcs, gboolean b_no_blue,
+           gboolean b_clut) {
+   GBytes     *p_c   = icc_build_curv(1, 1.45);
+   GBytes     *p_x   = icc_build_xyz(0.4, 0.2, 0.1);
+   GBytes     *p_lut = g_bytes_new_static("mft2\0\0\0\0", 8);
+   IccBuildTag t[]   = {{"wtpt", p_x},   {"rXYZ", p_x},   {"gXYZ", p_x},
+                        {"bXYZ", p_x},   {"rTRC", p_c},   {"gTRC", p_c},
+                        {"A2B0", p_lut}, {"B2A0", p_lut}, {"bTRC", p_c}};
+   gsize       u_n   = b_clut ? 9 : 6;
+   if (!b_clut && !b_no_blue) {
+      t[6] = t[8];
+      u_n  = 7;
+   }
+   GBytes *p_icc = icc_build(c_class, "RGB ", c_pcs, t, u_n);
+   g_bytes_unref(p_c);
+   g_bytes_unref(p_x);
+   g_bytes_unref(p_lut);
+   return (p_icc);
+}
+
+/* babl's early declines never reach it: no slot, no verdict. */
+static void
+test_babl_declines_cost_nothing(void) {
+   GBytes *CASES[] = {
+      declinable("prtr", "XYZ ", FALSE, FALSE), /* a class babl refuses */
+      declinable("mntr", "Lab ", FALSE, FALSE), /* a Lab PCS */
+      declinable("mntr", "XYZ ", FALSE, TRUE),  /* both CLUT directions */
+      declinable("mntr", "XYZ ", TRUE, FALSE),  /* no blue curve */
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      guint u_slots    = enhancer_test_profile_slots();
+      guint u_verdicts = enhancer_test_profile_verdicts();
+      g_assert_true(icc_profile_is_sane(CASES[u]));
+      g_assert_false(enhancer_test_profile_is_managed(CASES[u]));
+      g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots);
+      g_assert_cmpuint(enhancer_test_profile_verdicts(), ==, u_verdicts);
+      g_bytes_unref(CASES[u]);
+   }
+   /* The same profile with its class fixed does reach babl. */
+   GBytes *p_ok = declinable("mntr", "XYZ ", FALSE, FALSE);
+   guint   u_v  = enhancer_test_profile_verdicts();
+   (void)enhancer_test_profile_is_managed(p_ok);
+   g_assert_cmpuint(enhancer_test_profile_verdicts(), ==, u_v + 1);
+   g_bytes_unref(p_ok);
+}
+
+/* Slot-free verdicts past GGAZE_ENHANCER_MAX_FREE_VERDICTS drop the oldest:
+ * the table stays bounded, no slot is spent, and a dropped profile asked
+ * about again gets the same answer, again for free. */
+static void
+test_verdicts_are_bounded(void) {
+   GBytes *p_c     = icc_build_curv(1, 1.37); /* test_slot_accounting's space */
+   guint   u_slots = enhancer_test_profile_slots();
+   for (guint u = 0; u < 2 * GGAZE_ENHANCER_MAX_FREE_VERDICTS + 8; u++) {
+      char c_desc[32];
+      g_snprintf(c_desc, sizeof(c_desc), "free %u", u);
+      GBytes *p_icc = icc_build_rgb(c_desc, p_c, p_c, p_c);
+      g_assert_true(enhancer_test_profile_is_managed(p_icc));
+      g_bytes_unref(p_icc);
+      g_assert_cmpuint(enhancer_test_profile_verdicts(), <=,
+                       GGAZE_ENHANCER_MAX_PROFILES +
+                          GGAZE_ENHANCER_MAX_FREE_VERDICTS);
+   }
+   GBytes *p_first = icc_build_rgb("free 0", p_c, p_c, p_c); /* dropped */
+   g_assert_true(enhancer_test_profile_is_managed(p_first));
+   g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots);
+   g_bytes_unref(p_first);
+   g_bytes_unref(p_c);
+}
+
 /* --- cancellation (xb2 review 3) -----------------------------------------
  *
  * A cancelled load used to fall through to the loader with no cancellable:
@@ -1246,15 +1521,29 @@ test_profile_cap(void) {
 
 /* --- fuzz: the profile gate and babl together ---------------------------
  *
- * Random damage to the fixture profiles through the managed path's whole
- * profile gate (icc_profile_is_sane, the CMYK LCMS check, babl): no crash,
- * no babl_fatal exit, whatever passes. In subprocesses, because each
- * profile that gets through may take a slot of babl's fixed tables and
- * the per-process cap then keeps new ones from babl: each round starts
- * with empty tables. Seeded per round, so a failure reproduces. */
+ * Damage to profiles through the managed path's whole profile gate
+ * (icc_babl_kind, the CMYK LCMS check, babl) and on into babl: every
+ * profile that gets through makes babl build its space, and pixels are
+ * converted through that space both ways (as the preview and the chain /
+ * export do) and its profile copied out (as the savers do). No crash, no
+ * assertion, no babl_fatal exit, whatever passes. The seeds are the
+ * fixture profiles and built ones with the curve kinds the fixtures lack
+ * ('para' 0 / 3 / 4, long 'curv' tables, a grey 'para', an RGB profile
+ * with a kTRC), and half the edits are aimed INSIDE a tag -- a parameter
+ * set to an edge value, a function type, a reserved byte, a curve count --
+ * where babl's own crashes were, so most edited profiles stay well-formed
+ * enough to reach babl. In subprocesses, because each profile babl takes
+ * may take a slot of its fixed tables and the per-process cap then keeps
+ * new ones from babl: each round starts with empty tables and runs until
+ * its slots are spent. The rounds run with BABL_PATH_LENGTH=1: babl then
+ * converts through its reference fish (the space's own curves and matrix,
+ * in double -- what is under test) instead of timing candidate paths for
+ * every new space, ~1 s each, which made a round take 20 s. Seeded per
+ * round, so a failure reproduces (GGAZE_FUZZ_ROUND=<n> and
+ * BABL_PATH_LENGTH=1 with -p /enhancer_icc/profile_fuzz/subprocess). */
 
-#define FUZZ_ROUNDS 8
-#define FUZZ_RUNS 400
+#define FUZZ_ROUNDS 12
+#define FUZZ_RUNS 300
 
 /* One random edit of p_arr: a byte, a 32-bit field set to an edge value,
  * a cut, or the header's size field brought back in line. */
@@ -1283,34 +1572,167 @@ fuzz_mutate(GRand *p_rand, GByteArray *p_arr) {
    }
 }
 
+/* One edit inside the data of a random tag of p_arr (whose table is known
+ * to lie inside it and whose tag is at least 16 bytes): an s15Fixed16
+ * parameter set to a value at or across one of babl's edges, the 'para'
+ * function type, a reserved byte, or a 'curv' count. */
 static void
-test_profile_fuzz_subprocess(void) {
+fuzz_edit_tag(GRand *p_rand, guint8 *p_tag, guint32 u_size) {
+   static const double  C_PARAM[] = {0.0,    1.0,       -0.1,    0.9975,
+                                     0.9985, 30.0,      2.4,     -2.0,
+                                     0.04,   1 / 12.92, 32767.0, -32768.0};
+   static const guint32 C_COUNT[] = {0, 1, 2, 4096, 4097, 65536};
+   guint                u_slots   = (u_size - 12) / 4;
+   switch (g_rand_int_range(p_rand, 0, 4)) {
+   case 0: {
+      double f_v = C_PARAM[g_rand_int_range(p_rand, 0, G_N_ELEMENTS(C_PARAM))];
+      guint  u_k = (guint)g_rand_int_range(p_rand, 0, (gint32)u_slots);
+      put32(p_tag + 12 + 4 * u_k, (guint32)(gint32)(f_v * 65536.0));
+      break;
+   }
+   case 1:
+      p_tag[9] = (guint8)g_rand_int_range(p_rand, 0, 6);
+      break;
+   case 2:
+      p_tag[g_rand_int_range(p_rand, 4, 8)] =
+         (guint8)g_rand_int_range(p_rand, 0, 256);
+      break;
+   default:
+      put32(p_tag + 8,
+            C_COUNT[g_rand_int_range(p_rand, 0, G_N_ELEMENTS(C_COUNT))]);
+      break;
+   }
+}
+
+/* fuzz_edit_tag() on a random tag of p_arr, when its table and that tag
+ * lie inside it (an earlier edit may have broken them). */
+static void
+fuzz_mutate_tag(GRand *p_rand, GByteArray *p_arr) {
+   guint32 u_count = be32(p_arr->data + 128);
+   if (u_count == 0 || u_count > 64 || 132 + 12 * u_count > p_arr->len) {
+      return;
+   }
+   const guint8 *p_e =
+      p_arr->data + 132 + 12 * g_rand_int_range(p_rand, 0, (gint32)u_count);
+   guint32 u_off  = be32(p_e + 4);
+   guint32 u_size = be32(p_e + 8);
+   if (u_size >= 16 && u_off <= p_arr->len && u_size <= p_arr->len - u_off) {
+      fuzz_edit_tag(p_rand, p_arr->data + u_off, u_size);
+   }
+}
+
+/* Built seeds (taken into p_seeds): the curve kinds the fixtures lack. */
+static void
+fuzz_built_seeds(GPtrArray *p_seeds) {
+   const double SRGB[5] = {2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045};
+   const double P4[7]   = {2.2, 0.9, 0.1, 0.5, 0.05, 0.01, 0.0};
+   const double G[1]    = {1.8};
+   GBytes      *p_p3    = icc_build_para(3, SRGB, 5);
+   GBytes      *p_p4    = icc_build_para(4, P4, 7);
+   GBytes      *p_p0    = icc_build_para(0, G, 1);
+   GBytes      *p_lut   = icc_build_curv(1024, 1.9);
+   IccBuildTag  t_k[]   = {{"kTRC", p_p0}};
+   g_ptr_array_add(p_seeds, icc_build_rgb("fuzz p3", p_p3, p_p3, p_p3));
+   g_ptr_array_add(p_seeds, icc_build_rgb("fuzz mix", p_p4, p_p0, p_lut));
+   g_ptr_array_add(p_seeds, icc_build_rgb("fuzz lut", p_lut, p_lut, p_lut));
+   g_ptr_array_add(p_seeds, icc_build_gray("fuzz grey", p_p3));
+   g_ptr_array_add(p_seeds,
+                   icc_build_rgb_with("fuzz k", p_p3, p_p3, p_p3, t_k, 1));
+   g_bytes_unref(p_p3);
+   g_bytes_unref(p_p4);
+   g_bytes_unref(p_p0);
+   g_bytes_unref(p_lut);
+}
+
+static GPtrArray *
+fuzz_seeds(void) {
    const char *C_NAMES[] = {"swapped.png", "srgb-icc.png", "grey-icc.png",
                             "cmyk-icc.jpg"};
-   const char *c_round   = g_getenv("GGAZE_FUZZ_ROUND");
-   GRand      *p_rand =
-      g_rand_new_with_seed(0x1cc0u + (c_round != NULL ? atoi(c_round) : 0));
-   guint u_managed = 0;
-   for (guint u_run = 0; u_run < FUZZ_RUNS; u_run++) {
-      GFile  *p_file = fixture(C_NAMES[u_run % G_N_ELEMENTS(C_NAMES)]);
-      GBytes *p_icc  = icc_read_embedded(p_file, NULL);
+   GPtrArray  *p_seeds =
+      g_ptr_array_new_with_free_func((GDestroyNotify)g_bytes_unref);
+   for (gsize u = 0; u < G_N_ELEMENTS(C_NAMES); u++) {
+      GFile *p_file = fixture(C_NAMES[u]);
+      g_ptr_array_add(p_seeds, icc_read_embedded(p_file, NULL));
       g_object_unref(p_file);
-      GByteArray *p_arr = g_bytes_unref_to_array(p_icc);
-      guint       u_n   = (guint)g_rand_int_range(p_rand, 1, 5);
-      for (guint u = 0; u < u_n; u++) {
+   }
+   fuzz_built_seeds(p_seeds);
+   return (p_seeds);
+}
+
+/* Pixels through p_space both ways, and its profile copied out: what the
+ * preview (to sRGB), the chain and the savers (into the space -- never a
+ * CMYK one, whose chain runs in sRGB) and the export's profile ask of it. */
+static void
+fuzz_use_space(const Babl *p_space) {
+   const char *c_fmt = babl_space_is_gray(p_space)   ? "Y' u8"
+                       : babl_space_is_cmyk(p_space) ? "cmyk u8"
+                                                     : "R'G'B' u8";
+   const Babl *p_in  = babl_format_with_space(c_fmt, p_space);
+   const Babl *p_out = babl_format("R'G'B'A u8");
+   guint8      c_px[16 * 4], c_rgba[16 * 4];
+   for (guint u = 0; u < sizeof(c_px); u++) {
+      c_px[u] = (guint8)(u * 17);
+   }
+   babl_process(babl_fish(p_in, p_out), c_px, c_rgba, 16);
+   if (!babl_space_is_cmyk(p_space)) {
+      babl_process(babl_fish(p_out, p_in), c_rgba, c_px, 16);
+   }
+   int i_len = 0;
+   g_assert_nonnull(babl_space_get_icc(p_space, &i_len));
+   g_assert_cmpint(i_len, >, 0);
+}
+
+/* One fuzz case: a seed, edited u_n times. */
+static GBytes *
+fuzz_case(GRand *p_rand, GBytes *p_seed) {
+   gsize       u_len = 0;
+   const void *p_d   = g_bytes_get_data(p_seed, &u_len);
+   GByteArray *p_arr = g_byte_array_sized_new((guint)u_len);
+   g_byte_array_append(p_arr, p_d, (guint)u_len);
+   guint u_n = (guint)g_rand_int_range(p_rand, 1, 4);
+   for (guint u = 0; u < u_n; u++) {
+      if (g_rand_boolean(p_rand)) {
+         fuzz_mutate_tag(p_rand, p_arr);
+      } else {
          fuzz_mutate(p_rand, p_arr);
       }
-      GBytes *p_b = g_byte_array_free_to_bytes(p_arr);
-      u_managed += enhancer_test_profile_is_managed(p_b) ? 1 : 0;
+   }
+   return (g_byte_array_free_to_bytes(p_arr));
+}
+
+static void
+test_profile_fuzz_subprocess(void) {
+   const char *c_round = g_getenv("GGAZE_FUZZ_ROUND");
+   GRand      *p_rand =
+      g_rand_new_with_seed(0x1cc0u + (c_round != NULL ? atoi(c_round) : 0));
+   GPtrArray *p_seeds   = fuzz_seeds();
+   guint      u_managed = 0, u_run = 0;
+   for (; u_run < FUZZ_RUNS &&
+          enhancer_test_profile_slots() < GGAZE_ENHANCER_MAX_PROFILES;
+        u_run++) {
+      GBytes *p_b =
+         fuzz_case(p_rand, g_ptr_array_index(p_seeds, u_run % p_seeds->len));
+      const Babl *p_space = enhancer_test_profile_space(p_b);
+      if (p_space != NULL) {
+         fuzz_use_space(p_space);
+         u_managed++;
+      }
       g_bytes_unref(p_b);
    }
-   g_test_message("%u of %u mutated profiles managed, %u babl slots", u_managed,
-                  FUZZ_RUNS, enhancer_test_profile_slots());
+   g_test_message("%u of %u edited profiles managed, %u babl slots, %u "
+                  "verdicts",
+                  u_managed, u_run, enhancer_test_profile_slots(),
+                  enhancer_test_profile_verdicts());
+   /* The point of the round: babl itself was reached. */
+   g_assert_cmpuint(enhancer_test_profile_verdicts(), >, 0);
+   g_assert_cmpuint(u_managed, >, 0);
+   g_ptr_array_unref(p_seeds);
    g_rand_free(p_rand);
 }
 
 static void
 test_profile_fuzz(void) {
+   g_setenv("BABL_PATH_LENGTH", "1", TRUE); /* the subprocesses' babl */
    for (guint u = 0; u < FUZZ_ROUNDS; u++) {
       char c_round[16];
       g_snprintf(c_round, sizeof(c_round), "%u", u);
@@ -1320,14 +1742,16 @@ test_profile_fuzz(void) {
       g_test_trap_assert_passed();
    }
    g_unsetenv("GGAZE_FUZZ_ROUND");
+   g_unsetenv("BABL_PATH_LENGTH");
 }
 
 /* --- the local camera corpus ---------------------------------------------- */
 
 /* The babl space c_path's embedded profile parses to, or NULL. A real
- * camera profile babl parses must also pass icc_profile_is_sane(): the
- * gate in front of babl must not cost a real file its management. (The
- * corpus is trusted local data, so babl is asked directly here.) */
+ * camera profile babl parses must also pass icc_profile_is_sane() and
+ * icc_babl_kind(): the gate in front of babl must not cost a real file its
+ * management. (The corpus is trusted local data, so babl is asked
+ * directly here.) */
 static const Babl *
 profile_space(GFile *p_file) {
    GBytes *p_icc = icc_read_embedded(p_file, NULL);
@@ -1342,6 +1766,7 @@ profile_space(GFile *p_file) {
       babl_space_from_icc(c_data, (int)u_len, BABL_ICC_INTENT_DEFAULT, &c_err);
    if (p_space != NULL) {
       g_assert_true(icc_profile_is_sane(p_icc));
+      g_assert_cmpint(icc_babl_kind(p_icc), !=, ICC_BABL_NONE);
    }
    g_bytes_unref(p_icc);
    return (p_space);
@@ -1404,15 +1829,13 @@ test_sample_images_profiled_files(void) {
       g_free(c_path);
    }
    g_dir_close(p_dir);
-   g_test_message("%u profiled corpus files", u_seen);
+   g_test_message("%u profiled corpus files, %u babl slots", u_seen,
+                  enhancer_test_profile_slots());
 }
 
-int
-main(int argc, char **argv) {
-   gegl_init(&argc, &argv);
-   g_test_init(&argc, &argv, NULL);
-   c_dir = g_dir_make_tmp("ggaze-enhicc-XXXXXX", NULL);
-   g_assert_nonnull(c_dir);
+/* The managed decode, its fallbacks and the export. */
+static void
+add_decode_tests(void) {
    g_test_add_func("/enhancer_icc/managed_png_and_jpeg",
                    test_managed_png_and_jpeg);
    g_test_add_func("/enhancer_icc/managed_orientation",
@@ -1453,11 +1876,26 @@ main(int argc, char **argv) {
                    test_export_preserves_profile);
    g_test_add_func("/enhancer_icc/missing_saver_is_not_supported",
                    test_missing_saver_is_not_supported);
+}
+
+/* The profile gate, babl's tables, cancellation and the corpus; the
+ * profile cap last (it uses the cap up). */
+static void
+add_profile_tests(void) {
    g_test_add_func("/enhancer_icc/managed_original", test_managed_original);
    g_test_add_func("/enhancer_icc/insane_profile_is_declined",
                    test_insane_profile_is_declined);
    g_test_add_func("/enhancer_icc/cmyk_profile_lcms_cannot_open_is_declined",
                    test_cmyk_profile_lcms_cannot_open_is_declined);
+   g_test_add_func("/enhancer_icc/babl_crashers_are_declined",
+                   test_babl_crashers_are_declined);
+   g_test_add_func("/enhancer_icc/real_size_curves_are_managed",
+                   test_real_size_curves_are_managed);
+   g_test_add_func("/enhancer_icc/slot_accounting", test_slot_accounting);
+   g_test_add_func("/enhancer_icc/babl_declines_cost_nothing",
+                   test_babl_declines_cost_nothing);
+   g_test_add_func("/enhancer_icc/verdicts_are_bounded",
+                   test_verdicts_are_bounded);
    g_test_add_func("/enhancer_icc/cancelled_load_decodes_nothing",
                    test_cancelled_load_decodes_nothing);
    g_test_add_func("/enhancer_icc/would_manage_is_header_deep",
@@ -1468,6 +1906,16 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer_icc/profile_fuzz/subprocess",
                    test_profile_fuzz_subprocess);
    g_test_add_func("/enhancer_icc/profile_cap", test_profile_cap);
+}
+
+int
+main(int argc, char **argv) {
+   gegl_init(&argc, &argv);
+   g_test_init(&argc, &argv, NULL);
+   c_dir = g_dir_make_tmp("ggaze-enhicc-XXXXXX", NULL);
+   g_assert_nonnull(c_dir);
+   add_decode_tests();
+   add_profile_tests();
    int i_rc = g_test_run();
    g_rmdir(c_dir);
    g_free(c_dir);

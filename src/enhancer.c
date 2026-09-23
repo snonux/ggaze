@@ -564,14 +564,21 @@ enhancer_apply(GeglBuffer *p_in, const EnhancerPreset *p_preset,
  *
  * The buffer's babl format carries the image's colour space (see the
  * ICC-aware load below). gegl:png-save and gegl:jpg-save embed that space's
- * profile -- for a space made from an embedded ICC profile babl hands the
- * original bytes back, so the export carries the source's profile byte for
- * byte. gegl:webp-save embeds nothing -- and needs no conversion node for
- * it: it reads the buffer as "R'G'B'A u8" with no space, i.e. sRGB, so
- * babl converts the pixels on the way out (a test with gegl:convert-space
- * hidden proves it), and an untagged WebP is exactly what every viewer
- * reads as sRGB. An sRGB buffer (every file without a managed profile)
- * exports exactly as before. */
+ * profile, i.e. the bytes babl keeps for the space: the source's own when
+ * babl made the space from them, but babl answers a profile equivalent to
+ * one it has seen (the same curves, primaries within 0.001:
+ * babl_space_match_trc_matrix) with the earlier space and ITS bytes, and
+ * re-copies the latest profile onto a grey space it already has. So the
+ * export carries an equivalent profile -- same colours, possibly another
+ * file's description -- and the source's bytes only when it was the first
+ * of its kind this process met. Embedding the source's own bytes would mean
+ * writing the PNG / JPEG profile chunk ourselves after GEGL's saver; not
+ * worth it for identical colours. gegl:webp-save embeds nothing -- and needs no
+ * conversion node for it: it reads the buffer as "R'G'B'A u8" with no space,
+ * i.e. sRGB, so babl converts the pixels on the way out (a test with
+ * gegl:convert-space hidden proves it), and an untagged WebP is exactly what
+ * every viewer reads as sRGB. An sRGB buffer (every file without a managed
+ * profile) exports exactly as before. */
 
 /* Pick the GEGL saver op and (for jpeg) quality from the output extension.
  * Returns the op name, or NULL if the extension is unsupported / the op is
@@ -907,22 +914,53 @@ _gegl_loader_for(GFile *p_file, GgazeFormat *pe_fmt) {
  *
  * babl_space_from_icc() is not safe on untrusted bytes, in three ways, and
  * the managed path hands it nothing it has not first vetted:
- *   - it reads tag data unchecked: icc_profile_is_sane() (icc.c) vouches
- *     for every tag babl reads first;
+ *   - it reads tag data unchecked, and what it builds from some well-formed
+ *     curves overruns its own buffers or trips its assertions:
+ *     icc_profile_is_sane() (icc.c) vouches for every tag babl reads and
+ *     every curve it builds first;
  *   - on a CMYK profile it keeps whatever LCMS gives back, a NULL
  *     transform included, and the first conversion through that space
  *     crashes: the transform the decode converts through is built here
  *     first (_cmyk_profile_opens), and a profile it fails for declines;
  *   - its space and tone-curve tables are fixed arrays of 100 entries
- *     that are never freed, and a full space table makes the next
- *     babl_space_from_icc() dereference NULL. Every distinct non-sRGB
- *     profile adds a space and up to four curves (a declined one may still
- *     have added its curves), so only GGAZE_ENHANCER_MAX_PROFILES distinct
- *     profiles per process get to babl; the verdict on each is kept, so a
- *     file seen again costs a checksum. Past the cap a new profile is
- *     declined -- its file takes the loader path, sRGB, as before xb2.
+ *     that are never freed (babl itself fills ~20 spaces and ~5 curves),
+ *     and a full space table makes the next babl_space_from_icc()
+ *     dereference NULL. So only GGAZE_ENHANCER_MAX_PROFILES distinct
+ *     profiles per process that may grow them get to babl, each worth at
+ *     most one space and four curves (babl parses rTRC, gTRC, bTRC AND
+ *     kTRC of every profile, whatever its colour space): at most 16 + 20
+ *     spaces and 64 + 5 curves. A profile costs its slot when babl is
+ *     asked about it, whatever babl answers -- a declined one may have
+ *     added its curves -- UNLESS babl provably added nothing: it answered
+ *     with a space it already had (sRGB, or one an earlier slot's profile
+ *     gave, whose curves it therefore had too) and the profile carries no
+ *     curve that space does not use (a kTRC on an RGB profile is a new
+ *     curve even then). So camera files whose sRGB profiles differ only
+ *     in their bytes cost nothing, while no profile adds to babl's tables
+ *     without costing a slot. Past the cap a new profile is declined --
+ *     its file takes the loader path, sRGB, as before xb2.
+ * A profile babl would decline outright (icc_babl_kind: a class or PCS it
+ * does not take, both CLUT directions, no curves or primaries) is never
+ * handed to babl and costs nothing. Verdicts are kept per profile (SHA-256
+ * of its bytes), so a file seen again costs a checksum and babl is asked
+ * about a profile once: those that cost a slot for good (at most the cap
+ * of them), slot-free ones up to GGAZE_ENHANCER_MAX_FREE_VERDICTS, the
+ * oldest dropped first -- asking babl again about a dropped one is safe,
+ * since it adds nothing. A profile babl is not asked about (declined by
+ * kind, or a CMYK one LCMS cannot open) keeps no verdict: its checks are
+ * header-deep (the LCMS open a few milliseconds) and run again.
+ * Whoever asks first pays: the info card's enhancer_would_manage() goes
+ * through the same table as the render, so a profile the card asked
+ * about has its slot (or verdict) before the enhance ever runs, and the
+ * enhance of that file then costs nothing more -- the cap counts distinct
+ * profiles per process, not files, whichever path meets them.
  * GEGL's own loaders then make the same babl call on the same bytes, which
- * babl answers from its table (the same profile gives the same space). */
+ * babl answers from its tables (the same profile gives the same space).
+ * They make it four times per decode (the op's bounding box is queried
+ * three times -- ours, the graph's prepare and prepare-request -- and the
+ * decode reads the profile once more), which is what makes babl's grey
+ * branch leak: it re-copies the profile onto the grey space it found each
+ * time (docs/gegl.md, "Leaks we cannot fix"). */
 
 #ifndef TYPE_CMYKA_DBL /* not in lcms2.h; babl defines it the same way */
 #define TYPE_CMYKA_DBL                                                         \
@@ -961,16 +999,16 @@ _cmyk_profile_opens(const char *c_data, gsize u_len) {
    return (b_ok);
 }
 
-/* babl's space for a vetted profile (icc_profile_is_sane), or NULL;
- * *pb_asked says whether babl was asked at all (a CMYK profile LCMS cannot
- * open never reaches it, and touches none of its tables). */
+/* babl's space for a profile of kind e_kind (icc_babl_kind, not
+ * ICC_BABL_NONE), or NULL; *pb_asked says whether babl was asked at all (a
+ * CMYK profile LCMS cannot open never reaches it, and touches none of its
+ * tables). */
 static const Babl *
-_babl_space_for(GBytes *p_icc, gboolean *pb_asked) {
+_babl_space_for(GBytes *p_icc, IccBablKind e_kind, gboolean *pb_asked) {
    gsize       u_len  = 0;
    const char *c_data = g_bytes_get_data(p_icc, &u_len);
    *pb_asked          = FALSE;
-   if (memcmp(c_data + 16, "CMYK", 4) == 0 &&
-       !_cmyk_profile_opens(c_data, u_len)) {
+   if (e_kind == ICC_BABL_CMYK && !_cmyk_profile_opens(c_data, u_len)) {
       return (NULL);
    }
    const char *c_err = NULL;
@@ -979,13 +1017,21 @@ _babl_space_for(GBytes *p_icc, gboolean *pb_asked) {
       babl_space_from_icc(c_data, (int)u_len, BABL_ICC_INTENT_DEFAULT, &c_err));
 }
 
-static GMutex      t_profiles_lock;
-static GHashTable *p_profiles      = NULL; /* SHA-256 hex -> const Babl * */
-static guint       u_profile_slots = 0;    /* profiles that may have grown
-                                            * babl's tables (see above) */
+/* One kept verdict (section comment above). */
+typedef struct {
+   const Babl *p_space; /* babl's answer; NULL when it declined */
+   gboolean    b_slot;  /* it cost a slot: kept for good */
+} ProfileVerdict;
 
-/* Whether p_space is sRGB or a space an earlier profile already gave:
- * babl then added no space for this profile. */
+static GMutex      t_profiles_lock;
+static GHashTable *p_verdicts  = NULL; /* SHA-256 hex -> ProfileVerdict */
+static GQueue      t_free_keys = G_QUEUE_INIT; /* the slot-free verdicts'
+                                                * keys, oldest first
+                                                * (owned by the table) */
+static guint u_profile_slots = 0;
+
+/* Whether p_space is sRGB or a space a slot's profile already gave (a
+ * slot-free verdict's space is one of those by construction). */
 static gboolean
 _space_known(const Babl *p_space) {
    if (p_space == babl_space("sRGB")) {
@@ -993,54 +1039,101 @@ _space_known(const Babl *p_space) {
    }
    GHashTableIter t_it;
    gpointer       p_val = NULL;
-   g_hash_table_iter_init(&t_it, p_profiles);
+   g_hash_table_iter_init(&t_it, p_verdicts);
    while (g_hash_table_iter_next(&t_it, NULL, &p_val)) {
-      if (p_val == p_space) {
+      const ProfileVerdict *p_v = p_val;
+      if (p_v->b_slot && p_v->p_space == p_space) {
          return (TRUE);
       }
    }
    return (FALSE);
 }
 
-/* p_icc's babl space through the verdict table (section comment above):
- * the kept verdict for a profile seen before, a new babl call while the
- * cap allows one, NULL past it. */
-static const Babl *
-_profile_space(GBytes *p_icc) {
-   char       *c_key   = g_compute_checksum_for_bytes(G_CHECKSUM_SHA256, p_icc);
-   gpointer    p_val   = NULL;
-   const Babl *p_space = NULL;
-   g_mutex_lock(&t_profiles_lock);
-   if (p_profiles == NULL) {
-      p_profiles = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+/* Whether babl's answer p_space for p_icc (kind e_kind) provably added
+ * nothing to its tables: a space it already had, and no curve tag besides
+ * the ones that space uses. A CMYK profile always adds a space (babl keeps
+ * one per distinct profile), and a declined one may have added curves. */
+static gboolean
+_grew_nothing(const Babl *p_space, IccBablKind e_kind, GBytes *p_icc) {
+   guint u_used = e_kind == ICC_BABL_GRAY ? 1 : 3;
+   return (p_space != NULL && e_kind != ICC_BABL_CMYK &&
+           _space_known(p_space) && icc_babl_curve_tags(p_icc) == u_used);
+}
+
+/* Keep the verdict for c_key (taken). A slot-free one joins the eviction
+ * queue, and the oldest of those goes once there are more than
+ * GGAZE_ENHANCER_MAX_FREE_VERDICTS. */
+static void
+_keep_verdict(char *c_key, const Babl *p_space, gboolean b_slot) {
+   ProfileVerdict *p_v = g_new(ProfileVerdict, 1);
+   p_v->p_space        = p_space;
+   p_v->b_slot         = b_slot;
+   g_hash_table_insert(p_verdicts, c_key, p_v);
+   if (b_slot) {
+      u_profile_slots++;
+      return;
    }
-   if (g_hash_table_lookup_extended(p_profiles, c_key, NULL, &p_val)) {
-      p_space = p_val;
-      g_free(c_key);
-   } else if (u_profile_slots >= GGAZE_ENHANCER_MAX_PROFILES) {
+   g_queue_push_tail(&t_free_keys, c_key);
+   if (t_free_keys.length > GGAZE_ENHANCER_MAX_FREE_VERDICTS) {
+      g_hash_table_remove(p_verdicts, g_queue_pop_head(&t_free_keys));
+   }
+}
+
+/* A new verdict for p_icc (kind e_kind, key c_key taken), under the lock:
+ * babl's answer while the cap allows, NULL past it. */
+static const Babl *
+_ask_babl(GBytes *p_icc, IccBablKind e_kind, char *c_key) {
+   if (u_profile_slots >= GGAZE_ENHANCER_MAX_PROFILES) {
       g_debug("enhancer: not managed, %u distinct profiles already in babl",
               u_profile_slots);
       g_free(c_key);
+      return (NULL);
+   }
+   gboolean    b_asked = FALSE;
+   const Babl *p_space = _babl_space_for(p_icc, e_kind, &b_asked);
+   if (!b_asked) {
+      g_free(c_key);
+      return (NULL);
+   }
+   _keep_verdict(c_key, p_space, !_grew_nothing(p_space, e_kind, p_icc));
+   return (p_space);
+}
+
+/* p_icc's babl space through the verdict table (section comment above):
+ * NULL for a profile babl would decline (never asked), the kept verdict
+ * for one seen before, else a new one. */
+static const Babl *
+_profile_space(GBytes *p_icc) {
+   IccBablKind e_kind = icc_babl_kind(p_icc); /* icc_profile_is_sane too */
+   if (e_kind == ICC_BABL_NONE) {
+      return (NULL);
+   }
+   char       *c_key   = g_compute_checksum_for_bytes(G_CHECKSUM_SHA256, p_icc);
+   const Babl *p_space = NULL;
+   g_mutex_lock(&t_profiles_lock);
+   if (p_verdicts == NULL) {
+      p_verdicts =
+         g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+   }
+   const ProfileVerdict *p_v = g_hash_table_lookup(p_verdicts, c_key);
+   if (p_v != NULL) {
+      p_space = p_v->p_space;
+      g_free(c_key);
    } else {
-      gboolean b_asked = FALSE;
-      p_space          = _babl_space_for(p_icc, &b_asked);
-      if (b_asked && (p_space == NULL || !_space_known(p_space))) {
-         u_profile_slots++;
-      }
-      g_hash_table_insert(p_profiles, c_key, (gpointer)p_space);
+      p_space = _ask_babl(p_icc, e_kind, c_key);
    }
    g_mutex_unlock(&t_profiles_lock);
    return (p_space);
 }
 
-/* The space of a profile worth managing: one icc_profile_is_sane() vouches
- * for and babl parses (a matrix/TRC RGB, a grey TRC, or -- through babl's
- * LCMS -- a CMYK one) to a space other than sRGB (babl hands back its own
- * sRGB space for a profile equivalent to it). NULL otherwise. */
+/* The space of a profile worth managing: one icc_babl_kind() (so
+ * icc_profile_is_sane) lets through and babl parses (a matrix/TRC RGB, a
+ * grey TRC, or -- through babl's LCMS -- a CMYK one) to a space other than
+ * sRGB (babl hands back its own sRGB space for a profile equivalent to
+ * it). NULL otherwise. */
 static const Babl *
 _space_of_profile(GBytes *p_icc) {
-   const Babl *p_space =
-      icc_profile_is_sane(p_icc) ? _profile_space(p_icc) : NULL;
+   const Babl *p_space = _profile_space(p_icc);
    return (p_space == babl_space("sRGB") ? NULL : p_space);
 }
 
@@ -1056,10 +1149,15 @@ _managed_space(GFile *p_file) {
    return (p_space);
 }
 
+const Babl *
+enhancer_test_profile_space(GBytes *p_icc) {
+   g_return_val_if_fail(p_icc != NULL, NULL);
+   return (_space_of_profile(p_icc));
+}
+
 gboolean
 enhancer_test_profile_is_managed(GBytes *p_icc) {
-   g_return_val_if_fail(p_icc != NULL, FALSE);
-   return (_space_of_profile(p_icc) != NULL);
+   return (enhancer_test_profile_space(p_icc) != NULL);
 }
 
 guint
@@ -1068,6 +1166,14 @@ enhancer_test_profile_slots(void) {
    guint u_slots = u_profile_slots;
    g_mutex_unlock(&t_profiles_lock);
    return (u_slots);
+}
+
+guint
+enhancer_test_profile_verdicts(void) {
+   g_mutex_lock(&t_profiles_lock);
+   guint u_n = p_verdicts != NULL ? g_hash_table_size(p_verdicts) : 0;
+   g_mutex_unlock(&t_profiles_lock);
+   return (u_n);
 }
 
 /* loader/intact.h vouches for p_file and its stored size is within the
