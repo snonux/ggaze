@@ -70,8 +70,10 @@ GdkTexture *ggaze_viewer_get_frame(GgazeViewer *p_viewer);
 gboolean ggaze_viewer_is_animating(GgazeViewer *p_viewer);
 
 /* How many times the animation tick callback has run in this widget's
- * life. A test seam: it is how a test tells a slow animation that only
- * ticks near its frames from one that keeps the frame clock busy. */
+ * life (every run counted, whichever animation it played). A test seam:
+ * nothing in the app reads it; a slow animation must keep the frame clock
+ * ticking only near its frame changes, and a fast one's ticks are the
+ * clock's measured rate (tests/test_viewer.c, yb2). */
 guint ggaze_viewer_get_tick_count(GgazeViewer *p_viewer);
 
 /* Hold (TRUE) or release (FALSE) an animation on its first frame. The

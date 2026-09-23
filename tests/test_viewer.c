@@ -597,38 +597,75 @@ test_animation_pauses_while_unmapped(void) {
    fx_close(&fx);
 }
 
-/* A 10 ms frame delay (fastdelay.gif; glycin hands it over as 10 ms,
- * gdk-pixbuf 2.42 raises it to 20 itself) plays at GGAZE_ANIM_MIN_DELAY_MS,
- * not as fast as the frame clock ticks: over a one-second window the
- * frame on screen changes at most W / 20 ms + 2 times -- the dues are at
- * least the clamp apart, plus one for the fencepost and one for a first
- * change whose due fell up to a tick before the window opened. Anything
- * spinning (a change per tick is ~60 in that second, per main-loop turn
- * hundreds) fails; the frames must also keep changing (at least one
- * change), or "no spin" would be satisfied by not playing at all. (A
- * 0 ms delay is no test of the clamp: the decoders make it 100 ms.) */
-static void
-test_fast_delay_plays_at_the_clamp(void) {
-   ViewerFx fx;
-   fx_open_fixture(&fx, "fastdelay.gif", ANIM_W, ANIM_H);
-   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
-   g_assert_true(wait_past_first_frame(fx.p_viewer));
+/* Pump the main loop for u_ms of the MONOTONIC clock and count how
+ * often the frame on screen changes; *p_window_ms gets the window's real
+ * length (an iteration can overrun under load) and *p_ticks how many
+ * times the viewer's tick callback ran in it. A window measured by the
+ * clock, and changes counted along the way, is what keeps these tests
+ * honest on a loaded machine: a fixed-iteration drain stretches to
+ * seconds there, and comparing only the first and last frame of a
+ * LOOPING animation can land on the same frame by chance. */
+static guint
+count_frame_changes(GgazeViewer *p_v, guint u_ms, gint64 *p_window_ms,
+                    guint *p_ticks) {
    guint       u_changes = 0;
-   GdkTexture *p_last    = ggaze_viewer_get_frame(fx.p_viewer);
+   guint       u_ticks0  = ggaze_viewer_get_tick_count(p_v);
+   GdkTexture *p_last    = ggaze_viewer_get_frame(p_v);
    gint64      i_start   = g_get_monotonic_time();
-   while (g_get_monotonic_time() - i_start < G_USEC_PER_SEC) {
+   while (g_get_monotonic_time() - i_start < (gint64)u_ms * 1000) {
       g_main_context_iteration(g_main_context_default(), FALSE);
-      GdkTexture *p_now = ggaze_viewer_get_frame(fx.p_viewer);
+      GdkTexture *p_now = ggaze_viewer_get_frame(p_v);
       if (p_now != p_last) {
          u_changes++;
          p_last = p_now;
       }
       g_usleep(500);
    }
-   gint64 i_window_ms = (g_get_monotonic_time() - i_start) / 1000;
+   *p_window_ms = (g_get_monotonic_time() - i_start) / 1000;
+   *p_ticks     = ggaze_viewer_get_tick_count(p_v) - u_ticks0;
+   return (u_changes);
+}
+
+/* A 10 ms frame delay (fastdelay.gif; glycin hands it over as 10 ms,
+ * gdk-pixbuf 2.42 raises it to 20 itself) plays at GGAZE_ANIM_MIN_DELAY_MS,
+ * not as fast as the frame clock ticks: over a window of W ms the frame
+ * on screen changes at most W / 20 ms + 2 times -- the dues are at least
+ * the clamp apart, plus one for the fencepost and one for a first change
+ * whose due fell up to a tick before the window opened. The frames must
+ * also keep changing (at least one change), or "no spin" would be
+ * satisfied by not playing at all.
+ *
+ * An unclamped player would change the frame on every tick, so the bound
+ * only tells the two apart when the frame clock ticked MORE often than
+ * the bound allows -- above 50 Hz. The tick callback stays on the clock
+ * for the whole window (20 ms is inside GGAZE_ANIM_TICK_LEAD_MS), so the
+ * viewer's tick count IS the clock's measured rate; at or below 50 Hz (a
+ * starved main loop, a slow virtual display) the discriminating assertion
+ * is skipped with a message. The clamp itself is proven by the unit tests
+ * (tests/test_animation.c, animation_frame_delay_ms); this subtest shows
+ * the viewer schedules by the clamped delay rather than per tick. (A 0 ms
+ * delay is no test of the clamp: the decoders make it 100 ms.) */
+static void
+test_fast_delay_plays_at_the_clamp(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "fastdelay.gif", ANIM_W, ANIM_H);
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   g_assert_true(wait_past_first_frame(fx.p_viewer));
+   gint64 i_window_ms = 0;
+   guint  u_ticks     = 0;
+   guint  u_changes =
+      count_frame_changes(fx.p_viewer, 1000, &i_window_ms, &u_ticks);
+   guint u_bound = (guint)(i_window_ms / GGAZE_ANIM_MIN_DELAY_MS) + 2u;
+   g_test_message("%u changes, %u ticks in %" G_GINT64_FORMAT " ms", u_changes,
+                  u_ticks, i_window_ms);
    g_assert_cmpuint(u_changes, >=, 1);
-   g_assert_cmpuint(u_changes, <=,
-                    (guint)(i_window_ms / GGAZE_ANIM_MIN_DELAY_MS) + 2u);
+   if (u_ticks > u_bound) {
+      g_assert_cmpuint(u_changes, <=, u_bound);
+   } else {
+      g_test_message("frame clock ticked %u times, not above the clamp "
+                     "bound of %u: clamped and unclamped look alike here",
+                     u_ticks, u_bound);
+   }
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
    fx_close(&fx);
 }
@@ -692,21 +729,26 @@ test_play_once_webp_holds_last_frame(void) {
  * GGAZE_ANIM_TICK_LEAD_MS of 40 ms before it plus the due tick: a handful
  * of ticks per frame even on a 120 Hz clock, so the bound below is eight
  * per frame -- where a tick on every vblank of a 60 Hz clock would be
- * about 60 per second. At least one frame must change in the window, so
- * "few ticks" cannot be satisfied by not playing. */
+ * about 30 per frame period. W is the MEASURED window, not the nominal
+ * 1200 ms, so a window that overran under load raises the bound only by
+ * the frames that really fell due in it and the ratio -- eight ticks per
+ * 500 ms against thirty -- stays what the assertion discriminates on.
+ * At least one frame must change in the window (with frames 500 ms apart
+ * two fall due in any 1200 ms), so "few ticks" cannot be satisfied by not
+ * playing; the changes are counted as they happen, since the looping
+ * clip may be back on the frame it started from when the window ends. */
 static void
 test_slow_animation_ticks_only_near_frames(void) {
    ViewerFx fx;
    fx_open_fixture(&fx, "slow.gif", ANIM_W, ANIM_H);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
-   guint       u_ticks0 = ggaze_viewer_get_tick_count(fx.p_viewer);
-   GdkTexture *p_first  = ggaze_viewer_get_frame(fx.p_viewer);
-   gint64      i_start  = g_get_monotonic_time();
-   ggtest_drain_main(1200);
-   gint64 i_window_ms = (g_get_monotonic_time() - i_start) / 1000;
-   guint  u_ticks     = ggaze_viewer_get_tick_count(fx.p_viewer) - u_ticks0;
-   g_test_message("%u ticks in %" G_GINT64_FORMAT " ms", u_ticks, i_window_ms);
-   g_assert_true(ggaze_viewer_get_frame(fx.p_viewer) != p_first);
+   gint64 i_window_ms = 0;
+   guint  u_ticks     = 0;
+   guint  u_changes =
+      count_frame_changes(fx.p_viewer, 1200, &i_window_ms, &u_ticks);
+   g_test_message("%u changes, %u ticks in %" G_GINT64_FORMAT " ms", u_changes,
+                  u_ticks, i_window_ms);
+   g_assert_cmpuint(u_changes, >=, 1);
    g_assert_cmpuint(u_ticks, >=, 1);
    g_assert_cmpuint(u_ticks, <=, ((guint)(i_window_ms / 500) + 2u) * 8u);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));

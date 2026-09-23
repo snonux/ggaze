@@ -108,9 +108,13 @@ gboolean animation_probe(const guint8 *p_buf, gsize u_len,
  * until the decoder is dropped. So at this cap the worst case is 4 x 128
  * = 512 MiB held plus 3 x 256 MiB at peak, ~1.3 GiB, if every file in
  * sight is a maximal animation (the two neighbours are prefetched with
- * all their frames: viewload.c _prefetch says why). Measured on Fedora 44
- * (glycin), loader_load() of a 109-frame 640 x 480 GIF -- 32 M pixels,
- * just under the cap: 135 MB more RSS held after the load, a peak of
+ * all their frames: viewload.c _prefetch says why). On top of that the
+ * renderer uploads each frame of the VISIBLE animation the first time it
+ * is drawn and may keep that copy as long as the frame's texture lives:
+ * up to another 128 MiB, which on an integrated GPU (shared memory) is
+ * system RAM too -- ~1.4 GiB in all. Measured on Fedora 44 (glycin),
+ * loader_load() of a 109-frame 640 x 480 GIF -- 32 M pixels, just under
+ * the cap: 135 MB more RSS held after the load, a peak of
  * 270 MB above the baseline during it; the same clip with 110 frames is
  * over the cap and takes the still path at 8 MB. The still cap
  * (GGAZE_IMAGE_MAX_PIXELS, 100 M pixels) would have allowed ~400 MB held

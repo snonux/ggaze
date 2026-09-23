@@ -359,7 +359,10 @@ feels instant.
   animation: 4 cache entries × 128 MiB held plus three decodes in flight
   (the visible load and two neighbour prefetches, which take every frame
   too — a first-frame-only prefetch would leave an entry a hit could not
-  play; `viewload.c` `_prefetch`) at ~256 MiB peak each, ~1.3 GiB.
+  play; `viewload.c` `_prefetch`) at ~256 MiB peak each, ~1.3 GiB,
+  plus the renderer's upload of the visible animation's frames as they
+  play (up to another 128 MiB, system RAM on an integrated GPU with
+  shared memory), ~1.4 GiB.
   The enhance controller may hold two more outside that cap — the current
   file's original as the viewer last showed it (the identity the tools
   and hold-`Space` compare against, learned at the window's texture choke

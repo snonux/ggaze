@@ -1707,20 +1707,25 @@ test_single_frame_gif_has_no_animation(void) {
  *     g_log_writer_default, i.e. what GLib would have done without it.
  * Both roads drop the two known messages and let anything else through,
  * printed, FAILING the subtest (g_test_fail_printf) if it is a warning or
- * a critical, so no other message slips by unnoticed. */
+ * a critical, so no other message slips by unnoticed. An unexpected
+ * classic message fails ONCE: _webp_noise_log_cb hands it to
+ * g_log_default_handler, which forwards it to the log writer
+ * (g_log_structured_array), and it is the writer that fails it. */
 static const char *const WEBP_MODULE_NOISE[] = {
    "Could not instantiate WebP implementation of GdkPixbufAnimationIter",
    "gdk_pixbuf_animation_iter_get_pixbuf: assertion "
    "'GDK_IS_PIXBUF_ANIMATION_ITER (iter)' failed",
 };
 
-/* Set while a truncated WebP decodes (the main thread only: the loader
- * decodes synchronously here). */
-static gboolean b_webp_noise_filter = FALSE;
+/* Set while a truncated WebP decodes. The decode itself is synchronous on
+ * the main thread, but the writer is the whole process's and a decoder
+ * may log from a thread of its own (glycin's workers do), so the flag is
+ * read and written atomically. */
+static gint b_webp_noise_filter = FALSE;
 
 /* Known messages dropped so far, on either road (the filter's self-test
- * counts them). */
-static guint u_webp_noise_dropped = 0;
+ * counts them). Atomic for the same reason as the flag above. */
+static gint i_webp_noise_dropped = 0;
 
 static gboolean
 _is_webp_module_noise(const gchar *c_message) {
@@ -1740,17 +1745,20 @@ _fail_if_unexpected(GLogLevelFlags e_level, const gchar *c_message) {
    }
 }
 
-/* The classic-API road (see above). */
+/* The classic-API road (see above). Anything that is not the noise goes
+ * on to g_log_default_handler, which prints it through the log writer --
+ * and the writer, filtering while this handler is installed, is what
+ * fails the subtest for it, so this handler does not fail it a second
+ * time. */
 static void
 _webp_noise_log_cb(const gchar *c_domain, GLogLevelFlags e_level,
                    const gchar *c_message, gpointer p_data) {
    (void)p_data;
    if (_is_webp_module_noise(c_message)) {
-      u_webp_noise_dropped++;
+      g_atomic_int_inc(&i_webp_noise_dropped);
       return;
    }
    g_log_default_handler(c_domain, e_level, c_message, NULL);
-   _fail_if_unexpected(e_level, c_message);
 }
 
 /* The MESSAGE field of a structured message as a string (transfer full),
@@ -1771,7 +1779,7 @@ _log_field_message(const GLogField *p_fields, gsize u_fields) {
 static GLogWriterOutput
 _webp_noise_writer(GLogLevelFlags e_level, const GLogField *p_fields,
                    gsize u_fields, gpointer p_data) {
-   if (b_webp_noise_filter) {
+   if (g_atomic_int_get(&b_webp_noise_filter)) {
       gchar   *c_msg   = _log_field_message(p_fields, u_fields);
       gboolean b_noise = _is_webp_module_noise(c_msg);
       if (!b_noise) {
@@ -1779,7 +1787,7 @@ _webp_noise_writer(GLogLevelFlags e_level, const GLogField *p_fields,
       }
       g_free(c_msg);
       if (b_noise) {
-         u_webp_noise_dropped++;
+         g_atomic_int_inc(&i_webp_noise_dropped);
          return (G_LOG_WRITER_HANDLED);
       }
    }
@@ -1793,9 +1801,9 @@ _with_webp_noise_filtered(void (*fn_decode)(const guint8 *, gsize),
                           const guint8 *p_buf, gsize u_len) {
    GLogLevelFlags e_fatal = g_log_set_always_fatal(G_LOG_FATAL_MASK);
    GLogFunc       fn_prev = g_log_set_default_handler(_webp_noise_log_cb, NULL);
-   b_webp_noise_filter    = TRUE;
+   g_atomic_int_set(&b_webp_noise_filter, TRUE);
    fn_decode(p_buf, u_len);
-   b_webp_noise_filter = FALSE;
+   g_atomic_int_set(&b_webp_noise_filter, FALSE);
    g_log_set_default_handler(fn_prev, NULL);
    g_log_set_always_fatal(e_fatal);
 }
@@ -1821,10 +1829,10 @@ _emit_webp_noise(const guint8 *p_buf, gsize u_len) {
  * run or failing this subtest -- and the filter is off again afterwards. */
 static void
 test_webp_noise_filter_catches_both_roads(void) {
-   guint u_before = u_webp_noise_dropped;
+   gint i_before = g_atomic_int_get(&i_webp_noise_dropped);
    _with_webp_noise_filtered(_emit_webp_noise, NULL, 0);
-   g_assert_cmpuint(u_webp_noise_dropped - u_before, ==, 4);
-   g_assert_false(b_webp_noise_filter);
+   g_assert_cmpint(g_atomic_int_get(&i_webp_noise_dropped) - i_before, ==, 4);
+   g_assert_false(g_atomic_int_get(&b_webp_noise_filter));
    g_assert_false(g_test_failed());
 }
 
