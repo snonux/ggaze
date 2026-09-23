@@ -555,14 +555,6 @@ enhancer_apply(GeglBuffer *p_in, const EnhancerPreset *p_preset,
  * reads as sRGB. An sRGB buffer (every file without a managed profile)
  * exports exactly as before. */
 
-/* TRUE iff p_buf's space is sRGB (untagged, or a profile babl identified
- * as sRGB). */
-static gboolean
-_buffer_is_srgb(GeglBuffer *p_buf) {
-   const Babl *p_space = babl_format_get_space(gegl_buffer_get_format(p_buf));
-   return (p_space == NULL || p_space == babl_space("sRGB"));
-}
-
 /* Pick the GEGL saver op and (for jpeg) quality from the output extension.
  * Returns the op name, or NULL if the extension is unsupported / the op is
  * not installed. ju0: never write JPEG bytes into a .png. */
@@ -790,13 +782,18 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
  *
  * The managed path is an UPGRADE, never a new verdict: it either yields a
  * buffer it can vouch for or declines, and a declined file takes the
- * LOADER path -- ggaze's own loader, pixels copied as sRGB, which is
- * byte for byte what every file got before xb2, errors included. It
- * declines
+ * LOADER path -- ggaze's own loader, the same decode and the same errors
+ * every file got before xb2, its pixels copied as sRGB. (Copied RIGHT
+ * since xb2: before it the copy swapped red and blue and kept premultiplied
+ * alpha -- see _load_via_loader -- so the enhance preview of every file,
+ * untagged ones included, changed visibly with xb2: it is now what the
+ * file holds.) It declines
  *   - a file with no profile, one babl cannot use (a LUT-only RGB profile:
  *     GEGL's loader would tag it sRGB anyway) or one babl identifies as
- *     sRGB -- nothing to manage, and the loader path is faster and keeps
- *     the pixels exactly as before;
+ *     sRGB -- nothing to manage, and the loader path is faster;
+ *   - a profile for another number of colour components than the image
+ *     stores (a grey profile on an RGB JPEG, an RGB one on a CMYK file):
+ *     it cannot describe these pixels (_space_fits);
  *   - a non-local file (GEGL's loaders take a path) and a build whose GEGL
  *     lacks the loader op;
  *   - whatever the loader's own decode gate refuses (the same sniff, the
@@ -805,11 +802,13 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
  *     (gegl:png-load / gegl:jpg-load start the file over on EOF and never
  *     return), a PNG whose image data libpng would reject (the op logs
  *     "failed to open file" and yields a black / partial buffer of the
- *     header's size, with no error), or a JPEG libjpeg gives up on
- *     (gegl:jpg-load has no longjmp handler: libjpeg's default exits the
- *     process) -- which, in a build without the `jpeg` feature, is every
- *     JPEG, since there is no libjpeg to check with. A camera-truncated
- *     JPEG (no EOI) decodes on the loader path as it always did;
+ *     header's size, with no error), or a JPEG libjpeg gives up on or
+ *     that ends before libjpeg is done with it (gegl:jpg-load has no
+ *     longjmp handler: libjpeg's default exits the process, and at EOF its
+ *     reader starts the file over into "two SOI markers") -- which, in a
+ *     build without the `jpeg` feature, is every JPEG, since there is no
+ *     libjpeg to check with. A camera-truncated JPEG (no EOI) decodes on
+ *     the loader path as it always did;
  *   - a decode whose extent is not the header's (a corrupt header the
  *     checks above could not see).
  *
@@ -825,7 +824,12 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
  * the last walk and GEGL's open (the completeness walk also reads the
  * stored size, so no separate header peek opens the file), and the same
  * race exists for gdk-pixbuf's path-taking calls on the loader path
- * (tech-stack.md). */
+ * (tech-stack.md).
+ *
+ * The checks that read a whole file (the PNG inflate, the libjpeg pass)
+ * take the worker's GCancellable, so a superseded render stops checking
+ * between blocks and declines; GEGL's decode itself, once started, runs to
+ * its end. */
 
 /* The loader path (section comment above): ggaze's own loader, so the EXIF
  * Orientation every backend honors (decision #26) is applied, pixels
@@ -905,20 +909,24 @@ _managed_space(GFile *p_file) {
 
 /* loader/intact.h vouches for p_file and its stored size is within the
  * shared caps: the only files GEGL's loaders may see (*p_size set). A
- * JPEG must also get through libjpeg once (intact_jpeg_decodes), after the
- * caps: gegl:jpg-load exits the process where libjpeg gives up. */
+ * JPEG must also get through libjpeg once (intact_jpeg_decodes, EOF
+ * fatal), after the caps: gegl:jpg-load exits the process where libjpeg
+ * gives up, and on a file cut short. p_cancel (nullable) stops the whole-
+ * file passes between blocks; a cancelled check declines like any other
+ * (the caller's own cancellation check drops the result). */
 static gboolean
-_vouched(GFile *p_file, GgazeFormat e_fmt, IntactSize *p_size) {
+_vouched(GFile *p_file, GgazeFormat e_fmt, GCancellable *p_cancel,
+         IntactSize *p_size) {
    GError  *p_err = NULL;
    gboolean b_png = e_fmt == GGAZE_FMT_PNG;
-   gboolean b_ok  = b_png ? intact_png(p_file, p_size, &p_err)
-                          : intact_jpeg(p_file, p_size, &p_err);
+   gboolean b_ok  = b_png ? intact_png(p_file, p_cancel, p_size, &p_err)
+                          : intact_jpeg(p_file, p_cancel, p_size, &p_err);
    if (b_ok) {
       b_ok = detect_dims_within_bounds("enhancer", p_size->u_w, p_size->u_h,
                                        NULL, &p_err);
    }
    if (b_ok && !b_png) {
-      b_ok = intact_jpeg_decodes(p_file, &p_err);
+      b_ok = intact_jpeg_decodes(p_file, p_cancel, &p_err);
    }
    if (!b_ok) {
       g_debug("enhancer: not managed, the loader decodes it: %s",
@@ -926,6 +934,27 @@ _vouched(GFile *p_file, GgazeFormat e_fmt, IntactSize *p_size) {
       g_error_free(p_err);
    }
    return (b_ok);
+}
+
+/* Whether the profile space p_space describes an image of u_comps colour
+ * components (IntactSize): a grey profile one, a CMYK profile four, an RGB
+ * one three. libpng and libjpeg do not check this for GEGL's loaders --
+ * an RGB JPEG carrying a grey profile decodes tagged with the grey space,
+ * and the conversion then reads its RGB as something else -- so a profile
+ * for another number of components is declined here: it cannot describe
+ * these pixels, and the loader path shows them as sRGB, as before xb2. */
+static gboolean
+_space_fits(const Babl *p_space, guint u_comps) {
+   guint u_want = babl_space_is_gray(p_space)   ? 1
+                  : babl_space_is_cmyk(p_space) ? 4
+                                                : 3;
+   if (u_comps != u_want) {
+      g_debug("enhancer: not managed, a %u-component profile on a "
+              "%u-component image",
+              u_want, u_comps);
+      return (FALSE);
+   }
+   return (TRUE);
 }
 
 /* Whether a w x h extent is the header's stored size. */
@@ -979,7 +1008,9 @@ _free_pixels(guchar *p_pixels, gpointer p_data) {
  * presets and export stay in the source's gamut; sRGB for a CMYK or grey
  * profile (a CMYK JPEG with its press profile), whose pixels have no
  * meaning in an "R'G'B'A" format of that space -- the gegl_buffer_get()
- * below then does the colorimetric CMYK/grey -> sRGB conversion. */
+ * below then does the colorimetric CMYK/grey -> sRGB conversion. So an
+ * sRGB-tagged buffer does NOT mean "not managed": _load reports that
+ * separately (the hold-Space compare needs to know). */
 static const Babl *
 _working_space(GeglBuffer *p_buf) {
    const Babl *p_space = babl_format_get_space(gegl_buffer_get_format(p_buf));
@@ -1026,12 +1057,13 @@ _rgba8_upright(GeglBuffer *p_buf, int i_orient) {
 /* The managed path (section comment above): a buffer, or NULL when it
  * declines -- never an error of its own, the loader path then decides. */
 static GeglBuffer *
-_load_managed(GFile *p_file, const char *c_path) {
-   GgazeFormat e_fmt = GGAZE_FMT_UNKNOWN;
-   const char *c_op  = _gegl_loader_for(p_file, &e_fmt);
+_load_managed(GFile *p_file, const char *c_path, GCancellable *p_cancel) {
+   GgazeFormat e_fmt   = GGAZE_FMT_UNKNOWN;
+   const char *c_op    = _gegl_loader_for(p_file, &e_fmt);
+   const Babl *p_space = c_op != NULL ? _managed_space(p_file) : NULL;
    IntactSize  t_size;
-   if (c_op == NULL || _managed_space(p_file) == NULL ||
-       !_vouched(p_file, e_fmt, &t_size)) {
+   if (p_space == NULL || !_vouched(p_file, e_fmt, p_cancel, &t_size) ||
+       !_space_fits(p_space, t_size.u_comps)) {
       return (NULL);
    }
    GeglBuffer *p_raw = _load_via_gegl_op(c_op, c_path, &t_size);
@@ -1045,13 +1077,54 @@ _load_managed(GFile *p_file, const char *c_path) {
    return (p_out);
 }
 
+/* enhancer_load with the worker's GCancellable (nullable) for the managed
+ * path's whole-file checks, and *pb_managed (nullable) told whether the
+ * managed path decoded the file -- its embedded profile applied, whatever
+ * the working space (a CMYK or grey file's buffer is sRGB, yet its pixels
+ * are the profile's, not the loader's). */
+static GeglBuffer *
+_load(GFile *p_file, GCancellable *p_cancel, gboolean *pb_managed,
+      GError **p_err) {
+   char       *c_path = g_file_get_path(p_file);
+   GeglBuffer *p_buf =
+      c_path != NULL ? _load_managed(p_file, c_path, p_cancel) : NULL;
+   g_free(c_path);
+   if (pb_managed != NULL) {
+      *pb_managed = p_buf != NULL;
+   }
+   return (p_buf != NULL ? p_buf : _load_via_loader(p_file, p_err));
+}
+
+/* The managed path's own gates, header-deep: _load_managed's choices up to
+ * (not including) the completeness checks, with the component count from
+ * the headers alone -- intact_png_header for a PNG, the (headers-only)
+ * intact_jpeg walk for a JPEG -- and the JPEG's libjpeg requirement as a
+ * build fact, since the libjpeg pass declines every JPEG without it. */
+gboolean
+enhancer_would_manage(GFile *p_file) {
+   g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
+   char       *c_path = g_file_get_path(p_file);
+   GgazeFormat e_fmt  = GGAZE_FMT_UNKNOWN;
+   const char *c_op  = c_path != NULL ? _gegl_loader_for(p_file, &e_fmt) : NULL;
+   gboolean    b_png = e_fmt == GGAZE_FMT_PNG;
+   const Babl *p_space = NULL;
+   IntactSize  t_size  = {0, 0, 0};
+   g_free(c_path);
+   if (c_op != NULL && (b_png || GGAZE_HAVE_JPEG)) {
+      p_space = _managed_space(p_file);
+   }
+   if (p_space == NULL) {
+      return (FALSE);
+   }
+   gboolean b_hdr = b_png ? intact_png_header(p_file, &t_size, NULL)
+                          : intact_jpeg(p_file, NULL, &t_size, NULL);
+   return (b_hdr && _space_fits(p_space, t_size.u_comps));
+}
+
 GeglBuffer *
 enhancer_load(GFile *p_file, GError **p_err) {
    g_return_val_if_fail(p_file != NULL, NULL);
-   char       *c_path = g_file_get_path(p_file);
-   GeglBuffer *p_buf  = c_path != NULL ? _load_managed(p_file, c_path) : NULL;
-   g_free(c_path);
-   return (p_buf != NULL ? p_buf : _load_via_loader(p_file, p_err));
+   return (_load(p_file, NULL, NULL, p_err));
 }
 
 /* Asks babl for sRGB pixels ("R'G'B'A u8" without a space IS sRGB): for a
@@ -1098,23 +1171,21 @@ typedef struct {
    GPtrArray *p_presets; /* owned deep copy (thread-safe snapshot) */
    guint8     u_mask;
    Transform  t_xf; /* by value: a snapshot (see _ExportReq) */
-   gboolean   b_want_original;
 } _AsyncApplyReq;
 
 /* The worker's result: the texture plus the original's upright size, which
- * the controller records for the crop tool, and the managed original when
- * asked for (see the finish doc). */
+ * the controller records for the crop tool, and whether the decode was
+ * colour-managed (see the finish doc). */
 typedef struct {
-   GdkTexture *p_tex;  /* owned */
-   GdkTexture *p_orig; /* owned, NULL unless managed and asked for */
+   GdkTexture *p_tex; /* owned */
    gint        i_orig_w;
    gint        i_orig_h;
+   gboolean    b_managed;
 } _ApplyResult;
 
 static void
 _apply_result_free(_ApplyResult *p_res) {
    g_clear_object(&p_res->p_tex);
-   g_clear_object(&p_res->p_orig);
    g_free(p_res);
 }
 
@@ -1137,17 +1208,12 @@ _apply_chain_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
       return; /* superseded before the worker even started */
    }
    GError       *p_err = NULL;
-   GeglBuffer   *p_buf = enhancer_load(p_req->p_file, &p_err);
    _ApplyResult *p_res = g_new0(_ApplyResult, 1);
+   GeglBuffer   *p_buf =
+      _load(p_req->p_file, p_cancel, &p_res->b_managed, &p_err);
    if (p_buf != NULL) {
-      p_res->i_orig_w = gegl_buffer_get_width(p_buf);
-      p_res->i_orig_h = gegl_buffer_get_height(p_buf);
-      if (p_req->b_want_original && !_buffer_is_srgb(p_buf)) {
-         /* The identity chain of a managed decode: the original as the
-          * preview's colour pipeline shows it (a failure only costs the
-          * compare its managed original, never the render). */
-         p_res->p_orig = enhancer_buffer_to_texture(p_buf, NULL);
-      }
+      p_res->i_orig_w   = gegl_buffer_get_width(p_buf);
+      p_res->i_orig_h   = gegl_buffer_get_height(p_buf);
       GeglBuffer *p_enh = enhancer_apply_chain(
          p_buf, p_req->p_presets, p_req->u_mask, &p_req->t_xf, &p_err);
       if (p_enh != NULL) {
@@ -1156,7 +1222,6 @@ _apply_chain_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
       }
       g_object_unref(p_buf);
    }
-   (void)p_cancel;
    if (p_res->p_tex == NULL) {
       _apply_result_free(p_res);
       g_task_return_error(p_task, p_err);
@@ -1168,14 +1233,13 @@ _apply_chain_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
 void
 enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
                            guint8 u_mask, const Transform *p_xf,
-                           gboolean b_want_original, GCancellable *p_cancel,
-                           GAsyncReadyCallback p_cb, gpointer p_data) {
+                           GCancellable *p_cancel, GAsyncReadyCallback p_cb,
+                           gpointer p_data) {
    g_return_if_fail(p_file != NULL);
-   _AsyncApplyReq *p_req  = g_new0(_AsyncApplyReq, 1);
-   p_req->p_file          = (GFile *)g_object_ref(p_file);
-   p_req->p_presets       = _presets_copy(p_presets);
-   p_req->u_mask          = u_mask;
-   p_req->b_want_original = b_want_original;
+   _AsyncApplyReq *p_req = g_new0(_AsyncApplyReq, 1);
+   p_req->p_file         = (GFile *)g_object_ref(p_file);
+   p_req->p_presets      = _presets_copy(p_presets);
+   p_req->u_mask         = u_mask;
    _snapshot_transform(&p_req->t_xf, p_xf);
    GTask *p_task = g_task_new(p_file, p_cancel, p_cb, p_data);
    g_task_set_task_data(p_task, p_req, (GDestroyNotify)_async_apply_req_free);
@@ -1185,7 +1249,7 @@ enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
 
 GdkTexture *
 enhancer_apply_chain_finish(GAsyncResult *p_res, gint *p_orig_w, gint *p_orig_h,
-                            GdkTexture **pp_original, GError **p_err) {
+                            gboolean *pb_managed, GError **p_err) {
    g_return_val_if_fail(G_IS_TASK(p_res), NULL);
    _ApplyResult *p_out =
       (_ApplyResult *)g_task_propagate_pointer((GTask *)p_res, p_err);
@@ -1198,12 +1262,59 @@ enhancer_apply_chain_finish(GAsyncResult *p_res, gint *p_orig_w, gint *p_orig_h,
    if (p_orig_h != NULL) {
       *p_orig_h = p_out->i_orig_h;
    }
-   if (pp_original != NULL) {
-      *pp_original = g_steal_pointer(&p_out->p_orig);
+   if (pb_managed != NULL) {
+      *pb_managed = p_out->b_managed;
    }
    GdkTexture *p_tex = g_steal_pointer(&p_out->p_tex);
    _apply_result_free(p_out);
    return (p_tex);
+}
+
+/* --- the managed original (hold-Space on a colour-managed file) ---------
+ *
+ * Built only when asked for -- the first Space press on a render whose
+ * decode was managed -- not with every render: it is a second full-size
+ * texture (w x h x 4 bytes: ~100 MB at 24 MP, ~200 MB at 50 MP) outside
+ * the texture cache's cap, which most enhance sessions never look at. The
+ * worker decodes the file again through the same _load() as the render,
+ * so the original and the render share one colour pipeline and the
+ * compare shows only what the presets did. */
+
+static void
+_managed_original_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
+                         GCancellable *p_cancel) {
+   (void)p_task_data;
+   if (g_task_return_error_if_cancelled(p_task)) {
+      return;
+   }
+   GError     *p_err     = NULL;
+   gboolean    b_managed = FALSE;
+   GeglBuffer *p_buf     = _load(G_FILE(p_src), p_cancel, &b_managed, &p_err);
+   GdkTexture *p_tex     = NULL;
+   if (p_buf != NULL && b_managed) {
+      p_tex = enhancer_buffer_to_texture(p_buf, &p_err);
+   }
+   g_clear_object(&p_buf);
+   if (p_err != NULL) {
+      g_task_return_error(p_task, p_err);
+   } else {
+      g_task_return_pointer(p_task, p_tex, g_object_unref);
+   }
+}
+
+void
+enhancer_managed_original_async(GFile *p_file, GCancellable *p_cancel,
+                                GAsyncReadyCallback p_cb, gpointer p_data) {
+   g_return_if_fail(G_IS_FILE(p_file));
+   GTask *p_task = g_task_new(p_file, p_cancel, p_cb, p_data);
+   g_task_run_in_thread(p_task, _managed_original_thread);
+   g_object_unref(p_task);
+}
+
+GdkTexture *
+enhancer_managed_original_finish(GAsyncResult *p_res, GError **p_err) {
+   g_return_val_if_fail(G_IS_TASK(p_res), NULL);
+   return (g_task_propagate_pointer(G_TASK(p_res), p_err));
 }
 
 typedef struct {

@@ -11,14 +11,18 @@
  * never gives a verdict of its own (a broken file gets exactly the
  * loader's), an sRGB profile keeps the loader path byte for byte, the
  * export keeps the profile, the missing-op fallbacks, a non-local file,
- * the async render's managed original, and -- when ./sample-images is
- * there -- every profiled camera file.
+ * a profile for other colour components, the cut progressive JPEGs that
+ * made gegl:jpg-load exit, the lazy managed original, the info card's
+ * "would manage" question, and -- when ./sample-images is there -- every
+ * profiled camera file. Every JPEG case holds in a GEGL build without
+ * libjpeg too, where JPEGs keep the loader path (GGAZE_HAVE_JPEG).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
 #include "enhancer.h"
+#include "ggaze-config.h"
 #include "enhancer-gegl.h"
 #include "icc.h"
 #include "loader/intact.h"
@@ -142,6 +146,42 @@ fixture_pixel_is(const char *c_name, gint i_x, gint i_y, int i_r, int i_g,
    return (b_srgb);
 }
 
+/* Whether c_name's decode is colour-managed, as the async render reports
+ * it (enhancer_apply_chain_finish's *pb_managed): the one observable that
+ * also covers CMYK and grey files, whose managed buffers are sRGB-tagged
+ * like the loader path's. */
+typedef struct {
+   GMainLoop *p_loop;
+   gboolean   b_managed;
+} ManagedWait;
+
+static void
+managed_done(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   ManagedWait *p_w   = p_data;
+   GError      *p_err = NULL;
+   GdkTexture  *p_tex =
+      enhancer_apply_chain_finish(p_res, NULL, NULL, &p_w->b_managed, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_tex);
+   g_object_unref(p_tex);
+   g_main_loop_quit(p_w->p_loop);
+}
+
+static gboolean
+render_managed(const char *c_name) {
+   Enhancer   *p_e    = enhancer_new();
+   GFile      *p_file = fixture(c_name);
+   ManagedWait t_w    = {g_main_loop_new(NULL, FALSE), FALSE};
+   enhancer_apply_chain_async(p_file, enhancer_get_presets(p_e), 1u << 2, NULL,
+                              NULL, managed_done, &t_w);
+   g_main_loop_run(t_w.p_loop);
+   g_main_loop_unref(t_w.p_loop);
+   g_object_unref(p_file);
+   enhancer_delete(p_e);
+   return (t_w.b_managed);
+}
+
 /* A big-endian 32-bit field at p (any alignment). */
 static guint32
 be32(const guint8 *p) {
@@ -206,13 +246,28 @@ jpeg_first_segment_len(const GByteArray *p_a) {
    return (2 + (((gsize)p_a->data[4] << 8) | p_a->data[5]));
 }
 
-/* --- managed decodes ---------------------------------------------------- */
+/* --- managed decodes ----------------------------------------------------
+ *
+ * A JPEG is managed only in a build with the `jpeg` feature: without
+ * libjpeg nothing can check it before gegl:jpg-load (which exits the
+ * process on a file libjpeg gives up on), so every JPEG keeps the loader
+ * path there -- CI's gegl lane once built that way, and these cases must
+ * hold in both builds (GGAZE_HAVE_JPEG). What the loader path's pixels
+ * look like is the host's business (see below), so the JPEG-less branch
+ * asserts the path, not the colour. */
 
 /* Tagged with the profile's space, previewed managed: PNG and JPEG. */
 static void
 test_managed_png_and_jpeg(void) {
    g_assert_false(fixture_pixel_is("swapped.png", 0, 0, 0, 0, 255));
+#if GGAZE_HAVE_JPEG
    g_assert_false(fixture_pixel_is("swapped.jpg", 0, 0, 0, 0, 255));
+#else
+   GeglBuffer *p_buf = load_fixture("swapped.jpg");
+   g_assert_true(is_srgb(p_buf));
+   g_object_unref(p_buf);
+   g_assert_false(render_managed("swapped.jpg"));
+#endif
 }
 
 /* swapped-rot6.jpg: 16x8 stored, left half red / right half green under
@@ -221,9 +276,14 @@ test_managed_png_and_jpeg(void) {
 static void
 test_managed_orientation(void) {
    GeglBuffer *p_buf = load_fixture("swapped-rot6.jpg");
-   g_assert_false(is_srgb(p_buf));
    g_assert_cmpint(gegl_buffer_get_width(p_buf), ==, 8);
    g_assert_cmpint(gegl_buffer_get_height(p_buf), ==, 16);
+#if !GGAZE_HAVE_JPEG
+   g_assert_true(is_srgb(p_buf)); /* the loader path, upright all the same */
+   g_object_unref(p_buf);
+   return;
+#endif
+   g_assert_false(is_srgb(p_buf));
    guint8 c_px[4];
    preview_pixel(p_buf, 0, 0, c_px);
    assert_rgb("rot6 top", c_px, 0, 0, 255, 15);
@@ -233,13 +293,22 @@ test_managed_orientation(void) {
 }
 
 /* CMYK and grey profiles are managed too, but the chain runs in sRGB
- * (their pixels have no meaning in an RGB format of their space). */
+ * (their pixels have no meaning in an RGB format of their space) -- and
+ * the render reports them managed all the same, which is what makes
+ * hold-Space compare against their managed original. */
 static void
 test_cmyk_and_grey_run_in_srgb(void) {
-   g_assert_true(fixture_pixel_is("cmyk-icc.jpg", 0, 0, 0, 0, 255));
    /* linear grey 128/255 is sRGB ~188 */
    g_assert_true(fixture_pixel_is("grey-icc.png", 0, 0, 188, 188, 188));
+   g_assert_true(render_managed("grey-icc.png"));
+#if GGAZE_HAVE_JPEG
+   g_assert_true(fixture_pixel_is("cmyk-icc.jpg", 0, 0, 0, 0, 255));
    g_assert_true(fixture_pixel_is("grey-icc.jpg", 0, 0, 188, 188, 188));
+#endif
+   g_assert_true(render_managed("cmyk-icc.jpg") == GGAZE_HAVE_JPEG);
+   g_assert_true(render_managed("grey-icc.jpg") == GGAZE_HAVE_JPEG);
+   g_assert_false(render_managed("plain.jpg"));
+   g_assert_false(render_managed("srgb-icc.png"));
 }
 
 /* The space survives two presets and a transform. */
@@ -287,7 +356,9 @@ test_sof_past_64k_is_managed(void) {
       GeglBuffer *p_buf  = load_ok(p_file);
       guint8      c_px[4];
       preview_pixel(p_buf, 0, 0, c_px);
-      assert_rgb(C_NAMES[u], c_px, 0, 0, 255, 15); /* managed */
+      if (GGAZE_HAVE_JPEG) {
+         assert_rgb(C_NAMES[u], c_px, 0, 0, 255, 15); /* managed */
+      }
       g_object_unref(p_buf);
       drop_temp(p_file);
       g_byte_array_unref(p_a);
@@ -304,10 +375,93 @@ test_padded_jpeg_is_managed(void) {
    bytes_insert(p_a, jpeg_first_segment_len(p_a) + 2, C_PAD, 3);
    GFile      *p_file = temp_file("pad.jpg", p_a);
    GeglBuffer *p_buf  = load_ok(p_file);
-   g_assert_false(is_srgb(p_buf));
+   g_assert_true(is_srgb(p_buf) == !GGAZE_HAVE_JPEG);
    g_object_unref(p_buf);
    drop_temp(p_file);
    g_byte_array_unref(p_a);
+}
+
+/* A profile for another number of colour components than the image has
+ * -- the linear grey profile on the RGB swapped.jpg and swapped.png --
+ * cannot describe the pixels: the managed path declines it (the loader
+ * path, sRGB-tagged) instead of reading RGB through a grey curve. */
+static void
+test_profile_for_other_components_is_declined(void) {
+   GByteArray *p_rgb  = fixture_bytes("swapped.jpg");
+   GByteArray *p_grey = fixture_bytes("grey-icc.jpg");
+   gsize       u_rgb  = jpeg_first_segment_len(p_rgb); /* the APP2s */
+   gsize       u_grey = jpeg_first_segment_len(p_grey);
+   g_assert_cmpuint(p_rgb->data[3], ==, 0xE2);
+   g_assert_cmpuint(p_grey->data[3], ==, 0xE2);
+   g_byte_array_remove_range(p_rgb, 2, (guint)u_rgb);
+   bytes_insert(p_rgb, 2, p_grey->data + 2, u_grey);
+   struct {
+      const char *c_name;
+      GByteArray *p_a;
+   } CASES[2]         = {{"greyprof.jpg", p_rgb}, {"greyprof.png", NULL}};
+   GByteArray *p_png  = fixture_bytes("swapped.png");
+   GByteArray *p_gpng = fixture_bytes("grey-icc.png");
+   gsize       u_at   = png_chunk_at(p_png, "iCCP");
+   gsize       u_gat  = png_chunk_at(p_gpng, "iCCP");
+   g_byte_array_remove_range(p_png, (guint)u_at, be32(p_png->data + u_at) + 12);
+   bytes_insert(p_png, u_at, p_gpng->data + u_gat,
+                be32(p_gpng->data + u_gat) + 12);
+   CASES[1].p_a = p_png;
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      GFile      *p_file = temp_file(CASES[u].c_name, CASES[u].p_a);
+      GeglBuffer *p_buf  = load_ok(p_file);
+      g_assert_true(is_srgb(p_buf));
+      g_object_unref(p_buf);
+      drop_temp(p_file);
+   }
+   g_byte_array_unref(p_rgb);
+   g_byte_array_unref(p_grey);
+   g_byte_array_unref(p_png);
+   g_byte_array_unref(p_gpng);
+}
+
+/* The info card's question (enhancer_would_manage), header-deep: a
+ * non-sRGB profile on a local PNG, or JPEG with libjpeg, yes; no profile,
+ * an sRGB one, garbage, a profile for other components (built by the test
+ * above: a grey profile on an RGB JPEG), a non-local file or a missing
+ * loader op, no. */
+static void
+test_would_manage(void) {
+   const struct {
+      const char *c_name;
+      gboolean    b_want;
+   } CASES[] = {{"swapped.png", TRUE},
+                {"grey-icc.png", TRUE},
+                {"swapped.jpg", GGAZE_HAVE_JPEG},
+                {"cmyk-icc.jpg", GGAZE_HAVE_JPEG},
+                {"srgb-icc.png", FALSE},
+                {"srgb-icc.jpg", FALSE},
+                {"plain.jpg", FALSE},
+                {"badicc.png", FALSE}};
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      GFile *p_file = fixture(CASES[u].c_name);
+      g_assert_true(enhancer_would_manage(p_file) == CASES[u].b_want);
+      g_object_unref(p_file);
+   }
+   GByteArray *p_rgb  = fixture_bytes("swapped.jpg");
+   GByteArray *p_grey = fixture_bytes("grey-icc.jpg");
+   g_byte_array_remove_range(p_rgb, 2, (guint)jpeg_first_segment_len(p_rgb));
+   bytes_insert(p_rgb, 2, p_grey->data + 2, jpeg_first_segment_len(p_grey));
+   GFile *p_file = temp_file("greyprof.jpg", p_rgb);
+   g_assert_false(enhancer_would_manage(p_file));
+   drop_temp(p_file);
+   g_byte_array_unref(p_rgb);
+   g_byte_array_unref(p_grey);
+   GByteArray *p_a = fixture_bytes("swapped.png");
+   p_file          = ggtest_mem_file_new(p_a->data, p_a->len);
+   g_assert_false(enhancer_would_manage(p_file));
+   g_object_unref(p_file);
+   g_byte_array_unref(p_a);
+   enhancer_test_set_missing_op("gegl:png-load");
+   p_file = fixture("swapped.png");
+   g_assert_false(enhancer_would_manage(p_file));
+   g_object_unref(p_file);
+   enhancer_test_set_missing_op(NULL);
 }
 
 /* --- the loader path ------------------------------------------------------ */
@@ -408,7 +562,7 @@ static void
 test_missing_loader_op_takes_the_loader(void) {
    enhancer_test_set_missing_op("gegl:png-load");
    g_assert_true(fixture_is_srgb("swapped.png"));
-   g_assert_false(fixture_is_srgb("swapped.jpg"));
+   g_assert_true(fixture_is_srgb("swapped.jpg") == !GGAZE_HAVE_JPEG);
    enhancer_test_set_missing_op("gegl:jpg-load");
    g_assert_true(fixture_is_srgb("swapped.jpg"));
    g_assert_false(fixture_is_srgb("swapped.png"));
@@ -524,6 +678,46 @@ test_two_sof_jpeg_gets_the_loaders_verdict(void) {
    g_byte_array_unref(p_a);
 }
 
+/* Offset of the u_n-th (from 1) FF u_code marker in p_a. */
+static gsize
+jpeg_nth_marker(const GByteArray *p_a, guint8 u_code, guint u_n) {
+   for (gsize u = 2; u + 1 < p_a->len; u++) {
+      if (p_a->data[u] == 0xFF && p_a->data[u + 1] == u_code && --u_n == 0) {
+         return (u);
+      }
+   }
+   g_assert_not_reached();
+   return (0);
+}
+
+/* swapped-prog.jpg (progressive, every scan with entropy data) with a COM
+ * segment holding the bytes FF D9 inserted ahead of its third scan, then
+ * cut: right after the COM, and inside the third scan's data. Both look
+ * complete to a byte scan for EOI, and libjpeg's stdio source hides the
+ * cut (it inserts a fake EOI at EOF and decodes on), but gegl:jpg-load's
+ * reader starts the file over at EOF and libjpeg then exits the process
+ * ("two SOI markers"). The managed path must decline both -- the loader
+ * decides, as for any cut JPEG -- while the whole file is managed. */
+static void
+test_cut_progressive_jpeg_gets_the_loaders_verdict(void) {
+   GFile      *p_whole = fixture("swapped-prog.jpg");
+   GeglBuffer *p_buf   = load_ok(p_whole);
+   g_assert_true(is_srgb(p_buf) == !GGAZE_HAVE_JPEG);
+   g_object_unref(p_buf);
+   g_object_unref(p_whole);
+   const guint8 C_COM[6] = {0xFF, 0xFE, 0x00, 0x04, 0xFF, 0xD9};
+   GByteArray  *p_a      = fixture_bytes("swapped-prog.jpg");
+   gsize        u_sos    = jpeg_nth_marker(p_a, 0xDA, 3);
+   bytes_insert(p_a, u_sos, C_COM, sizeof(C_COM));
+   gsize u_full = p_a->len;
+   g_byte_array_set_size(p_a, (guint)(u_sos + 6 + 14 + 70)); /* mid-scan */
+   g_assert_cmpuint(p_a->len, <, u_full);
+   assert_loader_verdict("midscan.jpg", p_a);
+   g_byte_array_set_size(p_a, (guint)(u_sos + sizeof(C_COM)));
+   assert_loader_verdict("aftercom.jpg", p_a);
+   g_byte_array_unref(p_a);
+}
+
 /* An unknown critical chunk ahead of IDAT: sound as a container (the walk
  * checks its CRC, not its meaning), but libpng refuses the header, so
  * GEGL's bounding box comes out empty and the extent check -- the last
@@ -537,7 +731,7 @@ test_extent_check_catches_what_the_walk_cannot(void) {
    png_fix_crc(p_a, u_idat);
    GFile  *p_file = temp_file("critical.png", p_a);
    GError *p_err  = NULL;
-   g_assert_true(intact_png(p_file, NULL, &p_err));
+   g_assert_true(intact_png(p_file, NULL, NULL, &p_err));
    g_assert_no_error(p_err);
    drop_temp(p_file);
    assert_loader_verdict("critical.png", p_a);
@@ -587,7 +781,9 @@ export_keeps_profile(GeglBuffer *p_buf, const EnhancerPreset *p_preset,
    GeglBuffer *p_re = load_ok(p_out);
    guint8      c_px[4];
    preview_pixel(p_re, 0, 0, c_px);
-   assert_rgb(c_name, c_px, 0, 0, 255, 15);
+   if (GGAZE_HAVE_JPEG || g_str_has_suffix(c_name, ".png")) {
+      assert_rgb(c_name, c_px, 0, 0, 255, 15); /* reloaded managed */
+   }
    g_object_unref(p_re);
    drop_temp(p_out);
    g_free(c_out);
@@ -666,58 +862,85 @@ test_missing_saver_is_not_supported(void) {
    g_object_unref(p_buf);
 }
 
-/* --- the async render's managed original --------------------------------- */
+/* --- the managed original (lazy, for hold-Space) ------------------------ */
 
 typedef struct {
    GMainLoop  *p_loop;
    GdkTexture *p_tex;
-   GdkTexture *p_orig;
-} RenderWait;
+   GError     *p_err;
+} OrigWait;
 
 static void
-render_done(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+orig_done(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
-   RenderWait *p_w = p_data;
-   p_w->p_tex =
-      enhancer_apply_chain_finish(p_res, NULL, NULL, &p_w->p_orig, NULL);
+   OrigWait *p_w = p_data;
+   p_w->p_tex    = enhancer_managed_original_finish(p_res, &p_w->p_err);
    g_main_loop_quit(p_w->p_loop);
 }
 
-/* Render c_name with Contrast, asking for the original when b_want; the
- * managed original (NULL when not managed / not asked) is returned. */
+/* The managed original of p_file (NULL when none), with *pp_err. */
 static GdkTexture *
-render_original(const char *c_name, gboolean b_want) {
-   Enhancer  *p_e    = enhancer_new();
-   GFile     *p_file = fixture(c_name);
-   RenderWait t_w    = {g_main_loop_new(NULL, FALSE), NULL, NULL};
-   enhancer_apply_chain_async(p_file, enhancer_get_presets(p_e), 1u << 2, NULL,
-                              b_want, NULL, render_done, &t_w);
+managed_original(GFile *p_file, GCancellable *p_cancel, GError **pp_err) {
+   OrigWait t_w = {g_main_loop_new(NULL, FALSE), NULL, NULL};
+   enhancer_managed_original_async(p_file, p_cancel, orig_done, &t_w);
    g_main_loop_run(t_w.p_loop);
-   g_assert_nonnull(t_w.p_tex);
-   g_object_unref(t_w.p_tex);
    g_main_loop_unref(t_w.p_loop);
-   g_object_unref(p_file);
-   enhancer_delete(p_e);
-   return (t_w.p_orig);
+   if (t_w.p_err != NULL) {
+      g_propagate_error(pp_err, t_w.p_err);
+   }
+   return (t_w.p_tex);
 }
 
-/* A managed render hands back its original (the identity chain, blue for
- * swapped.png) when asked; not asked, or not managed, it hands back none. */
+/* c_name's managed original, pixel (0, 0) is (r, g, b). */
 static void
-test_render_returns_the_managed_original(void) {
-   GdkTexture *p_orig = render_original("swapped.png", TRUE);
-   g_assert_nonnull(p_orig);
-   GdkTextureDownloader *p_dl = gdk_texture_downloader_new(p_orig);
+assert_original_is(const char *c_name, int i_r, int i_g, int i_b) {
+   GFile      *p_file = fixture(c_name);
+   GError     *p_err  = NULL;
+   GdkTexture *p_tex  = managed_original(p_file, NULL, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_tex);
+   GdkTextureDownloader *p_dl = gdk_texture_downloader_new(p_tex);
    gdk_texture_downloader_set_format(p_dl, GDK_MEMORY_R8G8B8A8);
    gsize   u_stride = 0;
    GBytes *p_bytes  = gdk_texture_downloader_download_bytes(p_dl, &u_stride);
-   assert_rgb("managed original", g_bytes_get_data(p_bytes, NULL), 0, 0, 255,
-              15);
+   assert_rgb(c_name, g_bytes_get_data(p_bytes, NULL), i_r, i_g, i_b, 15);
    g_bytes_unref(p_bytes);
    gdk_texture_downloader_free(p_dl);
-   g_object_unref(p_orig);
-   g_assert_null(render_original("swapped.png", FALSE));
-   g_assert_null(render_original("plain.jpg", TRUE));
+   g_object_unref(p_tex);
+   g_object_unref(p_file);
+}
+
+/* The managed original is the file through the managed decode, converted
+ * for display: blue for swapped.png, ~188 for the linear grey PNG, blue
+ * for the CMYK JPEG (with libjpeg) -- CMYK and grey included, although
+ * their working space is sRGB. A file with nothing to manage has none (no
+ * error); a missing file is the loader's error; a cancelled fetch is
+ * CANCELLED. */
+static void
+test_managed_original(void) {
+   assert_original_is("swapped.png", 0, 0, 255);
+   assert_original_is("grey-icc.png", 188, 188, 188);
+#if GGAZE_HAVE_JPEG
+   assert_original_is("cmyk-icc.jpg", 0, 0, 255);
+#endif
+   GError *p_err  = NULL;
+   GFile  *p_file = fixture("plain.jpg");
+   g_assert_null(managed_original(p_file, NULL, &p_err));
+   g_assert_no_error(p_err);
+   g_object_unref(p_file);
+   p_file = g_file_new_for_path("/nonexistent/ggaze/x.png");
+   g_assert_null(managed_original(p_file, NULL, &p_err));
+   g_assert_nonnull(p_err);
+   g_clear_error(&p_err);
+   g_object_unref(p_file);
+   GCancellable *p_cancel = g_cancellable_new();
+   g_cancellable_cancel(p_cancel);
+   p_file = fixture("swapped.png");
+   g_assert_null(managed_original(p_file, p_cancel, &p_err));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+   g_clear_error(&p_err);
+   g_object_unref(p_file);
+   g_object_unref(p_cancel);
 }
 
 /* --- the local camera corpus ---------------------------------------------- */
@@ -744,16 +967,16 @@ profile_space(GFile *p_file) {
  * non-sRGB profile really decodes managed at that size. */
 static void
 check_corpus_file(GFile *p_file, const Babl *p_space) {
-   IntactSize t_size = {0, 0};
+   IntactSize t_size = {0, 0, 0};
    GError    *p_err  = NULL;
    char      *c_path = g_file_get_path(p_file);
    gboolean   b_png  = g_str_has_suffix(c_path, ".png");
-   g_assert_true(b_png ? intact_png(p_file, &t_size, &p_err)
-                       : intact_jpeg(p_file, &t_size, &p_err));
+   g_assert_true(b_png ? intact_png(p_file, NULL, &t_size, &p_err)
+                       : intact_jpeg(p_file, NULL, &t_size, &p_err));
    g_assert_no_error(p_err);
    g_assert_cmpuint(t_size.u_w, >, 0);
    g_assert_cmpuint(t_size.u_h, >, 0);
-   if (p_space != babl_space("sRGB")) {
+   if (p_space != babl_space("sRGB") && (b_png || GGAZE_HAVE_JPEG)) {
       g_test_message("%s: managed", c_path);
       GeglBuffer *p_buf = load_ok(p_file);
       g_assert_false(is_srgb(p_buf) && !babl_space_is_cmyk(p_space) &&
@@ -810,6 +1033,9 @@ main(int argc, char **argv) {
                    test_sof_past_64k_is_managed);
    g_test_add_func("/enhancer_icc/padded_jpeg_is_managed",
                    test_padded_jpeg_is_managed);
+   g_test_add_func("/enhancer_icc/profile_for_other_components_is_declined",
+                   test_profile_for_other_components_is_declined);
+   g_test_add_func("/enhancer_icc/would_manage", test_would_manage);
    g_test_add_func("/enhancer_icc/srgb_profile_is_byte_identical",
                    test_srgb_profile_is_byte_identical);
    g_test_add_func("/enhancer_icc/untagged_and_broken_profiles_stay_srgb",
@@ -824,6 +1050,9 @@ main(int argc, char **argv) {
                    test_broken_headers_get_the_loaders_verdict);
    g_test_add_func("/enhancer_icc/two_sof_jpeg_gets_the_loaders_verdict",
                    test_two_sof_jpeg_gets_the_loaders_verdict);
+   g_test_add_func(
+      "/enhancer_icc/cut_progressive_jpeg_gets_the_loaders_verdict",
+      test_cut_progressive_jpeg_gets_the_loaders_verdict);
    g_test_add_func("/enhancer_icc/extent_check_catches_what_the_walk_cannot",
                    test_extent_check_catches_what_the_walk_cannot);
    g_test_add_func("/enhancer_icc/corrupt_png_data_is_an_error",
@@ -832,8 +1061,7 @@ main(int argc, char **argv) {
                    test_export_preserves_profile);
    g_test_add_func("/enhancer_icc/missing_saver_is_not_supported",
                    test_missing_saver_is_not_supported);
-   g_test_add_func("/enhancer_icc/render_returns_the_managed_original",
-                   test_render_returns_the_managed_original);
+   g_test_add_func("/enhancer_icc/managed_original", test_managed_original);
    g_test_add_func("/enhancer_icc/sample_images_profiled_files",
                    test_sample_images_profiled_files);
    int i_rc = g_test_run();

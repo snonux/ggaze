@@ -66,6 +66,7 @@
 #include "croprect.h"
 #include "enhance-ui.h"
 #include "file_stamp.h"
+#include "ggaze-config.h"
 #include "gridview.h"
 #include "gtk_helpers.h"
 #include "histogram-view.h"
@@ -5178,42 +5179,65 @@ add_tool_review6_tests(void) {
  * managed original, blue too. Nothing here says what the plain view
  * shows: that depends on whether the host's gdk-pixbuf loaders apply
  * profiles (a glycin desktop does, fedora:40's native loaders do not) and
- * is, by decision #45, not ggaze's to manage. */
-/* The 6x3 preview's pixel (0, 0) is blue, read in an explicit R8G8B8A8
- * layout: gdk_texture_download() would hand back GDK_MEMORY_DEFAULT,
- * B8G8R8A8 on little-endian hosts. */
+ * is, by decision #45, not ggaze's to manage. The CMYK and grey fixtures
+ * (whose chain runs in sRGB) must compare against their managed original
+ * too (xb2 review 2). */
+
+/* Pixel (0, 0) of p_tex (i_w x i_h), read in an explicit R8G8B8A8 layout:
+ * gdk_texture_download() would hand back GDK_MEMORY_DEFAULT, B8G8R8A8 on
+ * little-endian hosts. Within 15 of (r, g, b). */
 static void
-assert_texture_is_blue_6x3(GdkTexture *p_tex) {
-   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 6);
-   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 3);
+assert_texture_pixel(GdkTexture *p_tex, gint i_w, gint i_h, int i_r, int i_g,
+                     int i_b) {
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, i_w);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, i_h);
    GdkTextureDownloader *p_dl = gdk_texture_downloader_new(p_tex);
    gdk_texture_downloader_set_format(p_dl, GDK_MEMORY_R8G8B8A8);
    gsize   u_stride   = 0;
    GBytes *p_bytes    = gdk_texture_downloader_download_bytes(p_dl, &u_stride);
    const guint8 *c_px = g_bytes_get_data(p_bytes, NULL);
-   g_assert_cmpuint(c_px[2], >=, 240); /* blue: managed */
-   g_assert_cmpuint(c_px[0], <=, 15);
+   g_test_message("pixel: %u %u %u", c_px[0], c_px[1], c_px[2]);
+   g_assert_cmpint(ABS((int)c_px[0] - i_r), <=, 15);
+   g_assert_cmpint(ABS((int)c_px[1] - i_g), <=, 15);
+   g_assert_cmpint(ABS((int)c_px[2] - i_b), <=, 15);
    g_bytes_unref(p_bytes);
    gdk_texture_downloader_free(p_dl);
 }
 
-/* Hold-Space on a managed preview compares against the MANAGED original
- * (the render's own decode, blue here), not the viewer's plain decode
- * p_orig, whose colours the host's loader decided -- so the compare shows
- * only what the preset did; release brings p_prev back. */
-static void
+/* What the managed original of a fixture looks like: its size and the
+ * managed colour of pixel (0, 0). */
+typedef struct {
+   gint i_w, i_h;
+   int  i_r, i_g, i_b;
+} ManagedLook;
+
+/* Hold-Space on a managed preview p_prev: at once the plain original
+ * p_orig (the managed one is fetched lazily, in a worker, on this first
+ * press), then the MANAGED original when it lands -- p_look's colour, and
+ * the `i` card plots it (it stands for the current file's original) --
+ * and the release brings p_prev back. A second press shows the fetched
+ * one at once. Returns the managed original (a new ref). */
+static GdkTexture *
 assert_hold_shows_the_managed_original(GgazeWindow *p_win, GdkTexture *p_orig,
-                                       GdkTexture *p_prev) {
+                                       GdkTexture        *p_prev,
+                                       const ManagedLook *p_look) {
    ggaze_window_set_hold_original(p_win, TRUE);
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   wait_for_texture_change(p_win, p_orig);
    GdkTexture *p_held = ref_viewer_texture(p_win);
    g_assert_true(p_held != p_orig);
    g_assert_true(p_held != p_prev);
-   assert_texture_is_blue_6x3(p_held);
-   g_object_unref(p_held);
+   assert_texture_pixel(p_held, p_look->i_w, p_look->i_h, p_look->i_r,
+                        p_look->i_g, p_look->i_b);
+   fire(p_win, "win.info");
+   wait_for_plot_of(p_win, p_held);
+   fire(p_win, "win.info"); /* the card down again */
    ggaze_window_set_hold_original(p_win, FALSE);
-   GdkTexture *p_back = ref_viewer_texture(p_win);
-   g_assert_true(p_back == p_prev);
-   g_object_unref(p_back);
+   g_assert_true(viewer_texture(p_win) == p_prev);
+   ggaze_window_set_hold_original(p_win, TRUE);
+   g_assert_true(viewer_texture(p_win) == p_held);
+   ggaze_window_set_hold_original(p_win, FALSE);
+   return (p_held);
 }
 
 /* c_out embeds p_src's ICC profile byte for byte. */
@@ -5232,25 +5256,44 @@ assert_same_profile(GFile *p_src, const char *c_out) {
    g_object_unref(p_out);
 }
 
+/* A window over c_dir/c_name (copied from the fixtures), loaded at
+ * i_w x i_h; *pp_file receives the file (a new ref). */
+static GgazeWindow *
+open_fixture_copy(const char *c_dir, const char *c_name, gint i_w, gint i_h,
+                  GFile **pp_file) {
+   copy_fixture(c_dir, c_name);
+   char *c_path = g_build_filename(c_dir, c_name, NULL);
+   *pp_file     = g_file_new_for_path(c_path);
+   g_free(c_path);
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, *pp_file);
+   wait_for_load(p_win, i_w, i_h);
+   return (p_win);
+}
+
+static void
+close_window(GgazeWindow *p_win) {
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   ggtest_drain_main(300);
+}
+
 static void
 test_icc_preview_is_managed_and_export_keeps_profile(void) {
-   GError *p_err = NULL;
-   char   *c_dir = g_dir_make_tmp("ggaze-icc-XXXXXX", &p_err);
+   static const ManagedLook C_BLUE = {6, 3, 0, 0, 255};
+   GError                  *p_err  = NULL;
+   char                    *c_dir  = g_dir_make_tmp("ggaze-icc-XXXXXX", &p_err);
    g_assert_no_error(p_err);
-   copy_fixture(c_dir, "swapped.png");
-   char        *c_path = g_build_filename(c_dir, "swapped.png", NULL);
-   GFile       *p_file = g_file_new_for_path(c_path);
-   GgazeWindow *p_win  = new_window();
-   ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win, 6, 3);
+   GFile       *p_file = NULL;
+   GgazeWindow *p_win  = open_fixture_copy(c_dir, "swapped.png", 6, 3, &p_file);
 
    GdkTexture *p_orig = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-3"); /* Contrast: keeps a pure colour pure */
    wait_for_texture_change(p_win, p_orig);
    GdkTexture *p_prev = ref_viewer_texture(p_win);
    g_assert_true(p_prev != p_orig);
-   assert_texture_is_blue_6x3(p_prev);
-   assert_hold_shows_the_managed_original(p_win, p_orig, p_prev);
+   assert_texture_pixel(p_prev, 6, 3, 0, 0, 255);
+   g_object_unref(
+      assert_hold_shows_the_managed_original(p_win, p_orig, p_prev, &C_BLUE));
    g_object_unref(p_prev);
 
    char *c_out = g_build_filename(c_dir, "swapped-enhanced.png", NULL);
@@ -5261,10 +5304,63 @@ test_icc_preview_is_managed_and_export_keeps_profile(void) {
    g_free(c_out);
    g_object_unref(p_orig);
    g_object_unref(p_file);
-   g_free(c_path);
-   gtk_window_destroy(GTK_WINDOW(p_win));
-   ggtest_drain_main(300);
+   close_window(p_win);
    ggtest_cleanup_temp_dir(c_dir);
+}
+
+/* The CMYK and grey fixtures: their chain runs in sRGB, yet the render
+ * was managed, so hold-Space compares against the MANAGED original (blue
+ * for the CMYK JPEG's printer profile, ~188 for the linear grey PNG), not
+ * the plain decode. A discard drops the managed original (memory): the
+ * next preview's first press shows the plain original again and fetches
+ * it anew. The CMYK JPEG is managed only with libjpeg (GGAZE_HAVE_JPEG). */
+static void
+check_hold_on(const char *c_name, const ManagedLook *p_look) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-icc-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   GFile       *p_file = NULL;
+   GgazeWindow *p_win =
+      open_fixture_copy(c_dir, c_name, p_look->i_w, p_look->i_h, &p_file);
+   GdkTexture *p_orig = ref_viewer_texture(p_win);
+   fire(p_win, "win.enhance-3");
+   wait_for_texture_change(p_win, p_orig);
+   GdkTexture *p_prev = ref_viewer_texture(p_win);
+   GdkTexture *p_held =
+      assert_hold_shows_the_managed_original(p_win, p_orig, p_prev, p_look);
+   g_object_unref(p_prev);
+
+   fire(p_win, "win.back"); /* Esc: discard */
+   ggtest_drain_main(100);
+   GdkTexture *p_orig2 = ref_viewer_texture(p_win);
+   fire(p_win, "win.enhance-3");
+   wait_for_texture_change(p_win, p_orig2);
+   GdkTexture *p_prev2 = ref_viewer_texture(p_win);
+   ggaze_window_set_hold_original(p_win, TRUE);
+   g_assert_true(viewer_texture(p_win) != p_held); /* dropped, not reused */
+   wait_for_texture_change(p_win, p_orig2);
+   assert_texture_pixel(viewer_texture(p_win), p_look->i_w, p_look->i_h,
+                        p_look->i_r, p_look->i_g, p_look->i_b);
+   ggaze_window_set_hold_original(p_win, FALSE);
+   g_object_unref(p_prev2);
+   g_object_unref(p_orig2);
+   g_object_unref(p_held);
+   g_object_unref(p_orig);
+   g_object_unref(p_file);
+   close_window(p_win);
+   ggtest_cleanup_temp_dir(c_dir);
+}
+
+static void
+test_icc_hold_space_on_cmyk_and_grey(void) {
+   static const ManagedLook C_GREY = {4, 2, 188, 188, 188};
+   static const ManagedLook C_CMYK = {8, 8, 0, 0, 255};
+   check_hold_on("grey-icc.png", &C_GREY);
+#if GGAZE_HAVE_JPEG
+   check_hold_on("cmyk-icc.jpg", &C_CMYK);
+#else
+   (void)C_CMYK;
+#endif
 }
 
 static void
@@ -5272,6 +5368,8 @@ add_icc_tests(void) {
    g_test_add_func("/enhance_flow/icc_preview_is_managed_and_export_keeps_"
                    "profile",
                    test_icc_preview_is_managed_and_export_keeps_profile);
+   g_test_add_func("/enhance_flow/icc_hold_space_on_cmyk_and_grey",
+                   test_icc_hold_space_on_cmyk_and_grey);
 }
 
 /* Seventh review round: a failed reload under the crop tool is named. */

@@ -17,10 +17,12 @@
 #include <glib/gstdio.h>
 #include <string.h>
 
+#include "detect.h"
 #include "ggaze-config.h"
 #include "streamread.h"
 
 #if GGAZE_HAVE_JPEG
+#include <jerror.h>
 #include <jpeglib.h>
 #include <setjmp.h>
 #include <stdio.h>
@@ -33,7 +35,7 @@ static gboolean
 _truncated(const char *c_what, GError **p_err) {
    g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                "%s is truncated (ends before its %s)", c_what,
-               c_what[0] == 'P' ? "IEND chunk" : "EOI marker");
+               c_what[0] == 'P' ? "IEND chunk" : "first scan (SOS)");
    return (FALSE);
 }
 
@@ -201,12 +203,13 @@ _rows_consume(PngRows *p_r, const guint8 *p, gsize u_len) {
 /* --- the PNG walk --------------------------------------------------------- */
 
 typedef struct {
-   PngRows     t_rows;
-   GConverter *p_dec;  /* zlib inflater over the concatenated IDAT data */
-   gboolean    b_ihdr; /* IHDR seen (it must come first) */
-   gboolean    b_idat; /* an IDAT seen */
-   gboolean    b_zend; /* the zlib stream ended */
-   IntactSize *p_size; /* the caller's, never NULL here */
+   PngRows       t_rows;
+   GConverter   *p_dec;    /* zlib inflater over the concatenated IDAT data */
+   gboolean      b_ihdr;   /* IHDR seen (it must come first) */
+   gboolean      b_idat;   /* an IDAT seen */
+   gboolean      b_zend;   /* the zlib stream ended */
+   IntactSize   *p_size;   /* the caller's, never NULL here */
+   GCancellable *p_cancel; /* the caller's (nullable): checked per block */
 } PngWalk;
 
 /* Inflate one block of IDAT data into a scratch buffer and follow the
@@ -242,12 +245,16 @@ _idat_feed(PngWalk *p_w, const guint8 *p_in, gsize u_len, GError **p_err) {
 }
 
 /* Read u_len chunk data bytes into the running CRC, inflating them when
- * they are IDAT data. */
+ * they are IDAT data. The caller's GCancellable is checked once per block,
+ * so a superseded check of a big file stops within a block's inflate. */
 static StreamReadStatus
 _png_read_data(GInputStream *p_in, PngWalk *p_w, gsize u_len, gboolean b_idat,
                guint32 *pu_crc, GError **p_err) {
    guint8 c_buf[INTACT_BLOCK];
    while (u_len > 0) {
+      if (g_cancellable_set_error_if_cancelled(p_w->p_cancel, p_err)) {
+         return (STREAMREAD_ERROR);
+      }
       gsize            u_n  = MIN(u_len, sizeof(c_buf));
       StreamReadStatus e_rd = streamread_exact(p_in, c_buf, u_n, p_err);
       if (e_rd == STREAMREAD_OK && b_idat) {
@@ -263,7 +270,12 @@ _png_read_data(GInputStream *p_in, PngWalk *p_w, gsize u_len, gboolean b_idat,
 }
 
 /* IHDR's data (13 bytes, already CRC'd by the caller's read): the size for
- * the caller and the row plan. */
+ * the caller and the row plan. The size is held against the loader's caps
+ * (detect_dims_within_bounds) right here, before a single IDAT byte is
+ * inflated: the rows IHDR promises are what the inflate runs to, so a
+ * small file declaring a huge image (a zlib bomb) would otherwise be
+ * inflated -- into scratch, but for as long as it takes -- only for the
+ * caller's cap check to refuse it afterwards. */
 static StreamReadStatus
 _png_take_ihdr(GInputStream *p_in, PngWalk *p_w, guint32 u_len, guint32 *pu_crc,
                GError **p_err) {
@@ -279,8 +291,16 @@ _png_take_ihdr(GInputStream *p_in, PngWalk *p_w, guint32 u_len, guint32 *pu_crc,
    p_w->b_ihdr      = TRUE;
    p_w->p_size->u_w = _be32(c_ihdr);
    p_w->p_size->u_h = _be32(c_ihdr + 4);
-   return (_rows_start(&p_w->t_rows, c_ihdr) ? STREAMREAD_OK
-                                             : _png_corrupt("bad IHDR", p_err));
+   /* colour types 0 (grey) and 4 (grey + alpha) store one colour channel;
+    * 2 (RGB), 3 (palette of RGB) and 6 (RGBA) three */
+   p_w->p_size->u_comps = (c_ihdr[9] & 2) ? 3 : 1;
+   if (!_rows_start(&p_w->t_rows, c_ihdr)) {
+      return (_png_corrupt("bad IHDR", p_err));
+   }
+   return (detect_dims_within_bounds("PNG", p_w->p_size->u_w, p_w->p_size->u_h,
+                                     NULL, p_err)
+              ? STREAMREAD_OK
+              : STREAMREAD_ERROR);
 }
 
 /* One critical chunk (type c_type, u_len data bytes): data through the CRC
@@ -305,6 +325,30 @@ _png_critical(GInputStream *p_in, PngWalk *p_w, const guint8 *c_type,
    return (e_rd);
 }
 
+/* The rules a chunk header must pass before its data is read: a length
+ * within PNG's range, IHDR first, and -- once IDAT data has started --
+ * no other chunk while rows are still missing. libpng reads the image data
+ * as ONE run of consecutive IDAT chunks and stops at the first chunk that
+ * is not an IDAT ("Not enough image data"; gegl:png-load then hands back
+ * a half-black buffer, no error), so an IDAT, tEXt, IDAT file whose rows
+ * need the second IDAT is short, however well its IDATs join up. Once the
+ * rows are complete, what follows is libpng's to warn about, not to fail
+ * on (a later stray IDAT inflates nothing here: the rows are done). */
+static StreamReadStatus
+_png_chunk_ok(const PngWalk *p_w, const guint8 *c_hdr, GError **p_err) {
+   gboolean b_dat = memcmp(c_hdr + 4, "IDAT", 4) == 0;
+   if (_be32(c_hdr) > 0x7FFFFFFFu) {
+      return (_png_corrupt("chunk length out of range", p_err));
+   }
+   if (!p_w->b_ihdr && memcmp(c_hdr + 4, "IHDR", 4) != 0) {
+      return (_png_corrupt("IHDR is not the first chunk", p_err));
+   }
+   if (p_w->b_idat && !b_dat && !p_w->t_rows.b_done) {
+      return (_png_corrupt("image data ends short", p_err));
+   }
+   return (STREAMREAD_OK);
+}
+
 /* The chunks after the signature, to IEND. Ancillary chunks (lower-case
  * first letter) are skipped unchecked: libpng only warns about those. */
 static StreamReadStatus
@@ -313,14 +357,11 @@ _png_chunks(GInputStream *p_in, PngWalk *p_w, GError **p_err) {
       guint8           c_hdr[8];
       StreamReadStatus e_rd  = streamread_exact(p_in, c_hdr, 8, p_err);
       guint32          u_len = _be32(c_hdr);
+      if (e_rd == STREAMREAD_OK) {
+         e_rd = _png_chunk_ok(p_w, c_hdr, p_err);
+      }
       if (e_rd != STREAMREAD_OK) {
          return (e_rd);
-      }
-      if (u_len > 0x7FFFFFFFu) {
-         return (_png_corrupt("chunk length out of range", p_err));
-      }
-      if (!p_w->b_ihdr && memcmp(c_hdr + 4, "IHDR", 4) != 0) {
-         return (_png_corrupt("IHDR is not the first chunk", p_err));
       }
       if (c_hdr[4] & 0x20) { /* ancillary: data + CRC */
          e_rd = streamread_skip(p_in, (gsize)u_len + 4, p_err);
@@ -334,7 +375,8 @@ _png_chunks(GInputStream *p_in, PngWalk *p_w, GError **p_err) {
 }
 
 static StreamReadStatus
-_png_check(GInputStream *p_in, IntactSize *p_size, GError **p_err) {
+_png_check(GInputStream *p_in, GCancellable *p_cancel, IntactSize *p_size,
+           GError **p_err) {
    guint8           c_sig[8];
    StreamReadStatus e_rd = streamread_exact(p_in, c_sig, sizeof(c_sig), p_err);
    if (e_rd != STREAMREAD_OK) {
@@ -344,7 +386,7 @@ _png_check(GInputStream *p_in, IntactSize *p_size, GError **p_err) {
       return (_png_corrupt("no PNG signature", p_err));
    }
    _crc_init();
-   PngWalk t_w = {.p_size = p_size};
+   PngWalk t_w = {.p_size = p_size, .p_cancel = p_cancel};
    t_w.p_dec =
       G_CONVERTER(g_zlib_decompressor_new(G_ZLIB_COMPRESSOR_FORMAT_ZLIB));
    e_rd = _png_chunks(p_in, &t_w, p_err);
@@ -353,6 +395,26 @@ _png_check(GInputStream *p_in, IntactSize *p_size, GError **p_err) {
       return (_png_corrupt("image data ends short", p_err));
    }
    return (e_rd);
+}
+
+/* The signature and IHDR only (intact_png_header): no CRC is compared
+ * (the running CRC is simply dropped), no image data read. */
+static StreamReadStatus
+_png_header(GInputStream *p_in, GCancellable *p_cancel, IntactSize *p_size,
+            GError **p_err) {
+   (void)p_cancel; /* 33 bytes: nothing worth interrupting */
+   guint8           c_head[16];
+   StreamReadStatus e_rd = streamread_exact(p_in, c_head, 16, p_err);
+   if (e_rd != STREAMREAD_OK) {
+      return (e_rd);
+   }
+   if (memcmp(c_head, "\x89PNG\r\n\x1a\n", 8) != 0 ||
+       memcmp(c_head + 12, "IHDR", 4) != 0) {
+      return (_png_corrupt("no PNG signature and IHDR", p_err));
+   }
+   PngWalk t_w   = {.p_size = p_size};
+   guint32 u_crc = 0;
+   return (_png_take_ihdr(p_in, &t_w, _be32(c_head + 8), &u_crc, p_err));
 }
 
 /* --- the JPEG walk -------------------------------------------------------- */
@@ -364,8 +426,8 @@ _jpeg_is_sof(guint8 u_code) {
            u_code != 0xC8 && u_code != 0xCC);
 }
 
-/* One length-prefixed segment; a SOF's precision, height and width are
- * read on the way (the first SOF's size is the image's). */
+/* One length-prefixed segment; a SOF's precision, height, width and
+ * component count are read on the way (the first SOF's are the image's). */
 static StreamReadStatus
 _jpeg_segment(GInputStream *p_in, guint8 u_code, IntactSize *p_size,
               GError **p_err) {
@@ -375,21 +437,22 @@ _jpeg_segment(GInputStream *p_in, guint8 u_code, IntactSize *p_size,
       return (e_rd);
    }
    gsize u_len = ((gsize)c_len[0] << 8) | c_len[1];
-   gsize u_sof = _jpeg_is_sof(u_code) ? 5 : 0;
+   gsize u_sof = _jpeg_is_sof(u_code) ? 6 : 0;
    if (u_len < 2 + u_sof) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                   "JPEG segment length %" G_GSIZE_FORMAT " is invalid", u_len);
       return (STREAMREAD_ERROR);
    }
    if (u_sof > 0) {
-      guint8 c_sof[5]; /* precision, height (2), width (2) */
+      guint8 c_sof[6]; /* precision, height (2), width (2), components */
       e_rd = streamread_exact(p_in, c_sof, sizeof(c_sof), p_err);
       if (e_rd != STREAMREAD_OK) {
          return (e_rd);
       }
       if (p_size->u_w == 0 && p_size->u_h == 0) {
-         p_size->u_h = ((guint32)c_sof[1] << 8) | c_sof[2];
-         p_size->u_w = ((guint32)c_sof[3] << 8) | c_sof[4];
+         p_size->u_h     = ((guint32)c_sof[1] << 8) | c_sof[2];
+         p_size->u_w     = ((guint32)c_sof[3] << 8) | c_sof[4];
+         p_size->u_comps = c_sof[5];
       }
    }
    return (streamread_skip(p_in, u_len - 2 - u_sof, p_err));
@@ -418,60 +481,43 @@ _jpeg_walk_to_sos(GInputStream *p_in, IntactSize *p_size, GError **p_err) {
    return (e_rd);
 }
 
-/* Sequential scan of the rest of the stream for FF D9, carrying the last
- * byte across block boundaries. In entropy-coded data every 0xFF is byte-
- * stuffed (FF 00) or a marker, so FF D9 there can only be the EOI. */
+/* The header walk only: the segments up to the first SOS (the size
+ * comes from the first SOF on the way). There is deliberately no scan of
+ * the entropy data for an EOI after it any more: a byte scan cannot tell
+ * an EOI from the bytes FF D9 inside a COM / APPn / DQT / DHT segment
+ * between two progressive scans, so a file cut after such a segment (or
+ * inside a later scan) passed it -- and gegl:jpg-load exits the process on
+ * exactly that file. The verdict on everything after SOS is libjpeg's own
+ * (intact_jpeg_decodes), with a source that treats EOF as fatal. */
 static StreamReadStatus
-_jpeg_find_eoi(GInputStream *p_in, GError **p_err) {
-   guint8   c_buf[INTACT_BLOCK];
-   gboolean b_ff = FALSE;
-   for (;;) {
-      gssize i_n = g_input_stream_read(p_in, c_buf, sizeof(c_buf), NULL, p_err);
-      if (i_n < 0) {
-         return (STREAMREAD_ERROR);
-      }
-      if (i_n == 0) {
-         return (STREAMREAD_EOF);
-      }
-      for (gssize i = 0; i < i_n; i++) {
-         if (b_ff && c_buf[i] == 0xD9) {
-            return (STREAMREAD_OK);
-         }
-         b_ff = (c_buf[i] == 0xFF);
-      }
-   }
-}
-
-static StreamReadStatus
-_jpeg_check(GInputStream *p_in, IntactSize *p_size, GError **p_err) {
-   StreamReadStatus e_rd = _jpeg_walk_to_sos(p_in, p_size, p_err);
-   if (e_rd != STREAMREAD_OK) {
-      return (e_rd);
-   }
-   return (_jpeg_find_eoi(p_in, p_err));
+_jpeg_check(GInputStream *p_in, GCancellable *p_cancel, IntactSize *p_size,
+            GError **p_err) {
+   (void)p_cancel; /* a few KiB of headers: nothing worth interrupting */
+   return (_jpeg_walk_to_sos(p_in, p_size, p_err));
 }
 
 /* --- entry points --------------------------------------------------------- */
 
-typedef StreamReadStatus (*IntactWalk)(GInputStream *, IntactSize *, GError **);
+typedef StreamReadStatus (*IntactWalk)(GInputStream *, GCancellable *,
+                                       IntactSize *, GError **);
 
 /* Open p_file (buffered: the JPEG marker search reads a byte at a time)
  * and run fn_walk on it; a walk that ends in EOF is reported as truncated,
  * an error as itself. */
 static gboolean
-_check(GFile *p_file, const char *c_what, IntactWalk fn_walk,
-       IntactSize *p_size, GError **p_err) {
-   IntactSize  t_size          = {0, 0};
+_check(GFile *p_file, GCancellable *p_cancel, const char *c_what,
+       IntactWalk fn_walk, IntactSize *p_size, GError **p_err) {
+   IntactSize  t_size          = {0, 0, 0};
    IntactSize *p_out           = p_size != NULL ? p_size : &t_size;
    *p_out                      = t_size;
    GError           *p_local   = NULL;
-   GFileInputStream *p_file_in = g_file_read(p_file, NULL, &p_local);
+   GFileInputStream *p_file_in = g_file_read(p_file, p_cancel, &p_local);
    if (p_file_in == NULL) {
       g_propagate_error(p_err, p_local);
       return (FALSE);
    }
    GInputStream *p_in = g_buffered_input_stream_new(G_INPUT_STREAM(p_file_in));
-   StreamReadStatus e_rd = fn_walk(p_in, p_out, &p_local);
+   StreamReadStatus e_rd = fn_walk(p_in, p_cancel, p_out, &p_local);
    g_input_stream_close(p_in, NULL, NULL);
    g_object_unref(p_in);
    g_object_unref(p_file_in);
@@ -483,15 +529,23 @@ _check(GFile *p_file, const char *c_what, IntactWalk fn_walk,
 }
 
 gboolean
-intact_png(GFile *p_file, IntactSize *p_size, GError **p_err) {
+intact_png(GFile *p_file, GCancellable *p_cancel, IntactSize *p_size,
+           GError **p_err) {
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
-   return (_check(p_file, "PNG", _png_check, p_size, p_err));
+   return (_check(p_file, p_cancel, "PNG", _png_check, p_size, p_err));
 }
 
 gboolean
-intact_jpeg(GFile *p_file, IntactSize *p_size, GError **p_err) {
+intact_png_header(GFile *p_file, IntactSize *p_size, GError **p_err) {
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
-   return (_check(p_file, "JPEG", _jpeg_check, p_size, p_err));
+   return (_check(p_file, NULL, "PNG", _png_header, p_size, p_err));
+}
+
+gboolean
+intact_jpeg(GFile *p_file, GCancellable *p_cancel, IntactSize *p_size,
+            GError **p_err) {
+   g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
+   return (_check(p_file, p_cancel, "JPEG", _jpeg_check, p_size, p_err));
 }
 
 /* --- the libjpeg pass (intact_jpeg_decodes) ------------------------------ */
@@ -508,22 +562,99 @@ _jerr_exit(j_common_ptr p_cinfo) {
    longjmp(((IntactJerr *)p_cinfo->err)->buf, 1);
 }
 
-/* Warnings ("extraneous bytes", "premature end of data") are libjpeg
- * decoding on, which is all this pass asks; nothing to print. */
+/* Warnings ("extraneous bytes", "corrupt data") are libjpeg decoding on,
+ * which is all this pass asks; nothing to print. */
 static void
 _jerr_quiet(j_common_ptr p_cinfo) {
    (void)p_cinfo;
 }
 
-/* Decode all of p_fp at 1/8 scale into one reused row, under a longjmp
- * error handler. FALSE with libjpeg's message in c_msg (JMSG_LENGTH_MAX)
- * when libjpeg gives up. The scale changes only the IDCT and the row
- * size: libjpeg-turbo scales every component alike, so the markers, the
- * entropy decoding and the upsampling / colour-conversion setup -- where
- * its fatal errors come from -- are those of a full-size decode with the
- * same (default) output colour space GEGL's loader asks for. */
+/* The source manager: a FILE read in blocks, where the END of the file is
+ * a fatal error (JERR_INPUT_EOF) -- deliberately unlike jpeg_stdio_src,
+ * which warns and inserts a fake EOI so a cut file decodes on. That
+ * leniency made this pass vouch for cut files gegl:jpg-load dies on: its
+ * reader starts the file over at EOF, libjpeg then meets a second SOI /
+ * SOF, and its default error_exit exits the process. With EOF fatal here,
+ * every file whose decode needs a byte past the end -- a cut inside a
+ * scan, a cut after a segment between two progressive scans, a missing
+ * EOI -- fails HERE first, harmlessly, and the enhancer's loader path
+ * decides it. The GCancellable (nullable) is checked per block too. */
+typedef struct {
+   struct jpeg_source_mgr pub;
+   FILE                  *p_fp;
+   GCancellable          *p_cancel;
+   gboolean               b_cancelled; /* why the error exit came */
+   JOCTET                 c_buf[INTACT_BLOCK];
+} IntactSrc;
+
+static void
+_src_init(j_decompress_ptr p_cinfo) {
+   (void)p_cinfo;
+}
+
+static boolean
+_src_fill(j_decompress_ptr p_cinfo) {
+   IntactSrc *p_src = (IntactSrc *)p_cinfo->src;
+   if (g_cancellable_is_cancelled(p_src->p_cancel)) {
+      p_src->b_cancelled = TRUE;
+      ERREXIT(p_cinfo, JERR_INPUT_EOF); /* any code: b_cancelled says why */
+   }
+   size_t u_n = fread(p_src->c_buf, 1, sizeof(p_src->c_buf), p_src->p_fp);
+   if (u_n == 0) {
+      ERREXIT(p_cinfo, JERR_INPUT_EOF); /* where GEGL would start over */
+   }
+   p_src->pub.next_input_byte = p_src->c_buf;
+   p_src->pub.bytes_in_buffer = u_n;
+   return (TRUE);
+}
+
+static void
+_src_skip(j_decompress_ptr p_cinfo, long l_n) {
+   struct jpeg_source_mgr *p_pub = p_cinfo->src;
+   while (l_n > (long)p_pub->bytes_in_buffer) {
+      l_n -= (long)p_pub->bytes_in_buffer;
+      _src_fill(p_cinfo); /* exits at EOF: never returns FALSE */
+   }
+   if (l_n > 0) {
+      p_pub->next_input_byte += l_n;
+      p_pub->bytes_in_buffer -= (size_t)l_n;
+   }
+}
+
+static void
+_src_term(j_decompress_ptr p_cinfo) {
+   (void)p_cinfo;
+}
+
+/* Install p_src (the caller's storage, outliving the decompress object)
+ * as cinfo's source over p_fp. */
+static void
+_src_setup(j_decompress_ptr p_cinfo, IntactSrc *p_src, FILE *p_fp,
+           GCancellable *p_cancel) {
+   memset(&p_src->pub, 0, sizeof(p_src->pub));
+   p_src->pub.init_source       = _src_init;
+   p_src->pub.fill_input_buffer = _src_fill;
+   p_src->pub.skip_input_data   = _src_skip;
+   p_src->pub.resync_to_restart = jpeg_resync_to_restart;
+   p_src->pub.term_source       = _src_term;
+   p_src->p_fp                  = p_fp;
+   p_src->p_cancel              = p_cancel;
+   p_src->b_cancelled           = FALSE;
+   p_cinfo->src                 = &p_src->pub;
+}
+
+/* Decode all of p_src's file at 1/8 scale into one reused row, under a
+ * longjmp error handler. FALSE with libjpeg's message in c_msg
+ * (JMSG_LENGTH_MAX) when libjpeg gives up. The scale changes only the IDCT
+ * and the row size: libjpeg-turbo scales every component alike, so the
+ * markers, the entropy decoding and the upsampling / colour-conversion
+ * setup -- where its fatal errors come from -- are those of a full-size
+ * decode with the same (default) output colour space GEGL's loader asks
+ * for. jpeg_finish_decompress() reads on to the EOI, so the whole file
+ * up to it has been through libjpeg when this returns TRUE. */
 static gboolean
-_jpeg_decode_all(FILE *p_fp, char *c_msg) {
+_jpeg_decode_all(IntactSrc *p_src, FILE *p_fp, GCancellable *p_cancel,
+                 char *c_msg) {
    struct jpeg_decompress_struct cinfo;
    IntactJerr                    jerr;
    JSAMPLE *volatile p_row = NULL; /* read after a longjmp */
@@ -537,7 +668,7 @@ _jpeg_decode_all(FILE *p_fp, char *c_msg) {
       return (FALSE);
    }
    jpeg_create_decompress(&cinfo);
-   jpeg_stdio_src(&cinfo, p_fp);
+   _src_setup(&cinfo, p_src, p_fp, p_cancel);
    jpeg_read_header(&cinfo, TRUE);
    cinfo.scale_num   = 1;
    cinfo.scale_denom = 8;
@@ -554,7 +685,7 @@ _jpeg_decode_all(FILE *p_fp, char *c_msg) {
 }
 
 gboolean
-intact_jpeg_decodes(GFile *p_file, GError **p_err) {
+intact_jpeg_decodes(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
    char *c_path = g_file_get_path(p_file);
    FILE *p_fp   = c_path != NULL ? g_fopen(c_path, "rb") : NULL;
@@ -564,21 +695,27 @@ intact_jpeg_decodes(GFile *p_file, GError **p_err) {
                   "JPEG cannot be opened for the libjpeg pass");
       return (FALSE);
    }
-   char     c_msg[JMSG_LENGTH_MAX] = "";
-   gboolean b_ok                   = _jpeg_decode_all(p_fp, c_msg);
+   IntactSrc *p_src                  = g_new(IntactSrc, 1);
+   char       c_msg[JMSG_LENGTH_MAX] = "";
+   gboolean   b_ok = _jpeg_decode_all(p_src, p_fp, p_cancel, c_msg);
    fclose(p_fp);
-   if (!b_ok) {
+   if (!b_ok && p_src->b_cancelled) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                  "JPEG check cancelled");
+   } else if (!b_ok) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                  "JPEG is corrupt (libjpeg: %s)", c_msg);
+                  "JPEG is corrupt or cut short (libjpeg: %s)", c_msg);
    }
+   g_free(p_src);
    return (b_ok);
 }
 
 #else
 
 gboolean
-intact_jpeg_decodes(GFile *p_file, GError **p_err) {
+intact_jpeg_decodes(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
+   (void)p_cancel;
    g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                "no libjpeg in this build to check the JPEG with");
    return (FALSE);

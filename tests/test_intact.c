@@ -2,17 +2,21 @@
  * ggaze — PNG / JPEG completeness check unit test (every lane, no GEGL)
  *
  * Pins intact.h: the committed fixtures are complete, and the cut copies
- * that make GEGL's loaders spin (see intact.h) are refused as truncated --
- * a PNG missing its IEND, a PNG whose chunk length points past the end, a
- * JPEG cut inside its scan, a JPEG whose only EOI is an EXIF thumbnail's
- * ahead of SOS, a JPEG with no SOS at all -- while a JPEG with bytes
- * trailing its EOI (camera trailers) is complete. A missing file is its
- * GIO error, and a marker stream that is not one is INVALID_DATA. Then
- * what libpng / libjpeg would give up on (xb2 review): a PNG's critical
- * chunk CRCs, its image data inflated row by row (Adam7 included, sizes
- * cross-checked against real interlaced files), a JPEG decoded once by
- * libjpeg -- and the stored sizes both walks report, the JPEG's also with
- * its SOF past 64 KiB and with padding between segments.
+ * that make GEGL's loaders spin or exit (see intact.h) are refused -- a
+ * PNG missing its IEND, a PNG whose chunk length points past the end, a
+ * JPEG cut inside its headers or with no SOS at all (the header walk), a
+ * JPEG cut inside a scan or right after a segment between progressive
+ * scans that holds the bytes FF D9 (the libjpeg pass, whose EOF is fatal)
+ * -- while a JPEG with bytes trailing its EOI (camera trailers) is
+ * complete. A missing file is its GIO error, and a marker stream that is
+ * not one is INVALID_DATA. Then what libpng / libjpeg would give up on
+ * (xb2 review): a PNG's critical chunk CRCs, its image data inflated row
+ * by row (Adam7 included, sizes cross-checked against real interlaced
+ * files) as ONE run of IDAT chunks, its IHDR held against the caps before
+ * the inflate (a zlib bomb), a cancelled check, a JPEG decoded once by
+ * libjpeg -- and the stored sizes and component counts both walks report,
+ * the JPEG's also with its SOF past 64 KiB and with padding between
+ * segments.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -62,8 +66,8 @@ temp_file(const char *c_name, const void *p_data, gsize u_len) {
 static void
 assert_truncated(gboolean b_png, GFile *p_file) {
    GError *p_err = NULL;
-   g_assert_false(b_png ? intact_png(p_file, NULL, &p_err)
-                        : intact_jpeg(p_file, NULL, &p_err));
+   g_assert_false(b_png ? intact_png(p_file, NULL, NULL, &p_err)
+                        : intact_jpeg(p_file, NULL, NULL, &p_err));
    g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
    g_clear_error(&p_err);
    g_file_delete(p_file, NULL, NULL);
@@ -73,8 +77,8 @@ assert_truncated(gboolean b_png, GFile *p_file) {
 static void
 assert_intact(gboolean b_png, GFile *p_file) {
    GError *p_err = NULL;
-   g_assert_true(b_png ? intact_png(p_file, NULL, &p_err)
-                       : intact_jpeg(p_file, NULL, &p_err));
+   g_assert_true(b_png ? intact_png(p_file, NULL, NULL, &p_err)
+                       : intact_jpeg(p_file, NULL, NULL, &p_err));
    g_assert_no_error(p_err);
    g_file_delete(p_file, NULL, NULL);
    g_object_unref(p_file);
@@ -90,14 +94,14 @@ test_fixtures_are_intact(void) {
    for (gsize u = 0; u < G_N_ELEMENTS(C_PNG); u++) {
       GFile  *p_file = fixture(C_PNG[u]);
       GError *p_err  = NULL;
-      g_assert_true(intact_png(p_file, NULL, &p_err));
+      g_assert_true(intact_png(p_file, NULL, NULL, &p_err));
       g_assert_no_error(p_err);
       g_object_unref(p_file);
    }
    for (gsize u = 0; u < G_N_ELEMENTS(C_JPG); u++) {
       GFile  *p_file = fixture(C_JPG[u]);
       GError *p_err  = NULL;
-      g_assert_true(intact_jpeg(p_file, NULL, &p_err));
+      g_assert_true(intact_jpeg(p_file, NULL, NULL, &p_err));
       g_assert_no_error(p_err);
       g_object_unref(p_file);
    }
@@ -119,43 +123,32 @@ test_cut_png_is_truncated(void) {
    g_free(c_png);
 }
 
+/* The header walk refuses a JPEG cut before its first scan; a cut after
+ * it is the libjpeg pass's to find (test_jpeg_decodes). */
 static void
 test_cut_jpeg_is_truncated(void) {
    gsize u_len;
    char *c_jpg = fixture_bytes("swapped.jpg", &u_len);
-   assert_truncated(FALSE, temp_file("cut.jpg", c_jpg, u_len - 100));
-   assert_truncated(FALSE, temp_file("noeoi.jpg", c_jpg, u_len - 2));
    assert_truncated(FALSE, temp_file("soi.jpg", c_jpg, 2));
    assert_truncated(FALSE, temp_file("empty.jpg", c_jpg, 0));
    /* Cut inside a header segment (the APP2 profile). */
    assert_truncated(FALSE, temp_file("hdr.jpg", c_jpg, 40));
-   /* Trailing bytes after the EOI (a camera trailer) are fine. */
-   GByteArray *p_trail = g_byte_array_new();
-   g_byte_array_append(p_trail, (const guint8 *)c_jpg, (guint)u_len);
-   g_byte_array_append(p_trail, (const guint8 *)"SEFT trailer", 12);
-   assert_intact(FALSE, temp_file("trail.jpg", p_trail->data, p_trail->len));
-   g_byte_array_unref(p_trail);
    g_free(c_jpg);
 }
 
 /* A hand-built marker stream: an APP1 carrying an EOI (as an EXIF
- * thumbnail would), then SOS and scan bytes with no EOI -- truncated; the
- * same with an EOI after the scan -- intact; EOI straight after the
- * headers (no image) -- truncated; a non-marker byte -- INVALID_DATA. */
+ * thumbnail would), then SOS -- the walk reaches SOS past it, sound as far
+ * as headers go; EOI straight after the headers (no image) -- truncated; a
+ * non-marker byte or a segment length under 2 -- INVALID_DATA. */
 static void
-test_jpeg_eoi_must_follow_sos(void) {
+test_jpeg_header_walk(void) {
    static const guint8 C_HEAD[] = {
       0xFF, 0xD8,                         /* SOI */
       0xFF, 0xE1, 0x00, 0x04, 0xFF, 0xD9, /* APP1 w/ EOI */
       0xFF, 0xD0,                         /* RST0 */
       0xFF, 0xFF, 0xDA, 0x00, 0x02,       /* fill + SOS */
       0x12, 0x34, 0xFF, 0x00, 0x56};
-   GByteArray *p_a = g_byte_array_new();
-   g_byte_array_append(p_a, C_HEAD, sizeof(C_HEAD));
-   assert_truncated(FALSE, temp_file("thumb.jpg", p_a->data, p_a->len));
-   g_byte_array_append(p_a, (const guint8 *)"\xFF\xD9", 2);
-   assert_intact(FALSE, temp_file("ok.jpg", p_a->data, p_a->len));
-   g_byte_array_unref(p_a);
+   assert_intact(FALSE, temp_file("thumb.jpg", C_HEAD, sizeof(C_HEAD)));
 
    static const guint8 C_NOIMG[] = {0xFF, 0xD8, 0xFF, 0xD9};
    assert_truncated(FALSE, temp_file("noimg.jpg", C_NOIMG, sizeof(C_NOIMG)));
@@ -170,10 +163,10 @@ static void
 test_missing_file_is_an_io_error(void) {
    GFile  *p_file = g_file_new_for_path("/nonexistent/ggaze/x.png");
    GError *p_err  = NULL;
-   g_assert_false(intact_png(p_file, NULL, &p_err));
+   g_assert_false(intact_png(p_file, NULL, NULL, &p_err));
    g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
    g_clear_error(&p_err);
-   g_assert_false(intact_jpeg(p_file, NULL, &p_err));
+   g_assert_false(intact_jpeg(p_file, NULL, NULL, &p_err));
    g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
    g_clear_error(&p_err);
    g_object_unref(p_file);
@@ -183,10 +176,10 @@ test_missing_file_is_an_io_error(void) {
 
 static void
 assert_size(gboolean b_png, GFile *p_file, guint32 u_w, guint32 u_h) {
-   IntactSize t_size = {0, 0};
+   IntactSize t_size = {0, 0, 0};
    GError    *p_err  = NULL;
-   g_assert_true(b_png ? intact_png(p_file, &t_size, &p_err)
-                       : intact_jpeg(p_file, &t_size, &p_err));
+   g_assert_true(b_png ? intact_png(p_file, NULL, &t_size, &p_err)
+                       : intact_jpeg(p_file, NULL, &t_size, &p_err));
    g_assert_no_error(p_err);
    g_assert_cmpuint(t_size.u_w, ==, u_w);
    g_assert_cmpuint(t_size.u_h, ==, u_h);
@@ -232,6 +225,28 @@ test_sizes_are_reported(void) {
    bytes_insert(p_far, 2, (const guint8 *)"\x00\x11\xFF\x00\x22", 5);
    assert_intact(FALSE, temp_file("pad.jpg", p_far->data, p_far->len));
    g_byte_array_unref(p_far);
+}
+
+/* The colour component counts the walks report (IntactSize.u_comps): a
+ * PNG's grey types one, RGB / RGBA / palette three; a JPEG's SOF count. */
+static void
+test_components_are_reported(void) {
+   const struct {
+      const char *c_name;
+      guint       u_comps;
+   } CASES[] = {{"swapped.png", 3},     {"rgba.png", 3},
+                {"grey-icc.png", 1},    {"swapped.jpg", 3},
+                {"grey-icc.jpg", 1},    {"cmyk-icc.jpg", 4},
+                {"swapped-prog.jpg", 3}};
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      GFile     *p_file = fixture(CASES[u].c_name);
+      IntactSize t_size = {0, 0, 0};
+      gboolean   b_png  = g_str_has_suffix(CASES[u].c_name, ".png");
+      g_assert_true(b_png ? intact_png(p_file, NULL, &t_size, NULL)
+                          : intact_jpeg(p_file, NULL, &t_size, NULL));
+      g_assert_cmpuint(t_size.u_comps, ==, CASES[u].u_comps);
+      g_object_unref(p_file);
+   }
 }
 
 /* --- PNG image data ------------------------------------------------------- */
@@ -308,7 +323,7 @@ png_file(guint32 u_w, guint32 u_h, guint8 u_type, guint8 u_depth,
 static void
 assert_png_corrupt(GFile *p_file) {
    GError *p_err = NULL;
-   g_assert_false(intact_png(p_file, NULL, &p_err));
+   g_assert_false(intact_png(p_file, NULL, NULL, &p_err));
    g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
    g_assert_nonnull(strstr(p_err->message, "corrupt"));
    g_clear_error(&p_err);
@@ -376,8 +391,193 @@ test_png_corruption_is_found(void) {
    g_byte_array_unref(p_a);
 }
 
+/* The 10x2 1-bit palette image of test_png_rows_are_checked (6 bytes of
+ * rows) with its compressed data split over two IDATs and a tEXt chunk
+ * placed after the first IDAT (b_between) or after both. */
+static GFile *
+png_with_text(gboolean b_between) {
+   guint8      c_raw[6] = {0};
+   GByteArray *p_a      = g_byte_array_new();
+   g_byte_array_append(p_a, (const guint8 *)"\x89PNG\r\n\x1a\n", 8);
+   const guint8 C_IHDR[13] = {0, 0, 0, 10, 0, 0, 0, 2, 1, 3, 0, 0, 0};
+   png_chunk(p_a, "IHDR", C_IHDR, 13);
+   GBytes       *p_z   = zlib_compress(c_raw, sizeof(c_raw));
+   gsize         u_len = 0;
+   const guint8 *p_zd  = g_bytes_get_data(p_z, &u_len);
+   const guint8 *C_TXT = (const guint8 *)"Comment\0ggaze";
+   png_chunk(p_a, "IDAT", p_zd, u_len / 2);
+   if (b_between) {
+      png_chunk(p_a, "tEXt", C_TXT, 13);
+   }
+   png_chunk(p_a, "IDAT", p_zd + u_len / 2, u_len - u_len / 2);
+   if (!b_between) {
+      png_chunk(p_a, "tEXt", C_TXT, 13);
+   }
+   png_chunk(p_a, "IEND", NULL, 0);
+   GFile *p_file = temp_file("text.png", p_a->data, p_a->len);
+   g_bytes_unref(p_z);
+   g_byte_array_unref(p_a);
+   return (p_file);
+}
+
+/* libpng reads the image data as one run of IDAT chunks: an ancillary
+ * chunk between two IDATs ends it, so rows still missing then are short
+ * however well the two IDATs would join; the same chunk after both is
+ * fine. */
+static void
+test_png_idat_run_ends_at_another_chunk(void) {
+   assert_png_corrupt(png_with_text(TRUE));
+   assert_intact(TRUE, png_with_text(FALSE));
+}
+
+/* zlib data of u_raw zero bytes, streamed through the compressor (a few
+ * KiB per MiB of zeros). */
+static GBytes *
+zlib_zeros(gsize u_raw) {
+   GConverter *p_z =
+      G_CONVERTER(g_zlib_compressor_new(G_ZLIB_COMPRESSOR_FORMAT_ZLIB, 9));
+   guint8     *p_in  = g_malloc0(1 << 20);
+   GByteArray *p_out = g_byte_array_new();
+   guint8      c_buf[65536];
+   for (;;) {
+      gsize u_n = MIN(u_raw, (gsize)1 << 20), u_read = 0, u_wrote = 0;
+      GConverterResult e_res = g_converter_convert(
+         p_z, p_in, u_n, c_buf, sizeof(c_buf),
+         u_n == u_raw ? G_CONVERTER_INPUT_AT_END : G_CONVERTER_NO_FLAGS,
+         &u_read, &u_wrote, NULL);
+      g_assert_cmpint(e_res, !=, G_CONVERTER_ERROR);
+      g_byte_array_append(p_out, c_buf, (guint)u_wrote);
+      u_raw -= u_read;
+      if (e_res == G_CONVERTER_FINISHED) {
+         break;
+      }
+   }
+   g_free(p_in);
+   g_object_unref(p_z);
+   return (g_byte_array_free_to_bytes(p_out));
+}
+
+/* A small zlib bomb: a 32768 x 32768 grey IHDR (1 Gi pixels, over the
+ * loader's 100 M pixel cap) over 64 MiB of zeros deflated to ~64 KiB. The
+ * caps refuse the IHDR before a byte of IDAT is inflated -- the error is
+ * the caps', not the "image data ends short" the old walk reached only
+ * after inflating all 64 MiB. A cancelled check of a sound file stops as
+ * CANCELLED. */
+static void
+test_png_ihdr_caps_before_inflate(void) {
+   GByteArray *p_a = g_byte_array_new();
+   g_byte_array_append(p_a, (const guint8 *)"\x89PNG\r\n\x1a\n", 8);
+   const guint8 C_IHDR[13] = {0, 0, 0x80, 0, 0, 0, 0x80, 0, 8, 0, 0, 0, 0};
+   png_chunk(p_a, "IHDR", C_IHDR, 13);
+   GBytes       *p_z   = zlib_zeros((gsize)64 << 20);
+   gsize         u_len = 0;
+   const guint8 *p_zd  = g_bytes_get_data(p_z, &u_len);
+   png_chunk(p_a, "IDAT", p_zd, u_len);
+   png_chunk(p_a, "IEND", NULL, 0);
+   g_assert_cmpuint(p_a->len, <, 1u << 20);
+   GFile  *p_file = temp_file("bomb.png", p_a->data, p_a->len);
+   GError *p_err  = NULL;
+   g_assert_false(intact_png(p_file, NULL, NULL, &p_err));
+   g_assert_nonnull(p_err);
+   g_test_message("bomb: %s", p_err->message);
+   g_assert_null(strstr(p_err->message, "corrupt"));
+   g_assert_null(strstr(p_err->message, "truncated"));
+   g_clear_error(&p_err);
+   g_file_delete(p_file, NULL, NULL);
+   g_object_unref(p_file);
+   g_bytes_unref(p_z);
+   g_byte_array_unref(p_a);
+
+   GCancellable *p_cancel = g_cancellable_new();
+   g_cancellable_cancel(p_cancel);
+   p_file = fixture("swapped.png");
+   g_assert_false(intact_png(p_file, p_cancel, NULL, &p_err));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+   g_clear_error(&p_err);
+   g_object_unref(p_file);
+   g_object_unref(p_cancel);
+}
+
 /* --- the libjpeg pass ------------------------------------------------------
  */
+
+#if GGAZE_HAVE_JPEG
+/* p_a, written as c_name, through the libjpeg pass: TRUE iff it decodes. */
+static gboolean
+jpeg_bytes_decode(const char *c_name, const GByteArray *p_a) {
+   GFile   *p_file = temp_file(c_name, p_a->data, p_a->len);
+   GError  *p_err  = NULL;
+   gboolean b_ok   = intact_jpeg_decodes(p_file, NULL, &p_err);
+   if (!b_ok) {
+      g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+      g_test_message("%s: %s", c_name, p_err->message);
+      g_clear_error(&p_err);
+   }
+   g_file_delete(p_file, NULL, NULL);
+   g_object_unref(p_file);
+   return (b_ok);
+}
+
+/* Offset of the u_n-th (from 1) FF u_code marker in p_a. */
+static gsize
+nth_marker(const GByteArray *p_a, guint8 u_code, guint u_n) {
+   for (gsize u = 2; u + 1 < p_a->len; u++) {
+      if (p_a->data[u] == 0xFF && p_a->data[u + 1] == u_code && --u_n == 0) {
+         return (u);
+      }
+   }
+   g_assert_not_reached();
+   return (0);
+}
+#endif /* GGAZE_HAVE_JPEG: the helpers of the case below */
+
+/* EOF is fatal in the libjpeg pass, as it is inside gegl:jpg-load: a JPEG
+ * cut inside its scan or just before its EOI fails, and so does a
+ * progressive one cut right after a COM segment holding the bytes FF D9
+ * between two scans, or inside a later scan -- files libjpeg's own stdio
+ * source would have "decoded" by inventing an EOI. The whole progressive
+ * file and one with a trailer after its EOI decode; a cancelled pass is
+ * CANCELLED. */
+static void
+test_jpeg_cut_after_sos_fails_the_pass(void) {
+#if GGAZE_HAVE_JPEG
+   GByteArray *p_a   = fixture_array("swapped.jpg");
+   guint       u_len = p_a->len;
+   g_byte_array_append(p_a, (const guint8 *)"SEFT trailer", 12);
+   g_assert_true(jpeg_bytes_decode("trail.jpg", p_a));
+   g_byte_array_set_size(p_a, u_len - 2);
+   g_assert_false(jpeg_bytes_decode("noeoi.jpg", p_a));
+   g_byte_array_set_size(p_a, u_len - 100);
+   g_assert_false(jpeg_bytes_decode("cut.jpg", p_a));
+   g_byte_array_unref(p_a);
+
+   const guint8 C_COM[6] = {0xFF, 0xFE, 0x00, 0x04, 0xFF, 0xD9};
+   p_a                   = fixture_array("swapped-prog.jpg");
+   g_assert_true(jpeg_bytes_decode("prog.jpg", p_a));
+   gsize u_sos = nth_marker(p_a, 0xDA, 3);
+   bytes_insert(p_a, u_sos, C_COM, sizeof(C_COM));
+   g_assert_true(jpeg_bytes_decode("progcom.jpg", p_a)); /* whole: fine */
+   g_byte_array_set_size(p_a, (guint)(u_sos + 6 + 14 + 70));
+   g_assert_false(jpeg_bytes_decode("midscan.jpg", p_a));
+   g_byte_array_set_size(p_a, (guint)(u_sos + sizeof(C_COM)));
+   /* the header walk vouches for it (it reaches SOS): the pass decides */
+   assert_intact(FALSE, temp_file("walk.jpg", p_a->data, p_a->len));
+   g_assert_false(jpeg_bytes_decode("aftercom.jpg", p_a));
+   g_byte_array_unref(p_a);
+
+   GCancellable *p_cancel = g_cancellable_new();
+   GFile        *p_file   = fixture("swapped.jpg");
+   GError       *p_err    = NULL;
+   g_cancellable_cancel(p_cancel);
+   g_assert_false(intact_jpeg_decodes(p_file, p_cancel, &p_err));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+   g_clear_error(&p_err);
+   g_object_unref(p_file);
+   g_object_unref(p_cancel);
+#else
+   g_test_skip("no libjpeg in this build");
+#endif
+}
 
 /* A good JPEG decodes; one libjpeg gives up on (a second SOF: gegl:jpg-load
  * would exit the process on it) is INVALID_DATA with libjpeg's message; a
@@ -388,7 +588,7 @@ test_jpeg_decodes(void) {
    GFile  *p_file = fixture("swapped.jpg");
    GError *p_err  = NULL;
 #if GGAZE_HAVE_JPEG
-   g_assert_true(intact_jpeg_decodes(p_file, &p_err));
+   g_assert_true(intact_jpeg_decodes(p_file, NULL, &p_err));
    g_assert_no_error(p_err);
    GByteArray *p_a   = fixture_array("swapped.jpg");
    gsize       u_sof = 0;
@@ -400,7 +600,7 @@ test_jpeg_decodes(void) {
    bytes_insert(p_a, u_sof, p_sof, u_len);
    g_free(p_sof);
    GFile *p_two = temp_file("twosof.jpg", p_a->data, p_a->len);
-   g_assert_false(intact_jpeg_decodes(p_two, &p_err));
+   g_assert_false(intact_jpeg_decodes(p_two, NULL, &p_err));
    g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
    g_test_message("%s", p_err->message);
    g_clear_error(&p_err);
@@ -408,12 +608,12 @@ test_jpeg_decodes(void) {
    g_object_unref(p_two);
    g_byte_array_unref(p_a);
    GFile *p_none = g_file_new_for_path("/nonexistent/ggaze/x.jpg");
-   g_assert_false(intact_jpeg_decodes(p_none, &p_err));
+   g_assert_false(intact_jpeg_decodes(p_none, NULL, &p_err));
    g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED);
    g_clear_error(&p_err);
    g_object_unref(p_none);
 #else
-   g_assert_false(intact_jpeg_decodes(p_file, &p_err));
+   g_assert_false(intact_jpeg_decodes(p_file, NULL, &p_err));
    g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
    g_clear_error(&p_err);
 #endif
@@ -428,15 +628,22 @@ main(int argc, char **argv) {
    g_test_add_func("/intact/fixtures_are_intact", test_fixtures_are_intact);
    g_test_add_func("/intact/cut_png_is_truncated", test_cut_png_is_truncated);
    g_test_add_func("/intact/cut_jpeg_is_truncated", test_cut_jpeg_is_truncated);
-   g_test_add_func("/intact/jpeg_eoi_must_follow_sos",
-                   test_jpeg_eoi_must_follow_sos);
+   g_test_add_func("/intact/jpeg_header_walk", test_jpeg_header_walk);
    g_test_add_func("/intact/missing_file_is_an_io_error",
                    test_missing_file_is_an_io_error);
    g_test_add_func("/intact/sizes_are_reported", test_sizes_are_reported);
    g_test_add_func("/intact/png_rows_are_checked", test_png_rows_are_checked);
    g_test_add_func("/intact/png_corruption_is_found",
                    test_png_corruption_is_found);
+   g_test_add_func("/intact/components_are_reported",
+                   test_components_are_reported);
+   g_test_add_func("/intact/png_idat_run_ends_at_another_chunk",
+                   test_png_idat_run_ends_at_another_chunk);
+   g_test_add_func("/intact/png_ihdr_caps_before_inflate",
+                   test_png_ihdr_caps_before_inflate);
    g_test_add_func("/intact/jpeg_decodes", test_jpeg_decodes);
+   g_test_add_func("/intact/jpeg_cut_after_sos_fails_the_pass",
+                   test_jpeg_cut_after_sos_fails_the_pass);
    int i_rc = g_test_run();
    g_rmdir(c_dir);
    g_free(c_dir);

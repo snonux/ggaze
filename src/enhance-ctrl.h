@@ -247,9 +247,12 @@ gboolean enhance_ctrl_is_dirty(EnhanceCtrl *p_ctrl);
 gboolean enhance_ctrl_is_open(EnhanceCtrl *p_ctrl);
 
 /* The hot-path override: returns the texture the viewer should show given the
- * natural candidate p_tex. An active, non-hold-original preview wins; else
- * p_tex is returned unchanged. Called from the window's single texture
- * choke point (_show_texture). A pure query: it learns nothing. */
+ * natural candidate p_tex. An active, non-hold-original preview wins; under
+ * hold-Space a fetched managed original (a colour-managed file's original
+ * through the render's own decode) stands for p_tex -- so the info card
+ * plots it too; else p_tex is returned unchanged. Called from the window's
+ * single texture choke point (_show_texture). A pure query: it learns nothing.
+ */
 GdkTexture *enhance_ctrl_override_texture(EnhanceCtrl *p_ctrl,
                                           GdkTexture  *p_tex);
 
@@ -269,9 +272,14 @@ void enhance_ctrl_texture_shown(EnhanceCtrl *p_ctrl, GdkTexture *p_tex);
 
 /* Hold-Space compare: TRUE shows the original as the viewer last showed it
  * (this controller's own reference -- an evicted or stale cache entry does
- * not matter); FALSE restores the cached modified texture. No-op if nothing
- * is active, the requested state is already in effect, or the file's decode
- * has not been shown since a rewrite forgot it. */
+ * not matter); FALSE restores the cached modified texture. For a render
+ * whose decode was colour-managed the compare is against the MANAGED
+ * original instead, fetched in a worker on the first press (not with every
+ * render: a full-size texture outside the cache's cap) and swapped in when
+ * it lands if Space is still held; until then the plain original shows. It
+ * is dropped on discard, navigation and a rewrite of the file. No-op if
+ * nothing is active, the requested state is already in effect, or the
+ * file's decode has not been shown since a rewrite forgot it. */
 void enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold);
 
 /* --- action entry points (the GActions stay window-side; these do the work) */

@@ -4,8 +4,11 @@
 #   minimal  all optional backends disabled (jpeg included: only then is
 #            GGAZE_HAVE_ANY_BACKEND 0 and the loader's #else branches
 #            compiled at all); plain GdkPixbuf viewer.
-#   gegl     gegl=enabled (+ jxl/avif/heif auto) — keeps the optional path
-#            from bit-rotting.
+#   gegl     gegl=enabled (+ jxl/avif/heif/jpeg auto) — keeps the optional
+#            path from bit-rotting. libjpeg-turbo-devel is installed so
+#            jpeg=auto finds it: colour-managed JPEGs on the enhance path
+#            need the libjpeg check pass (loader/intact.c), without which
+#            every JPEG keeps the loader path (the tests cover both).
 #   asan     the same minimal build (jpeg disabled too) under
 #            AddressSanitizer + UBSan (also drives the per-feature
 #            leak-check tasks).
@@ -43,7 +46,8 @@ steps:
           libasan libubsan
       - |
         if [ "$LANE" = "gegl" ]; then
-          dnf install -y --setopt=install_weak_deps=False gegl-devel babl-devel
+          dnf install -y --setopt=install_weak_deps=False gegl-devel babl-devel \
+            libjpeg-turbo-devel
         fi
       - meson setup build $MESON_OPTS
       - ninja -C build

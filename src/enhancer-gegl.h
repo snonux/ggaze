@@ -91,6 +91,16 @@ gboolean enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err);
  * (the loader's error). */
 GeglBuffer *enhancer_load(GFile *p_file, GError **p_err);
 
+/* Whether enhancer_load() will decode p_file colour-managed, as far as the
+ * file's headers tell: a local PNG / JPEG (a JPEG only in a build with
+ * the `jpeg` feature), GEGL's loader op installed, an embedded profile
+ * babl parses to a space other than sRGB, for the image's number of
+ * colour components. The completeness checks are NOT run -- a file whose
+ * data turns out broken still falls back to the loader path -- so this is
+ * the cheap answer for the info card's "managed on enhance/export" note,
+ * not a promise. Thread-safe (the info card asks from a worker). */
+gboolean enhancer_would_manage(GFile *p_file);
+
 /* Convert a GeglBuffer to a GdkTexture for preview: sRGB RGBA8 bytes, so a
  * buffer in another space is colour-converted here (babl), which is what
  * makes a wide-gamut preview look right. Returns a new GdkTexture (caller
@@ -105,14 +115,12 @@ GdkTexture *enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err);
  * concurrent enhancer_set_presets() (Preferences apply) or a tool nudge
  * cannot race it. p_cancel may be NULL. Since GEGL processing itself cannot
  * be interrupted mid-flight, cancellation only skips work that has not
- * started yet -- a caller that needs last-write-wins semantics (e.g. a newer
- * apply superseding this one) must still check that on its own before using
- * the finished result. b_want_original asks for the managed original as
- * well (see the finish), which costs one more sRGB conversion of the full
- * decode, so a caller that already holds it passes FALSE. */
+ * started yet (and cuts the managed path's whole-file checks short, which
+ * then decline) -- a caller that needs last-write-wins semantics (e.g. a
+ * newer apply superseding this one) must still check that on its own
+ * before using the finished result. */
 void enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
                                 guint8 u_mask, const Transform *p_xf,
-                                gboolean            b_want_original,
                                 GCancellable       *p_cancel,
                                 GAsyncReadyCallback p_cb, gpointer p_data);
 
@@ -121,17 +129,34 @@ void enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
  * receive the ORIGINAL image's upright size, the number the transform's base
  * size is computed from (transform_base_size); the controller records it so
  * the crop tool and a later quarter turn know the image they work on without
- * a second decode. *pp_original (nullable) receives, when the call asked
- * for it (b_want_original) and the decode was colour-managed (not sRGB),
- * the ORIGINAL through the same managed pipeline as the render -- the
- * identity chain, untransformed, converted to sRGB for display -- and NULL
- * otherwise (caller unrefs). The plain view shows an unmanaged decode, so
- * a before/after compare against it would show a colour shift no preset
- * caused; the controller shows this one under hold-Space instead. */
+ * a second decode. *pb_managed (nullable) says whether the decode was
+ * colour-managed: the file's embedded profile applied by GEGL's loader, in
+ * whatever working space (a CMYK or grey file's chain runs in sRGB, yet its
+ * pixels are the profile's). The plain view shows an unmanaged decode, so
+ * a before/after compare of a managed render against it would show a
+ * colour shift no preset caused: the controller then asks for the managed
+ * original (below) for hold-Space. */
 GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, gint *p_orig_w,
-                                        gint        *p_orig_h,
-                                        GdkTexture **pp_original,
-                                        GError     **p_err);
+                                        gint *p_orig_h, gboolean *pb_managed,
+                                        GError **p_err);
+
+/* Async: the ORIGINAL of p_file through the same colour-managed decode as
+ * the render (enhancer_load's managed path: the identity chain,
+ * untransformed, converted to sRGB for display), in a GTask worker. Asked
+ * for lazily -- on the first hold-Space of a managed render -- because it
+ * is a second full-size texture (w x h x 4 bytes) the caller keeps outside
+ * the texture cache's cap. p_cancel may be NULL (it cuts the whole-file
+ * checks short; a cancelled task finishes with G_IO_ERROR_CANCELLED). */
+void enhancer_managed_original_async(GFile *p_file, GCancellable *p_cancel,
+                                     GAsyncReadyCallback p_cb, gpointer p_data);
+
+/* Finish enhancer_managed_original_async(): a new GdkTexture (caller
+ * unrefs); NULL WITHOUT an error when the file no longer decodes managed
+ * (rewritten meanwhile: the plain original is then the right compare);
+ * NULL with p_err set when the file does not load at all or the task was
+ * cancelled. */
+GdkTexture *enhancer_managed_original_finish(GAsyncResult *p_res,
+                                             GError      **p_err);
 
 /* Generate the max-512px original followed by up to eight independent preset
  * previews. The returned array owns its GdkTexture entries; index 0 is the

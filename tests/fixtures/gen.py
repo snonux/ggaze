@@ -29,6 +29,9 @@ the stdlib is needed and the files stay tiny (~700 bytes each):
                with a LINEAR (gamma 1.0) curve: managed it displays ~188
                in sRGB, unmanaged 128 (grey -> sRGB working space).
   grey-icc.jpg 8x8 greyscale JPEG of the same, the profile in APP2.
+  swapped-prog.jpg 16x16 PROGRESSIVE JPEG of a noise pattern under the
+               swapped profile: every scan carries entropy data, so a test
+               can cut the file between or inside scans (xb2 review 2).
   cmyk-icc.jpg 8x8 CMYK JPEG (ImageMagick) of C=0 M=Y=100% K=0 (red),
                under a hand-built lut8 CMYK -> Lab printer profile
                (write_cmyk_icc) that maps it to BLUE: managed through
@@ -254,17 +257,18 @@ def _splice_app2(path, icc):
         f.write(jpg[:2] + app2 + jpg[2:])
 
 
-def write_jpg_icc(path, w, h, icc, pixels=None, grey=False, sample=None):
+def write_jpg_icc(path, w, h, icc, pixels=None, grey=False, sample=None,
+                  extra=()):
     """A JPEG via cjpeg of pixels (row-major RGB or grey bytes; solid
     (255, 0, 0) by default), with icc spliced in. sample="1x1" writes 4:4:4
     so neighbouring colours do not bleed (swapped.jpg predates the option
-    and keeps cjpeg's default)."""
+    and keeps cjpeg's default); extra holds further cjpeg options."""
     pnm = path + ".pnm"
     if pixels is None:
         pixels = b"\xff\x00\x00" * (w * h)
     with open(pnm, "wb") as f:
         f.write(b"P%d\n%d %d\n255\n" % (5 if grey else 6, w, h) + pixels)
-    opts = ["-sample", sample] if sample else []
+    opts = (["-sample", sample] if sample else []) + list(extra)
     subprocess.run(["cjpeg", "-quality", "100"] + opts + ["-outfile", path,
                                                            pnm], check=True)
     os.remove(pnm)
@@ -303,6 +307,12 @@ def write_icc_fixtures_2(out, swapped, srgb):
                     "-colorspace", "CMYK", "-quality", "100", "-strip",
                     cmyk], check=True)
     _splice_app2(cmyk, write_cmyk_icc("ggaze CMYK test"))
+    # A progressive JPEG with real entropy data in every scan (a noise
+    # pattern), for the crafted cut-between-scans cases (xb2 review 2).
+    noise = bytes((x * 37 + y * 91 + c * 53) * 7 % 256
+                  for y in range(16) for x in range(16) for c in range(3))
+    write_jpg_icc(os.path.join(out, "swapped-prog.jpg"), 16, 16, swapped,
+                  pixels=noise, sample="1x1", extra=("-progressive",))
 
 
 def main():
