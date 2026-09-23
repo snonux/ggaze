@@ -45,12 +45,13 @@ typedef struct {
    GgazeIccState e_icc;         /* embedded-profile state, see above */
    char         *c_colorspace; /* the embedded profile's description (owned), or
                                 * NULL unless e_icc is GGAZE_ICC_EMBEDDED */
-   gboolean b_icc_managed;     /* the enhance path will apply that profile in
-                                * this build. info_new() leaves it FALSE: only a
+   gboolean b_icc_managed;     /* the enhance path may apply that profile in
+                                * this build (its headers pass the enhancer's
+                                * gates). info_new() leaves it FALSE: only a
                                 * caller that can ask the enhancer (GEGL builds:
                                 * enhancer_would_manage, from info-overlay.c's
                                 * worker) sets it; info_format() then adds
-                                * "managed on enhance/export" to the line */
+                                * "may be managed on enhance/export" */
 } GgazeInfo;
 
 /* Gather info for p_file (synchronous). Returns a new GgazeInfo (caller owns,

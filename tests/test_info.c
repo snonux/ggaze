@@ -472,7 +472,7 @@ test_dnl_zero_height_jpeg_size_unknown(void) {
 
 /* xb2: the colour space the card names. swapped.png / swapped.jpg carry a
  * hand-built profile called "ggaze swapped RGB" (tests/fixtures/gen.py);
- * the line says so, and adds "managed on enhance/export" only when the
+ * the line says so, and adds "may be managed on enhance/export" only when the
  * caller established it (b_icc_managed: info_new cannot know, it leaves it
  * FALSE -- the enhancer's answer is test_enhancer_icc's to pin). */
 static void
@@ -491,7 +491,7 @@ test_colorspace_embedded_profile(void) {
    c_fmt                = info_format(p_png);
    g_assert_nonnull(g_strstr_len(c_fmt, -1,
                                  "Color space: ggaze swapped RGB (embedded "
-                                 "ICC; managed on enhance/export)"));
+                                 "ICC; may be managed on enhance/export)"));
    g_free(c_fmt);
    info_delete(p_png);
 

@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
+#include <lcms2.h>
 
 #include "enhancer-gegl.h"
 #include "ggaze-config.h"
@@ -41,6 +42,23 @@ void
 enhancer_test_set_missing_op(const char *c_op) {
    g_free(c_missing_op);
    c_missing_op = g_strdup(c_op);
+}
+
+/* Test seams (enhancer-gegl.h): a hook run as each managed load starts,
+ * and the number of loader-path decodes so far. */
+static EnhancerTestHook p_load_hook      = NULL;
+static gpointer         p_load_hook_data = NULL;
+static gint             i_loader_decodes = 0;
+
+void
+enhancer_test_set_load_hook(EnhancerTestHook p_hook, gpointer p_data) {
+   p_load_hook      = p_hook;
+   p_load_hook_data = p_data;
+}
+
+guint
+enhancer_test_loader_decodes(void) {
+   return ((guint)g_atomic_int_get(&i_loader_decodes));
 }
 
 /* gegl_has_operation(), unless the test seam hides c_op. */
@@ -842,8 +860,9 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
  * trip). The downloader is also why there is no gegl:load fallback for a
  * texture that is not RGBA8 any more: every texture converts. */
 static GeglBuffer *
-_load_via_loader(GFile *p_file, GError **p_err) {
-   GdkTexture *p_tex = loader_load(p_file, NULL, p_err);
+_load_via_loader(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
+   g_atomic_int_inc(&i_loader_decodes);
+   GdkTexture *p_tex = loader_load(p_file, p_cancel, p_err);
    if (p_tex == NULL) {
       return (NULL);
    }
@@ -884,27 +903,171 @@ _gegl_loader_for(GFile *p_file, GgazeFormat *pe_fmt) {
    return (c_op != NULL && _has_op(c_op) ? c_op : NULL);
 }
 
-/* The space of p_file's embedded profile when there is one worth managing:
- * a profile icc.c finds and babl parses (a matrix/TRC RGB, a grey TRC, or
- * -- through babl's LCMS -- a CMYK one), and that is not sRGB (babl hands
- * back its own sRGB space for a profile equivalent to it). NULL otherwise.
- * GEGL's loader makes the same babl call on the same bytes, so this is the
- * space the decoded buffer will carry. */
+/* --- which profiles babl sees ---------------------------------------------
+ *
+ * babl_space_from_icc() is not safe on untrusted bytes, in three ways, and
+ * the managed path hands it nothing it has not first vetted:
+ *   - it reads tag data unchecked: icc_profile_is_sane() (icc.c) vouches
+ *     for every tag babl reads first;
+ *   - on a CMYK profile it keeps whatever LCMS gives back, a NULL
+ *     transform included, and the first conversion through that space
+ *     crashes: the transform the decode converts through is built here
+ *     first (_cmyk_profile_opens), and a profile it fails for declines;
+ *   - its space and tone-curve tables are fixed arrays of 100 entries
+ *     that are never freed, and a full space table makes the next
+ *     babl_space_from_icc() dereference NULL. Every distinct non-sRGB
+ *     profile adds a space and up to four curves (a declined one may still
+ *     have added its curves), so only GGAZE_ENHANCER_MAX_PROFILES distinct
+ *     profiles per process get to babl; the verdict on each is kept, so a
+ *     file seen again costs a checksum. Past the cap a new profile is
+ *     declined -- its file takes the loader path, sRGB, as before xb2.
+ * GEGL's own loaders then make the same babl call on the same bytes, which
+ * babl answers from its table (the same profile gives the same space). */
+
+#ifndef TYPE_CMYKA_DBL /* not in lcms2.h; babl defines it the same way */
+#define TYPE_CMYKA_DBL                                                         \
+   (FLOAT_SH(1) | COLORSPACE_SH(PT_CMYK) | EXTRA_SH(1) | CHANNELS_SH(4) |      \
+    BYTES_SH(0))
+#endif
+#ifndef TYPE_RGBA_DBL
+#define TYPE_RGBA_DBL                                                          \
+   (FLOAT_SH(1) | COLORSPACE_SH(PT_RGB) | EXTRA_SH(1) | CHANNELS_SH(3) |       \
+    BYTES_SH(0))
+#endif
+
+/* Whether LCMS builds the transform babl reads a CMYK image through
+ * (babl-icc.c: CMYKA double -> the RGBA double of babl's scRGB profile,
+ * relative colorimetric with black-point compensation). babl also builds
+ * the reverse one, which only a conversion INTO the CMYK space uses --
+ * never done here: the chain of a CMYK file runs in sRGB -- and which a
+ * profile with no B2A tags (an input-only one, like cmyk-icc.jpg's)
+ * legitimately cannot give; so it is not required. */
+static gboolean
+_cmyk_profile_opens(const char *c_data, gsize u_len) {
+   int         i_rgb_len = 0;
+   const char *c_rgb     = babl_space_get_icc(babl_space("scRGB"), &i_rgb_len);
+   cmsHPROFILE p_cmyk = cmsOpenProfileFromMem(c_data, (cmsUInt32Number)u_len);
+   cmsHPROFILE p_rgb = cmsOpenProfileFromMem(c_rgb, (cmsUInt32Number)i_rgb_len);
+   gboolean    b_ok  = FALSE;
+   if (p_cmyk != NULL && p_rgb != NULL) {
+      cmsHTRANSFORM p_to = cmsCreateTransform(
+         p_cmyk, TYPE_CMYKA_DBL, p_rgb, TYPE_RGBA_DBL,
+         INTENT_RELATIVE_COLORIMETRIC, cmsFLAGS_BLACKPOINTCOMPENSATION);
+      b_ok = p_to != NULL;
+      g_clear_pointer(&p_to, cmsDeleteTransform);
+   }
+   g_clear_pointer(&p_cmyk, cmsCloseProfile);
+   g_clear_pointer(&p_rgb, cmsCloseProfile);
+   return (b_ok);
+}
+
+/* babl's space for a vetted profile (icc_profile_is_sane), or NULL;
+ * *pb_asked says whether babl was asked at all (a CMYK profile LCMS cannot
+ * open never reaches it, and touches none of its tables). */
+static const Babl *
+_babl_space_for(GBytes *p_icc, gboolean *pb_asked) {
+   gsize       u_len  = 0;
+   const char *c_data = g_bytes_get_data(p_icc, &u_len);
+   *pb_asked          = FALSE;
+   if (memcmp(c_data + 16, "CMYK", 4) == 0 &&
+       !_cmyk_profile_opens(c_data, u_len)) {
+      return (NULL);
+   }
+   const char *c_err = NULL;
+   *pb_asked         = TRUE;
+   return (
+      babl_space_from_icc(c_data, (int)u_len, BABL_ICC_INTENT_DEFAULT, &c_err));
+}
+
+static GMutex      t_profiles_lock;
+static GHashTable *p_profiles      = NULL; /* SHA-256 hex -> const Babl * */
+static guint       u_profile_slots = 0;    /* profiles that may have grown
+                                            * babl's tables (see above) */
+
+/* Whether p_space is sRGB or a space an earlier profile already gave:
+ * babl then added no space for this profile. */
+static gboolean
+_space_known(const Babl *p_space) {
+   if (p_space == babl_space("sRGB")) {
+      return (TRUE);
+   }
+   GHashTableIter t_it;
+   gpointer       p_val = NULL;
+   g_hash_table_iter_init(&t_it, p_profiles);
+   while (g_hash_table_iter_next(&t_it, NULL, &p_val)) {
+      if (p_val == p_space) {
+         return (TRUE);
+      }
+   }
+   return (FALSE);
+}
+
+/* p_icc's babl space through the verdict table (section comment above):
+ * the kept verdict for a profile seen before, a new babl call while the
+ * cap allows one, NULL past it. */
+static const Babl *
+_profile_space(GBytes *p_icc) {
+   char       *c_key   = g_compute_checksum_for_bytes(G_CHECKSUM_SHA256, p_icc);
+   gpointer    p_val   = NULL;
+   const Babl *p_space = NULL;
+   g_mutex_lock(&t_profiles_lock);
+   if (p_profiles == NULL) {
+      p_profiles = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+   }
+   if (g_hash_table_lookup_extended(p_profiles, c_key, NULL, &p_val)) {
+      p_space = p_val;
+      g_free(c_key);
+   } else if (u_profile_slots >= GGAZE_ENHANCER_MAX_PROFILES) {
+      g_debug("enhancer: not managed, %u distinct profiles already in babl",
+              u_profile_slots);
+      g_free(c_key);
+   } else {
+      gboolean b_asked = FALSE;
+      p_space          = _babl_space_for(p_icc, &b_asked);
+      if (b_asked && (p_space == NULL || !_space_known(p_space))) {
+         u_profile_slots++;
+      }
+      g_hash_table_insert(p_profiles, c_key, (gpointer)p_space);
+   }
+   g_mutex_unlock(&t_profiles_lock);
+   return (p_space);
+}
+
+/* The space of a profile worth managing: one icc_profile_is_sane() vouches
+ * for and babl parses (a matrix/TRC RGB, a grey TRC, or -- through babl's
+ * LCMS -- a CMYK one) to a space other than sRGB (babl hands back its own
+ * sRGB space for a profile equivalent to it). NULL otherwise. */
+static const Babl *
+_space_of_profile(GBytes *p_icc) {
+   const Babl *p_space =
+      icc_profile_is_sane(p_icc) ? _profile_space(p_icc) : NULL;
+   return (p_space == babl_space("sRGB") ? NULL : p_space);
+}
+
+/* _space_of_profile() for p_file's embedded profile: the space GEGL's
+ * loader will tag the decoded buffer with. */
 static const Babl *
 _managed_space(GFile *p_file) {
    GBytes     *p_icc   = icc_read_embedded(p_file, NULL);
-   const Babl *p_space = NULL;
-   if (icc_is_profile(p_icc)) {
-      gsize       u_len  = 0;
-      const char *c_data = g_bytes_get_data(p_icc, &u_len);
-      const char *c_err  = NULL;
-      p_space = babl_space_from_icc(c_data, (int)u_len, BABL_ICC_INTENT_DEFAULT,
-                                    &c_err);
-   }
+   const Babl *p_space = p_icc != NULL ? _space_of_profile(p_icc) : NULL;
    if (p_icc != NULL) {
       g_bytes_unref(p_icc);
    }
-   return (p_space == babl_space("sRGB") ? NULL : p_space);
+   return (p_space);
+}
+
+gboolean
+enhancer_test_profile_is_managed(GBytes *p_icc) {
+   g_return_val_if_fail(p_icc != NULL, FALSE);
+   return (_space_of_profile(p_icc) != NULL);
+}
+
+guint
+enhancer_test_profile_slots(void) {
+   g_mutex_lock(&t_profiles_lock);
+   guint u_slots = u_profile_slots;
+   g_mutex_unlock(&t_profiles_lock);
+   return (u_slots);
 }
 
 /* loader/intact.h vouches for p_file and its stored size is within the
@@ -1055,15 +1218,21 @@ _rgba8_upright(GeglBuffer *p_buf, int i_orient) {
 }
 
 /* The managed path (section comment above): a buffer, or NULL when it
- * declines -- never an error of its own, the loader path then decides. */
+ * declines -- never an error of its own, the caller then decides (a
+ * decline the cancellation caused included: GEGL's decode, which nothing
+ * can stop, is not started once p_cancel has fired). */
 static GeglBuffer *
 _load_managed(GFile *p_file, const char *c_path, GCancellable *p_cancel) {
+   if (p_load_hook != NULL) {
+      p_load_hook(p_load_hook_data);
+   }
    GgazeFormat e_fmt   = GGAZE_FMT_UNKNOWN;
    const char *c_op    = _gegl_loader_for(p_file, &e_fmt);
    const Babl *p_space = c_op != NULL ? _managed_space(p_file) : NULL;
    IntactSize  t_size;
    if (p_space == NULL || !_vouched(p_file, e_fmt, p_cancel, &t_size) ||
-       !_space_fits(p_space, t_size.u_comps)) {
+       !_space_fits(p_space, t_size.u_comps) ||
+       g_cancellable_is_cancelled(p_cancel)) {
       return (NULL);
    }
    GeglBuffer *p_raw = _load_via_gegl_op(c_op, c_path, &t_size);
@@ -1077,29 +1246,49 @@ _load_managed(GFile *p_file, const char *c_path, GCancellable *p_cancel) {
    return (p_out);
 }
 
-/* enhancer_load with the worker's GCancellable (nullable) for the managed
- * path's whole-file checks, and *pb_managed (nullable) told whether the
- * managed path decoded the file -- its embedded profile applied, whatever
- * the working space (a CMYK or grey file's buffer is sRGB, yet its pixels
- * are the profile's, not the loader's). */
+/* _load_managed() for p_file when it is local, else NULL. */
 static GeglBuffer *
-_load(GFile *p_file, GCancellable *p_cancel, gboolean *pb_managed,
-      GError **p_err) {
+_load_managed_file(GFile *p_file, GCancellable *p_cancel) {
    char       *c_path = g_file_get_path(p_file);
    GeglBuffer *p_buf =
       c_path != NULL ? _load_managed(p_file, c_path, p_cancel) : NULL;
    g_free(c_path);
+   return (p_buf);
+}
+
+/* enhancer_load with the worker's GCancellable (nullable) for the managed
+ * path's whole-file checks and the loader's decode, and *pb_managed
+ * (nullable) told whether the managed path decoded the file -- its
+ * embedded profile applied, whatever the working space (a CMYK or grey
+ * file's buffer is sRGB, yet its pixels are the profile's, not the
+ * loader's). A cancelled load returns G_IO_ERROR_CANCELLED WITHOUT
+ * decoding: a check the cancellation cut short declines like a failed one,
+ * and falling through to the loader would decode the whole file for a
+ * result nobody takes. */
+static GeglBuffer *
+_load(GFile *p_file, GCancellable *p_cancel, gboolean *pb_managed,
+      GError **p_err) {
+   GeglBuffer *p_buf = _load_managed_file(p_file, p_cancel);
    if (pb_managed != NULL) {
       *pb_managed = p_buf != NULL;
    }
-   return (p_buf != NULL ? p_buf : _load_via_loader(p_file, p_err));
+   if (p_buf != NULL || g_cancellable_set_error_if_cancelled(p_cancel, p_err)) {
+      return (p_buf);
+   }
+   return (_load_via_loader(p_file, p_cancel, p_err));
 }
 
 /* The managed path's own gates, header-deep: _load_managed's choices up to
- * (not including) the completeness checks, with the component count from
- * the headers alone -- intact_png_header for a PNG, the (headers-only)
- * intact_jpeg walk for a JPEG -- and the JPEG's libjpeg requirement as a
- * build fact, since the libjpeg pass declines every JPEG without it. */
+ * (not including) the completeness checks, with the size and component
+ * count from the headers alone -- intact_png_header for a PNG (the caps
+ * included), the (headers-only) intact_jpeg walk plus the same caps for a
+ * JPEG -- and the JPEG's libjpeg requirement as a build fact, since the
+ * libjpeg pass declines every JPEG without it. The whole-file checks stay
+ * out: measured on ./sample-images (106 profiled files), the header gates
+ * take ~0.02 ms a file, the PNG inflate / libjpeg 1/8 pass ~150 ms on
+ * average and ~0.9 s at most, on every `i` press -- so the card says
+ * "may be managed" instead of promising what only the enhance-time checks
+ * can. */
 gboolean
 enhancer_would_manage(GFile *p_file) {
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
@@ -1116,8 +1305,11 @@ enhancer_would_manage(GFile *p_file) {
    if (p_space == NULL) {
       return (FALSE);
    }
-   gboolean b_hdr = b_png ? intact_png_header(p_file, &t_size, NULL)
-                          : intact_jpeg(p_file, NULL, &t_size, NULL);
+   gboolean b_hdr = b_png
+                       ? intact_png_header(p_file, &t_size, NULL)
+                       : intact_jpeg(p_file, NULL, &t_size, NULL) &&
+                            detect_dims_within_bounds("enhancer", t_size.u_w,
+                                                      t_size.u_h, NULL, NULL);
    return (b_hdr && _space_fits(p_space, t_size.u_comps));
 }
 
@@ -1287,12 +1479,16 @@ _managed_original_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
    if (g_task_return_error_if_cancelled(p_task)) {
       return;
    }
-   GError     *p_err     = NULL;
-   gboolean    b_managed = FALSE;
-   GeglBuffer *p_buf     = _load(G_FILE(p_src), p_cancel, &b_managed, &p_err);
-   GdkTexture *p_tex     = NULL;
-   if (p_buf != NULL && b_managed) {
+   /* The managed path alone: a decline (the file rewritten meanwhile, or
+    * past the profile cap) is "no managed original", never a plain decode
+    * -- the caller already shows that one. */
+   GError     *p_err = NULL;
+   GeglBuffer *p_buf = _load_managed_file(G_FILE(p_src), p_cancel);
+   GdkTexture *p_tex = NULL;
+   if (p_buf != NULL) {
       p_tex = enhancer_buffer_to_texture(p_buf, &p_err);
+   } else {
+      g_cancellable_set_error_if_cancelled(p_cancel, &p_err);
    }
    g_clear_object(&p_buf);
    if (p_err != NULL) {

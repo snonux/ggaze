@@ -691,11 +691,11 @@ test_info_shows_color_space(void) {
    c_text = gtk_label_get_text(GTK_LABEL(p_lbl));
    g_assert_nonnull(
       g_strstr_len(c_text, -1, "Color space: ggaze swapped RGB (embedded"));
-   /* The "managed" note only where the enhancer really will manage it:
-    * a GEGL build (the overlay asks enhancer_would_manage), never the
-    * minimal lane. */
+   /* The "may be managed" note only where the enhancer's header-deep gates
+    * pass: a GEGL build (the overlay asks enhancer_would_manage), never
+    * the minimal lane. */
    gboolean b_note =
-      g_strstr_len(c_text, -1, "managed on enhance/export") != NULL;
+      g_strstr_len(c_text, -1, "may be managed on enhance/export") != NULL;
    g_assert_true(b_note == GGAZE_HAVE_GEGL);
 
    g_object_unref(p_file);

@@ -695,7 +695,7 @@ intact_jpeg_decodes(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
                   "JPEG cannot be opened for the libjpeg pass");
       return (FALSE);
    }
-   IntactSrc *p_src                  = g_new(IntactSrc, 1);
+   IntactSrc *p_src                  = g_new0(IntactSrc, 1);
    char       c_msg[JMSG_LENGTH_MAX] = "";
    gboolean   b_ok = _jpeg_decode_all(p_src, p_fp, p_cancel, c_msg);
    fclose(p_fp);

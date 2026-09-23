@@ -32,6 +32,7 @@
 
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static char *c_dir; /* temp folder for the hand-built variants */
@@ -169,17 +170,23 @@ managed_done(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
 }
 
 static gboolean
-render_managed(const char *c_name) {
-   Enhancer   *p_e    = enhancer_new();
-   GFile      *p_file = fixture(c_name);
-   ManagedWait t_w    = {g_main_loop_new(NULL, FALSE), FALSE};
+render_file_managed(GFile *p_file) {
+   Enhancer   *p_e = enhancer_new();
+   ManagedWait t_w = {g_main_loop_new(NULL, FALSE), FALSE};
    enhancer_apply_chain_async(p_file, enhancer_get_presets(p_e), 1u << 2, NULL,
                               NULL, managed_done, &t_w);
    g_main_loop_run(t_w.p_loop);
    g_main_loop_unref(t_w.p_loop);
-   g_object_unref(p_file);
    enhancer_delete(p_e);
    return (t_w.b_managed);
+}
+
+static gboolean
+render_managed(const char *c_name) {
+   GFile   *p_file    = fixture(c_name);
+   gboolean b_managed = render_file_managed(p_file);
+   g_object_unref(p_file);
+   return (b_managed);
 }
 
 /* A big-endian 32-bit field at p (any alignment). */
@@ -914,7 +921,8 @@ assert_original_is(const char *c_name, int i_r, int i_g, int i_b) {
  * for display: blue for swapped.png, ~188 for the linear grey PNG, blue
  * for the CMYK JPEG (with libjpeg) -- CMYK and grey included, although
  * their working space is sRGB. A file with nothing to manage has none (no
- * error); a missing file is the loader's error; a cancelled fetch is
+ * error), and so has a missing file -- the managed original never falls
+ * back to the loader, whose error that would be; a cancelled fetch is
  * CANCELLED. */
 static void
 test_managed_original(void) {
@@ -930,8 +938,7 @@ test_managed_original(void) {
    g_object_unref(p_file);
    p_file = g_file_new_for_path("/nonexistent/ggaze/x.png");
    g_assert_null(managed_original(p_file, NULL, &p_err));
-   g_assert_nonnull(p_err);
-   g_clear_error(&p_err);
+   g_assert_no_error(p_err); /* declined: never the loader's decode */
    g_object_unref(p_file);
    GCancellable *p_cancel = g_cancellable_new();
    g_cancellable_cancel(p_cancel);
@@ -943,9 +950,384 @@ test_managed_original(void) {
    g_object_unref(p_cancel);
 }
 
+/* --- profiles babl must never see (xb2 review 3) -------------------------
+ *
+ * babl_space_from_icc() trusts tag data (a huge 'curv' count read past the
+ * buffer or exited the process through babl_fatal), and on a CMYK profile
+ * keeps a failed LCMS transform and crashes converting through it. Each
+ * case below crashed the process before; now the file takes the loader
+ * path (sRGB), the card says nothing is managed, and no managed original
+ * exists. The profile is edited inside the JPEG's APP2 segment, so the
+ * container stays sound. */
+
+/* Offset of the profile inside p_a's (single) APP2 ICC_PROFILE segment. */
+static gsize
+jpeg_profile_at(const GByteArray *p_a) {
+   for (gsize u = 2; u + 14 <= p_a->len; u++) {
+      if (memcmp(p_a->data + u, "ICC_PROFILE", 12) == 0) {
+         return (u + 14); /* the name, then the sequence number and count */
+      }
+   }
+   g_assert_not_reached();
+   return (0);
+}
+
+/* The data offset (in p_a) of tag c_sig of the profile at u_icc. */
+static gsize
+profile_tag_at(const GByteArray *p_a, gsize u_icc, const char *c_sig) {
+   const guint8 *p       = p_a->data + u_icc;
+   guint32       u_count = be32(p + 128);
+   for (guint32 u = 0; u < u_count; u++) {
+      if (memcmp(p + 132 + 12 * u, c_sig, 4) == 0) {
+         return (u_icc + be32(p + 132 + 12 * u + 4));
+      }
+   }
+   g_assert_not_reached();
+   return (0);
+}
+
+static void
+put32(guint8 *p, guint32 u) {
+   p[0] = (guint8)(u >> 24);
+   p[1] = (guint8)(u >> 16);
+   p[2] = (guint8)(u >> 8);
+   p[3] = (guint8)u;
+}
+
+/* p_a as c_name: declined everywhere -- the card, the render, the managed
+ * original -- and decoded by the loader, sRGB. */
+static void
+assert_profile_declined(const char *c_name, const GByteArray *p_a) {
+   GFile *p_file = temp_file(c_name, p_a);
+   g_assert_false(enhancer_would_manage(p_file));
+   GeglBuffer *p_buf = load_ok(p_file);
+   g_assert_true(is_srgb(p_buf));
+   g_object_unref(p_buf);
+   g_assert_false(render_file_managed(p_file));
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = managed_original(p_file, NULL, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_null(p_tex);
+   drop_temp(p_file);
+}
+
+/* swapped.jpg with its gTRC 'curv' count set to u_count. */
+static void
+check_curv_count(guint32 u_count) {
+   GByteArray *p_a   = fixture_bytes("swapped.jpg");
+   gsize       u_icc = jpeg_profile_at(p_a);
+   put32(p_a->data + profile_tag_at(p_a, u_icc, "gTRC") + 8, u_count);
+   assert_profile_declined("hugecurv.jpg", p_a);
+   g_byte_array_unref(p_a);
+}
+
+static void
+test_insane_profile_is_declined(void) {
+   check_curv_count(0x01000000u); /* the review's repro */
+   check_curv_count(0xffffffffu); /* a negative int to babl */
+   /* A 'para' curve cut short, and a tag pointing past the profile. */
+   GByteArray *p_a   = fixture_bytes("swapped.jpg");
+   gsize       u_icc = jpeg_profile_at(p_a);
+   memcpy(p_a->data + profile_tag_at(p_a, u_icc, "rTRC"), "para", 4);
+   p_a->data[profile_tag_at(p_a, u_icc, "rTRC") + 9] = 3; /* needs 32 */
+   assert_profile_declined("shortpara.jpg", p_a);
+   g_byte_array_unref(p_a);
+   p_a   = fixture_bytes("swapped.jpg");
+   u_icc = jpeg_profile_at(p_a);
+   put32(p_a->data + u_icc + 132 + 4, 0x7ffffff0u); /* the first tag */
+   assert_profile_declined("tagout.jpg", p_a);
+   g_byte_array_unref(p_a);
+}
+
+/* cmyk-icc.jpg's profile with one byte of its A2B0 lut8 header changed:
+ * LCMS cannot build the transform (babl would keep the NULL one and crash
+ * on the first conversion), so the managed path declines. The profile as
+ * it is still passes (the test seam, through the same verdict table). */
+static void
+test_cmyk_profile_lcms_cannot_open_is_declined(void) {
+   const struct {
+      guint  u_at; /* into the A2B0 tag */
+      guint8 u_val;
+   } CASES[]         = {{8, 0}, {9, 0}, {10, 0}, {8, 9}};
+   GByteArray *p_a   = fixture_bytes("cmyk-icc.jpg");
+   gsize       u_icc = jpeg_profile_at(p_a);
+   GBytes     *p_ok  = g_bytes_new(p_a->data + u_icc, be32(p_a->data + u_icc));
+   g_assert_true(enhancer_test_profile_is_managed(p_ok));
+   g_bytes_unref(p_ok);
+   g_byte_array_unref(p_a);
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      p_a   = fixture_bytes("cmyk-icc.jpg");
+      u_icc = jpeg_profile_at(p_a);
+      p_a->data[profile_tag_at(p_a, u_icc, "A2B0") + CASES[u].u_at] =
+         CASES[u].u_val;
+      GBytes *p_icc = g_bytes_new(p_a->data + u_icc, be32(p_a->data + u_icc));
+      g_assert_false(enhancer_test_profile_is_managed(p_icc));
+      g_bytes_unref(p_icc);
+      assert_profile_declined("badclut.jpg", p_a);
+      g_byte_array_unref(p_a);
+   }
+}
+
+/* --- cancellation (xb2 review 3) -----------------------------------------
+ *
+ * A cancelled load used to fall through to the loader with no cancellable:
+ * a whole decode for a result nobody takes. The test seam cancels from
+ * inside the load, as the managed path starts -- "while the check runs",
+ * deterministically -- and the loader-decode counter says whether the
+ * loader ran. */
+
+static void
+cancel_hook(gpointer p_data) {
+   g_cancellable_cancel(G_CANCELLABLE(p_data));
+}
+
+typedef struct {
+   GMainLoop *p_loop;
+   GError    *p_err;
+} ErrWait;
+
+static void
+apply_err_done(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_src;
+   ErrWait    *p_w = p_data;
+   GdkTexture *p_tex =
+      enhancer_apply_chain_finish(p_res, NULL, NULL, NULL, &p_w->p_err);
+   g_assert_null(p_tex);
+   g_main_loop_quit(p_w->p_loop);
+}
+
+/* A render of c_name cancelled mid-check: CANCELLED, and no decode. */
+static void
+assert_render_cancelled(const char *c_name) {
+   GCancellable *p_cancel = g_cancellable_new();
+   Enhancer     *p_e      = enhancer_new();
+   GFile        *p_file   = fixture(c_name);
+   ErrWait       t_w      = {g_main_loop_new(NULL, FALSE), NULL};
+   guint         u_before = enhancer_test_loader_decodes();
+   enhancer_test_set_load_hook(cancel_hook, p_cancel);
+   enhancer_apply_chain_async(p_file, enhancer_get_presets(p_e), 1u << 2, NULL,
+                              p_cancel, apply_err_done, &t_w);
+   g_main_loop_run(t_w.p_loop);
+   enhancer_test_set_load_hook(NULL, NULL);
+   g_assert_error(t_w.p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+   g_assert_cmpuint(enhancer_test_loader_decodes(), ==, u_before);
+   g_clear_error(&t_w.p_err);
+   g_main_loop_unref(t_w.p_loop);
+   g_object_unref(p_file);
+   enhancer_delete(p_e);
+   g_object_unref(p_cancel);
+}
+
+/* A render cancelled while the managed path checks (swapped.png: its
+ * checks see the cancellation and decline; plain.jpg: nothing to manage,
+ * declined at once) returns CANCELLED without the loader's decode; so
+ * does the managed original, which also never falls back to a plain
+ * decode when it declines for any other reason. The uncancelled render
+ * of an untagged file does decode, once. */
+static void
+test_cancelled_load_decodes_nothing(void) {
+   assert_render_cancelled("swapped.png");
+   assert_render_cancelled("plain.jpg");
+#if GGAZE_HAVE_JPEG
+   assert_render_cancelled("swapped.jpg");
+#endif
+   GCancellable *p_cancel = g_cancellable_new();
+   GFile        *p_file   = fixture("swapped.png");
+   GError       *p_err    = NULL;
+   guint         u_before = enhancer_test_loader_decodes();
+   enhancer_test_set_load_hook(cancel_hook, p_cancel);
+   g_assert_null(managed_original(p_file, p_cancel, &p_err));
+   enhancer_test_set_load_hook(NULL, NULL);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+   g_clear_error(&p_err);
+   g_object_unref(p_file);
+   g_object_unref(p_cancel);
+   p_file = fixture("plain.jpg");
+   g_assert_null(managed_original(p_file, NULL, &p_err));
+   g_assert_no_error(p_err);
+   g_assert_cmpuint(enhancer_test_loader_decodes(), ==, u_before);
+   g_assert_false(render_file_managed(p_file));
+   g_assert_cmpuint(enhancer_test_loader_decodes(), ==, u_before + 1);
+   g_object_unref(p_file);
+}
+
+/* --- the info card's answer is header-deep (xb2 review 3) ---------------- */
+
+/* swapped.jpg (8x8; its SOF0 height at byte 701, width at 703) cut inside
+ * its scan: every header is there, so the card says "may be managed", but
+ * the render's whole-file checks decline it and the loader decodes the cut
+ * file as it always did. With SOF sizes past the shared caps -- one side
+ * over GGAZE_IMAGE_MAX_SIDE, or 30000 x 30000 over GGAZE_IMAGE_MAX_PIXELS
+ * -- the card says no, as the render would (every build). */
+static void
+test_would_manage_is_header_deep(void) {
+#if GGAZE_HAVE_JPEG
+   GByteArray *p_cut = fixture_bytes("swapped.jpg");
+   g_byte_array_set_size(p_cut, p_cut->len - 4); /* EOI and some data */
+   GFile *p_file = temp_file("cutscan.jpg", p_cut);
+   g_assert_true(enhancer_would_manage(p_file));
+   g_assert_false(render_file_managed(p_file));
+   drop_temp(p_file);
+   g_byte_array_unref(p_cut);
+#endif
+   const guint8 C_SIDE[2] = {0x80, 0x01};             /* 32769 rows */
+   const guint8 C_AREA[4] = {0x75, 0x30, 0x75, 0x30}; /* 30000 x 30000 */
+   const struct {
+      const guint8 *p_patch;
+      gsize         u_len;
+   } CASES[] = {{C_SIDE, sizeof(C_SIDE)}, {C_AREA, sizeof(C_AREA)}};
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      GByteArray *p_a = fixture_bytes("swapped.jpg");
+      memcpy(p_a->data + 701, CASES[u].p_patch, CASES[u].u_len);
+      GFile *p_big = temp_file("bigsof.jpg", p_a);
+      g_assert_false(enhancer_would_manage(p_big));
+      drop_temp(p_big);
+      g_byte_array_unref(p_a);
+   }
+}
+
+/* --- babl's fixed tables: the per-process profile cap --------------------
+ *
+ * Distinct profiles that may grow babl's space / curve tables stop at
+ * GGAZE_ENHANCER_MAX_PROFILES; past that a NEW profile is declined, while
+ * one already seen keeps its verdict (so a folder of the same camera's
+ * files never runs out). Registered last among the managed cases: it uses
+ * the cap up. */
+
+/* swapped.png's profile with its red primary's X nudged by u_step: a
+ * distinct, valid, non-sRGB profile per step. */
+static GBytes *
+nudged_profile(guint u_step) {
+   GFile  *p_file = fixture("swapped.png");
+   GBytes *p_icc  = icc_read_embedded(p_file, NULL);
+   g_object_unref(p_file);
+   gsize       u_len = 0;
+   const void *p_src = g_bytes_get_data(p_icc, &u_len);
+   guint8     *p     = g_memdup2(p_src, u_len);
+   g_bytes_unref(p_icc);
+   guint32 u_count = be32(p + 128);
+   for (guint32 u = 0; u < u_count; u++) {
+      if (memcmp(p + 132 + 12 * u, "rXYZ", 4) == 0) {
+         guint8 *p_x = p + be32(p + 132 + 12 * u + 4) + 8;
+         put32(p_x, be32(p_x) + 1024 * (u_step + 1));
+      }
+   }
+   return (g_bytes_new_take(p, u_len));
+}
+
+static void
+test_profile_cap(void) {
+   GFile  *p_file = fixture("swapped.png");
+   GBytes *p_seen = icc_read_embedded(p_file, NULL);
+   g_object_unref(p_file);
+   g_assert_true(enhancer_test_profile_is_managed(p_seen));
+   /* Until a few past the cap; a nudge babl maps onto a space it already
+    * has takes no slot, hence the generous bound. */
+   guint u_new = 0, u_declined = 0;
+   for (guint u = 0; u < 4 * GGAZE_ENHANCER_MAX_PROFILES && u_declined < 4;
+        u++) {
+      GBytes  *p_icc = nudged_profile(u);
+      guint    u_was = enhancer_test_profile_slots();
+      gboolean b_ok  = enhancer_test_profile_is_managed(p_icc);
+      g_assert_true(b_ok == (u_was < GGAZE_ENHANCER_MAX_PROFILES));
+      u_new += b_ok ? 1 : 0;
+      u_declined += b_ok ? 0 : 1;
+      g_assert_true(enhancer_test_profile_is_managed(p_icc) == b_ok);
+      g_bytes_unref(p_icc);
+   }
+   g_test_message("%u new profiles before the cap", u_new);
+   g_assert_cmpuint(u_declined, ==, 4);
+   g_assert_cmpuint(enhancer_test_profile_slots(), ==,
+                    GGAZE_ENHANCER_MAX_PROFILES);
+   g_assert_true(enhancer_test_profile_is_managed(p_seen)); /* kept */
+   g_assert_true(render_managed("swapped.png"));
+   g_bytes_unref(p_seen);
+}
+
+/* --- fuzz: the profile gate and babl together ---------------------------
+ *
+ * Random damage to the fixture profiles through the managed path's whole
+ * profile gate (icc_profile_is_sane, the CMYK LCMS check, babl): no crash,
+ * no babl_fatal exit, whatever passes. In subprocesses, because each
+ * profile that gets through may take a slot of babl's fixed tables and
+ * the per-process cap then keeps new ones from babl: each round starts
+ * with empty tables. Seeded per round, so a failure reproduces. */
+
+#define FUZZ_ROUNDS 8
+#define FUZZ_RUNS 400
+
+/* One random edit of p_arr: a byte, a 32-bit field set to an edge value,
+ * a cut, or the header's size field brought back in line. */
+static void
+fuzz_mutate(GRand *p_rand, GByteArray *p_arr) {
+   static const guint32 C_EDGE[] = {
+      0, 1, 0x7fffffffu, 0x80000000u, 0xffffffffu, 0x01000000u, 20, 14};
+   guint u_pos = (guint)g_rand_int_range(p_rand, 0, (gint32)p_arr->len);
+   switch (g_rand_int_range(p_rand, 0, 4)) {
+   case 0:
+      p_arr->data[u_pos] = (guint8)g_rand_int_range(p_rand, 0, 256);
+      break;
+   case 1:
+      if (u_pos + 4 <= p_arr->len) {
+         put32(p_arr->data + u_pos,
+               C_EDGE[g_rand_int_range(p_rand, 0, G_N_ELEMENTS(C_EDGE))]);
+      }
+      break;
+   case 2:
+      g_byte_array_set_size(
+         p_arr, (guint)g_rand_int_range(p_rand, 132, (gint32)p_arr->len + 1));
+      break;
+   default:
+      put32(p_arr->data, p_arr->len);
+      break;
+   }
+}
+
+static void
+test_profile_fuzz_subprocess(void) {
+   const char *C_NAMES[] = {"swapped.png", "srgb-icc.png", "grey-icc.png",
+                            "cmyk-icc.jpg"};
+   const char *c_round   = g_getenv("GGAZE_FUZZ_ROUND");
+   GRand      *p_rand =
+      g_rand_new_with_seed(0x1cc0u + (c_round != NULL ? atoi(c_round) : 0));
+   guint u_managed = 0;
+   for (guint u_run = 0; u_run < FUZZ_RUNS; u_run++) {
+      GFile  *p_file = fixture(C_NAMES[u_run % G_N_ELEMENTS(C_NAMES)]);
+      GBytes *p_icc  = icc_read_embedded(p_file, NULL);
+      g_object_unref(p_file);
+      GByteArray *p_arr = g_bytes_unref_to_array(p_icc);
+      guint       u_n   = (guint)g_rand_int_range(p_rand, 1, 5);
+      for (guint u = 0; u < u_n; u++) {
+         fuzz_mutate(p_rand, p_arr);
+      }
+      GBytes *p_b = g_byte_array_free_to_bytes(p_arr);
+      u_managed += enhancer_test_profile_is_managed(p_b) ? 1 : 0;
+      g_bytes_unref(p_b);
+   }
+   g_test_message("%u of %u mutated profiles managed, %u babl slots", u_managed,
+                  FUZZ_RUNS, enhancer_test_profile_slots());
+   g_rand_free(p_rand);
+}
+
+static void
+test_profile_fuzz(void) {
+   for (guint u = 0; u < FUZZ_ROUNDS; u++) {
+      char c_round[16];
+      g_snprintf(c_round, sizeof(c_round), "%u", u);
+      g_setenv("GGAZE_FUZZ_ROUND", c_round, TRUE);
+      g_test_trap_subprocess("/enhancer_icc/profile_fuzz/subprocess",
+                             120 * G_USEC_PER_SEC, G_TEST_SUBPROCESS_DEFAULT);
+      g_test_trap_assert_passed();
+   }
+   g_unsetenv("GGAZE_FUZZ_ROUND");
+}
+
 /* --- the local camera corpus ---------------------------------------------- */
 
-/* The babl space c_path's embedded profile parses to, or NULL. */
+/* The babl space c_path's embedded profile parses to, or NULL. A real
+ * camera profile babl parses must also pass icc_profile_is_sane(): the
+ * gate in front of babl must not cost a real file its management. (The
+ * corpus is trusted local data, so babl is asked directly here.) */
 static const Babl *
 profile_space(GFile *p_file) {
    GBytes *p_icc = icc_read_embedded(p_file, NULL);
@@ -958,6 +1340,9 @@ profile_space(GFile *p_file) {
    const char *c_err  = NULL;
    const Babl *p_space =
       babl_space_from_icc(c_data, (int)u_len, BABL_ICC_INTENT_DEFAULT, &c_err);
+   if (p_space != NULL) {
+      g_assert_true(icc_profile_is_sane(p_icc));
+   }
    g_bytes_unref(p_icc);
    return (p_space);
 }
@@ -976,7 +1361,14 @@ check_corpus_file(GFile *p_file, const Babl *p_space) {
    g_assert_no_error(p_err);
    g_assert_cmpuint(t_size.u_w, >, 0);
    g_assert_cmpuint(t_size.u_h, >, 0);
-   if (p_space != babl_space("sRGB") && (b_png || GGAZE_HAVE_JPEG)) {
+   if (p_space != babl_space("sRGB") && (b_png || GGAZE_HAVE_JPEG) &&
+       !enhancer_would_manage(p_file)) {
+      /* Only past the per-process profile cap (a corpus with more
+       * distinct non-sRGB profiles than GGAZE_ENHANCER_MAX_PROFILES). */
+      g_assert_cmpuint(enhancer_test_profile_slots(), ==,
+                       GGAZE_ENHANCER_MAX_PROFILES);
+      g_test_message("%s: past the profile cap", c_path);
+   } else if (p_space != babl_space("sRGB") && (b_png || GGAZE_HAVE_JPEG)) {
       g_test_message("%s: managed", c_path);
       GeglBuffer *p_buf = load_ok(p_file);
       g_assert_false(is_srgb(p_buf) && !babl_space_is_cmyk(p_space) &&
@@ -1062,8 +1454,20 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer_icc/missing_saver_is_not_supported",
                    test_missing_saver_is_not_supported);
    g_test_add_func("/enhancer_icc/managed_original", test_managed_original);
+   g_test_add_func("/enhancer_icc/insane_profile_is_declined",
+                   test_insane_profile_is_declined);
+   g_test_add_func("/enhancer_icc/cmyk_profile_lcms_cannot_open_is_declined",
+                   test_cmyk_profile_lcms_cannot_open_is_declined);
+   g_test_add_func("/enhancer_icc/cancelled_load_decodes_nothing",
+                   test_cancelled_load_decodes_nothing);
+   g_test_add_func("/enhancer_icc/would_manage_is_header_deep",
+                   test_would_manage_is_header_deep);
    g_test_add_func("/enhancer_icc/sample_images_profiled_files",
                    test_sample_images_profiled_files);
+   g_test_add_func("/enhancer_icc/profile_fuzz", test_profile_fuzz);
+   g_test_add_func("/enhancer_icc/profile_fuzz/subprocess",
+                   test_profile_fuzz_subprocess);
+   g_test_add_func("/enhancer_icc/profile_cap", test_profile_cap);
    int i_rc = g_test_run();
    g_rmdir(c_dir);
    g_free(c_dir);

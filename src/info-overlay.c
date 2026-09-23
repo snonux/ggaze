@@ -227,8 +227,8 @@ _info_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
          return;
       }
 #if GGAZE_HAVE_GEGL
-      /* The card's "managed on enhance/export" note, only when true: the
-       * enhancer's own gates, asked header-deep (info.h b_icc_managed). */
+      /* The card's "may be managed on enhance/export" note: the enhancer's
+       * own gates, asked header-deep (info.h b_icc_managed). */
       p_job->p_info->b_icc_managed =
          p_job->p_info->e_icc == GGAZE_ICC_EMBEDDED &&
          enhancer_would_manage(p_job->p_file);

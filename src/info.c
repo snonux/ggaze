@@ -252,12 +252,14 @@ _display_desc(const char *c_desc) {
 }
 
 /* The colour-space line, one wording per GgazeIccState (see info.h). An
- * embedded profile's name is followed by "managed on enhance/export" only
- * when the caller established that this build's enhance path will really
- * apply it (b_icc_managed): a note claimed for every profile was untrue
- * for an sRGB profile, a JPEG in a build without libjpeg, a non-local file
- * or a profile babl cannot parse -- all of which the enhancer leaves on
- * the plain loader path. */
+ * embedded profile's name is followed by "may be managed on
+ * enhance/export" only when the caller established, header-deep, that this
+ * build's enhance path would apply it (b_icc_managed): a note claimed for
+ * every profile was untrue for an sRGB profile, a JPEG in a build without
+ * libjpeg, a non-local file or a profile babl cannot parse -- all of which
+ * the enhancer leaves on the plain loader path. "may": the enhance-time
+ * checks read the whole file, too slow for the card, and a file whose data
+ * is broken past its headers still takes the loader path. */
 static void
 _append_colorspace(GString *p_str, const GgazeInfo *p_info) {
    char *c_desc = NULL;
@@ -266,7 +268,7 @@ _append_colorspace(GString *p_str, const GgazeInfo *p_info) {
       c_desc = _display_desc(p_info->c_colorspace);
       g_string_append_printf(
          p_str, "Color space: %s (embedded ICC%s)\n", c_desc,
-         p_info->b_icc_managed ? "; managed on enhance/export" : "");
+         p_info->b_icc_managed ? "; may be managed on enhance/export" : "");
       g_free(c_desc);
       break;
    case GGAZE_ICC_UNREADABLE:

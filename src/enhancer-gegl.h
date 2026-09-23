@@ -91,14 +91,17 @@ gboolean enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err);
  * (the loader's error). */
 GeglBuffer *enhancer_load(GFile *p_file, GError **p_err);
 
-/* Whether enhancer_load() will decode p_file colour-managed, as far as the
+/* Whether enhancer_load() may decode p_file colour-managed, as far as the
  * file's headers tell: a local PNG / JPEG (a JPEG only in a build with
- * the `jpeg` feature), GEGL's loader op installed, an embedded profile
- * babl parses to a space other than sRGB, for the image's number of
- * colour components. The completeness checks are NOT run -- a file whose
- * data turns out broken still falls back to the loader path -- so this is
- * the cheap answer for the info card's "managed on enhance/export" note,
- * not a promise. Thread-safe (the info card asks from a worker). */
+ * the `jpeg` feature) within the size caps, GEGL's loader op installed,
+ * an embedded profile the managed path vouches for (icc_profile_is_sane,
+ * babl, within the per-process profile cap) to a space other than sRGB,
+ * for the image's number of colour components. The completeness checks
+ * are NOT run (they read the whole file: ~150 ms on average for a camera
+ * file) -- a file whose data turns out broken, a truncated scan say, still
+ * falls back to the loader path -- so this is the cheap answer behind the
+ * info card's "may be managed on enhance/export", not a promise.
+ * Thread-safe (the info card asks from a worker). */
 gboolean enhancer_would_manage(GFile *p_file);
 
 /* Convert a GeglBuffer to a GdkTexture for preview: sRGB RGBA8 bytes, so a
@@ -151,10 +154,12 @@ void enhancer_managed_original_async(GFile *p_file, GCancellable *p_cancel,
                                      GAsyncReadyCallback p_cb, gpointer p_data);
 
 /* Finish enhancer_managed_original_async(): a new GdkTexture (caller
- * unrefs); NULL WITHOUT an error when the file no longer decodes managed
- * (rewritten meanwhile: the plain original is then the right compare);
- * NULL with p_err set when the file does not load at all or the task was
- * cancelled. */
+ * unrefs); NULL WITHOUT an error whenever the managed path declines the
+ * file -- rewritten meanwhile into one with nothing to manage, gone, past
+ * the profile cap: the plain original is then the right compare, and the
+ * worker never decodes one itself (the caller already shows it); NULL
+ * with G_IO_ERROR_CANCELLED when p_cancel fired (nothing decoded after
+ * that), or with p_err set when the managed buffer cannot be converted. */
 GdkTexture *enhancer_managed_original_finish(GAsyncResult *p_res,
                                              GError      **p_err);
 
@@ -175,6 +180,34 @@ GPtrArray *enhancer_preview_thumbnails_finish(GAsyncResult *p_res,
  * NULL restores the real answer. Not thread-safe: set it only while no
  * enhancer work is in flight. */
 void enhancer_test_set_missing_op(const char *c_op);
+
+/* Test seam: p_hook(p_data) runs at the start of every managed-path
+ * attempt (the render, enhancer_load, the managed original), on the
+ * calling thread -- a test cancels its GCancellable there to cancel "while
+ * the check runs" deterministically. NULL removes it. Not thread-safe: set
+ * it only while no enhancer work is in flight. */
+typedef void (*EnhancerTestHook)(gpointer p_data);
+void enhancer_test_set_load_hook(EnhancerTestHook p_hook, gpointer p_data);
+
+/* Test seam: how many loader-path (non-managed) decodes this process has
+ * started, so a test can tell "declined and decoded anyway" from
+ * "declined, nothing decoded". */
+guint enhancer_test_loader_decodes(void);
+
+/* Distinct embedded profiles the managed path hands to babl per process
+ * (enhancer.c, "which profiles babl sees"): babl's space and tone-curve
+ * tables hold 100 entries each, are never freed, and a full space table
+ * crashes the next babl_space_from_icc(). Past the cap a new profile is
+ * declined (its file decodes on the loader path, sRGB). */
+#define GGAZE_ENHANCER_MAX_PROFILES 16u
+
+/* Test seam: whether the managed path would apply the profile p_icc
+ * (icc_profile_is_sane, the CMYK LCMS check, babl, not sRGB), through the
+ * same per-process verdict table and cap as a file's profile. */
+gboolean enhancer_test_profile_is_managed(GBytes *p_icc);
+
+/* Test seam: profiles counted against GGAZE_ENHANCER_MAX_PROFILES so far. */
+guint enhancer_test_profile_slots(void);
 
 G_END_DECLS
 
