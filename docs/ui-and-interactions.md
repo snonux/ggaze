@@ -39,10 +39,12 @@ The **KISS** part — things gthumb has that ggaze deliberately drops:
   grid: the first file is loaded once, whatever its position in the sort
   order. The **first entry decides** and the rest only ask for the grid: a
   folder as the first entry opens that folder itself (not its parent); a
-  first entry that is missing, not an image, or a RAW sidecar hidden by the
-  hide-raw preference opens its folder on the first-sorted image with the
-  status line saying why ("… not found — opened its folder", "… is not an
-  image in this folder …", "… is a RAW sidecar hidden by Preferences …"),
+  first entry that is missing, not an image, a hidden dotfile (never
+  listed), or a RAW sidecar hidden by the hide-raw preference opens its
+  folder on the first-sorted image with the status line saying why ("… not
+  found — opened its folder", "… is not an image in this folder …", "… is a
+  hidden dotfile, never listed …", "… is a RAW sidecar hidden by
+  Preferences …"),
   exactly as a single-file open of that entry would. A drop highlight shows
   the window is a drop target.
 - **`o`** opens a file dialog that can pick a file or a folder.

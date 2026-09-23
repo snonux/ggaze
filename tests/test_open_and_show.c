@@ -399,8 +399,10 @@ test_open_many_first_entry_hidden_raw_sidecar(void) {
  * dropped by the listing's dotfile filter before RAW pruning ever looks at
  * it, so the RAW-sidecar message would send the user to Preferences for a
  * file no preference shows. The dotfile case is checked first and says
- * what really happened; the twin plain.jpg is there so that, without that
- * check, the RAW rule WOULD have matched. */
+ * what really happened. Without that check the RAW rule WOULD match: it
+ * only asks whether hide-raw is on and the name has a RAW extension (it
+ * never looks for a twin), and both hold for "._plain.cr2"; plain.jpg is
+ * there only so the folder has an image to open on. */
 static void
 test_open_many_first_entry_raw_named_dotfile(void) {
    gchar *c_dir = make_three_fixture_dir();

@@ -20,12 +20,13 @@ arguments (or a multi-file drop onto the window) open the first one's
 folder in the grid with that file selected. The first argument decides the
 folder and the remaining ones are ignored beyond asking for the grid: a
 folder given first opens that folder itself, and a first argument that does
-not exist, is not an image, or is a RAW sidecar hidden by the
+not exist, is not an image, is a hidden dotfile (never listed), or is a RAW
+sidecar hidden by the
 .B Hide RAW sidecars
 preference opens its folder on the first image with the status line saying
-why. A missing or non-image single
+why. A single
 .I FILE
-is reported the same way.
+in any of those cases is reported the same way.
 .SH KEYBINDINGS
 .TP
 .B h / l / Left / Right
