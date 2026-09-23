@@ -296,15 +296,20 @@ void enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
 gboolean enhance_ctrl_can_save(EnhanceCtrl *p_ctrl);
 
 /* --- choke points --- */
-/* The navigator "changed" choke point: reset the preview only when the
- * current file's IDENTITY actually changed (see the comment in the .c). An
+/* The navigator "changed" choke point -- and an open's, which replaces the
+ * navigator without that signal firing for the new file (window.c
+ * _open_rebuild): reset the preview only when the current file's IDENTITY
+ * actually changed (see the comment in the .c). An
  * open panel stays open and re-previews the new file. A rescan of the SAME
  * file re-checks the original against the texture cache: rewritten in
  * place (`e`, `!`), possibly with another size, its size and identity are
  * forgotten (the reload that follows shows the fresh decode, which is
  * learned) and an active preview is rendered again from the new contents;
  * the rescan a save's "-enhanced" copy causes finds the entry fresh and
- * changes nothing. */
+ * changes nothing. The render of a rewritten file may land before the
+ * reload's decode: its original size is told to the tool as a new
+ * original's is (original_changed), so a crop tool lays out again on it
+ * either way. */
 void enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl);
 
 /* Drop the current enhance preview and go back to the original (Esc, `0`,

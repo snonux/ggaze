@@ -2402,6 +2402,30 @@ _drop_leave_cb(GtkDropTarget *p_t, gpointer p_data) {
 
 /* --- navigator changed -> reload ----------------------------------------- */
 
+#if GGAZE_HAVE_GEGL
+/* The tools' and the enhance controller's "the current file may be another
+ * one now" choke point, shared by every path that replaces what
+ * navigator.current names: the navigator's "changed" (_nav_changed_cb) and
+ * an open (_open_rebuild), which rebuilds the navigator without that signal
+ * ever firing for the new file. Both controllers are told on every call
+ * and decide for themselves. "changed" fires for every navigator rescan,
+ * not only an actual move to a different current file -- notably,
+ * win.enhance-save writes the "-enhanced" copy into the SAME live-monitored
+ * folder, whose GFileMonitor then schedules a debounced rescan that
+ * re-emits "changed" a few hundred ms later even though navigator.current
+ * never moved. The enhance controller's nav_changed resets only on an
+ * actual identity change, so that incidental rescan does not silently
+ * discard the still-active preview (tests/test_enhance_flow.c
+ * save-twice-in-a-row); the tool controller leaves only when the file is
+ * not the one it started on. The tool goes first: the controller's reset
+ * drops the transform and a crop tool's override together. */
+static void
+_edit_state_nav_changed(GgazeWindow *p_win) {
+   tool_ctrl_nav_changed(p_win->p_tool_ctrl); /* another file: no tool */
+   enhance_ctrl_nav_changed(p_win->p_enhance_ctrl);
+}
+#endif
+
 static void
 _nav_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
    (void)p_nav;
@@ -2413,17 +2437,7 @@ _nav_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
       return;
    }
 #if GGAZE_HAVE_GEGL
-   /* "changed" fires for every navigator rescan, not only an actual move to a
-    * different current file -- notably, win.enhance-save writes the
-    * "-enhanced" copy into the SAME live-monitored folder, whose GFileMonitor
-    * then schedules a debounced rescan that re-emits "changed" a few hundred
-    * ms later even though navigator.current never moved. The enhance
-    * controller's nav_changed resets only on an actual identity change, so
-    * that incidental rescan does not silently discard the still-active
-    * preview (tests/test_enhance_flow.c save-twice-in-a-row).
-    */
-   tool_ctrl_nav_changed(p_win->p_tool_ctrl); /* another file: no tool */
-   enhance_ctrl_nav_changed(p_win->p_enhance_ctrl);
+   _edit_state_nav_changed(p_win);
 #endif
    /* This signal is the single choke point every navigation path funnels
     * through (prev/next/first/last, slideshow auto-advance, grid selection,
@@ -3313,11 +3327,16 @@ _open_resolve_target(GFile *p_arg, GFile **p_out_dir, GFile **p_out_start) {
 /* Build the new navigator for p_dir, wire it up, and point it at p_start (if
  * any). Also resets the per-folder trash/undo state, since a move or trash
  * undo recorded against the folder just left must not silently apply to the
- * new one. NOTE: navigator_set_current_file() only emits "changed" when the
- * resolved index differs from the navigator's default i_current == 0 (e.g. a
- * file that happens to sort first in its folder never triggers it) -- do not
- * rely on that signal to dismiss the info overlay; the caller handles that
- * unconditionally instead (gu0). */
+ * new one. The "changed" handler is connected only AFTER the cursor is
+ * placed: navigator_set_current_file() emits "changed" only when the
+ * resolved index differs from the navigator's default i_current == 0 (a
+ * file that happens to sort first in its folder never triggers it, and a
+ * folder open places no cursor at all), so nothing an open needs may hang
+ * on that signal. _open_now does all of it itself, unconditionally and
+ * once: the info overlay (gu0), the tools' and the enhance controller's
+ * choke point (wb2 sixth review: a tool and a saved transform used to
+ * survive into a folder whose file sorted first) and the load. Connecting
+ * before the cursor only made the index != 0 case load the file twice. */
 static void
 _open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
                       GgazeSort e_sort, gboolean b_wrap, gboolean b_hide_raw) {
@@ -3326,11 +3345,11 @@ _open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
    g_clear_pointer(&p_win->p_trash, trash_delete);
    mover_clear_last(p_win->p_mover);
    undo_reset(p_win->p_undo);
-   g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(_nav_changed_cb),
-                    p_win);
    if (p_start != NULL) {
       navigator_set_current_file(p_win->p_nav, p_start);
    }
+   g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(_nav_changed_cb),
+                    p_win);
 }
 
 /* Read the sort/wrap/hide-raw/hide-trashed preferences from settings
@@ -3434,6 +3453,47 @@ _report_open_target(GgazeWindow *p_win, GFile *p_arg, gboolean b_is_dir) {
    g_free(c_name);
 }
 
+/* The open is confirmed to proceed: drop any stale info overlay
+ * unconditionally before tearing down/rebuilding the navigator -- the
+ * "changed" signal is NOT a reliable trigger for an open (see
+ * _open_build_navigator), so this must not depend on whether it happens to
+ * fire (gu0 fresh-context review). Before the teardown/rebuild, so there
+ * is no window where new content is already showing but the old overlay is
+ * still up. The slideshow and a pending Esc go with the folder. */
+static void
+_open_leave_previous(GgazeWindow *p_win) {
+   _dismiss_info_for_nav(p_win);
+   _slideshow_stop(p_win, NULL);
+   p_win->i_esc_at = 0;
+   _open_reset_existing_nav(p_win);
+}
+
+/* The navigator for p_dir (cursor on p_start, if any) and the grid over it,
+ * from the current preferences. Between the two, the tools' and the enhance
+ * controller's choke point: an open replaces the current file without
+ * "changed" firing for it (_open_build_navigator), and a tool or a
+ * transform left over from the previous file used to survive into the new
+ * folder -- A's saved turn under B's title, the crop rectangle drawn over
+ * A's render, Enter applying A's turn and crop to B, `s` exporting A again.
+ * Told here, with the new navigator in place, the tool leaves and the
+ * controller resets exactly as they do for a navigation (the panel is
+ * re-pointed at the new file, not closed), and before _set_view, whose
+ * abandon would otherwise re-render the transform a crop tool was hiding
+ * onto the new file. */
+static void
+_open_rebuild(GgazeWindow *p_win, GFile *p_dir, GFile *p_start) {
+   GgazeSort e_sort;
+   gboolean  b_wrap;
+   gboolean  b_hide_raw;
+   gboolean  b_hide_trashed;
+   _open_read_prefs(p_win, &e_sort, &b_wrap, &b_hide_raw, &b_hide_trashed);
+   _open_build_navigator(p_win, p_dir, p_start, e_sort, b_wrap, b_hide_raw);
+#if GGAZE_HAVE_GEGL
+   _edit_state_nav_changed(p_win);
+#endif
+   _open_rebuild_grid(p_win, b_hide_trashed);
+}
+
 /* The actual open logic (was ggaze_window_open's whole body before tu0 added
  * the dirty-preview gate below). Kept as a separate static function so the
  * public entry point can defer it behind a Save/Discard/Cancel prompt
@@ -3452,30 +3512,10 @@ _open_now(GgazeWindow *p_win, GFile *p_arg) {
       g_clear_object(&p_start);
       return;
    }
-
-   /* Only now that the open is confirmed to proceed: drop any stale info
-    * overlay unconditionally before tearing down/rebuilding the navigator --
-    * the "changed" signal wired in _open_build_navigator is NOT a reliable
-    * trigger here (see its doc comment), so this must not depend on whether
-    * it happens to fire (gu0 fresh-context review). Firing before the
-    * teardown/rebuild below avoids a window where new content is already
-    * showing but the old overlay is still up. */
-   _dismiss_info_for_nav(p_win);
-   _slideshow_stop(p_win, NULL);
-   p_win->i_esc_at = 0;
-
-   _open_reset_existing_nav(p_win);
-
-   GgazeSort e_sort;
-   gboolean  b_wrap;
-   gboolean  b_hide_raw;
-   gboolean  b_hide_trashed;
-   _open_read_prefs(p_win, &e_sort, &b_wrap, &b_hide_raw, &b_hide_trashed);
-   _open_build_navigator(p_win, p_dir, p_start, e_sort, b_wrap, b_hide_raw);
+   _open_leave_previous(p_win);
+   _open_rebuild(p_win, p_dir, p_start);
    g_clear_object(&p_dir);
    g_clear_object(&p_start);
-
-   _open_rebuild_grid(p_win, b_hide_trashed);
 
    /* Folder arg → start in the thumbnail grid (folder-to-grid behavior,
     * docs/ui-and-interactions.md 33-47); file arg → large view on that image.
@@ -3515,7 +3555,8 @@ _open_ctx_free(gpointer p_data) {
  * "changed" signal is not a reliable choke point for this path -- see
  * _open_build_navigator's comment -- so the gate lives here, before any
  * teardown/rebuild, not inside _open_now). Proceeds immediately if nothing
- * is dirty. */
+ * is dirty; either way a tool and a preview that survived the gate (saved,
+ * or Save just wrote them) are ended by the open itself (_open_rebuild). */
 void
 ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));

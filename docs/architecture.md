@@ -277,7 +277,10 @@ feels instant.
   that cap — the current file's original as the viewer last showed it (the
   identity the tools and hold-`Space` compare against, learned at the
   window's texture choke point) and the rendered preview — bounded to those
-  two, and released on navigation, on a rewrite's rescan, and in dispose.
+  two, and released on navigation (an open or a drop of another file
+  included: the open path runs the same identity reset, since a file that
+  sorts first in its folder never emits "changed"), on a rewrite's rescan,
+  and in dispose.
 
 ## Threading / cancellation invariant
 

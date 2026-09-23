@@ -171,15 +171,39 @@ _line(GtkSnapshot *p_snap, gdouble d_x0, gdouble d_y0, gdouble d_x1,
 
 /* --- the crop overlay ----------------------------------------------------- */
 
+/* TRUE iff the rectangle is laid out on the base the controller names now:
+ * the size the tool measured when it laid the rectangle out is the one the
+ * transform gives for the original as known now. The controller says when
+ * that moved (tool_ctrl_original_changed lays the rectangle out again), so
+ * this is the guard behind that notification: a render of a rewritten
+ * file that landed before the file's own decode, or any base change the
+ * tool was not told of, hides the rectangle instead of drawing it where
+ * it does not belong. A pure read of the controller, like _ensure_rect. */
+static gboolean
+_rect_on_base(ToolCtrl *p_tc) {
+   gint i_w, i_h;
+   return (enhance_ctrl_get_base_size(p_tc->p_ec, &i_w, &i_h) &&
+           i_w == p_tc->i_base_w && i_h == p_tc->i_base_h);
+}
+
+/* The overlay's own condition for drawing the rectangle, and the test
+ * seam's for reporting it (tool_ctrl_get_crop_rect): laid out, over the
+ * rendered base it was laid out on (_shown_is_current: not while the base
+ * preview is still rendering, or Space holds the original), and on the
+ * base the controller names now (_rect_on_base). A rectangle over another
+ * picture, or over the same picture at another size, would lie about what
+ * Enter will crop. */
+static gboolean
+_rect_visible(ToolCtrl *p_tc) {
+   return (p_tc->b_rect_set && _shown_is_current(p_tc) && _rect_on_base(p_tc));
+}
+
 /* Dim everything outside the rectangle, draw thirds inside it, a black-
  * haloed white frame, and the four corner handles. Nothing is drawn while
- * the texture on screen is not the rendered base the rectangle was laid
- * out on (_shown_is_current: the base preview is still rendering, or Space
- * holds the original): a rectangle over another picture would lie about
- * what Enter will crop. */
+ * the rectangle is not visible (_rect_visible). */
 static void
 _draw_crop(ToolCtrl *p_tc, GtkSnapshot *p_snap, const GgazeViewerGeom *p_g) {
-   if (!p_tc->b_rect_set || !_shown_is_current(p_tc)) {
+   if (!_rect_visible(p_tc)) {
       return;
    }
    const GdkRGBA t_dim    = {0.0f, 0.0f, 0.0f, 0.55f};
@@ -1002,8 +1026,7 @@ tool_ctrl_get_crop_rect(ToolCtrl *p_tc, CropRect *p_rect, gint *p_base_w,
    g_return_val_if_fail(p_tc != NULL && p_rect != NULL && p_base_w != NULL &&
                            p_base_h != NULL,
                         FALSE);
-   if (p_tc->e_tool != GGAZE_TOOL_CROP || !p_tc->b_rect_set ||
-       !_shown_is_current(p_tc)) {
+   if (p_tc->e_tool != GGAZE_TOOL_CROP || !_rect_visible(p_tc)) {
       return (FALSE); /* hidden: the same test _draw_crop makes */
    }
    *p_rect   = p_tc->t_rect;

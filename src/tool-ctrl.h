@@ -142,7 +142,9 @@ void tool_ctrl_abandon(ToolCtrl *p_tc);
  * so no tool can outlive the state it was editing and re-apply it. */
 void tool_ctrl_discarded(ToolCtrl *p_tc);
 
-/* The navigator "changed" choke point: abandon iff the current file is no
+/* The navigator "changed" choke point, and an open's (window.c
+ * _open_rebuild -- a file that sorts first in its folder never emits
+ * "changed"): abandon iff the current file is no
  * longer the one the tool started on (a same-file rescan keeps it -- the
  * rectangle follows the reload through tool_ctrl_original_changed, since
  * at this point the rewritten file's decode has not landed yet). */
@@ -158,10 +160,11 @@ void tool_ctrl_nav_changed(ToolCtrl *p_tc);
 void tool_ctrl_original_changed(ToolCtrl *p_tc);
 
 /* The crop rectangle exactly as the overlay draws it right now: TRUE iff
- * the crop tool is active, its rectangle is laid out and the texture on
- * screen is the base it is laid out on (_draw_crop's own condition), with
- * the rectangle and that base's size in the out-params; FALSE whenever the
- * overlay is hidden. A test seam: a test cannot read a snapshot, and every
+ * the crop tool is active, its rectangle is laid out, the texture on
+ * screen is the base it is laid out on and that base is still the size the
+ * controller names (_draw_crop's own condition), with the rectangle and
+ * that base's size in the out-params; FALSE whenever the overlay is
+ * hidden. A test seam: a test cannot read a snapshot, and every
  * key or drag lays the rectangle out itself, so this is the only way to
  * check "drawn on the new base without any input" after a rewrite. */
 gboolean tool_ctrl_get_crop_rect(ToolCtrl *p_tc, CropRect *p_rect,

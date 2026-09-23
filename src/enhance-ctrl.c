@@ -57,7 +57,9 @@ struct EnhanceCtrl {
    gint     i_orig_w;        /* the ORIGINAL's upright size, from the
                               * decode the viewer showed for it (learned
                               * with p_orig_tex below) or the last landed
-                              * apply's (0 = not known yet);
+                              * apply's (0 = not known yet); every change
+                              * of it is told to the tool
+                              * (original_changed), since
                               * transform_base_size of it is the image the
                               * crop rectangle lives on */
    gint     i_orig_h;
@@ -320,6 +322,34 @@ enhance_ctrl_override_texture(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
    return (p_ctrl->p_enhance_tex);
 }
 
+/* Remember the original's size. TRUE iff it differs from what was known
+ * (including "not known yet", 0x0): the caller tells the tool then, since
+ * the base the crop rectangle lives on is derived from it. */
+static gboolean
+_note_orig_size(EnhanceCtrl *p_ctrl, gint i_w, gint i_h) {
+   if (p_ctrl->i_orig_w == i_w && p_ctrl->i_orig_h == i_h) {
+      return (FALSE);
+   }
+   p_ctrl->i_orig_w = i_w;
+   p_ctrl->i_orig_h = i_h;
+   return (TRUE);
+}
+
+/* Remember p_tex as the original's identity, with its size, and tell the
+ * tool: a rectangle laid out on the previous object (or on none yet) lays
+ * out again on this one, whether or not the size moved -- the overlay is
+ * hidden while the object on screen is not the one known here, so the
+ * redraw is what brings it back. Every path that learns an identity goes
+ * through here (the window's texture choke point, a rescan finding a
+ * decode the viewer has not shown), so none can forget to tell it. */
+static void
+_learn_original(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
+   g_set_object(&p_ctrl->p_orig_tex, p_tex);
+   _note_orig_size(p_ctrl, gdk_texture_get_width(p_tex),
+                   gdk_texture_get_height(p_tex));
+   p_ctrl->p_ops->original_changed(p_ctrl->p_host);
+}
+
 /* The ONE place the original's identity (and, with it, its size) is
  * learned: the window tells this controller about every decoded texture of
  * the current file it is about to show -- a cache hit, a finished load, a
@@ -334,7 +364,7 @@ enhance_ctrl_override_texture(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
  * check against the old one failed for good. The controller's own
  * textures teach it nothing: the window passes only what viewload decoded.
  * Nothing here looks anything up. A tool laid out on the previous object
- * is told so it can lay out again (original_changed). */
+ * is told so it can lay out again (original_changed, _learn_original). */
 void
 enhance_ctrl_texture_shown(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
    if (p_ctrl == NULL || p_tex == NULL || _disposed(p_ctrl) ||
@@ -344,10 +374,7 @@ enhance_ctrl_texture_shown(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
    if (p_tex == p_ctrl->p_orig_tex) {
       return; /* the one already known (hold-Space, a cache hit) */
    }
-   g_set_object(&p_ctrl->p_orig_tex, p_tex);
-   p_ctrl->i_orig_w = gdk_texture_get_width(p_tex);
-   p_ctrl->i_orig_h = gdk_texture_get_height(p_tex);
-   p_ctrl->p_ops->original_changed(p_ctrl->p_host);
+   _learn_original(p_ctrl, p_tex);
 }
 
 void
@@ -556,6 +583,34 @@ _req_free(_Req *p_req) {
 
 static void _render(EnhanceCtrl *p_ctrl);
 
+/* A render landed and is still wanted: show it. The worker decoded the
+ * original, so its size is known here even before the viewer has shown a
+ * decode of it -- after a rewrite in place the render may land BEFORE the
+ * reload's decode, and a crop tool laid out on the old size used to draw
+ * its rectangle over the new render until that decode taught the
+ * controller (the overlay's own base guard, tool-ctrl.c _rect_on_base,
+ * would hide it now, but only a relayout puts the rectangle where it
+ * belongs). So a size that moved is told the same way a new original is
+ * (original_changed), once the render is on screen. The original's
+ * IDENTITY is not touched: the render is not it, and hold-Space keeps
+ * showing the last decode the viewer showed until the reload lands. */
+static void
+_apply_landed(EnhanceCtrl *p_ctrl, const _Req *p_req, GdkTexture *p_tex,
+              gint i_w, gint i_h) {
+   g_set_object(&p_ctrl->p_enhance_tex, p_tex);
+   _show_texture(p_ctrl, p_tex);
+   _update_header(p_ctrl);
+   if (_note_orig_size(p_ctrl, i_w, i_h)) {
+      p_ctrl->p_ops->original_changed(p_ctrl->p_host);
+   }
+   if (p_req->b_hint) {
+      /* Without the panel nothing on screen says how to compare or keep
+       * the result; say it once, when the first preview of a file lands. */
+      _show_status(p_ctrl, "Enhanced preview — hold Space to compare, "
+                           "s saves a copy, a shows the presets");
+   }
+}
+
 /* Async apply completion (tu0): last-write-wins via u_enhance_gen -- a
  * discard, a navigation, or the window closing while this was still
  * processing in its worker thread all bump the generation, so a stale result
@@ -586,20 +641,8 @@ _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       _discard(p_ctrl); /* back to the original; also bumps the gen and
                          * drops a queued relaunch (it would fail too) */
    } else {
-      /* The worker decoded the original: remember its size for the crop
-       * tool / the next quarter turn (see i_orig_w). */
-      p_ctrl->i_orig_w = i_w;
-      p_ctrl->i_orig_h = i_h;
-      g_set_object(&p_ctrl->p_enhance_tex, p_tex);
-      _show_texture(p_ctrl, p_tex);
+      _apply_landed(p_ctrl, p_req, p_tex, i_w, i_h);
       g_object_unref(p_tex);
-      _update_header(p_ctrl);
-      if (p_req->b_hint) {
-         /* Without the panel nothing on screen says how to compare or keep
-          * the result; say it once, when the first preview of a file lands. */
-         _show_status(p_ctrl, "Enhanced preview — hold Space to compare, "
-                              "s saves a copy, a shows the presets");
-      }
    }
    if (p_ctrl->b_relaunch) {
       p_ctrl->b_relaunch = FALSE;
@@ -1102,7 +1145,11 @@ enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx) {
  * this signal decodes the file as it is now and shows it, which is where
  * it is learned again -- and say so (TRUE), since a preview rendered from
  * the old contents has to be rendered again. Still cached but not the
- * object known here (a decode the viewer has not shown yet): take it.
+ * object known here (a decode the viewer has not shown yet -- a
+ * neighbour's prefetch of this very file that landed while its own
+ * visible load is still in flight): take it, and tell the tool as the
+ * choke point does (_learn_original; a crop tool used to stay laid out on
+ * the previous base until the visible load showed its own decode).
  * Unchanged: nothing to do, and a crop tool open over the file keeps its
  * rectangle. This is the one deliberate cache lookup left in this
  * controller, and it runs on a rescan only. */
@@ -1114,9 +1161,7 @@ _recheck_original(EnhanceCtrl *p_ctrl, GFile *p_cur) {
       return (TRUE);
    }
    if (p_now != p_ctrl->p_orig_tex) {
-      g_set_object(&p_ctrl->p_orig_tex, p_now);
-      p_ctrl->i_orig_w = gdk_texture_get_width(p_now);
-      p_ctrl->i_orig_h = gdk_texture_get_height(p_now);
+      _learn_original(p_ctrl, p_now);
    }
    return (FALSE);
 }
@@ -1146,7 +1191,11 @@ _rerender_rewritten(EnhanceCtrl *p_ctrl) {
  * silently zeroed u_enhance_mask right after a successful save, discarding the
  * still-active preview the user was not done comparing/adjusting. Only reset
  * when the current file's IDENTITY actually changed; p_enhance_file is updated
- * unconditionally so the next call has an accurate baseline. A same-file
+ * unconditionally so the next call has an accurate baseline -- the window
+ * calls this for an open too (window.c _open_rebuild), so a folder's first
+ * rescan already compares against its current file rather than against
+ * "nothing" (NULL used to read as an identity change and forget the
+ * original under an open crop tool). A same-file
  * rescan is not a no-op either: the file may have been rewritten in place
  * (_recheck_original), and a preview of it is then rendered again
  * (_rerender_rewritten).

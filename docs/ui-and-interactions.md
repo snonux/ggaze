@@ -447,8 +447,11 @@ built in, all four report "GEGL not built in".
 - The tool keys are **modal**: while a tool is active they belong to it
   (`h` moves the rectangle instead of going to the previous image), the
   other tool's key and `[`/`]` are refused until `Enter`/`Esc`, and any key
-  not listed keeps its usual meaning. Navigating away, or leaving the large
-  view, ends a tool without applying it — leaving the large view is an `Esc`:
+  not listed keeps its usual meaning. Navigating away (opening another file
+  or folder with `o`/`O`/a drop included — the open runs the same reset a
+  navigation does, whichever position the file sorts to), or leaving the
+  large view, ends a tool without applying it — leaving the large view is
+  an `Esc`:
   a nudged straighten goes back to the angle it started with, the crop
   tool's rectangle is dropped and the crop already applied stays. So does
   discarding the preview

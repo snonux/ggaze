@@ -4417,6 +4417,233 @@ test_crop_tool_relays_out_on_the_rewritten_base(void) {
    tool_fx_close(&fx);
 }
 
+/* --- wb2 sixth review round ----------------------------------------------
+ *
+ * An open (`o`, a drop, a single-instance activation) rebuilds the
+ * navigator, and navigator_set_current_file emits no "changed" when the
+ * file sorts first in its folder (a folder open places no cursor at all),
+ * so the two nav_changed choke points never ran for it: a tool and a
+ * transform left over from the previous file survived into the new folder.
+ * The open now runs the same choke point a navigation does
+ * (window.c _open_rebuild). The other subtests here pin the render of a
+ * rewritten file landing before the file's own decode, and the baseline an
+ * open leaves for the folder's first rescan. */
+
+/* A fresh folder holding one 200x150 PNG, "b.png": the only file, so it
+ * sorts first and its open never emits "changed". */
+static char *
+make_first_sorted_dir(char **c_path_out) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-open-b-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   char *c_path = g_build_filename(c_dir, "b.png", NULL);
+   rewrite_as_200x150(c_path);
+   *c_path_out = c_path;
+   return (c_dir);
+}
+
+/* What every open of B must leave behind, whatever A had going: B's own
+ * 200x150 decode on screen (never A's render under B's title), no tool,
+ * no rectangle, no transform in the title, nothing dirty. */
+static void
+assert_b_opened_clean(GgazeWindow *p_win) {
+   wait_for_texture_size(p_win, 200, 150);
+   g_assert_nonnull(g_strstr_len(window_title(p_win), -1, "b.png"));
+   g_assert_null(g_strstr_len(window_title(p_win), -1, "°"));
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
+   CropRect t_rect;
+   gint     i_bw, i_bh;
+   g_assert_false(ggaze_window_tool_crop_rect(p_win, &t_rect, &i_bw, &i_bh));
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+}
+
+/* A's turn saved (not dirty: the open asks nothing) and the crop tool up
+ * over it; then a first-sorted B in another folder is opened. Before the
+ * fix nothing reset: B decoded and was learned as the original, but the
+ * override still returned A's turned render -- A's picture under B's
+ * title, the rectangle drawn over it, Enter applying A's turn and crop to
+ * B, and `s` exporting A once more. Now: tool gone, transform gone, B's
+ * own decode, and `s` has nothing to save. */
+static void
+test_open_ends_the_tool_and_the_saved_transform(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   fire(fx.p_win, "win.enhance-save");
+   char *c_out = g_build_filename(fx.c_dir, "tool-enhanced.png", NULL);
+   wait_for_file(c_out);
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   fire(fx.p_win, "win.crop");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   char  *c_b     = NULL;
+   char  *c_other = make_first_sorted_dir(&c_b);
+   GFile *p_b     = g_file_new_for_path(c_b);
+   ggaze_window_open(fx.p_win, p_b); /* saved: no prompt */
+   ggtest_drain_main(100);
+   g_assert_cmpuint(ggtest_count_dialogs(GTK_WINDOW(fx.p_win), "Cancel"), ==,
+                    0);
+   assert_b_opened_clean(fx.p_win);
+   fire(fx.p_win, "win.enhance-save");
+   wait_for_status_prefix(fx.p_win, "Nothing to save");
+   ggtest_drain_main(200);
+   g_assert_false(file_exists_in(c_other, "b-enhanced.png"));
+   g_assert_false(file_exists_in(fx.c_dir, "tool-enhanced-1.png"));
+   g_object_unref(p_b);
+   g_free(c_b);
+   g_free(c_out);
+   tool_fx_close(&fx);
+   cleanup_temp_dir(c_other);
+}
+
+/* A dirty (a turn, the crop tool up), the open of a first-sorted B is
+ * answered with Save: the export of A lands (turned, 300x400), and B then
+ * comes up clean. Before the fix the save went through and the open showed
+ * A's turned render under B's title all the same. */
+static void
+test_open_save_exports_then_shows_the_new_file_clean(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   fire(fx.p_win, "win.crop");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   char      *c_b     = NULL;
+   char      *c_other = make_first_sorted_dir(&c_b);
+   GFile     *p_b     = g_file_new_for_path(c_b);
+   GtkWindow *p_own   = GTK_WINDOW(fx.p_win);
+   ggaze_window_open(fx.p_win, p_b);
+   GGTEST_ASSERT_DIALOG_UP(p_own, "Save");
+   g_assert_true(ggtest_click_dialog_button(p_own, "Save"));
+   char *c_out = g_build_filename(fx.c_dir, "tool-enhanced.png", NULL);
+   wait_for_file(c_out);
+   assert_b_opened_clean(fx.p_win);
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = gdk_texture_new_from_filename(c_out, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, TOOL_H);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, TOOL_W);
+   g_object_unref(p_tex);
+   g_assert_false(file_exists_in(c_other, "b-enhanced.png"));
+   g_object_unref(p_b);
+   g_free(c_b);
+   g_free(c_out);
+   tool_fx_close(&fx);
+   cleanup_temp_dir(c_other);
+}
+
+/* Rewrite c_path as a 200x150 PNG that keeps the texture cache's stamp --
+ * the old byte count (a tEXt chunk pads it: every comment character is one
+ * more byte) and the old mtime -- so the viewer's reload after the folder
+ * monitor's rescan is a cache HIT of the old 400x300 decode and only a
+ * GEGL render ever reads the new contents: the deterministic form of "the
+ * render lands before the decode", which a real rewrite only races. */
+static void
+rewrite_as_200x150_same_stamp(const char *c_path) {
+   GFile     *p_f    = g_file_new_for_path(c_path);
+   GFileInfo *p_info = g_file_query_info(
+      p_f, G_FILE_ATTRIBUTE_STANDARD_SIZE "," G_FILE_ATTRIBUTE_TIME_MODIFIED,
+      G_FILE_QUERY_INFO_NONE, NULL, NULL);
+   g_assert_nonnull(p_info);
+   goffset i_size = g_file_info_get_size(p_info);
+   guint64 u_mtime =
+      g_file_info_get_attribute_uint64(p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED);
+   g_object_unref(p_info);
+   GdkPixbuf *p_pix = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 200, 150);
+   gdk_pixbuf_fill(p_pix, 0x99cc33ffu);
+   gchar  *c_buf = NULL;
+   gsize   u_len = 0;
+   GError *p_err = NULL;
+   g_assert_true(gdk_pixbuf_save_to_buffer(p_pix, &c_buf, &u_len, "png", &p_err,
+                                           "tEXt::Comment", "x", NULL));
+   g_assert_no_error(p_err);
+   g_assert_cmpint((goffset)u_len, <=, i_size); /* the smaller compresses
+                                                 * smaller: the premise */
+   char *c_pad = g_strnfill(1 + (gsize)(i_size - (goffset)u_len), 'x');
+   g_free(c_buf);
+   g_assert_true(gdk_pixbuf_save_to_buffer(p_pix, &c_buf, &u_len, "png", &p_err,
+                                           "tEXt::Comment", c_pad, NULL));
+   g_assert_no_error(p_err);
+   g_assert_cmpint((goffset)u_len, ==, i_size);
+   g_assert_true(g_file_set_contents(c_path, c_buf, (gssize)u_len, NULL));
+   g_assert_true(
+      g_file_set_attribute_uint64(p_f, G_FILE_ATTRIBUTE_TIME_MODIFIED, u_mtime,
+                                  G_FILE_QUERY_INFO_NONE, NULL, NULL));
+   g_free(c_pad);
+   g_free(c_buf);
+   g_object_unref(p_pix);
+   g_object_unref(p_f);
+}
+
+/* The crop tool is open on the 400x300 base when a render decodes the file
+ * at another size before any reload has (rewrite_as_200x150_same_stamp:
+ * the reload is a cache hit of the old decode, the preset's render reads
+ * the 200x150 file). The render's original size is told to the tool as a
+ * new original is, so the rectangle is laid out again on 200x150 and
+ * reported full on it; before the fix the seam reported the 400x300 layout
+ * as drawn over the 200x150 render. Then the keys crop on the true base. */
+static void
+test_crop_tool_follows_a_render_of_another_size(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop");
+   CropRect t_rect;
+   gint     i_bw, i_bh;
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
+   g_assert_cmpint(i_bw, ==, TOOL_W);
+   g_assert_cmpint(i_bh, ==, TOOL_H);
+   rewrite_as_200x150_same_stamp(fx.c_path);
+   ggtest_drain_main(700); /* past the monitor's debounce: the rescan finds
+                            * the entry fresh, the reload is a hit */
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   fire_and_wait(fx.p_win, "win.enhance-1"); /* the render reads 200x150 */
+   assert_texture_size(fx.p_win, 200, 150);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
+   g_assert_cmpint(i_bw, ==, 200);
+   g_assert_cmpint(i_bh, ==, 150);
+   g_assert_true(croprect_is_full(&t_rect, 200.0, 150.0));
+   for (guint u = 0; u < 10; u++) {
+      tool_key(fx.p_win, GDK_KEY_H);
+   }
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_texture_size(fx.p_win, 190, 150);
+   tool_fx_close(&fx);
+}
+
+/* An open leaves the controller comparing against the folder's current
+ * file, so the folder's first rescan (a sibling appearing) under an open
+ * crop tool -- nothing rendered yet -- is a same-file event: the tool, its
+ * rectangle and its base stay, and no render is launched. (With no
+ * baseline the rescan read as an identity change; the reload in the same
+ * callback re-learned the original, so this guards the baseline rather
+ * than a visible failure.) */
+static void
+test_first_rescan_after_an_open_is_a_same_file_event(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop");
+   for (guint u = 0; u < 10; u++) {
+      tool_key(fx.p_win, GDK_KEY_H);
+   }
+   CropRect t_rect;
+   gint     i_bw, i_bh;
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
+   g_assert_cmpfloat(t_rect.d_w, ==, TOOL_W - 30.0); /* 10 steps of 3 px */
+   copy_fixture(fx.c_dir, "plain.jpg"); /* a sibling: the folder rescans */
+   ggtest_drain_main(700);              /* past the monitor's debounce */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, 0);
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
+   g_assert_cmpint(i_bw, ==, TOOL_W);
+   g_assert_cmpfloat(t_rect.d_w, ==, TOOL_W - 30.0);
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_texture_size(fx.p_win, TOOL_W - 30, TOOL_H);
+   tool_fx_close(&fx);
+}
+
 static void
 add_tool_tests(void) {
    g_test_add_func("/enhance_flow/rotate_cw_repeats_to_the_original",
@@ -4687,6 +4914,20 @@ add_tool_review5_tests(void) {
                    test_crop_tool_relays_out_on_the_rewritten_base);
 }
 
+/* wb2 sixth review round: an open runs the choke point a navigation does,
+ * a render of another size re-bases the crop tool, an open's baseline. */
+static void
+add_tool_review6_tests(void) {
+   g_test_add_func("/enhance_flow/open_ends_the_tool_and_the_saved_transform",
+                   test_open_ends_the_tool_and_the_saved_transform);
+   g_test_add_func("/enhance_flow/open_save_exports_then_shows_new_file_clean",
+                   test_open_save_exports_then_shows_the_new_file_clean);
+   g_test_add_func("/enhance_flow/crop_tool_follows_a_render_of_another_size",
+                   test_crop_tool_follows_a_render_of_another_size);
+   g_test_add_func("/enhance_flow/first_rescan_after_an_open_is_same_file",
+                   test_first_rescan_after_an_open_is_a_same_file_event);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -4722,5 +4963,6 @@ main(int i_argc, char **c_argv) {
    add_tool_review3_tests();
    add_tool_review4_tests();
    add_tool_review5_tests();
+   add_tool_review6_tests();
    return (g_test_run());
 }
