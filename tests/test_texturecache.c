@@ -4,7 +4,9 @@
  * Exercises the bounded LRU: capacity cap + eviction, MRU ordering on get,
  * replace, and miss; then the stamp that evicts an entry whose file changed
  * on disk -- size, whole seconds, the sub-second part of the mtime and the
- * inode each on their own, and the whole-second-filesystem fallback. Uses
+ * inode each on their own, and the whole-second-filesystem fallback -- and
+ * that the stamp an entry is put under is the one read BEFORE the decode
+ * (a write landing mid-decode must not make the old pixels fresh). Uses
  * 1x1 GdkMemoryTextures (no display needed).
  *
  * Copyright (c) 2026 ggaze contributors
@@ -18,6 +20,8 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
+
+#include "file_stamp.h"
 
 static GdkTexture *
 mk_tex(void) {
@@ -135,51 +139,6 @@ file_fx_close(FileFx *p_fx) {
    g_free(p_fx->c_dir);
 }
 
-/* c_path's mtime as the cache reads it: whole seconds and the sub-second
- * part in nanoseconds; and its inode. */
-static void
-read_stamp(const char *c_path, guint64 *p_sec, guint32 *p_nsec,
-           guint64 *p_inode) {
-   GFile     *p_f    = g_file_new_for_path(c_path);
-   GFileInfo *p_info = g_file_query_info(p_f,
-                                         G_FILE_ATTRIBUTE_TIME_MODIFIED
-                                         "," G_FILE_ATTRIBUTE_TIME_MODIFIED_NSEC
-                                         "," G_FILE_ATTRIBUTE_UNIX_INODE,
-                                         G_FILE_QUERY_INFO_NONE, NULL, NULL);
-   g_assert_nonnull(p_info);
-   *p_sec =
-      g_file_info_get_attribute_uint64(p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED);
-   *p_nsec = g_file_info_get_attribute_uint32(
-      p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED_NSEC);
-   *p_inode =
-      g_file_info_get_attribute_uint64(p_info, G_FILE_ATTRIBUTE_UNIX_INODE);
-   g_object_unref(p_info);
-   g_object_unref(p_f);
-}
-
-/* Set c_path's mtime to u_sec + u_nsec, both parts in one call (setting the
- * seconds alone zeroes the sub-second part), and check it took: a
- * filesystem that keeps whole seconds only would make the sub-second
- * subtests below vacuous, so they say so instead of passing. */
-static void
-set_mtime(const char *c_path, guint64 u_sec, guint32 u_nsec) {
-   GFile     *p_f    = g_file_new_for_path(c_path);
-   GFileInfo *p_info = g_file_info_new();
-   g_file_info_set_attribute_uint64(p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED,
-                                    u_sec);
-   g_file_info_set_attribute_uint32(p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED_NSEC,
-                                    u_nsec);
-   g_assert_true(g_file_set_attributes_from_info(
-      p_f, p_info, G_FILE_QUERY_INFO_NONE, NULL, NULL));
-   g_object_unref(p_info);
-   g_object_unref(p_f);
-   guint64 u_sec_now, u_inode;
-   guint32 u_nsec_now;
-   read_stamp(c_path, &u_sec_now, &u_nsec_now, &u_inode);
-   g_assert_cmpuint(u_sec_now, ==, u_sec);
-   g_assert_cmpuint(u_nsec_now, ==, u_nsec);
-}
-
 /* Overwrite c_path in place -- truncate and write, the same inode -- unlike
  * g_file_set_contents, which writes a temp file and renames it over. */
 static void
@@ -190,9 +149,10 @@ write_in_place(const char *c_path, const char *c_text) {
    g_assert_cmpint(fclose(p_fp), ==, 0);
 }
 
-/* An entry for a real file is evicted once the file changes on disk (size
- * here), so in-place edits are never served stale; a synthetic path that
- * cannot be stat'ed is trusted as before. */
+/* An entry for a real file is evicted once the file changes on disk (here
+ * through g_file_set_contents, which changes the byte count AND, by its
+ * rename over the original, the inode), so edits are never served stale;
+ * a removed entry misses. */
 static void
 test_stale_entry_evicted(void) {
    FileFx fx;
@@ -206,6 +166,27 @@ test_stale_entry_evicted(void) {
    file_fx_close(&fx);
 }
 
+/* The byte count on its own: an in-place rewrite (same inode) to another
+ * size with the mtime restored to the nanosecond, so the size is the only
+ * part of the stamp that differs. */
+static void
+test_size_only_change_evicted(void) {
+   FileFx fx;
+   file_fx_open(&fx, "one");
+   GgtestFileStamp t_old, t_new;
+   ggtest_read_stamp(fx.c_path, &t_old);
+   write_in_place(fx.c_path, "longer");
+   ggtest_set_mtime(fx.c_path, t_old.u_sec, t_old.u_nsec);
+   ggtest_read_stamp(fx.c_path, &t_new);
+   g_assert_cmpuint(t_new.u_inode, ==, t_old.u_inode); /* the premise: */
+   g_assert_cmpuint(t_new.u_sec, ==, t_old.u_sec);     /* only the size */
+   g_assert_cmpuint(t_new.u_nsec, ==, t_old.u_nsec);   /* moved */
+   g_assert_cmpint(t_new.i_size, !=, t_old.i_size);
+   g_assert_null(texturecache_get(fx.p_cache, fx.p_file)); /* stale */
+   g_assert_cmpuint(texturecache_get_size(fx.p_cache), ==, 0);
+   file_fx_close(&fx);
+}
+
 /* The fd2 case: a rewrite within the same second to the same byte count,
  * in place. Whole seconds + size read that as unchanged and the viewer
  * kept the stale decode; the sub-second part of the mtime tells it. The
@@ -215,11 +196,11 @@ static void
 test_same_second_same_size_rewrite_evicted(void) {
    FileFx fx;
    file_fx_open(&fx, "one");
-   guint64 u_sec, u_inode;
-   guint32 u_nsec;
-   read_stamp(fx.c_path, &u_sec, &u_nsec, &u_inode);
+   GgtestFileStamp t_st;
+   ggtest_read_stamp(fx.c_path, &t_st);
    write_in_place(fx.c_path, "two"); /* the same 3 bytes */
-   set_mtime(fx.c_path, u_sec, (u_nsec + 500000000u) % 1000000000u);
+   ggtest_set_mtime(fx.c_path, t_st.u_sec,
+                    (t_st.u_nsec + 500000000u) % 1000000000u);
    g_assert_null(texturecache_get(fx.p_cache, fx.p_file)); /* stale */
    g_assert_cmpuint(texturecache_get_size(fx.p_cache), ==, 0);
    file_fx_close(&fx);
@@ -229,21 +210,23 @@ test_same_second_same_size_rewrite_evicted(void) {
  * put and get alike (simulated here by setting the mtime to .000000000 on
  * both sides), so the seconds + size check stands on its own as it did:
  * the same stamp is a hit -- the one rewrite the cache cannot tell -- and
- * another second is a miss. */
+ * another second is a miss. The simulation needs a filesystem that DOES
+ * keep sub-second mtimes (the first move to .0 must be a change), so a
+ * whole-second one fails up front and says so. */
 static void
 test_whole_second_stamp_falls_back(void) {
    FileFx fx;
    file_fx_open(&fx, "one");
-   guint64 u_sec, u_inode;
-   guint32 u_nsec;
-   read_stamp(fx.c_path, &u_sec, &u_nsec, &u_inode);
-   set_mtime(fx.c_path, u_sec, 0);
+   GgtestFileStamp t_st;
+   ggtest_read_stamp(fx.c_path, &t_st);
+   ggtest_require_subsecond_mtime(fx.c_path, &t_st);
+   ggtest_set_mtime(fx.c_path, t_st.u_sec, 0);
    g_assert_null(texturecache_get(fx.p_cache, fx.p_file)); /* moved */
    texturecache_put(fx.p_cache, fx.p_file, fx.p_tex);      /* stamp: .0 */
    write_in_place(fx.c_path, "two");
-   set_mtime(fx.c_path, u_sec, 0);
+   ggtest_set_mtime(fx.c_path, t_st.u_sec, 0);
    g_assert_true(texturecache_get(fx.p_cache, fx.p_file) == fx.p_tex);
-   set_mtime(fx.c_path, u_sec - 1, 0);
+   ggtest_set_mtime(fx.c_path, t_st.u_sec - 1, 0);
    g_assert_null(texturecache_get(fx.p_cache, fx.p_file)); /* seconds */
    g_assert_cmpuint(texturecache_get_size(fx.p_cache), ==, 0);
    file_fx_close(&fx);
@@ -256,15 +239,68 @@ static void
 test_replaced_inode_evicted(void) {
    FileFx fx;
    file_fx_open(&fx, "one");
-   guint64 u_sec, u_inode, u_sec_now, u_inode_now;
-   guint32 u_nsec, u_nsec_now;
-   read_stamp(fx.c_path, &u_sec, &u_nsec, &u_inode);
+   GgtestFileStamp t_old, t_new;
+   ggtest_read_stamp(fx.c_path, &t_old);
    g_assert_true(g_file_set_contents(fx.c_path, "one", -1, NULL));
-   set_mtime(fx.c_path, u_sec, u_nsec);
-   read_stamp(fx.c_path, &u_sec_now, &u_nsec_now, &u_inode_now);
-   g_assert_cmpuint(u_inode_now, !=, u_inode);             /* the premise */
+   ggtest_set_mtime(fx.c_path, t_old.u_sec, t_old.u_nsec);
+   ggtest_read_stamp(fx.c_path, &t_new);
+   g_assert_cmpuint(t_new.u_inode, !=, t_old.u_inode);     /* the premise */
    g_assert_null(texturecache_get(fx.p_cache, fx.p_file)); /* stale */
    g_assert_cmpuint(texturecache_get_size(fx.p_cache), ==, 0);
+   file_fx_close(&fx);
+}
+
+/* --- the stamp is taken BEFORE the decode ------------------------------- */
+
+/* The viewer's sequence with a writer finishing mid-decode: the miss hands
+ * out the file's stamp (texturecache_lookup), the decode runs on the old
+ * bytes while the file is rewritten, and the finished texture is put
+ * under the PRE-decode stamp. The next get must miss -- the texture shows
+ * the old file. A stamp read at put time (texturecache_put, what viewload
+ * used to do) describes the NEW file and keeps the old pixels a hit for
+ * good; the second half pins that difference so the test cannot pass
+ * without the pre-decode stamp mattering. */
+static void
+test_prestamp_put_evicted_after_mid_decode_write(void) {
+   FileFx fx;
+   file_fx_open(&fx, "one");
+   texturecache_remove(fx.p_cache, fx.p_file); /* start from a miss */
+   TextureStamp t_pre;
+   g_assert_null(texturecache_lookup(fx.p_cache, fx.p_file, &t_pre));
+   g_assert_true(t_pre.b_valid);
+   write_in_place(fx.c_path, "rewritten mid-decode"); /* the writer */
+   texturecache_put_stamped(fx.p_cache, fx.p_file, fx.p_tex, &t_pre);
+   g_assert_null(texturecache_get(fx.p_cache, fx.p_file)); /* stale */
+   g_assert_cmpuint(texturecache_get_size(fx.p_cache), ==, 0);
+
+   /* The post-decode stamp the fix replaced: the old pixels stay a hit. */
+   texturecache_put(fx.p_cache, fx.p_file, fx.p_tex);
+   g_assert_true(texturecache_get(fx.p_cache, fx.p_file) == fx.p_tex);
+   file_fx_close(&fx);
+}
+
+/* A miss on a STALE entry hands out the stamp its freshness check read (no
+ * second query), and a put under it is a hit while the file stays put; a
+ * hit on an entry of an unqueryable file reads nothing (b_valid FALSE),
+ * and a put with no stamp is trusted. */
+static void
+test_lookup_hands_out_stamp(void) {
+   FileFx fx;
+   file_fx_open(&fx, "one");
+   write_in_place(fx.c_path, "two!");
+   TextureStamp t_miss;
+   g_assert_null(texturecache_lookup(fx.p_cache, fx.p_file, &t_miss));
+   g_assert_true(t_miss.b_valid);
+   g_assert_cmpint(t_miss.i_size, ==, 4);
+   texturecache_put_stamped(fx.p_cache, fx.p_file, fx.p_tex, &t_miss);
+   g_assert_true(texturecache_get(fx.p_cache, fx.p_file) == fx.p_tex);
+
+   GFile *p_synth = g_file_new_for_path("/nonexistent/ggaze/x.jpg");
+   texturecache_put_stamped(fx.p_cache, p_synth, fx.p_tex, NULL);
+   TextureStamp t_hit;
+   g_assert_true(texturecache_lookup(fx.p_cache, p_synth, &t_hit) == fx.p_tex);
+   g_assert_false(t_hit.b_valid);
+   g_object_unref(p_synth);
    file_fx_close(&fx);
 }
 
@@ -282,5 +318,11 @@ main(int i_argc, char **c_argv) {
                    test_whole_second_stamp_falls_back);
    g_test_add_func("/texturecache/replaced_inode_evicted",
                    test_replaced_inode_evicted);
+   g_test_add_func("/texturecache/size_only_change_evicted",
+                   test_size_only_change_evicted);
+   g_test_add_func("/texturecache/prestamp_put_evicted_after_mid_decode_write",
+                   test_prestamp_put_evicted_after_mid_decode_write);
+   g_test_add_func("/texturecache/lookup_hands_out_stamp",
+                   test_lookup_hands_out_stamp);
    return (g_test_run());
 }

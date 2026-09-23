@@ -65,6 +65,7 @@
 
 #include "croprect.h"
 #include "enhance-ui.h"
+#include "file_stamp.h"
 #include "gridview.h"
 #include "gtk_helpers.h"
 #include "histogram-view.h"
@@ -4608,56 +4609,6 @@ test_open_save_exports_then_shows_the_new_file_clean(void) {
    ggtest_cleanup_temp_dir(c_other);
 }
 
-/* c_path's stamp as the texture cache reads it: mtime (whole seconds and
- * the sub-second part in nanoseconds) and byte count. The inode is the
- * rest of it, kept by writing in place. */
-typedef struct {
-   guint64 u_sec;
-   guint32 u_nsec;
-   goffset i_size;
-} FileStamp;
-
-static void
-read_stamp(const char *c_path, FileStamp *p_st) {
-   GFile     *p_f    = g_file_new_for_path(c_path);
-   GFileInfo *p_info = g_file_query_info(
-      p_f,
-      G_FILE_ATTRIBUTE_STANDARD_SIZE "," G_FILE_ATTRIBUTE_TIME_MODIFIED
-                                     "," G_FILE_ATTRIBUTE_TIME_MODIFIED_NSEC,
-      G_FILE_QUERY_INFO_NONE, NULL, NULL);
-   g_assert_nonnull(p_info);
-   p_st->i_size = g_file_info_get_size(p_info);
-   p_st->u_sec =
-      g_file_info_get_attribute_uint64(p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED);
-   p_st->u_nsec = g_file_info_get_attribute_uint32(
-      p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED_NSEC);
-   g_object_unref(p_info);
-   g_object_unref(p_f);
-}
-
-/* Set c_path's mtime to u_sec + u_nsec, both parts in one call (setting
- * the seconds alone zeroes the sub-second part), and check it took, so a
- * filesystem keeping whole seconds only fails here rather than making the
- * same-second subtest vacuous. The folder monitor ignores the attribute
- * change; the rescan the rewrite before it scheduled is what follows. */
-static void
-set_mtime(const char *c_path, guint64 u_sec, guint32 u_nsec) {
-   GFile     *p_f    = g_file_new_for_path(c_path);
-   GFileInfo *p_info = g_file_info_new();
-   g_file_info_set_attribute_uint64(p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED,
-                                    u_sec);
-   g_file_info_set_attribute_uint32(p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED_NSEC,
-                                    u_nsec);
-   g_assert_true(g_file_set_attributes_from_info(
-      p_f, p_info, G_FILE_QUERY_INFO_NONE, NULL, NULL));
-   g_object_unref(p_info);
-   g_object_unref(p_f);
-   FileStamp t_now;
-   read_stamp(c_path, &t_now);
-   g_assert_cmpuint(t_now.u_sec, ==, u_sec);
-   g_assert_cmpuint(t_now.u_nsec, ==, u_nsec);
-}
-
 /* Overwrite c_path IN PLACE (truncate and write: the same inode, which the
  * cache's stamp also checks) as a 200x150 PNG of exactly i_size bytes -- a
  * tEXt chunk pads it: every comment character is one more byte. The
@@ -4695,15 +4646,17 @@ write_200x150_padded_in_place(const char *c_path, goffset i_size) {
  * monitor's rescan is a cache HIT of the old 400x300 decode and only a
  * GEGL render ever reads the new contents: the deterministic form of "the
  * render lands before the decode", which a real rewrite only races. It is
- * also the one rewrite the stamp cannot tell (the same-second, same-size
- * case on a filesystem that keeps whole seconds only), so the tool must
- * cope with it rather than the cache. */
+ * also the one rewrite the stamp cannot tell (a same-size rewrite within
+ * one coarse mtime tick, or within one second on a filesystem that keeps
+ * whole seconds only), so the tool must cope with it rather than the
+ * cache. The folder monitor ignores the mtime change itself; the rescan
+ * the in-place write scheduled is what follows. */
 static void
 rewrite_as_200x150_same_stamp(const char *c_path) {
-   FileStamp t_st;
-   read_stamp(c_path, &t_st);
+   GgtestFileStamp t_st;
+   ggtest_read_stamp(c_path, &t_st);
    write_200x150_padded_in_place(c_path, t_st.i_size);
-   set_mtime(c_path, t_st.u_sec, t_st.u_nsec);
+   ggtest_set_mtime(c_path, t_st.u_sec, t_st.u_nsec);
 }
 
 /* Rewrite c_path as 200x150 within the SAME SECOND to the same byte count,
@@ -4713,10 +4666,11 @@ rewrite_as_200x150_same_stamp(const char *c_path) {
  * must miss on the sub-second part now. */
 static void
 rewrite_as_200x150_same_second(const char *c_path) {
-   FileStamp t_st;
-   read_stamp(c_path, &t_st);
+   GgtestFileStamp t_st;
+   ggtest_read_stamp(c_path, &t_st);
    write_200x150_padded_in_place(c_path, t_st.i_size);
-   set_mtime(c_path, t_st.u_sec, (t_st.u_nsec + 500000000u) % 1000000000u);
+   ggtest_set_mtime(c_path, t_st.u_sec,
+                    (t_st.u_nsec + 500000000u) % 1000000000u);
 }
 
 /* Pump until the window title contains c_part (up to 5 s) and assert it

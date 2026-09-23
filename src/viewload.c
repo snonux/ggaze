@@ -31,11 +31,16 @@ struct ViewLoad {
 /* One per loader_load_async call. Carries the source GFile identity so the
  * main-thread progress/finish callbacks can enforce last-write-wins: a
  * result whose file no longer equals navigator.current is dropped instead
- * of overwriting the viewer. The GTask always invokes the finish callback
+ * of overwriting the viewer. It also carries the file's stamp as the cache
+ * miss read it, BEFORE the decode started: the finished texture is cached
+ * under that stamp, so a rewrite that lands mid-decode makes the next get
+ * miss instead of stamping the old pixels as the new file (texturecache.h
+ * texturecache_put_stamped). The GTask always invokes the finish callback
  * (even on cancellation), which is the sole owner that frees the ctx. */
 typedef struct {
-   ViewLoad *p_vl;   /* ref'd; outlives the load */
-   GFile    *p_file; /* ref'd; the file being loaded */
+   ViewLoad    *p_vl;    /* ref'd; outlives the load */
+   GFile       *p_file;  /* ref'd; the file being loaded */
+   TextureStamp t_stamp; /* p_file's state before the decode began */
 } LoadCtx;
 
 /* A partial texture hopping from the decode thread to the main thread. */
@@ -61,6 +66,17 @@ _unref(ViewLoad *p_vl) {
       g_clear_pointer(&p_vl->p_cache, texturecache_delete);
       g_free(p_vl);
    }
+}
+
+/* A LoadCtx for p_file, owning refs on p_vl and p_file; p_stamp is the
+ * miss stamp texturecache_lookup() read (the one query this load costs). */
+static LoadCtx *
+_load_ctx_new(ViewLoad *p_vl, GFile *p_file, const TextureStamp *p_stamp) {
+   LoadCtx *p_ctx = g_new(LoadCtx, 1);
+   p_ctx->p_vl    = _ref(p_vl);
+   p_ctx->p_file  = (GFile *)g_object_ref(p_file);
+   p_ctx->t_stamp = *p_stamp;
+   return (p_ctx);
 }
 
 /* TRUE iff p_file is still navigator.current (last-write-wins). */
@@ -120,7 +136,8 @@ _prefetch_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
    if (p_tex != NULL) {
       if (!p_ctx->p_vl->b_disposed) {
-         texturecache_put(p_ctx->p_vl->p_cache, p_ctx->p_file, p_tex);
+         texturecache_put_stamped(p_ctx->p_vl->p_cache, p_ctx->p_file, p_tex,
+                                  &p_ctx->t_stamp);
       }
       g_object_unref(p_tex);
    } else {
@@ -153,11 +170,11 @@ _prefetch(ViewLoad *p_vl) {
       if (i_j < 0 || i_j >= (gint)u_n) {
          continue;
       }
-      GFile *p_file = navigator_get_file(p_vl->p_nav, (guint)i_j);
-      if (p_file != NULL && texturecache_get(p_vl->p_cache, p_file) == NULL) {
-         LoadCtx *p_ctx = g_new(LoadCtx, 1);
-         p_ctx->p_vl    = _ref(p_vl);
-         p_ctx->p_file  = (GFile *)g_object_ref(p_file);
+      GFile       *p_file = navigator_get_file(p_vl->p_nav, (guint)i_j);
+      TextureStamp t_stamp;
+      if (p_file != NULL &&
+          texturecache_lookup(p_vl->p_cache, p_file, &t_stamp) == NULL) {
+         LoadCtx *p_ctx = _load_ctx_new(p_vl, p_file, &t_stamp);
          loader_load_async(p_file, p_vl->p_prefetch_cancel, NULL, NULL,
                            _prefetch_finish_cb, p_ctx);
       }
@@ -235,7 +252,8 @@ _load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       g_clear_error(&p_err);
    } else {
       if (_is_current(p_vl, p_ctx->p_file)) {
-         texturecache_put(p_vl->p_cache, p_ctx->p_file, p_tex);
+         texturecache_put_stamped(p_vl->p_cache, p_ctx->p_file, p_tex,
+                                  &p_ctx->t_stamp);
          p_vl->p_ops->show_texture(p_vl->p_host, p_tex);
          _prefetch(p_vl);
       }
@@ -266,11 +284,14 @@ viewload_load_current(ViewLoad *p_vl) {
       p_vl->p_ops->update_header(p_vl->p_host);
       return;
    }
-   /* Cache hit: show immediately, no async load. texturecache_get validates
-    * the file's stamp (mtime to the nanosecond, size, inode), so a file
+   /* Cache hit: show immediately, no async load. The lookup validates the
+    * file's stamp (mtime to the nanosecond, size, inode), so a file
     * rewritten in place (external editor, script) -- even within the same
-    * second to the same byte count -- misses and is decoded afresh. */
-   GdkTexture *p_cached = texturecache_get(p_vl->p_cache, p_cur);
+    * second to the same byte count, clock tick permitting -- misses and is
+    * decoded afresh; a miss hands out the stamp it read, which the decode
+    * below is cached under (read before the decode, never after). */
+   TextureStamp t_stamp;
+   GdkTexture  *p_cached = texturecache_lookup(p_vl->p_cache, p_cur, &t_stamp);
    if (p_cached != NULL) {
       _restart_visible_cancel(p_vl); /* an in-flight load is now stale */
       p_vl->p_ops->show_texture(p_vl->p_host, p_cached);
@@ -282,9 +303,7 @@ viewload_load_current(ViewLoad *p_vl) {
     * Last-write-wins is enforced in the progress and finish callbacks via
     * the LoadCtx's source GFile. */
    _restart_visible_cancel(p_vl);
-   LoadCtx *p_ctx = g_new(LoadCtx, 1);
-   p_ctx->p_vl    = _ref(p_vl);
-   p_ctx->p_file  = (GFile *)g_object_ref(p_cur);
+   LoadCtx *p_ctx = _load_ctx_new(p_vl, p_cur, &t_stamp);
    loader_load_async(p_cur, p_vl->p_cancel, _load_progress_cb, p_ctx,
                      _load_finish_cb, p_ctx);
    p_vl->p_ops->update_header(p_vl->p_host);
