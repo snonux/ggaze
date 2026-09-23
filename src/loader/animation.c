@@ -16,7 +16,6 @@
 
 #include <string.h>
 
-#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gdk/gdk.h>
 #include <glib.h>
 
@@ -191,18 +190,20 @@ animation_probe(const guint8 *p_buf, gsize u_len, GgazeAnimProbe *p_out) {
 gboolean
 animation_within_budget(const GgazeAnimProbe *p_probe) {
    g_return_val_if_fail(p_probe != NULL, FALSE);
-   if (p_probe->u_frames == 0 || p_probe->u_width == 0 ||
-       p_probe->u_height == 0) {
+   if (p_probe->u_frames == 0 || p_probe->u_frames > GGAZE_ANIM_MAX_FRAMES ||
+       p_probe->u_width == 0 || p_probe->u_height == 0) {
       return (FALSE);
    }
    if (p_probe->u_width > GGAZE_IMAGE_MAX_SIDE ||
        p_probe->u_height > GGAZE_IMAGE_MAX_SIDE) {
       return (FALSE);
    }
-   /* Each factor is at most 32-bit, so the 64-bit product cannot wrap. */
-   guint64 u_pixels =
-      (guint64)p_probe->u_frames * p_probe->u_width * p_probe->u_height;
-   return (u_pixels <= GGAZE_ANIM_MAX_PIXELS);
+   /* Each factor is at most 32-bit, so neither 64-bit product can wrap. */
+   guint64 u_canvas = (guint64)p_probe->u_width * p_probe->u_height;
+   if (u_canvas > GGAZE_ANIM_MAX_CANVAS_PIXELS) {
+      return (FALSE);
+   }
+   return (u_canvas * p_probe->u_frames <= GGAZE_ANIM_MAX_PIXELS);
 }
 
 gint
@@ -213,9 +214,73 @@ animation_frame_delay_ms(gint i_reported) {
    return (MAX(i_reported, GGAZE_ANIM_MIN_DELAY_MS));
 }
 
-/* The one quark the attach/lookup pair shares; the texture's qdata
- * destroy notify is the unref, so an attached animation lives exactly as
- * long as its first frame does. */
+/* --- the decoded frames ---------------------------------------------------
+ */
+
+struct _GgazeAnimation {
+   GPtrArray *p_frames; /* GdkTexture of frames 1..n-1 (frame 0 is the
+                         * texture the animation is attached to) */
+   GArray *p_delays;    /* gint, as reported, of frames 0..n-1 */
+};
+
+GgazeAnimation *
+animation_new(gint i_first_delay_ms) {
+   GgazeAnimation *p_anim = g_new0(GgazeAnimation, 1);
+   p_anim->p_frames       = g_ptr_array_new_with_free_func(g_object_unref);
+   p_anim->p_delays       = g_array_new(FALSE, FALSE, sizeof(gint));
+   g_array_append_val(p_anim->p_delays, i_first_delay_ms);
+   return (p_anim);
+}
+
+void
+animation_delete(GgazeAnimation *p_anim) {
+   if (p_anim == NULL) {
+      return;
+   }
+   g_ptr_array_unref(p_anim->p_frames);
+   g_array_unref(p_anim->p_delays);
+   g_free(p_anim);
+}
+
+void
+animation_append_frame(GgazeAnimation *p_anim, GdkTexture *p_frame,
+                       gint i_delay_ms) {
+   g_return_if_fail(p_anim != NULL);
+   g_return_if_fail(GDK_IS_TEXTURE(p_frame));
+   g_ptr_array_add(p_anim->p_frames, g_object_ref(p_frame));
+   g_array_append_val(p_anim->p_delays, i_delay_ms);
+}
+
+guint
+animation_get_n_frames(const GgazeAnimation *p_anim) {
+   g_return_val_if_fail(p_anim != NULL, 0);
+   return (p_anim->p_delays->len);
+}
+
+GdkTexture *
+animation_get_frame(const GgazeAnimation *p_anim, guint u_idx) {
+   g_return_val_if_fail(p_anim != NULL, NULL);
+   if (u_idx == 0 || u_idx > p_anim->p_frames->len) {
+      return (NULL);
+   }
+   return (GDK_TEXTURE(g_ptr_array_index(p_anim->p_frames, u_idx - 1)));
+}
+
+gint
+animation_get_delay_ms(const GgazeAnimation *p_anim, guint u_idx) {
+   g_return_val_if_fail(p_anim != NULL, -1);
+   if (u_idx >= p_anim->p_delays->len) {
+      return (-1);
+   }
+   return (
+      animation_frame_delay_ms(g_array_index(p_anim->p_delays, gint, u_idx)));
+}
+
+/* --- the texture <-> animation channel -------------------------------------
+ *
+ * The one quark the attach/lookup pair shares; the texture's qdata
+ * destroy notify is animation_delete, so an attached animation lives
+ * exactly as long as its first frame does. */
 static GQuark
 _animation_quark(void) {
    static GQuark u_quark = 0;
@@ -226,19 +291,17 @@ _animation_quark(void) {
 }
 
 void
-animation_attach(GdkTexture *p_tex, GdkPixbufAnimation *p_anim) {
+animation_attach(GdkTexture *p_tex, GgazeAnimation *p_anim) {
    g_return_if_fail(GDK_IS_TEXTURE(p_tex));
-   g_return_if_fail(p_anim == NULL || GDK_IS_PIXBUF_ANIMATION(p_anim));
-   g_object_set_qdata_full(G_OBJECT(p_tex), _animation_quark(),
-                           p_anim != NULL ? g_object_ref(p_anim) : NULL,
-                           g_object_unref);
+   g_object_set_qdata_full(G_OBJECT(p_tex), _animation_quark(), p_anim,
+                           (GDestroyNotify)animation_delete);
 }
 
-GdkPixbufAnimation *
+const GgazeAnimation *
 animation_lookup(GdkTexture *p_tex) {
    if (p_tex == NULL) {
       return (NULL);
    }
-   return ((GdkPixbufAnimation *)g_object_get_qdata(G_OBJECT(p_tex),
-                                                    _animation_quark()));
+   return ((const GgazeAnimation *)g_object_get_qdata(G_OBJECT(p_tex),
+                                                      _animation_quark()));
 }

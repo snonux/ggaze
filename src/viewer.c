@@ -8,20 +8,30 @@
  * lives in enhance-ctrl.c and only swaps the texture shown here.
  *
  * Animation (M5, task yb2): the texture handed to ggaze_viewer_set_texture
- * is always a still -- the first frame -- and may carry a
- * GdkPixbufAnimation (animation_lookup, loader/animation.h). Playback is
- * this widget's alone: a GdkPixbufAnimationIter plus one pending timeout
- * per frame, each frame converted to a GdkTexture on the main thread and
- * drawn in place of the first frame at the SAME geometry (frames are the
- * canvas size), so zoom, pan, the fit ratio, the tool overlay's geometry
- * and ggaze_viewer_get_texture() all keep describing the first frame. It
- * runs only while the widget is mapped (map/unmap), so a grid view or an
- * unpresented window costs no frames, and it restarts from the first
- * frame on every set_texture, remap and hold-Space release, the same way
- * zoom resets. The decode itself is the loader's (worker thread); the
- * per-frame work here is a composition + texture upload, and with a
- * glycin-backed gdk-pixbuf the first pass over the frames fetches each
- * from the sandbox on demand (measured 1-2 ms for 640x480), cached after.
+ * is always a still -- the first frame -- and may carry the animation's
+ * other frames (animation_lookup, loader/animation.h), decoded to textures
+ * by the loader's worker. Playback is this widget's alone and only picks
+ * which of those immutable textures to draw: a tick callback on the
+ * frame clock compares the frame time with when the next frame is due and
+ * switches the index, so the per-frame main-thread cost is a comparison
+ * and a redraw -- no decode, no composition, no pixel copy -- plus, the
+ * first time each frame is drawn, the renderer's upload of it (at most
+ * GGAZE_ANIM_MAX_CANVAS_PIXELS x 4 bytes; later loops draw the uploaded
+ * texture again). Frames are drawn at the first frame's geometry (frames
+ * are the canvas size), so zoom, pan, the fit ratio, the tool overlay's
+ * geometry and ggaze_viewer_get_texture() all keep describing the first
+ * frame.
+ *
+ * When it runs: only while the widget is mapped (map/unmap), so the grid
+ * page or an unpresented window plays nothing; and, because the ticks come
+ * from the toplevel's frame clock rather than a g_timeout, only while GDK
+ * drives that clock -- it stops ticking for a surface the compositor
+ * reports as not being presented (a minimized window; on Wayland also a
+ * fully covered one that gets no frame callbacks), and playback pauses
+ * there with it. It restarts from the first frame on every set_texture,
+ * remap and hold release, the same way zoom resets; and it holds the
+ * first frame while a crop / straighten tool is up (hold_first_frame),
+ * since the tool frames and applies against the first frame.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -31,12 +41,10 @@
 
 #include <math.h>
 
-#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <glib.h>
 #include <graphene.h>
 
 #include "loader/animation.h"
-#include "loader/pixbuf-util.h"
 #include "settings.h"
 
 #define GGAZE_ZOOM_FACTOR 1.25
@@ -65,12 +73,14 @@ struct _GgazeViewer {
    GgazeViewerDragFn    fn_drag;
    gpointer             p_overlay_data;
    /* Animation playback (top-of-file comment). p_anim is the one attached
-    * to p_texture, or NULL for a still; the other three are non-NULL /
-    * non-zero only while playing. */
-   GdkPixbufAnimation     *p_anim;
-   GdkPixbufAnimationIter *p_iter;         /* where the playback is */
-   GdkTexture             *p_frame;        /* drawn instead of p_texture */
-   guint                   u_frame_source; /* the pending frame timeout */
+    * to p_texture (borrowed: it lives as long as p_texture, which this
+    * widget holds), or NULL for a still. */
+   const GgazeAnimation *p_anim;
+   guint                 u_frame;   /* index drawn; 0 is p_texture */
+   guint                 u_tick_id; /* the tick callback while playing */
+   gint64                i_due_us;  /* frame time the next frame is due;
+                                     * 0 until the first tick */
+   gboolean b_hold;                 /* a tool holds the first frame */
 };
 
 G_DEFINE_TYPE(GgazeViewer, ggaze_viewer, GTK_TYPE_WIDGET)
@@ -79,74 +89,93 @@ static guint u_navigate_sig = 0;
 
 /* --- animation playback -------------------------------------------------- */
 
-/* gdk-pixbuf 2.44 deprecates the GdkPixbufAnimation API for glycin's,
- * which CI's fedora:40 (2.42) does not have and ggaze does not depend on;
- * the deprecated calls are the portable ones (see pixbuf-util.c), so this
- * section silences their warnings. */
-G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-
-/* Stop playing: no pending timeout, no iterator. The frame on screen
- * stays until the next start or set_texture replaces it, so an unmap does
- * not flash the first frame back. */
+/* Stop playing: no tick callback. The frame on screen stays until the
+ * next start or set_texture replaces it, so an unmap does not flash the
+ * first frame back. */
 static void
 _anim_stop(GgazeViewer *p_v) {
-   g_clear_handle_id(&p_v->u_frame_source, g_source_remove);
-   g_clear_object(&p_v->p_iter);
+   if (p_v->u_tick_id != 0) {
+      gtk_widget_remove_tick_callback(GTK_WIDGET(p_v), p_v->u_tick_id);
+      p_v->u_tick_id = 0;
+   }
 }
 
-/* Draw the iterator's current frame from now on. A frame the conversion
- * cannot wrap (an empty pixbuf) leaves the previous one up. */
+/* Show frame u_idx from now on. */
 static void
-_anim_show_current_frame(GgazeViewer *p_v) {
-   GdkPixbuf  *p_pix = gdk_pixbuf_animation_iter_get_pixbuf(p_v->p_iter);
-   GdkTexture *p_tex = (p_pix != NULL) ? pixbuf_util_to_texture(p_pix) : NULL;
-   if (p_tex != NULL) {
-      g_set_object(&p_v->p_frame, p_tex);
-      g_object_unref(p_tex);
-   }
+_anim_show(GgazeViewer *p_v, guint u_idx) {
+   p_v->u_frame = u_idx;
    gtk_widget_queue_draw(GTK_WIDGET(p_v));
 }
 
-static gboolean _anim_tick_cb(gpointer p_data);
-
-/* Arm the timeout for the next frame, or none when the animation has
- * ended on this frame (a GIF without a loop: the last frame holds). */
-static void
-_anim_schedule(GgazeViewer *p_v) {
-   gint i_delay = animation_frame_delay_ms(
-      gdk_pixbuf_animation_iter_get_delay_time(p_v->p_iter));
+/* The next frame is due at i_now: show it and work out when the one
+ * after is due. FALSE when the animation has ended on the frame now
+ * shown (a GIF without a loop: the last frame holds). The due time moves
+ * by the frame's delay, so the average rate is the file's even though
+ * frames land on ticks; after a stall (a busy main loop, a frame clock
+ * that paused) it restarts from now rather than racing through the
+ * frames it missed. */
+static gboolean
+_anim_step(GgazeViewer *p_v, gint64 i_now) {
+   guint u_n   = animation_get_n_frames(p_v->p_anim);
+   guint u_idx = (p_v->u_frame + 1) % u_n;
+   _anim_show(p_v, u_idx);
+   gint i_delay = animation_get_delay_ms(p_v->p_anim, u_idx);
    if (i_delay < 0) {
-      return;
+      return (FALSE);
    }
-   p_v->u_frame_source = g_timeout_add((guint)i_delay, _anim_tick_cb, p_v);
+   p_v->i_due_us += (gint64)i_delay * 1000;
+   if (p_v->i_due_us <= i_now) {
+      p_v->i_due_us = i_now + (gint64)i_delay * 1000;
+   }
+   return (TRUE);
 }
 
-/* One frame period elapsed: advance to whatever frame is due now (the
- * iterator skips ahead if the main loop was held up) and re-arm. */
+/* Once per frame of the frame clock while playing: advance when the next
+ * frame is due. The first tick only anchors the schedule to the clock. */
 static gboolean
-_anim_tick_cb(gpointer p_data) {
-   GgazeViewer *p_v    = GGAZE_VIEWER(p_data);
-   p_v->u_frame_source = 0;
-   if (gdk_pixbuf_animation_iter_advance(p_v->p_iter, NULL)) {
-      _anim_show_current_frame(p_v);
+_anim_tick_cb(GtkWidget *p_widget, GdkFrameClock *p_clock, gpointer p_data) {
+   (void)p_data;
+   GgazeViewer *p_v   = GGAZE_VIEWER(p_widget);
+   gint64       i_now = gdk_frame_clock_get_frame_time(p_clock);
+   if (p_v->i_due_us == 0) {
+      gint i_delay  = animation_get_delay_ms(p_v->p_anim, p_v->u_frame);
+      p_v->i_due_us = i_now + (gint64)i_delay * 1000;
+      return (G_SOURCE_CONTINUE);
    }
-   _anim_schedule(p_v);
+   if (i_now < p_v->i_due_us || _anim_step(p_v, i_now)) {
+      return (G_SOURCE_CONTINUE);
+   }
+   p_v->u_tick_id = 0; /* ended: GTK drops the callback on REMOVE */
    return (G_SOURCE_REMOVE);
 }
 
-/* Start from the first frame if there is an animation and nothing is
- * playing yet. */
+/* Start from the first frame if there is an animation to play, nothing
+ * plays yet, no tool holds the first frame and the widget can be seen.
+ * An animation whose first frame already holds for ever never starts. */
 static void
 _anim_start(GgazeViewer *p_v) {
-   if (p_v->p_anim == NULL || p_v->p_iter != NULL) {
+   if (p_v->p_anim == NULL || p_v->u_tick_id != 0 || p_v->b_hold ||
+       !gtk_widget_get_mapped(GTK_WIDGET(p_v))) {
       return;
    }
-   p_v->p_iter = gdk_pixbuf_animation_get_iter(p_v->p_anim, NULL);
-   _anim_show_current_frame(p_v);
-   _anim_schedule(p_v);
+   _anim_show(p_v, 0);
+   if (animation_get_delay_ms(p_v->p_anim, 0) < 0) {
+      return;
+   }
+   p_v->i_due_us = 0;
+   p_v->u_tick_id =
+      gtk_widget_add_tick_callback(GTK_WIDGET(p_v), _anim_tick_cb, NULL, NULL);
 }
 
-G_GNUC_END_IGNORE_DEPRECATIONS
+/* The texture drawn now: the current frame while an animation is on
+ * frame 1 or later, else the texture itself. */
+static GdkTexture *
+_drawn_texture(GgazeViewer *p_v) {
+   if (p_v->p_anim != NULL && p_v->u_frame != 0) {
+      return (animation_get_frame(p_v->p_anim, p_v->u_frame));
+   }
+   return (p_v->p_texture);
+}
 
 /* --- geometry --------------------------------------------------------------
  */
@@ -341,8 +370,7 @@ ggaze_viewer_snapshot(GtkWidget *p_widget, GtkSnapshot *p_snap) {
       GRAPHENE_RECT_INIT((float)x, (float)y, (float)dw, (float)dh);
    /* The current animation frame, if playing, at the first frame's
     * geometry (the frames are the canvas size, so nothing moves). */
-   gtk_snapshot_append_texture(
-      p_snap, p_v->p_frame != NULL ? p_v->p_frame : p_v->p_texture, &rect);
+   gtk_snapshot_append_texture(p_snap, _drawn_texture(p_v), &rect);
    if (p_v->fn_overlay != NULL) {
       GgazeViewerGeom t_geom;
       if (ggaze_viewer_get_geometry(p_v, &t_geom)) {
@@ -368,9 +396,8 @@ ggaze_viewer_unmap(GtkWidget *p_widget) {
 static void
 ggaze_viewer_dispose(GObject *p_obj) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_obj);
-   _anim_stop(p_v); /* before the widget goes: the timeout borrows it */
-   g_clear_object(&p_v->p_frame);
-   g_clear_object(&p_v->p_anim);
+   _anim_stop(p_v);
+   p_v->p_anim = NULL; /* borrowed from p_texture, which goes next */
    g_clear_object(&p_v->p_texture);
    G_OBJECT_CLASS(ggaze_viewer_parent_class)->dispose(p_obj);
 }
@@ -576,16 +603,14 @@ ggaze_viewer_set_texture(GgazeViewer *p_viewer, GdkTexture *p_texture) {
     * animation again, starts over from the first frame (the picture is
     * being (re)set, and zoom resets on the same rule). */
    _anim_stop(p_viewer);
-   g_clear_object(&p_viewer->p_frame);
    g_set_object(&p_viewer->p_texture, p_texture);
-   g_set_object(&p_viewer->p_anim, animation_lookup(p_texture));
+   p_viewer->p_anim  = animation_lookup(p_texture);
+   p_viewer->u_frame = 0;
    p_viewer->b_fit   = TRUE;
    p_viewer->d_zoom  = 1.0;
    p_viewer->d_pan_x = 0.0;
    p_viewer->d_pan_y = 0.0;
-   if (gtk_widget_get_mapped(GTK_WIDGET(p_viewer))) {
-      _anim_start(p_viewer);
-   }
+   _anim_start(p_viewer);
    gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
 }
 
@@ -598,13 +623,25 @@ ggaze_viewer_get_texture(GgazeViewer *p_viewer) {
 GdkTexture *
 ggaze_viewer_get_frame(GgazeViewer *p_viewer) {
    g_return_val_if_fail(GGAZE_IS_VIEWER(p_viewer), NULL);
-   return (p_viewer->p_frame != NULL ? p_viewer->p_frame : p_viewer->p_texture);
+   return (_drawn_texture(p_viewer));
 }
 
 gboolean
 ggaze_viewer_is_animating(GgazeViewer *p_viewer) {
    g_return_val_if_fail(GGAZE_IS_VIEWER(p_viewer), FALSE);
-   return (p_viewer->u_frame_source != 0);
+   return (p_viewer->u_tick_id != 0);
+}
+
+void
+ggaze_viewer_hold_first_frame(GgazeViewer *p_viewer, gboolean b_hold) {
+   g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
+   p_viewer->b_hold = b_hold;
+   if (b_hold) {
+      _anim_stop(p_viewer);
+      _anim_show(p_viewer, 0);
+   } else {
+      _anim_start(p_viewer);
+   }
 }
 
 void

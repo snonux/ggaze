@@ -44,24 +44,37 @@
  * the GdkPixbufLoader and hang glycin-jxl; the dispatch rule refuses it
  * there. So the GdkPixbufLoader never sees a JXL in any build, and the
  * residual glycin-jxl defect costs an error message rather than a hung
- * worker. The GCancellable is honoured at the two points it can be: the
- * read and the moment before the (uninterruptible) decode.
+ * worker. The GCancellable is honoured at the points it can be: the read,
+ * the moment before the (uninterruptible) decode, and between the frames
+ * of an animation (below).
  *
  * Animated GIF/WebP (task yb2, M5): the gated bytes go through
  * animation_probe() -- a decoder-free walk of the container -- and a file
- * with two or more frames within the pixel budget is decoded as a
- * GdkPixbufAnimation instead of a GdkPixbuf. What this backend returns is
- * still one GdkTexture, the FIRST frame: that is what the texture LRU,
- * the prefetch, the grid, the histogram, the enhance graph, the tools and
- * the clipboard see, so none of them changed. The animation travels with
- * that texture (animation_attach) and only the viewer looks for it. A
- * decoder that yields a static image for a probed animation (a webp
- * module without frame support, or the frames the decoder could not
- * read) attaches nothing: the still is right, only the motion is
- * missing. Beyond the budget the still path runs, which decodes the first
- * frame exactly as it did before this task. No EXIF orientation is
- * applied on the animated path: GIF carries none, and a rotated first
- * frame over unrotated frames would be worse than none.
+ * with two or more frames within the playback budget
+ * (animation_within_budget: frame count, canvas and frames x canvas) is
+ * decoded as a GdkPixbufAnimation instead of a GdkPixbuf, and then, still
+ * on this worker thread, turned into one texture per frame
+ * (pixbuf_util_animation_to_texture). What this backend returns is still
+ * one GdkTexture, the FIRST frame: that is what the texture LRU, the
+ * prefetch, the grid, the histogram, the enhance graph, the tools and the
+ * clipboard see, so none of them changed. The other frames travel with
+ * that texture (animation_attach) and only the viewer looks for them, to
+ * pick which one to draw -- no decode, composition or copy happens on the
+ * main thread. Taking every frame here makes the load of an animation
+ * cost its whole decode before the first frame shows (and the neighbour
+ * prefetch pays it for the files next door, off the main thread); the
+ * cancellable is checked between frames, so a superseded load stops at
+ * the next frame. A decoder that yields a static image for a probed
+ * animation (a webp module without frame support, or the frames the
+ * decoder could not read) attaches nothing: the still is right, only the
+ * motion is missing. A decoder that yields FEWER frames than probed (a
+ * file cut mid-frame) loops back to its first frames for the rest of the
+ * count; that shows a stutter, never a wrong or unowned picture. Beyond
+ * the budget the still path runs, which decodes the first frame exactly
+ * as it did before this task: an over-budget animation is a still,
+ * logged at debug level. No EXIF orientation is applied on the animated
+ * path: GIF carries none, and a rotated first frame over unrotated frames
+ * would be worse than none.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -137,50 +150,40 @@ _pixbuf_decode_still(const guchar *p_buf, gsize u_len, GError **p_err) {
 }
 
 /* The animated path (top-of-file comment): the first frame as the
- * texture, the GdkPixbufAnimation attached to it -- unless the decoder
+ * texture, the other u_frames - 1 attached to it -- unless the decoder
  * made a still of it after all, in which case the texture is that still
  * and nothing is attached. */
 static GdkTexture *
-_pixbuf_decode_animation(const guchar *p_buf, gsize u_len, GError **p_err) {
+_pixbuf_decode_animation(const guchar *p_buf, gsize u_len, guint u_frames,
+                         GCancellable *p_cancel, GError **p_err) {
    GdkPixbufAnimation *p_anim =
       pixbuf_util_decode_animation_bytes(p_buf, u_len, p_err);
    if (p_anim == NULL) {
       return (NULL);
    }
-   /* The animation API is deprecated since gdk-pixbuf 2.44 (for glycin's,
-    * which fedora:40's 2.42 lacks): see pixbuf-util.c. */
-   G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-   GdkPixbuf *p_first = gdk_pixbuf_animation_get_static_image(p_anim);
-   gboolean   b_still = gdk_pixbuf_animation_is_static_image(p_anim);
-   G_GNUC_END_IGNORE_DEPRECATIONS
    GdkTexture *p_tex =
-      (p_first != NULL) ? pixbuf_util_to_texture(p_first) : NULL;
-   if (p_tex == NULL) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                  "could not build texture from the animation's first frame");
-   } else if (!b_still) {
-      animation_attach(p_tex, p_anim);
-   }
+      pixbuf_util_animation_to_texture(p_anim, u_frames, p_cancel, p_err);
    g_object_unref(p_anim);
    return (p_tex);
 }
 
-/* TRUE iff the gated bytes are a multi-frame GIF/WebP the viewer may play:
- * probed animated and within the pixel budget (animation.h). An animation
- * over budget is logged and shown as its first frame. */
-static gboolean
-_pixbuf_wants_animation(const guint8 *p_buf, gsize u_len) {
+/* The frame count of the gated bytes when they are a multi-frame GIF/WebP
+ * the viewer may play -- probed animated and within the budget
+ * (animation.h) -- else 0. An animation over budget is logged and shown as
+ * its first frame. */
+static guint
+_pixbuf_animation_frames(const guint8 *p_buf, gsize u_len) {
    GgazeAnimProbe st_probe;
    if (!animation_probe(p_buf, u_len, &st_probe)) {
-      return (FALSE);
+      return (0);
    }
    if (!animation_within_budget(&st_probe)) {
-      g_debug("ggaze: animation of %u frames at %ux%u is over the pixel "
+      g_debug("ggaze: animation of %u frames at %ux%u is over the playback "
               "budget; showing its first frame only",
               st_probe.u_frames, st_probe.u_width, st_probe.u_height);
-      return (FALSE);
+      return (0);
    }
-   return (TRUE);
+   return (st_probe.u_frames);
 }
 
 static GdkTexture *
@@ -202,10 +205,12 @@ _pixbuf_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
       g_free(c_buf);
       return (NULL);
    }
-   const guchar *p_buf = (const guchar *)c_buf;
-   GdkTexture   *p_tex = _pixbuf_wants_animation(p_buf, u_len)
-                            ? _pixbuf_decode_animation(p_buf, u_len, p_err)
-                            : _pixbuf_decode_still(p_buf, u_len, p_err);
+   const guchar *p_buf    = (const guchar *)c_buf;
+   guint         u_frames = _pixbuf_animation_frames(p_buf, u_len);
+   GdkTexture   *p_tex =
+      (u_frames >= 2)
+         ? _pixbuf_decode_animation(p_buf, u_len, u_frames, p_cancel, p_err)
+         : _pixbuf_decode_still(p_buf, u_len, p_err);
    g_free(c_buf);
    return (p_tex);
 }

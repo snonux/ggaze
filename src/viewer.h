@@ -19,10 +19,11 @@
  * pixels.
  *
  * And it PLAYS an animated GIF/WebP (M5, task yb2): the texture it is
- * given is that file's first frame with the GdkPixbufAnimation attached
- * (loader/animation.h), and the viewer alone iterates the frames -- while
- * mapped, at each frame's own delay, restarting from the first frame
- * whenever the texture is set. Everything else in the app, and every
+ * given is that file's first frame with the other frames attached
+ * (loader/animation.h), and the viewer alone steps through them -- on the
+ * frame clock while mapped, at each frame's own delay, restarting from the
+ * first frame whenever the texture is set, holding it while a tool asks
+ * (ggaze_viewer_hold_first_frame). Everything else in the app, and every
  * other accessor here, keeps seeing the first frame: zoom, pan and the
  * overlay geometry are the canvas's; ggaze_viewer_get_texture() is what
  * the cache, the histogram and hold-Space compare against; only
@@ -61,8 +62,18 @@ ggaze_viewer_get_texture(GgazeViewer *p_viewer); /* (transfer none) */
 GdkTexture *ggaze_viewer_get_frame(GgazeViewer *p_viewer);
 
 /* TRUE while a next frame is scheduled: an animation is attached, the
- * widget is mapped and the animation has not ended on its last frame. */
+ * widget is mapped, no hold is on and the animation has not ended on its
+ * last frame. */
 gboolean ggaze_viewer_is_animating(GgazeViewer *p_viewer);
+
+/* Hold (TRUE) or release (FALSE) an animation on its first frame. The
+ * crop / straighten tools hold while they are up: they lay out and apply
+ * against the first frame -- the texture everything but the viewer sees
+ * -- so the picture under the rectangle or the horizon line must be that
+ * frame, not whichever one is playing. The hold outlives set_texture (a
+ * render landing under the tool) and releasing restarts playback from the
+ * first frame if the widget is mapped. A still is unaffected either way. */
+void ggaze_viewer_hold_first_frame(GgazeViewer *p_viewer, gboolean b_hold);
 
 /* Zoom + pan actions (also reachable via the on-widget controllers). */
 void ggaze_viewer_zoom_in(GgazeViewer *p_viewer);
