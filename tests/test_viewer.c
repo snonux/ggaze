@@ -19,8 +19,17 @@
  *
  * Fixtures are generated here rather than taken from tests/fixtures: the
  * shared ones are a few pixels across (plain.jpg is 6x3), which in a 600x400
- * window puts the fit scale at 100 -- above GGAZE_ZOOM_MAX (64) -- so they
- * cannot express "zooming in makes it bigger" at all.
+ * window puts the fit scale at about 98-100 depending on backend (the
+ * viewer's share of the window differs, see gtk_helpers.h "large-view
+ * readiness") -- above GGAZE_ZOOM_MAX (64) either way -- so they cannot
+ * express "zooming in makes it bigger" at all.
+ *
+ * Every subtest that shows a picture opens its window through
+ * open_and_settle(), which waits for the FULL decode inside a SETTLED
+ * allocation (gtk_helpers.h "large-view readiness") before anything reads
+ * a scale. A read taken off the JPEG
+ * backend's 1x1 preview of plain.jpg, or off an interim allocation, disagrees
+ * with every read taken after -- the load-dependent flake of 2d2.
  *
  * Needs a display (a real GgazeWindow with a realized, allocated viewer),
  * hence the `integration` suite.
@@ -41,6 +50,7 @@
 #include "window.h"
 
 #include "ggaze-config.h"
+#include "gtk_helpers.h"
 #include "loader/animation.h"
 #include "loader/loader.h"
 #include "viewer.h"
@@ -56,18 +66,33 @@
 #define FIXTURE_W 1200
 #define FIXTURE_H 800
 
-static void
-drain_main(guint u_ms) {
-   for (guint u = 0; u < u_ms; u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-}
+/* tests/fixtures/plain.jpg, the tiny fixture of the jx0 subtest. Its size is
+ * what the readiness wait matches the viewer's texture against, so it must be
+ * the FULL-DECODE size: the JPEG backend's two-phase load (loader/backends/
+ * jpeg.c) shows a 1/8-scale preview first, which for 6x3 is 1x1. */
+#define PLAIN_JPG_W 6
+#define PLAIN_JPG_H 3
 
+/* tests/fixtures/anim.gif and zerodelay.gif: the canvas (and so the first
+ * frame's size) of the animated fixtures (tests/fixtures/gen.py). */
+#define ANIM_W 8
+#define ANIM_H 6
+
+/* Present p_win at the 600x400 the header comment's numbers assume, open
+ * p_file on it and wait until the viewer shows the i_tex_w x i_tex_h decode
+ * inside its settled allocation (gtk_helpers.h "large-view readiness").
+ * Its callers go on to read the viewer's scale or pan (directly or through
+ * a zoom/pan/fit step), and those are meaningless off an unallocated viewer
+ * (_compute_geom's zero-size guard returns a fit ratio of 1.0) and WRONG off
+ * the JPEG backend's 1/8-scale preview -- the flake of 2d2, where the 1x1
+ * preview's fit (about 344) was read in place of the file's (about 98).
+ * Returns the viewer (borrowed). */
 static GgazeViewer *
-viewer_of(GgazeWindow *p_win) {
-   GtkStack *p_stack = ggaze_window_get_stack(p_win);
-   return (GGAZE_VIEWER(gtk_stack_get_child_by_name(p_stack, "large")));
+open_and_settle(GgazeWindow *p_win, GFile *p_file, int i_tex_w, int i_tex_h) {
+   gtk_window_set_default_size(GTK_WINDOW(p_win), 600, 400);
+   gtk_window_present(GTK_WINDOW(p_win));
+   ggaze_window_open(p_win, p_file);
+   return (GGTEST_WAIT_FOR_VIEW(p_win, i_tex_w, i_tex_h));
 }
 
 /* A folder holding one FIXTURE_W x FIXTURE_H PNG. Returns the temp directory;
@@ -106,40 +131,23 @@ typedef struct {
    GgazeViewer *p_viewer;
 } ViewerFx;
 
-/* Zoom is computed from the widget allocation, so an unrealized viewer would
- * make every scale meaningless (_compute_geom's zero-size guard returns a fit
- * ratio of 1.0). Wait for a real allocation before any assertion. */
+/* The generated PNG goes through the pixbuf backend, which delivers no
+ * partial, so here the wait's texture-size match only pins the decode; the
+ * settled allocation is what every scale assertion below leans on. */
 static void
 fx_open(ViewerFx *p_fx) {
    p_fx->c_dir         = make_fixture_dir(&p_fx->c_img);
    GFile       *p_file = g_file_new_for_path(p_fx->c_img);
    GgazeWindow *p_win  = GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL));
-   gtk_window_set_default_size(GTK_WINDOW(p_win), 600, 400);
-   gtk_window_present(GTK_WINDOW(p_win));
-   ggaze_window_open(p_win, p_file);
-   p_fx->p_win    = p_win;
-   p_fx->p_viewer = viewer_of(p_win);
-
-   for (guint u = 0;
-        u < 3000 && ggaze_viewer_get_texture(p_fx->p_viewer) == NULL; u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_nonnull(ggaze_viewer_get_texture(p_fx->p_viewer));
-   for (guint u = 0;
-        u < 3000 && gtk_widget_get_width(GTK_WIDGET(p_fx->p_viewer)) == 0;
-        u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_cmpint(gtk_widget_get_width(GTK_WIDGET(p_fx->p_viewer)), >, 0);
+   p_fx->p_win         = p_win;
+   p_fx->p_viewer      = open_and_settle(p_win, p_file, FIXTURE_W, FIXTURE_H);
    g_object_unref(p_file);
 }
 
 static void
 fx_close(ViewerFx *p_fx) {
    gtk_window_destroy(GTK_WINDOW(p_fx->p_win));
-   drain_main(200);
+   ggtest_drain_main(200);
    cleanup_dir(p_fx->c_dir, p_fx->c_img);
 }
 
@@ -161,7 +169,7 @@ test_zoom_in_action_increases_scale(void) {
    gdouble d_before = ggaze_viewer_get_scale(fx.p_viewer);
    g_assert_cmpfloat(d_before, >, 0.0);
    fire(fx.p_win, "win.zoom-in");
-   drain_main(50);
+   ggtest_drain_main(50);
    g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), >, d_before);
 
    fx_close(&fx);
@@ -175,7 +183,7 @@ test_zoom_out_action_decreases_scale(void) {
    gdouble d_before = ggaze_viewer_get_scale(fx.p_viewer);
    g_assert_cmpfloat(d_before, >, 0.0);
    fire(fx.p_win, "win.zoom-out");
-   drain_main(50);
+   ggtest_drain_main(50);
    g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), <, d_before);
 
    fx_close(&fx);
@@ -233,7 +241,7 @@ test_non_finite_pan_is_rejected(void) {
    ggaze_viewer_pan(fx.p_viewer, NAN, 0.0);
    ggaze_viewer_pan(fx.p_viewer, 0.0, NAN);
    ggaze_viewer_pan(fx.p_viewer, INFINITY, -INFINITY);
-   drain_main(50);
+   ggtest_drain_main(50);
 
    /* Assert on the PAN, not just the scale. The scale is derived from the fit
     * ratio or d_zoom and stays finite even while the pan is NaN -- so a
@@ -270,10 +278,10 @@ test_finite_pan_still_applies(void) {
    fx_open(&fx);
 
    ggaze_viewer_toggle_fit_100(fx.p_viewer); /* 100%: image exceeds window */
-   drain_main(50);
+   ggtest_drain_main(50);
    gdouble d_scale = ggaze_viewer_get_scale(fx.p_viewer);
    ggaze_viewer_pan(fx.p_viewer, -40.0, -30.0);
-   drain_main(50);
+   ggtest_drain_main(50);
    g_assert_true(isfinite(ggaze_viewer_get_scale(fx.p_viewer)));
    g_assert_cmpfloat(ABS(ggaze_viewer_get_scale(fx.p_viewer) - d_scale), <,
                      0.0001);
@@ -283,10 +291,20 @@ test_finite_pan_still_applies(void) {
 
 /* jx0: an image small enough that fit-to-window already exceeds
  * GGAZE_ZOOM_MAX. tests/fixtures/plain.jpg is 6x3, so in this 600x400 window
- * it fits at 100x -- above the 64x ceiling. Zooming in must never make such a
- * picture SMALLER, which is exactly what clamping to a bare GGAZE_ZOOM_MAX
- * did (scale went 100 -> 64 on the first win.zoom-in). At the top end a
- * no-op is correct; a reversal is not. */
+ * it fits at about 98-100x depending on backend (roughly 590-600 px of
+ * viewer width over 6) -- above the 64x ceiling. Zooming in must never make
+ * such a picture SMALLER, which is exactly what clamping to a bare
+ * GGAZE_ZOOM_MAX did (scale went from the fit down to 64 on the first
+ * win.zoom-in). At the top end a no-op is correct; a reversal is not.
+ *
+ * The wait in open_and_settle matches the texture's size against the file's
+ * (2d2): the JPEG backend shows a 1/8-scale preview before the full decode,
+ * and plain.jpg's 1x1 preview fits at roughly 344x (backend-dependent, like
+ * the 98). A d_fit read off that preview passed the premise below, and the
+ * real decode landing a millisecond later then read as a shrink -- a flake
+ * whose window was the gap between the two textures, which only a starved
+ * worker thread on a loaded lane made wide enough to hit. The minimal lane
+ * (jpeg disabled) never showed a preview and never flaked. */
 static void
 test_zoom_in_never_shrinks_a_tiny_image(void) {
    const gchar *c_fx = g_getenv("GGAZE_FIXTURES_DIR");
@@ -294,20 +312,7 @@ test_zoom_in_never_shrinks_a_tiny_image(void) {
    char        *c_path = g_build_filename(c_fx, "plain.jpg", NULL);
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL));
-   gtk_window_set_default_size(GTK_WINDOW(p_win), 600, 400);
-   gtk_window_present(GTK_WINDOW(p_win));
-   ggaze_window_open(p_win, p_file);
-   GgazeViewer *p_v = viewer_of(p_win);
-   for (guint u = 0; u < 3000 && ggaze_viewer_get_texture(p_v) == NULL; u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_nonnull(ggaze_viewer_get_texture(p_v));
-   for (guint u = 0; u < 3000 && gtk_widget_get_width(GTK_WIDGET(p_v)) == 0;
-        u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
+   GgazeViewer *p_v = open_and_settle(p_win, p_file, PLAIN_JPG_W, PLAIN_JPG_H);
 
    /* Guard the premise: if this fixture ever stops fitting above the ceiling
     * the test would silently stop covering jx0. */
@@ -315,12 +320,12 @@ test_zoom_in_never_shrinks_a_tiny_image(void) {
    g_assert_cmpfloat(d_fit, >, 64.0);
 
    ggaze_viewer_zoom_in(p_v);
-   drain_main(50);
+   ggtest_drain_main(50);
    g_assert_cmpfloat(ggaze_viewer_get_scale(p_v), >=, d_fit);
 
    g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));
-   drain_main(200);
+   ggtest_drain_main(200);
    g_free(c_path);
 }
 
@@ -396,9 +401,11 @@ test_overlay_removed_mid_drag_rebases_the_pan(void) {
 /* --- animation (yb2) ----------------------------------------------------- */
 
 /* A folder holding one copy of a committed fixture, opened in a presented
- * window; waits for the texture and a real allocation like fx_open(). */
+ * window through open_and_settle(): the shared view wait (gtk_helpers.h
+ * "large-view readiness") pins the i_w x i_h decode inside a settled
+ * allocation, which the scale reads below lean on. */
 static void
-fx_open_fixture(ViewerFx *p_fx, const char *c_fixture) {
+fx_open_fixture(ViewerFx *p_fx, const char *c_fixture, int i_w, int i_h) {
    GError *p_err = NULL;
    p_fx->c_dir   = g_dir_make_tmp("ggaze-viewer-anim-XXXXXX", &p_err);
    g_assert_no_error(p_err);
@@ -413,21 +420,8 @@ fx_open_fixture(ViewerFx *p_fx, const char *c_fixture) {
    g_object_unref(p_src);
    g_free(c_src);
 
-   GgazeWindow *p_win = GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL));
-   gtk_window_set_default_size(GTK_WINDOW(p_win), 600, 400);
-   gtk_window_present(GTK_WINDOW(p_win));
-   ggaze_window_open(p_win, p_dst);
-   p_fx->p_win    = p_win;
-   p_fx->p_viewer = viewer_of(p_win);
-   for (guint u = 0;
-        u < 3000 && (ggaze_viewer_get_texture(p_fx->p_viewer) == NULL ||
-                     gtk_widget_get_width(GTK_WIDGET(p_fx->p_viewer)) == 0);
-        u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_nonnull(ggaze_viewer_get_texture(p_fx->p_viewer));
-   g_assert_cmpint(gtk_widget_get_width(GTK_WIDGET(p_fx->p_viewer)), >, 0);
+   p_fx->p_win    = GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL));
+   p_fx->p_viewer = open_and_settle(p_fx->p_win, p_dst, i_w, i_h);
    g_object_unref(p_dst);
 }
 
@@ -466,7 +460,7 @@ wait_past_first_frame(GgazeViewer *p_v) {
 static void
 test_animation_plays_and_keeps_first_frame_texture(void) {
    ViewerFx fx;
-   fx_open_fixture(&fx, "anim.gif");
+   fx_open_fixture(&fx, "anim.gif", ANIM_W, ANIM_H);
    GdkTexture *p_tex = ggaze_viewer_get_texture(fx.p_viewer);
    g_assert_nonnull(animation_lookup(p_tex));
    g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 8);
@@ -502,7 +496,7 @@ overlay_draw_cb(GtkSnapshot *p_snap, const GgazeViewerGeom *p_geom,
 static void
 test_animation_survives_zoom_pan_and_overlay(void) {
    ViewerFx fx;
-   fx_open_fixture(&fx, "anim.gif");
+   fx_open_fixture(&fx, "anim.gif", ANIM_W, ANIM_H);
    gdouble d_fit   = ggaze_viewer_get_scale(fx.p_viewer);
    guint   u_draws = 0;
    ggaze_viewer_set_overlay(fx.p_viewer, overlay_draw_cb, NULL, &u_draws);
@@ -515,7 +509,7 @@ test_animation_survives_zoom_pan_and_overlay(void) {
    g_assert_true(ggaze_viewer_get_geometry(fx.p_viewer, &st_geom));
    g_assert_cmpint(st_geom.i_img_w, ==, 8);
    g_assert_cmpint(st_geom.i_img_h, ==, 6);
-   drain_main(150); /* a couple of frames drawn with the overlay up */
+   ggtest_drain_main(150); /* a couple of frames drawn with the overlay up */
    g_assert_cmpuint(u_draws, >=, 1);
    ggaze_viewer_set_overlay(fx.p_viewer, NULL, NULL, NULL);
    fx_close(&fx);
@@ -526,10 +520,10 @@ test_animation_survives_zoom_pan_and_overlay(void) {
 static void
 test_still_image_does_not_animate(void) {
    ViewerFx fx;
-   fx_open_fixture(&fx, "plain.jpg");
+   fx_open_fixture(&fx, "plain.jpg", PLAIN_JPG_W, PLAIN_JPG_H);
    g_assert_null(animation_lookup(ggaze_viewer_get_texture(fx.p_viewer)));
    g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
-   drain_main(100);
+   ggtest_drain_main(100);
    g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
    g_assert_true(ggaze_viewer_get_frame(fx.p_viewer) ==
                  ggaze_viewer_get_texture(fx.p_viewer));
@@ -554,13 +548,13 @@ wait_mapped(GgazeViewer *p_v, gboolean b_mapped) {
 static void
 test_animation_pauses_while_unmapped(void) {
    ViewerFx fx;
-   fx_open_fixture(&fx, "anim.gif");
+   fx_open_fixture(&fx, "anim.gif", ANIM_W, ANIM_H);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
    GtkStack *p_stack = ggaze_window_get_stack(fx.p_win);
    gtk_stack_set_visible_child_name(p_stack, "grid");
    wait_mapped(fx.p_viewer, FALSE);
    g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
-   drain_main(50);
+   ggtest_drain_main(50);
    g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
    gtk_stack_set_visible_child_name(p_stack, "large");
    wait_mapped(fx.p_viewer, TRUE);
@@ -575,11 +569,11 @@ test_animation_pauses_while_unmapped(void) {
 static void
 test_zero_delay_plays_at_the_clamp(void) {
    ViewerFx fx;
-   fx_open_fixture(&fx, "zerodelay.gif");
+   fx_open_fixture(&fx, "zerodelay.gif", ANIM_W, ANIM_H);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
    g_assert_true(wait_past_first_frame(fx.p_viewer));
    gint64 i_start = g_get_monotonic_time();
-   drain_main(100);
+   ggtest_drain_main(100);
    g_assert_cmpint(g_get_monotonic_time() - i_start, <, 1000000);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
    fx_close(&fx);
@@ -601,7 +595,7 @@ test_unmapped_viewer_holds_first_frame(void) {
    GtkWidget *p_v = ggaze_viewer_new();
    g_object_ref_sink(p_v);
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_v), p_tex);
-   drain_main(60);
+   ggtest_drain_main(60);
    g_assert_false(ggaze_viewer_is_animating(GGAZE_VIEWER(p_v)));
    g_assert_true(ggaze_viewer_get_frame(GGAZE_VIEWER(p_v)) == p_tex);
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_v), NULL);
