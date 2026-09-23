@@ -1,14 +1,32 @@
-.TH GGAZE 1 "2026-07-12" "ggaze 0.1.0" "User Commands"
+.TH GGAZE 1 "2026-09-23" "ggaze 0.1.0" "User Commands"
 .SH NAME
 ggaze \- fast native image viewer for culling camera shoots
 .SH SYNOPSIS
 .B ggaze
-[\fIFILE\fR | \fIFOLDER\fR] [\fI--version\fR] [\fI--help\fR]
+[\fIFILE\fR... | \fIFOLDER\fR] [\fI--version\fR] [\fI--help\fR]
 .SH DESCRIPTION
 ggaze (GTK Gaze) is a small, fast, native image viewer for Fedora Linux,
 written in C with GTK4. It opens a file or folder, shows a thumbnail grid,
 and lets you flip through the shoot with vi-style keys, check EXIF, trash
 rejects, and move on. No library, no database, no sidecars.
+.PP
+A single
+.I FILE
+opens in the large view with its folder as the navigator; a
+.I FOLDER
+opens as a thumbnail grid. Several
+.I FILE
+arguments (or a multi-file drop onto the window) open the first one's
+folder in the grid with that file selected. The first argument decides the
+folder and the remaining ones are ignored beyond asking for the grid: a
+folder given first opens that folder itself, and a first argument that does
+not exist, is not an image, is a hidden dotfile (never listed), or is a RAW
+sidecar hidden by the
+.B Hide RAW sidecars
+preference opens its folder on the first image with the status line saying
+why. A single
+.I FILE
+in any of those cases is reported the same way.
 .SH KEYBINDINGS
 .TP
 .B h / l / Left / Right

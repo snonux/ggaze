@@ -76,6 +76,11 @@ gboolean  navigator_get_wrap(Navigator *p_nav);
 void      navigator_set_wrap(Navigator *p_nav, gboolean b_wrap);
 gboolean  navigator_get_hide_raw(Navigator *p_nav);
 void      navigator_set_hide_raw(Navigator *p_nav, gboolean b_hide_raw);
+/* Whether c_name (a basename) carries one of the RAW extensions the
+ * hide-raw preference prunes when a JPEG twin exists. Pure: needs no
+ * navigator, so window.c can tell "hidden RAW sidecar" from "not an image"
+ * without owning a copy of the extension table. */
+gboolean navigator_is_raw_name(const char *c_name);
 
 /* --- marks (path-based; survive re-sort; cleared on remove) ------------- */
 gboolean navigator_is_marked(Navigator *p_nav, GFile *p_file);

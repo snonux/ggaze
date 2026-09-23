@@ -227,6 +227,12 @@ gboolean enhance_ctrl_get_orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
  * must cost at most two launches (tests/test_enhance_flow.c). */
 guint enhance_ctrl_get_render_count(EnhanceCtrl *p_ctrl);
 
+/* How many thumbnail-preview batches the open panel has started so far
+ * (only batches that really launched: label-only cards and "no current
+ * file" start none). A test seam: an open with the panel up must re-point
+ * it at the new file with one batch (tests/test_enhance_flow.c, gd2). */
+guint enhance_ctrl_get_preview_count(EnhanceCtrl *p_ctrl);
+
 /* --- state queries --- */
 /* TRUE iff a GEGL preview is on screen (a preset enabled or a non-identity
  * transform), saved or not. */

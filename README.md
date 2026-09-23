@@ -15,6 +15,11 @@ and KISS — no library, no database, no sidecars. The layout nods to gthumb
 ggaze ~/Downloads/Camera/IMG_0001.jpg
 ```
 
+`ggaze FOLDER` opens the folder as a grid; `ggaze FILE...` (several files,
+or a multi-file drop onto the window) opens the first file's folder in the
+grid with that file selected — the first entry decides the folder, the rest
+only ask for the grid.
+
 ### Install on Fedora (local user + GNOME launcher)
 
 ```sh
