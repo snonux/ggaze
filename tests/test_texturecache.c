@@ -109,8 +109,9 @@ test_replace_and_miss(void) {
 
 /* A temp folder holding one file, a cache with its entry, the entry's
  * texture: what the stamp subtests share. file_fx_close() takes the folder
- * down with ggtest_cleanup_temp_dir(), which asserts every delete: a
- * leftover (a subtest that forgot what it created) fails the suite. */
+ * down with ggtest_cleanup_temp_dir(), which removes whatever is left and
+ * asserts every delete: a teardown that cannot remove the folder fails the
+ * suite instead of leaking it silently. */
 typedef struct {
    char         *c_dir;
    char         *c_path;
