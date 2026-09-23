@@ -123,6 +123,11 @@ that cost a full investigation to learn, so they are written down here:
   clicked, which is how the dirty-preview prompt is answered in tests; the
   window-teardown rule (1w0); and `ggtest_focus_viewer()` (5w0), which every
   suite that pops one of the window's popovers must call.
+  `wait_until.{c,h}` (plain GLib, hd2): `ggtest_wait_until()` polls a
+  condition under a monotonic deadline scaled by `ggtest_wait_scale()`
+  (sanitizer lanes, `GGAZE_TEST_TIMEOUT_SCALE`) — the replacement for any
+  "N iterations of a 1 ms sleep, then assert" wait, which a loaded lane
+  outlives (`test_thumbnail`'s queue drain read 23 == 24 once that way).
 - `tests/fixtures/` — curated images per format + a rotated-EXIF JPEG +
   progressive JPEG + RAW+JPEG pair + an injection-hostile filename (`;rm -rf /`).
 - CI runs **both tracks on all three lanes** (`.woodpecker/ci.yml`): each of

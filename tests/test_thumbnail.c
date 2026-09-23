@@ -51,6 +51,7 @@
 #include "loader/detect.h"
 #include "open_counter.h"
 #include "tiny_images.h"
+#include "wait_until.h"
 
 /* Dimensions of the marker PNG the persistence tests plant in the cache. Not
  * a size any real thumbnail of the fixtures could have, so "did this texture
@@ -640,8 +641,54 @@ test_cache_dir_not_creatable(void) {
 /* Regression: thumbnail_delete() with requests still queued used to discard
  * the queued GTasks without completing them, leaking each one (and the refs
  * its callback data carried). Every request must now finish -- as a texture
- * or as G_IO_ERROR_CANCELLED -- so the owners' callbacks run and release. */
+ * or as G_IO_ERROR_CANCELLED -- so the owners' callbacks run and release.
+ *
+ * How long that takes is not a property of the test: thumbnail_delete()
+ * returns at once, and every request -- the ones the pool's workers (up
+ * to 4) had already taken, NULL cancellables so they decode to the end,
+ * and the ones still queued, which the workers answer CANCELLED after the
+ * owner is gone -- completes on a pool thread whenever that thread gets
+ * the CPU. So the test waits for the COUNT, under a budget that only says
+ * how long it is willing to wait before calling it a bug. It used to be
+ * 2000 iterations of a 1 ms sleep, ~2 s however starved the pool was, and
+ * on a parallel --repeat lane at load average ~10 that read 23 == 24
+ * (hd2). The bounded wait told the two readings apart: with the budget at
+ * 20 s the count still stuck at 23 of 24 (4 of 300 runs on 8 loaded
+ * cores), so it was a lost completion in thumbnail.c and not a slow lane
+ * -- g_thread_pool_free(immediate=TRUE) let a worker that woke late drop
+ * the request it had popped (see _thumb_pool_func in thumbnail.c). 20 s
+ * (scaled for sanitizer lanes and GGAZE_TEST_TIMEOUT_SCALE) is two orders
+ * above the unloaded time and, at the default scale (x3 under ASan),
+ * under the suite's 120 s meson timeout, so a regression fails the named
+ * assertion below, not the harness. That ordering stops holding once the
+ * scaled budget reaches 120 s -- GGAZE_TEST_TIMEOUT_SCALE >= 6, or >= 2
+ * on the sanitizer lane -- unless meson's own --timeout-multiplier is
+ * raised to match; a hang then reads as a meson TIMEOUT instead.
+ *
+ * Counting completions alone would also pass if thumbnail_delete() did
+ * not stop anything and all 24 decoded to the end, so the test also
+ * splits them into textures and CANCELLED. Only requests a worker had
+ * popped before i_dead was set can come back as a texture: at most
+ * GGAZE_THUMB_MAX_WORKERS in flight, plus any finished while the push
+ * loop was still running. If the loop outruns the first decode that
+ * leaves >= u_n - GGAZE_THUMB_MAX_WORKERS = 20 CANCELLED, and it did in
+ * every run measured (20..24 of 24, unloaded and on a 16-process
+ * --repeat lane with every core busy -- load only delays the workers
+ * further). But "the loop outruns a decode" is scheduling, not a
+ * guarantee: a main thread preempted mid-loop while the workers run
+ * lets them finish (and pop) more, so asserting 20 would be a timing
+ * bet. The floor is therefore 1: it still fails whenever the owner-gone
+ * path is skipped (0 CANCELLED if _thumb_pool_func ignored i_dead), and
+ * it could only misfire if the main thread stalled for u_n /
+ * GGAZE_THUMB_MAX_WORKERS = 6 back-to-back decodes per worker before
+ * reaching thumbnail_delete() -- which is why u_n is 6x the worker cap
+ * rather than just above it. GGAZE_TEXTURE_COUNT goes into the failure
+ * message so a 0-CANCELLED run says how many decoded instead. */
+#define GGAZE_QUEUE_DRAIN_BUDGET_US (20 * G_USEC_PER_SEC)
+
 static guint GGAZE_DONE_COUNT;
+static guint GGAZE_CANCELLED_COUNT;
+static guint GGAZE_TEXTURE_COUNT;
 
 static void
 _count_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
@@ -651,30 +698,54 @@ _count_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    GdkTexture *p_tex = thumbnail_get_finish(p_res, &p_err);
    if (p_tex != NULL) {
       g_object_unref(p_tex);
+      GGAZE_TEXTURE_COUNT++;
    } else {
       g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
       g_error_free(p_err);
+      GGAZE_CANCELLED_COUNT++;
    }
    GGAZE_DONE_COUNT++;
 }
 
+/* GgtestCondFn: every one of the p_data (a guint) requests has completed.
+ * ">=" and not "==" so an over-completion (a callback run twice) does not
+ * make the wait burn its whole budget before the "==" assertion names it. */
+static gboolean
+_all_requests_done(gpointer p_data) {
+   return (GGAZE_DONE_COUNT >= GPOINTER_TO_UINT(p_data));
+}
+
 static void
 test_delete_completes_queued_requests(void) {
-   Thumbnail  *p_t  = thumbnail_new();
-   GFile      *p_a  = fixture_file("plain.jpg");
-   GFile      *p_b  = fixture_file("rot6.jpg");
-   const guint u_n  = 24;
-   GGAZE_DONE_COUNT = 0;
+   Thumbnail  *p_t       = thumbnail_new();
+   GFile      *p_a       = fixture_file("plain.jpg");
+   GFile      *p_b       = fixture_file("rot6.jpg");
+   const guint u_n       = 6 * GGAZE_THUMB_MAX_WORKERS; /* 24, see above */
+   GGAZE_DONE_COUNT      = 0;
+   GGAZE_CANCELLED_COUNT = 0;
+   GGAZE_TEXTURE_COUNT   = 0;
    for (guint u = 0; u < u_n; u++) {
       thumbnail_get_async(p_t, (u % 2 == 0) ? p_a : p_b, 128, NULL,
                           _count_done_cb, NULL);
    }
    thumbnail_delete(p_t); /* queue still holds most of the requests */
-   for (guint u = 0; u < 2000 && GGAZE_DONE_COUNT < u_n; u++) {
-      g_main_context_iteration(NULL, FALSE);
-      g_usleep(1000);
+   if (!ggtest_wait_until(_all_requests_done, GUINT_TO_POINTER(u_n),
+                          GGAZE_QUEUE_DRAIN_BUDGET_US)) {
+      g_error("thumbnail_delete(): only %u of %u queued requests completed "
+              "within %d s (scale x%g)",
+              GGAZE_DONE_COUNT, u_n,
+              (int)(GGAZE_QUEUE_DRAIN_BUDGET_US / G_USEC_PER_SEC),
+              ggtest_wait_scale());
    }
    g_assert_cmpuint(GGAZE_DONE_COUNT, ==, u_n);
+   /* The owner-gone path must really have run: see the comment above
+    * GGAZE_QUEUE_DRAIN_BUDGET_US for why this floor is 1 and not
+    * u_n - GGAZE_THUMB_MAX_WORKERS. */
+   if (GGAZE_CANCELLED_COUNT == 0) {
+      g_error("thumbnail_delete(): none of %u requests came back CANCELLED "
+              "(%u textures): the queue was decoded after the owner left",
+              u_n, GGAZE_TEXTURE_COUNT);
+   }
    g_object_unref(p_a);
    g_object_unref(p_b);
 }
