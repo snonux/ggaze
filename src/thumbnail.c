@@ -127,11 +127,18 @@ _thumb_option(GdkPixbuf *p_pix, const char *c_key) {
  * the next chunk would take the total over the cap, so the memory and I/O
  * a decoy costs are one chunk past the cap and never the file's length.
  * A short read is not an error on a regular file (the loop just
- * continues), so the only "unreadable" is a read that fails. */
+ * continues), so the only "unreadable" is a read that fails. The task's
+ * p_cancel goes into the open and every read, so a detached grid stops
+ * paying for an entry chunk by chunk instead of at the next
+ * _thumb_bail_if_cancelled(); a cancelled read is just "unreadable" here
+ * and _thumb_run() reports the cancellation itself. What no cancellable
+ * bounds is a FIFO or a character device planted under the entry name:
+ * GIO's open(2) of it blocks before any read -- pre-existing and
+ * accepted, as for every path the loader opens. */
 static guint8 *
-_read_entry_bounded(const char *c_path, gsize *p_len) {
+_read_entry_bounded(const char *c_path, GCancellable *p_cancel, gsize *p_len) {
    GFile            *p_entry = g_file_new_for_path(c_path);
-   GFileInputStream *p_in    = g_file_read(p_entry, NULL, NULL);
+   GFileInputStream *p_in    = g_file_read(p_entry, p_cancel, NULL);
    g_object_unref(p_entry);
    if (p_in == NULL) {
       return (NULL);
@@ -141,7 +148,7 @@ _read_entry_bounded(const char *c_path, gsize *p_len) {
    gboolean    b_ok    = TRUE;
    for (;;) {
       gssize i_n = g_input_stream_read(G_INPUT_STREAM(p_in), p_chunk,
-                                       GGAZE_THUMB_READ_CHUNK, NULL, NULL);
+                                       GGAZE_THUMB_READ_CHUNK, p_cancel, NULL);
       if (i_n <= 0) {
          b_ok = (i_n == 0);
          break;
@@ -175,9 +182,9 @@ _read_entry_bounded(const char *c_path, gsize *p_len) {
  * _load_cached() verifies survive the loader path (they are read from the
  * PNG chunks, not from the file name). */
 static GdkPixbuf *
-_read_png_entry(const char *c_path) {
+_read_png_entry(const char *c_path, GCancellable *p_cancel) {
    gsize   u_len = 0;
-   guint8 *p_buf = _read_entry_bounded(c_path, &u_len);
+   guint8 *p_buf = _read_entry_bounded(c_path, p_cancel, &u_len);
    if (p_buf == NULL) {
       return (NULL);
    }
@@ -211,8 +218,9 @@ _read_png_entry(const char *c_path) {
  * mislabelled file), to be regenerated rather than decoded -- see
  * _read_png_entry() for why the check is on the loaded bytes. */
 static GdkTexture *
-_load_cached(GFile *p_file, const char *c_path, gint64 i_mtime) {
-   GdkPixbuf *p_pix = _read_png_entry(c_path);
+_load_cached(GFile *p_file, const char *c_path, gint64 i_mtime,
+             GCancellable *p_cancel) {
+   GdkPixbuf *p_pix = _read_png_entry(c_path, p_cancel);
    if (p_pix == NULL) {
       return (NULL);
    }
@@ -300,6 +308,18 @@ _thumb_bail_if_cancelled(GTask *p_task, GCancellable *p_cancel) {
    return (TRUE);
 }
 
+/* Ensure the cache entry's directory exists, 0700 as the TMS requires.
+ * Best-effort: if it cannot be created (read-only $XDG_CACHE_HOME, a file
+ * in the way, quota) the lookup just misses and _generate() still returns
+ * a texture -- an unusable cache degrades ggaze to "slow", never to
+ * "broken". */
+static void
+_ensure_cache_dir(const char *c_cache_path) {
+   char *c_dir = g_path_get_dirname(c_cache_path);
+   g_mkdir_with_parents(c_dir, 0700);
+   g_free(c_dir);
+}
+
 static void
 _thumb_run(GTask *p_task) {
    ThumbTask    *p_tt     = (ThumbTask *)g_task_get_task_data(p_task);
@@ -323,15 +343,10 @@ _thumb_run(GTask *p_task) {
    gint64 i_size = (gint64)g_file_info_get_size(p_info);
    g_object_unref(p_info);
 
-   /* Ensure the cache dir exists, 0700 as the TMS requires. Best-effort: if it
-    * cannot be created (read-only $XDG_CACHE_HOME, a file in the way, quota)
-    * the lookup below just misses and _generate() still returns a texture --
-    * an unusable cache degrades ggaze to "slow", never to "broken". */
-   char *c_dir = g_path_get_dirname(p_tt->c_cache_path);
-   g_mkdir_with_parents(c_dir, 0700);
-   g_free(c_dir);
+   _ensure_cache_dir(p_tt->c_cache_path);
 
-   GdkTexture *p_tex = _load_cached(p_tt->p_file, p_tt->c_cache_path, i_mtime);
+   GdkTexture *p_tex =
+      _load_cached(p_tt->p_file, p_tt->c_cache_path, i_mtime, p_cancel);
    if (p_tex == NULL) {
       /* The decode is the expensive step; re-check cancellation first so a
        * detached grid doesn't pay for gdk_pixbuf_new_from_file_at_scale plus

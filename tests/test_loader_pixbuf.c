@@ -463,38 +463,71 @@ _assert_inotify_ok(int i_ret, const char *c_call) {
  * session per reader that opens it. It proves that the header reads cope
  * with a file that arrives in two pieces (test_fifo_two_chunk_read for the
  * sniff, test_fifo_two_chunk_jpeg_peek for detect's SOF peek). It also
- * counts the sessions, but that count is only sound for a file SHORTER
- * than every read the loader makes of it: then every session ends in the
- * writer's close (the reader's EOF), so the reader cannot close before
- * the writer and the next open is a new session. A file that exactly
- * fills a read_all() is satisfied without EOF, the reader closes first,
- * and its next open is served by the still-open session -- one open
- * counted for two (observed: a 64-byte JPEG against the 64-byte sniff,
- * ~1.5 % of runs). Open counts on regular files are therefore taken with
- * inotify instead (OpenCounter below), never with this harness.
+ * counts the sessions, and two kernel facts shape how:
+ *
+ * 1. The count is only sound for a file SHORTER than every read the loader
+ *    makes of it: then every session ends in the writer's close (the
+ *    reader's EOF), so the reader cannot close before the writer and the
+ *    next open is a new session. A file that exactly fills a read_all() is
+ *    satisfied without EOF, the reader closes first, and its next open is
+ *    served by the still-open session -- one open counted for two
+ *    (observed: a 64-byte JPEG against the 64-byte sniff, ~1.5 % of runs).
+ *    Open counts on regular files are therefore taken with inotify instead
+ *    (OpenCounter below), never with this harness.
+ *
+ * 2. The writer's O_WRONLY|O_NONBLOCK open succeeds while the FIFO has ANY
+ *    reader counted, including one that is still closing: the kernel
+ *    queues the reader's IN_CLOSE_NOWRITE (fsnotify_close) BEFORE
+ *    pipe_release() drops the reader count, so an open issued right after
+ *    that event can land on a reader that is gone a few microseconds later
+ *    (observed ~1 in 300 runs under load: after the loader's last session
+ *    the writer served a third session nobody read, waited the whole
+ *    budget for chunk one to drain and failed with "the reader never
+ *    consumed the first chunk"). A session is therefore counted -- and
+ *    served -- only once the READER's own IN_OPEN has been seen after the
+ *    writer's open. Two names for the one inode tell the two opens apart:
+ *    the loader opens GGAZE_FIFO_READER_NAME, the writer opens the hard
+ *    link GGAZE_FIFO_WRITER_NAME, and an inotify watch on the DIRECTORY
+ *    reports each open under the name it went through. (A watch on the
+ *    FIFO itself carries no name and merges the two adjacent IN_OPENs into
+ *    one event, the coalescing OpenCounter describes.) An open that no
+ *    reader IN_OPEN follows before the main thread is done was that
+ *    leftover count: closed, not counted, never written to.
  *
  * Every wait is bounded by one deadline (GGAZE_FIFO_BUDGET_US) so a broken
- * loader fails a named assertion instead of meson's 30 s binary timeout:
- * the writer never blocks in open() (it polls O_NONBLOCK), never blocks in
- * read() on the inotify fd (poll() with the remaining budget) and, on its
- * way out after a failure, opens and closes the FIFO once so a reader
- * stuck in open() or read() sees EOF and the main thread's call returns.
- * The first failure is recorded in c_failure for the main thread to
- * assert on; the writer never aborts the process itself. */
+ * loader fails a named assertion instead of meson's 30 s binary timeout,
+ * and every wait also ends as soon as the main thread's call has returned
+ * (i_done), so whatever a wait is still expecting then costs milliseconds,
+ * not the budget. The writer never blocks in open() (it polls O_NONBLOCK),
+ * never blocks in read() on the inotify fd (poll() in short slices) and,
+ * on its way out after a failure, opens and closes the FIFO once so a
+ * reader stuck in open() or read() sees EOF and the main thread's call
+ * returns. The first failure is recorded in c_failure for the main thread
+ * to assert on; the writer never aborts the process itself. */
 #define GGAZE_FIFO_BUDGET_US (5 * G_USEC_PER_SEC)
+#define GGAZE_FIFO_POLL_MS 10
+#define GGAZE_FIFO_READER_NAME "image.fifo"
+#define GGAZE_FIFO_WRITER_NAME "writer.fifo"
 
 typedef struct {
-   const char   *c_fifo;
+   const char   *c_fifo; /* the reader's name (what the tests hand out) */
+   gchar        *c_writer_link; /* the writer's name: a hard link to c_fifo */
    const guint8 *p_img;
    gsize         u_len;
    gsize         u_first_chunk; /* 0: one write; else split after this */
-   int           i_inotify;     /* watches the FIFO for IN_CLOSE_NOWRITE */
-   gint64        i_deadline;    /* monotonic, every wait checks it */
-   gint          i_done;        /* atomic: main thread's call returned */
-   guint         u_opens;       /* reader sessions served */
-   const char   *c_failure;     /* first failure, NULL when none */
-   GThread      *p_thread;
-   gchar        *c_tmpdir;
+   int i_inotify; /* watches the directory: IN_OPEN, IN_CLOSE_NOWRITE */
+   union {
+      struct inotify_event s_align; /* keeps raw aligned for the casts */
+      guint8               raw[4096];
+   } events; /* read but not yet consumed, u_ev_pos..u_ev_len */
+   gsize       u_ev_len;
+   gsize       u_ev_pos;
+   gint64      i_deadline; /* monotonic, every wait checks it */
+   gint        i_done;     /* atomic: main thread's call returned */
+   guint       u_opens;    /* reader sessions served */
+   const char *c_failure;  /* first failure, NULL when none */
+   GThread    *p_thread;
+   gchar      *c_tmpdir;
 } FifoWriter;
 
 static gboolean
@@ -510,18 +543,20 @@ _fifo_fail(FifoWriter *p_w, const char *c_what) {
    if (p_w->c_failure == NULL) {
       p_w->c_failure = c_what;
    }
-   int i_fd = open(p_w->c_fifo, O_WRONLY | O_NONBLOCK);
+   int i_fd = open(p_w->c_writer_link, O_WRONLY | O_NONBLOCK);
    if (i_fd >= 0) {
       close(i_fd);
    }
 }
 
-/* Open the write end as soon as a reader shows up (ENXIO until then), or
- * return -1 once the main thread is done or the budget is spent. */
+/* Open the write end as soon as a reader is counted (ENXIO until then), or
+ * return -1 once the main thread is done or the budget is spent. The count
+ * may be a closing reader's (fact 2 above): the caller confirms a live one
+ * before it writes. */
 static int
 _fifo_open_writer(FifoWriter *p_w) {
    while (!g_atomic_int_get(&p_w->i_done)) {
-      int i_fd = open(p_w->c_fifo, O_WRONLY | O_NONBLOCK);
+      int i_fd = open(p_w->c_writer_link, O_WRONLY | O_NONBLOCK);
       if (i_fd >= 0) {
          return (i_fd);
       }
@@ -534,44 +569,99 @@ _fifo_open_writer(FifoWriter *p_w) {
    return (-1);
 }
 
+/* The next inotify event on the directory, refilling the buffer with a
+ * deadline-bound poll() once it is exhausted. NULL once the main thread is
+ * done (no failure: the writer just stops) or the budget is spent (c_what
+ * is recorded). Polled in GGAZE_FIFO_POLL_MS slices so i_done is noticed
+ * without a wake-up channel of its own. */
+static const struct inotify_event *
+_fifo_next_event(FifoWriter *p_w, const char *c_what) {
+   while (p_w->u_ev_pos >= p_w->u_ev_len) {
+      if (g_atomic_int_get(&p_w->i_done)) {
+         return (NULL);
+      }
+      gint64 i_left_ms = (p_w->i_deadline - g_get_monotonic_time()) / 1000;
+      if (i_left_ms <= 0) {
+         _fifo_fail(p_w, c_what);
+         return (NULL);
+      }
+      struct pollfd pfd = {.fd = p_w->i_inotify, .events = POLLIN};
+      if (poll(&pfd, 1, (int)MIN(i_left_ms, GGAZE_FIFO_POLL_MS)) <= 0) {
+         continue;
+      }
+      ssize_t i_n =
+         read(p_w->i_inotify, p_w->events.raw, sizeof(p_w->events.raw));
+      if (i_n <= 0) {
+         _fifo_fail(p_w, "reading the inotify queue failed");
+         return (NULL);
+      }
+      p_w->u_ev_len = (gsize)i_n;
+      p_w->u_ev_pos = 0;
+   }
+   const struct inotify_event *p_ev =
+      (const struct inotify_event *)(p_w->events.raw + p_w->u_ev_pos);
+   p_w->u_ev_pos += sizeof(*p_ev) + p_ev->len;
+   return (p_ev);
+}
+
+/* Wait for the READER's event of u_mask (IN_OPEN: a session has really
+ * begun; IN_CLOSE_NOWRITE: it is over, and the next open is a new one --
+ * without that wait the writer's next open succeeded at once, the next
+ * session's bytes landed in this session's pipe and the loader's own next
+ * open later blocked with no writer left, seen with strace). Events under
+ * the writer's own name and on the directory itself are skipped; the
+ * writer's closes are IN_CLOSE_WRITE and not watched at all. FALSE once
+ * the main thread is done or the budget is spent. */
+static gboolean
+_fifo_wait_reader_event(FifoWriter *p_w, guint32 u_mask, const char *c_what) {
+   for (;;) {
+      const struct inotify_event *p_ev = _fifo_next_event(p_w, c_what);
+      if (p_ev == NULL) {
+         return (FALSE);
+      }
+      if ((p_ev->mask & u_mask) != 0 && p_ev->len > 0 &&
+          strcmp(p_ev->name, GGAZE_FIFO_READER_NAME) == 0) {
+         return (TRUE);
+      }
+   }
+}
+
+/* poll() on a FIFO's write end with no events requested wakes for POLLERR
+ * only, which Linux raises the moment the last reader is gone; with a
+ * timeout it doubles as the pause between looks at FIONREAD. */
+static gboolean
+_fifo_reader_gone(int i_fd, int i_timeout_ms) {
+   struct pollfd pfd = {.fd = i_fd, .events = 0};
+   return (poll(&pfd, 1, i_timeout_ms) > 0 && (pfd.revents & POLLERR) != 0);
+}
+
 /* Block until the reader has consumed everything written so far (the pipe
  * is empty: FIONREAD == 0), so the next write really is a SECOND chunk the
  * reader's first read() cannot have merged in. A merged read would only
  * make test_fifo_two_chunk_read less sensitive, never fail it; this keeps
- * it sensitive. */
+ * it sensitive. Gives up as soon as the main thread is done -- a loader
+ * that returned with chunk one unread is the failure named here, and it
+ * is named in milliseconds rather than after the budget -- and the moment
+ * the reader closes with the chunk unread. */
 static void
 _fifo_wait_drained(FifoWriter *p_w, int i_fd) {
-   int i_pending = 0;
-   do {
+   for (;;) {
+      int i_pending = 0;
       if (ioctl(i_fd, FIONREAD, &i_pending) != 0) {
          _fifo_fail(p_w, "FIONREAD on the FIFO failed");
          return;
       }
-      if (i_pending > 0 && _fifo_expired(p_w)) {
+      if (i_pending == 0) {
+         return;
+      }
+      if (g_atomic_int_get(&p_w->i_done) || _fifo_expired(p_w)) {
          _fifo_fail(p_w, "the reader never consumed the first chunk");
          return;
       }
-      if (i_pending > 0) {
-         g_usleep(1000);
+      if (_fifo_reader_gone(i_fd, 1)) {
+         _fifo_fail(p_w, "the reader closed with the first chunk unread");
+         return;
       }
-   } while (i_pending > 0);
-}
-
-/* Block until the reader has CLOSED its end of the FIFO. Without this the
- * writer's next open succeeds at once (a reader still exists), the next
- * session's bytes land in this session's pipe, and the loader's own next
- * open later blocks with no writer left -- observed with strace before
- * this wait was added. The reader's close is exactly what inotify reports
- * as IN_CLOSE_NOWRITE on the FIFO (the writer's own closes are
- * IN_CLOSE_WRITE and are not watched). Linux-only, like the app. */
-static void
-_fifo_wait_reader_closed(FifoWriter *p_w) {
-   guint8        buf[sizeof(struct inotify_event) + NAME_MAX + 1];
-   struct pollfd pfd     = {.fd = p_w->i_inotify, .events = POLLIN};
-   gint64        i_left  = p_w->i_deadline - g_get_monotonic_time();
-   int           i_ready = poll(&pfd, 1, (int)MAX(0, i_left / 1000));
-   if (i_ready <= 0 || read(p_w->i_inotify, buf, sizeof(buf)) <= 0) {
-      _fifo_fail(p_w, "the reader never closed the FIFO within the budget");
    }
 }
 
@@ -601,34 +691,51 @@ _fifo_writer_thread(gpointer p_data) {
       if (i_fd < 0) {
          return (NULL);
       }
+      /* The open proves a reader is COUNTED, not that one is coming (fact
+       * 2 in the harness comment): only the reader's own IN_OPEN starts a
+       * session. Without it the fd was a closing reader's leftover count,
+       * and the main thread being done is how that shows. */
+      if (!_fifo_wait_reader_event(
+             p_w, IN_OPEN, "no reader completed its open within the budget")) {
+         close(i_fd);
+         return (NULL);
+      }
       p_w->u_opens++;
       _fifo_serve_session(p_w, i_fd);
-      _fifo_wait_reader_closed(p_w);
+      _fifo_wait_reader_event(
+         p_w, IN_CLOSE_NOWRITE,
+         "the reader never closed the FIFO within the budget");
       if (p_w->c_failure != NULL) {
          return (NULL);
       }
    }
 }
 
-/* Create the FIFO in a private temp dir, arm the inotify watch and start
- * the writer. p_w must already carry p_img/u_len/u_first_chunk. */
+/* Create the FIFO and the writer's hard link to it in a private temp dir,
+ * arm the inotify watch on that dir and start the writer. p_w must already
+ * carry p_img/u_len/u_first_chunk. */
 static void
 _fifo_start(FifoWriter *p_w) {
    p_w->c_tmpdir = g_dir_make_tmp("ggaze-fifo-XXXXXX", NULL);
    g_assert_nonnull(p_w->c_tmpdir);
-   p_w->c_fifo = g_build_filename(p_w->c_tmpdir, "image.fifo", NULL);
+   p_w->c_fifo = g_build_filename(p_w->c_tmpdir, GGAZE_FIFO_READER_NAME, NULL);
+   p_w->c_writer_link =
+      g_build_filename(p_w->c_tmpdir, GGAZE_FIFO_WRITER_NAME, NULL);
    g_assert_cmpint(mkfifo(p_w->c_fifo, 0600), ==, 0);
+   g_assert_cmpint(link(p_w->c_fifo, p_w->c_writer_link), ==, 0);
    p_w->i_inotify = inotify_init1(IN_CLOEXEC);
    _assert_inotify_ok(p_w->i_inotify, "inotify_init1");
-   _assert_inotify_ok(
-      inotify_add_watch(p_w->i_inotify, p_w->c_fifo, IN_CLOSE_NOWRITE),
-      "inotify_add_watch");
+   _assert_inotify_ok(inotify_add_watch(p_w->i_inotify, p_w->c_tmpdir,
+                                        IN_OPEN | IN_CLOSE_NOWRITE),
+                      "inotify_add_watch");
    /* Should a reader ever close early, the writer must see EPIPE, not
     * take the whole test binary down with SIGPIPE. */
    signal(SIGPIPE, SIG_IGN);
    p_w->i_deadline = g_get_monotonic_time() + GGAZE_FIFO_BUDGET_US;
    p_w->i_done     = 0;
    p_w->u_opens    = 0;
+   p_w->u_ev_len   = 0;
+   p_w->u_ev_pos   = 0;
    p_w->c_failure  = NULL;
    p_w->p_thread   = g_thread_new("fifo-writer", _fifo_writer_thread, p_w);
 }
@@ -642,9 +749,11 @@ _fifo_finish(FifoWriter *p_w) {
    g_thread_join(p_w->p_thread);
    g_assert_cmpstr(p_w->c_failure, ==, NULL);
    close(p_w->i_inotify);
+   unlink(p_w->c_writer_link);
    unlink(p_w->c_fifo);
    g_rmdir(p_w->c_tmpdir);
    g_free((gchar *)p_w->c_fifo);
+   g_free(p_w->c_writer_link);
    g_free(p_w->c_tmpdir);
    return (p_w->u_opens);
 }
@@ -1013,8 +1122,8 @@ test_fallback_refuses_jxl_in_every_build(void) {
       g_assert_null(p_tex);
       g_assert_cmpfloat(d_secs, <, 5.0);
 #if GGAZE_HAVE_JXL
-      g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED);
-      g_assert_nonnull(strstr(p_err->message, "own backend"));
+      g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_BUSY);
+      g_assert_nonnull(strstr(p_err->message, "changed while loading"));
       g_assert_nonnull(strstr(p_err->message, "JXL"));
 #else
       g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
@@ -1027,8 +1136,9 @@ test_fallback_refuses_jxl_in_every_build(void) {
 
 /* loader_sniff_bytes_for_fallback() on its own: the plain gate first (a
  * truncated JXL is INVALID_DATA, as before), then the dispatch rule --
- * bytes a specific backend of THIS build claims are refused with FAILED
- * naming the format, bytes only gdk-pixbuf decodes pass. JPEG is the
+ * bytes a specific backend of THIS build claims are refused with BUSY
+ * and the status-line message naming the format, bytes only gdk-pixbuf
+ * decodes pass. JPEG is the
  * build-dependent probe: refused with the jpeg backend, accepted without
  * it (there the fallback IS the JPEG decoder). PNG passes in every build. */
 static void
@@ -1047,8 +1157,9 @@ test_fallback_gate_follows_dispatch(void) {
       loader_sniff_bytes_for_fallback(TINY_JPEG, sizeof(TINY_JPEG), &p_err);
 #if GGAZE_HAVE_JPEG
    g_assert_false(b_jpeg);
-   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED);
-   g_assert_nonnull(strstr(p_err->message, "JPEG"));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_BUSY);
+   g_assert_cmpstr(p_err->message, ==,
+                   "JPEG file changed while loading; try again");
    g_clear_error(&p_err);
 #else
    g_assert_true(b_jpeg);

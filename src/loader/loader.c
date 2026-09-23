@@ -230,10 +230,15 @@ loader_sniff_bytes(const guint8 *p_bytes, gsize u_len, GgazeFormat *p_format,
  * file that changed between the dispatcher's sniff and the backend's read
  * -- refuse it and let the caller's reload dispatch it properly; decoding
  * it through gdk-pixbuf would bypass the backend's own guards and, for a
- * garbage JXL in a libjxl build, hang glycin-jxl. In the minimal build
- * _backend_for() can only name the fallback, so the rule is compiled out
- * there (GGAZE_HAVE_ANY_BACKEND, top-of-file comment) and this IS the
- * plain gate. */
+ * garbage JXL in a libjxl build, hang glycin-jxl. The refusal is
+ * G_IO_ERROR_BUSY: a transient verdict about the file's state, distinct
+ * from the gate's INVALID_DATA/NOT_SUPPORTED and from the backends'
+ * generic FAILED, so a caller can tell "reload" from "broken"; and its
+ * message is the user's, since viewload.c prints it on the status line
+ * as is -- the format name says what the file turned into, the rest is
+ * the advice. In the minimal build _backend_for() can only name the
+ * fallback, so the rule is compiled out there (GGAZE_HAVE_ANY_BACKEND,
+ * top-of-file comment) and this IS the plain gate. */
 gboolean
 loader_sniff_bytes_for_fallback(const guint8 *p_bytes, gsize u_len,
                                 GError **p_err) {
@@ -244,9 +249,8 @@ loader_sniff_bytes_for_fallback(const guint8 *p_bytes, gsize u_len,
 #if GGAZE_HAVE_ANY_BACKEND
    gsize u_head = MIN(u_len, (gsize)GGAZE_DETECT_SNIFF_LEN);
    if (_backend_for(p_bytes, u_head) != &pixbuf_backend) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                  "%s is decoded by its own backend, not the GdkPixbuf "
-                  "fallback (the file changed between sniff and read; reload)",
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_BUSY,
+                  "%s file changed while loading; try again",
                   detect_format_name(e_format));
       return (FALSE);
    }

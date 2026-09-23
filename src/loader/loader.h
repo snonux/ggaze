@@ -121,7 +121,9 @@ gboolean loader_sniff_bytes(const guint8 *p_bytes, gsize u_len,
 
 /* The gate as the GdkPixbuf FALLBACK applies it to the bytes it loaded:
  * loader_sniff_bytes() plus the dispatch rule -- FALSE, with
- * G_IO_ERROR_FAILED naming the format, for bytes that a format-specific
+ * G_IO_ERROR_BUSY ("<format> file changed while loading; try again", a
+ * status-line message, and a code distinct from the gate's and from the
+ * backends' generic FAILED), for bytes that a format-specific
  * backend of this build claims (jxl/avif/heif/jpeg, whichever are
  * compiled in). Such bytes reach the fallback only when the file changed
  * between the dispatcher's sniff and the backend's read, and decoding

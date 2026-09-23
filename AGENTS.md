@@ -122,10 +122,13 @@ the CI-portable baseline; `./sample-images/` is a local supplement.
 ## Optional features are OFF in the minimal CI lane
 
 `gegl`, `jxl`, `avif`, `heif`, `jpeg` are meson `feature`s (default `auto`). The
-**minimal** CI lane forces all disabled and must stay green; the **gegl** lane
-forces `gegl=enabled`. Never break the minimal build when adding an optional
-backend — gate code with `GGAZE_HAVE_*` from `ggaze-config.h` and toast
-"GEGL not built in" gracefully.
+**minimal** CI lane forces all disabled (`jpeg` too, explicitly: with every
+backend off `GGAZE_HAVE_ANY_BACKEND` is 0 and the `#else` branches of the
+loader's `#if GGAZE_HAVE_ANY_BACKEND` blocks are compiled and tested only
+there, so a lane that left `jpeg=auto` would never build them) and must stay
+green; the **gegl** lane forces `gegl=enabled`. Never break the minimal build
+when adding an optional backend — gate code with `GGAZE_HAVE_*` from
+`ggaze-config.h` and toast "GEGL not built in" gracefully.
 
 ## Architecture invariants (do not violate)
 

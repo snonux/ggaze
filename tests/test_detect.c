@@ -266,16 +266,10 @@ test_jpeg_peek_dims_from_path_missing(void) {
 }
 
 /* The path twin's own guards, which no real JPEG reaches: a NULL path is
- * NOT_JPEG before any I/O; an empty file opens fine and reads nothing
- * (u_read == 0); and a read that FAILS after a successful open is
- * NOT_JPEG too, so the real decoder gets to produce its own error. Linux
- * has one file whose read reliably fails after a good open: /proc/self/mem
- * at offset 0 is unmapped (mmap_min_addr) and read() returns EIO, no disk
- * fault needed. That case is asserted where the file can be opened and
- * skipped with a message where it cannot (a hardened kernel); like the
- * app, the suite is Linux-only. The out-parameters stay untouched. */
+ * NOT_JPEG before any I/O, and an empty file opens fine and reads nothing
+ * (u_read == 0). The out-parameters stay untouched. */
 static void
-test_jpeg_peek_dims_from_path_null_empty_and_failed_read(void) {
+test_jpeg_peek_dims_from_path_null_and_empty(void) {
    guint32 u_w = 0xdeadbeef, u_h = 0xdeadbeef;
    g_assert_cmpint(detect_jpeg_peek_dims_from_path(NULL, &u_w, &u_h), ==,
                    GGAZE_JPEG_PEEK_NOT_JPEG);
@@ -285,14 +279,27 @@ test_jpeg_peek_dims_from_path_null_empty_and_failed_read(void) {
                    GGAZE_JPEG_PEEK_NOT_JPEG);
    unlink(c_empty);
    g_free(c_empty);
+   g_assert_cmpuint(u_w, ==, 0xdeadbeef);
+   g_assert_cmpuint(u_h, ==, 0xdeadbeef);
+}
 
+/* A read that FAILS after a successful open is NOT_JPEG too, so the real
+ * decoder gets to produce its own error. Linux has one file whose read
+ * reliably fails after a good open: /proc/self/mem at offset 0 is unmapped
+ * (mmap_min_addr) and read() returns EIO, no disk fault needed. Its own
+ * test, so that where it cannot be opened (a hardened kernel) the run
+ * shows a SKIP rather than a pass that quietly did less; like the app,
+ * the suite is Linux-only. The out-parameters stay untouched. */
+static void
+test_jpeg_peek_dims_from_path_failed_read(void) {
+   guint32 u_w = 0xdeadbeef, u_h = 0xdeadbeef;
    if (access("/proc/self/mem", R_OK) != 0) {
-      g_test_message("no readable /proc/self/mem; failed-read case skipped");
-   } else {
-      g_assert_cmpint(
-         detect_jpeg_peek_dims_from_path("/proc/self/mem", &u_w, &u_h), ==,
-         GGAZE_JPEG_PEEK_NOT_JPEG);
+      g_test_skip("no readable /proc/self/mem: failed-read case not run");
+      return;
    }
+   g_assert_cmpint(
+      detect_jpeg_peek_dims_from_path("/proc/self/mem", &u_w, &u_h), ==,
+      GGAZE_JPEG_PEEK_NOT_JPEG);
    g_assert_cmpuint(u_w, ==, 0xdeadbeef);
    g_assert_cmpuint(u_h, ==, 0xdeadbeef);
 }
@@ -635,9 +642,10 @@ _add_jpeg_peek_tests(void) {
                    test_jpeg_peek_dims_from_path_oversized);
    g_test_add_func("/detect/jpeg_peek_dims_from_path/missing",
                    test_jpeg_peek_dims_from_path_missing);
-   g_test_add_func(
-      "/detect/jpeg_peek_dims_from_path/null_empty_and_failed_read",
-      test_jpeg_peek_dims_from_path_null_empty_and_failed_read);
+   g_test_add_func("/detect/jpeg_peek_dims_from_path/null_and_empty",
+                   test_jpeg_peek_dims_from_path_null_and_empty);
+   g_test_add_func("/detect/jpeg_peek_dims_from_path/failed_read",
+                   test_jpeg_peek_dims_from_path_failed_read);
    g_test_add_func(
       "/detect/jpeg_peek_dims_from_path/padded_past_prefix_inconclusive",
       test_jpeg_peek_dims_from_path_padded_past_prefix_inconclusive);

@@ -1,7 +1,9 @@
 # ggaze CI — Woodpecker (codeberg-native).
 #
 # Three lanes (see docs/IMPLEMENTATION.md Phase 0):
-#   minimal  all optional backends disabled; plain GdkPixbuf viewer.
+#   minimal  all optional backends disabled (jpeg included: only then is
+#            GGAZE_HAVE_ANY_BACKEND 0 and the loader's #else branches
+#            compiled at all); plain GdkPixbuf viewer.
 #   gegl     gegl=enabled (+ jxl/avif/heif auto) — keeps the optional path
 #            from bit-rotting.
 #   asan     minimal build under AddressSanitizer + UBSan (also drives the
@@ -13,7 +15,7 @@
 matrix:
   include:
     - LANE: minimal
-      MESON_OPTS: "-Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled"
+      MESON_OPTS: "-Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled -Djpeg=disabled"
       RUN_COVERAGE: "yes"
       ENV: ""
     - LANE: gegl
