@@ -298,8 +298,10 @@ _view_ready(gpointer p_data) {
       (now.i_tex_w == p_w->i_want_w && now.i_tex_h == p_w->i_want_h);
    gboolean b_held = b_tex && now.i_w > 0 && now.i_h > 0 &&
                      now.i_w == p_w->last.i_w && now.i_h == p_w->last.i_h;
-   p_w->u_still    = b_held ? p_w->u_still + 1 : 0;
-   p_w->last       = now;
+   /* Counted for both waits for simplicity; only the settling wait reads
+    * it -- the texture-only wait returns on b_tex below. */
+   p_w->u_still = b_held ? p_w->u_still + 1 : 0;
+   p_w->last    = now;
    if (!p_w->b_settle) {
       return (b_tex);
    }

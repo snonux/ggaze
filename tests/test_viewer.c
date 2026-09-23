@@ -25,9 +25,9 @@
  * express "zooming in makes it bigger" at all.
  *
  * Every subtest that shows a picture opens its window through
- * open_and_settle(), which waits for
- * the FULL decode inside a SETTLED allocation (gtk_helpers.h "large-view
- * readiness") before anything reads a scale. A read taken off the JPEG
+ * open_and_settle(), which waits for the FULL decode inside a SETTLED
+ * allocation (gtk_helpers.h "large-view readiness") before anything reads
+ * a scale. A read taken off the JPEG
  * backend's 1x1 preview of plain.jpg, or off an interim allocation, disagrees
  * with every read taken after -- the load-dependent flake of 2d2.
  *
