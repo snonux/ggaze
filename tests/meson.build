@@ -287,6 +287,19 @@ test_icc = executable(
 )
 test('icc', test_icc, suite : 'unit', env : fixtures_env)
 
+# intact (xb2): the PNG / JPEG completeness check that keeps a truncated
+# file away from GEGL's loaders (which spin on EOF). Plain C over GIO
+# streams, every lane, over the fixtures and hand-cut copies.
+test_intact = executable(
+   'test_intact',
+   ['test_intact.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('intact', test_intact, suite : 'unit', env : fixtures_env)
+
 # histogram: the plain-C RGB/luminance binner behind the info card's plot,
 # driven over hand-built pixel buffers and GdkMemoryTextures (no display).
 test_histogram = executable(
