@@ -472,23 +472,26 @@ test_dnl_zero_height_jpeg_size_unknown(void) {
 
 /* xb2: the colour space the card names. swapped.png / swapped.jpg carry a
  * hand-built profile called "ggaze swapped RGB" (tests/fixtures/gen.py);
- * the line says so and says what this build does with it. */
+ * the line says so, and adds "managed on enhance/export" only when the
+ * caller established it (b_icc_managed: info_new cannot know, it leaves it
+ * FALSE -- the enhancer's answer is test_enhancer_icc's to pin). */
 static void
 test_colorspace_embedded_profile(void) {
    GgazeInfo *p_png = info_from_fixture("swapped.png");
    g_assert_cmpint(p_png->e_icc, ==, GGAZE_ICC_EMBEDDED);
    g_assert_cmpstr(p_png->c_colorspace, ==, "ggaze swapped RGB");
    char *c_fmt = info_format(p_png);
-   g_assert_nonnull(g_strstr_len(
-      c_fmt, -1, "Color space: ggaze swapped RGB (embedded ICC; "));
+   g_assert_false(p_png->b_icc_managed);
+   g_assert_nonnull(
+      g_strstr_len(c_fmt, -1, "Color space: ggaze swapped RGB (embedded ICC)"));
    g_assert_nonnull(g_strstr_len(c_fmt, -1, "6\u00d73"));
-   /* The note is the build's honest answer: a GEGL-less build (the minimal
-    * lane) manages nothing and must say so. */
-#if GGAZE_HAVE_GEGL
-   g_assert_nonnull(g_strstr_len(c_fmt, -1, "managed on enhance/export"));
-#else
-   g_assert_nonnull(g_strstr_len(c_fmt, -1, "not managed in this build"));
-#endif
+   g_assert_null(g_strstr_len(c_fmt, -1, "managed"));
+   g_free(c_fmt);
+   p_png->b_icc_managed = TRUE;
+   c_fmt                = info_format(p_png);
+   g_assert_nonnull(g_strstr_len(c_fmt, -1,
+                                 "Color space: ggaze swapped RGB (embedded "
+                                 "ICC; managed on enhance/export)"));
    g_free(c_fmt);
    info_delete(p_png);
 
@@ -561,7 +564,7 @@ test_colorspace_description_is_capped_and_one_line(void) {
    g_assert_null(strchr(c_line, '\n')); /* the card's last line: one line */
    g_assert_true(g_str_has_prefix(c_line, "Color space: line1 line2 "));
    const char *c_name = c_line + strlen("Color space: ");
-   const char *c_end  = g_strstr_len(c_name, -1, "\u2026 (embedded ICC; ");
+   const char *c_end  = g_strstr_len(c_name, -1, "\u2026 (embedded ICC)");
    g_assert_nonnull(c_end);
    g_assert_true(g_utf8_validate(c_name, c_end - c_name, NULL));
    g_assert_cmpint(g_utf8_strlen(c_name, c_end - c_name), ==,
@@ -571,7 +574,7 @@ test_colorspace_description_is_capped_and_one_line(void) {
    t_info.c_colorspace = "Display P3";
    c_fmt               = info_format(&t_info);
    g_assert_nonnull(
-      g_strstr_len(c_fmt, -1, "Color space: Display P3 (embedded ICC; "));
+      g_strstr_len(c_fmt, -1, "Color space: Display P3 (embedded ICC)"));
    g_free(c_fmt);
    g_string_free(p_desc, TRUE);
 }

@@ -608,7 +608,7 @@ test_enhance_a_is_safe_with_and_without_gegl(void) {
 /* xb2: the `i` card names the file's colour space -- the embedded
  * profile's description for swapped.png, the sRGB assumption for the
  * untagged plain.jpg -- in both lanes (the line is info.c's, no GEGL
- * involved; only the note behind the name differs per build). */
+ * involved; only the "managed" note behind the name differs per build). */
 static void
 test_info_shows_color_space(void) {
    GError *p_err = NULL;
@@ -636,6 +636,12 @@ test_info_shows_color_space(void) {
    c_text = gtk_label_get_text(GTK_LABEL(p_lbl));
    g_assert_nonnull(
       g_strstr_len(c_text, -1, "Color space: ggaze swapped RGB (embedded"));
+   /* The "managed" note only where the enhancer really will manage it:
+    * a GEGL build (the overlay asks enhancer_would_manage), never the
+    * minimal lane. */
+   gboolean b_note =
+      g_strstr_len(c_text, -1, "managed on enhance/export") != NULL;
+   g_assert_true(b_note == GGAZE_HAVE_GEGL);
 
    g_object_unref(p_file);
    g_free(c_path);

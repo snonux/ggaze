@@ -17,18 +17,8 @@
 #include <libexif/exif-format.h>
 #include <libexif/exif-tag.h>
 
-#include "ggaze-config.h"
 #include "icc.h"
 #include "loader/loader.h"
-
-/* The card's note behind an embedded profile's name: what this build does
- * with it. The plain (fast-decode) view is never managed by ggaze itself;
- * with GEGL the enhance preview and the export are (decision #45). */
-#if GGAZE_HAVE_GEGL
-#define INFO_ICC_NOTE "managed on enhance/export"
-#else
-#define INFO_ICC_NOTE "not managed in this build"
-#endif
 
 static char *
 _dup_exif_value(ExifData *p_data, ExifTag e_tag) {
@@ -261,15 +251,22 @@ _display_desc(const char *c_desc) {
    return (g_string_free(p_out, FALSE));
 }
 
-/* The colour-space line, one wording per GgazeIccState (see info.h). */
+/* The colour-space line, one wording per GgazeIccState (see info.h). An
+ * embedded profile's name is followed by "managed on enhance/export" only
+ * when the caller established that this build's enhance path will really
+ * apply it (b_icc_managed): a note claimed for every profile was untrue
+ * for an sRGB profile, a JPEG in a build without libjpeg, a non-local file
+ * or a profile babl cannot parse -- all of which the enhancer leaves on
+ * the plain loader path. */
 static void
 _append_colorspace(GString *p_str, const GgazeInfo *p_info) {
    char *c_desc = NULL;
    switch (p_info->e_icc) {
    case GGAZE_ICC_EMBEDDED:
       c_desc = _display_desc(p_info->c_colorspace);
-      g_string_append_printf(p_str, "Color space: %s (embedded ICC; %s)\n",
-                             c_desc, INFO_ICC_NOTE);
+      g_string_append_printf(
+         p_str, "Color space: %s (embedded ICC%s)\n", c_desc,
+         p_info->b_icc_managed ? "; managed on enhance/export" : "");
       g_free(c_desc);
       break;
    case GGAZE_ICC_UNREADABLE:
