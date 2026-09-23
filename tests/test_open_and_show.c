@@ -395,6 +395,26 @@ test_open_many_first_entry_hidden_raw_sidecar(void) {
    ggtest_cleanup_temp_dir(c_dir);
 }
 
+/* A RAW-NAMED dotfile (macOS AppleDouble metadata, "._plain.cr2") is
+ * dropped by the listing's dotfile filter before RAW pruning ever looks at
+ * it, so the RAW-sidecar message would send the user to Preferences for a
+ * file no preference shows. The dotfile case is checked first and says
+ * what really happened; the twin plain.jpg is there so that, without that
+ * check, the RAW rule WOULD have matched. */
+static void
+test_open_many_first_entry_raw_named_dotfile(void) {
+   gchar *c_dir = make_three_fixture_dir();
+   write_text_file(c_dir, "._plain.cr2");
+   GgazeWindow *p_win = open_pair_in_grid(c_dir, "._plain.cr2");
+   g_assert_cmpstr(status_text(p_win), ==,
+                   "._plain.cr2 is a hidden dotfile, never listed "
+                   "\u2014 opened the folder");
+   assert_on_first_of_three(p_win); /* 1/3: the dotfile was not listed */
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(500);
+   ggtest_cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -426,5 +446,7 @@ main(int i_argc, char **c_argv) {
                    test_open_many_first_entry_not_an_image);
    g_test_add_func("/open/many_first_entry_hidden_raw_sidecar",
                    test_open_many_first_entry_hidden_raw_sidecar);
+   g_test_add_func("/open/many_first_entry_raw_named_dotfile",
+                   test_open_many_first_entry_raw_named_dotfile);
    return (g_test_run());
 }

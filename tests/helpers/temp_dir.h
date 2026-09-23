@@ -16,13 +16,15 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
-#ifndef TEMP_DIR_H
-#define TEMP_DIR_H
+#ifndef GGAZE_TEST_TEMP_DIR_H
+#define GGAZE_TEST_TEMP_DIR_H
 
 #include <gio/gio.h>
 
 /* Delete everything under p_dir (files and subfolders, depth first), leaving
- * p_dir itself empty. Asserts the enumeration and every delete. */
+ * p_dir itself empty. Asserts the enumeration and every delete. A symlink
+ * is deleted as a link and never followed: a link to a folder outside the
+ * tree must not have its TARGET emptied. */
 void ggtest_remove_tree(GFile *p_dir);
 
 /* ggtest_remove_tree(c_dir) and then the folder itself; asserts that final
@@ -30,4 +32,4 @@ void ggtest_remove_tree(GFile *p_dir);
  * call is the last line of a subtest. */
 void ggtest_cleanup_temp_dir(char *c_dir);
 
-#endif /* TEMP_DIR_H */
+#endif /* GGAZE_TEST_TEMP_DIR_H */

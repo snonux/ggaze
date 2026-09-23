@@ -372,6 +372,19 @@ test_fileops = executable(
 )
 test('fileops', test_fileops, suite : 'unit', env : fixtures_env)
 
+# temp_dir: self-test of the shared teardown helper -- a symlink to a folder
+# outside the tree is unlinked, never followed (gd2 review). Links only
+# test_helpers_lib; the archive pulls in just temp_dir.o, which needs gio.
+test_temp_dir = executable(
+   'test_temp_dir',
+   ['test_temp_dir.c', ggaze_conf_h],
+   include_directories : [inc, test_helpers_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : test_helpers_lib,
+   install : false,
+)
+test('temp_dir', test_temp_dir, suite : 'unit')
+
 # --- integration track (needs a display; CI uses xvfb-run) ---
 #
 # Lane determinism (1w0) -- why these tests are NOT pinned to a backend.

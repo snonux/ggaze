@@ -3529,11 +3529,15 @@ _open_rebuild_grid(GgazeWindow *p_win, gboolean b_hide_trashed) {
 
 /* Why the requested file p_arg (basename c_name) is not what the navigator
  * ended up on, as a status line to own, or NULL when it is exactly the
- * current file. Three cases, told apart because each asks for a different
- * fix from the user: the path does not exist (a typo); it exists but the
- * listing skipped it as a RAW sidecar of a JPEG twin (the hide-raw
- * preference -- calling that "not an image" sent people looking for a
- * broken file); or it is a file of this folder that is not an image at all. */
+ * current file. Four cases, told apart because each asks for a different
+ * fix from the user: the path does not exist (a typo); its name starts
+ * with '.' (the listing drops every dotfile before it looks at the type,
+ * so neither "not an image" nor the RAW message below is true -- a macOS
+ * AppleDouble "._IMG_0001.CR2" has a RAW name but was never a sidecar
+ * candidate); it exists but the listing skipped it as a RAW sidecar of a
+ * JPEG twin (the hide-raw preference -- calling that "not an image" sent
+ * people looking for a broken file); or it is a file of this folder that
+ * is not an image at all. */
 static char *
 _open_target_mismatch(GgazeWindow *p_win, GFile *p_arg, const char *c_name) {
    if (!g_file_query_exists(p_arg, NULL)) {
@@ -3542,6 +3546,13 @@ _open_target_mismatch(GgazeWindow *p_win, GFile *p_arg, const char *c_name) {
    GFile *p_cur = navigator_get_current(p_win->p_nav);
    if (p_cur != NULL && g_file_equal(p_cur, p_arg)) {
       return (NULL);
+   }
+   if (c_name[0] == '.') {
+      /* Checked before the RAW rule: the dotfile filter runs first in the
+       * listing, so a RAW-named dotfile never reached the RAW pruning. */
+      return (g_strdup_printf("%s is a hidden dotfile, never listed "
+                              "\u2014 opened the folder",
+                              c_name));
    }
    if (navigator_get_hide_raw(p_win->p_nav) && navigator_is_raw_name(c_name)) {
       /* A RAW with no JPEG twin is listed even with the preference on, so a

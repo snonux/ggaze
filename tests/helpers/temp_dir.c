@@ -12,10 +12,15 @@
 
 void
 ggtest_remove_tree(GFile *p_dir) {
-   GError          *p_err = NULL;
-   GFileEnumerator *p_e =
-      g_file_enumerate_children(p_dir, "standard::name,standard::type",
-                                G_FILE_QUERY_INFO_NONE, NULL, &p_err);
+   GError *p_err = NULL;
+   /* NOFOLLOW: the type of a symlink must be G_FILE_TYPE_SYMBOLIC_LINK, not
+    * its target's, so a link to a directory is unlinked below instead of
+    * recursed into -- following it deleted the TARGET's contents, which
+    * may live outside the temp folder entirely. g_file_delete() on a link
+    * removes the link itself. */
+   GFileEnumerator *p_e = g_file_enumerate_children(
+      p_dir, "standard::name,standard::type",
+      G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, NULL, &p_err);
    g_assert_no_error(p_err);
    GFileInfo *p_info;
    while ((p_info = g_file_enumerator_next_file(p_e, NULL, &p_err)) != NULL) {
