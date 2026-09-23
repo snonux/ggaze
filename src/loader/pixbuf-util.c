@@ -65,13 +65,18 @@ pixbuf_util_to_upright_texture(GdkPixbuf *p_pix) {
    return (p_tex);
 }
 
-GdkPixbuf *
-pixbuf_util_decode_bytes(const guchar *p_buf, gsize u_len, GError **p_err) {
-   /* A loader must be closed before it is finalized or GdkPixbuf logs a
-    * warning per corrupt file (fatal under G_DEBUG=fatal-warnings), so
-    * both exits close it; on the write-failure exit the close error is
-    * irrelevant (the write error is the one reported), and a close that
-    * fails on truncated data may still leave a usable pixbuf. */
+/* Feed p_buf to a fresh GdkPixbufLoader and close it: the one decode both
+ * pixbuf_util_decode_bytes() and pixbuf_util_decode_animation_bytes()
+ * read their result from. Returns the closed loader (caller unrefs), or
+ * NULL with p_err set when the write failed.
+ *
+ * A loader must be closed before it is finalized or GdkPixbuf logs a
+ * warning per corrupt file (fatal under G_DEBUG=fatal-warnings), so both
+ * exits close it; on the write-failure exit the close error is irrelevant
+ * (the write error is the one reported), and a close that fails on
+ * truncated data may still leave a usable pixbuf. */
+static GdkPixbufLoader *
+_closed_loader_over_bytes(const guchar *p_buf, gsize u_len, GError **p_err) {
    GdkPixbufLoader *p_loader = gdk_pixbuf_loader_new();
    GError          *p_sub    = NULL;
    if (!gdk_pixbuf_loader_write(p_loader, p_buf, u_len, &p_sub)) {
@@ -83,6 +88,15 @@ pixbuf_util_decode_bytes(const guchar *p_buf, gsize u_len, GError **p_err) {
    if (!gdk_pixbuf_loader_close(p_loader, &p_sub)) {
       g_clear_error(&p_sub);
    }
+   return (p_loader);
+}
+
+GdkPixbuf *
+pixbuf_util_decode_bytes(const guchar *p_buf, gsize u_len, GError **p_err) {
+   GdkPixbufLoader *p_loader = _closed_loader_over_bytes(p_buf, u_len, p_err);
+   if (p_loader == NULL) {
+      return (NULL);
+   }
    GdkPixbuf *p_pix = gdk_pixbuf_loader_get_pixbuf(p_loader);
    if (p_pix == NULL) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -92,4 +106,28 @@ pixbuf_util_decode_bytes(const guchar *p_buf, gsize u_len, GError **p_err) {
    }
    g_object_unref(p_loader);
    return (p_pix);
+}
+
+GdkPixbufAnimation *
+pixbuf_util_decode_animation_bytes(const guchar *p_buf, gsize u_len,
+                                   GError **p_err) {
+   GdkPixbufLoader *p_loader = _closed_loader_over_bytes(p_buf, u_len, p_err);
+   if (p_loader == NULL) {
+      return (NULL);
+   }
+   /* gdk-pixbuf 2.44 deprecates its whole animation API in favour of
+    * glycin's, which CI's fedora:40 (2.42) does not have and ggaze does
+    * not depend on; the deprecated calls are the portable ones, so their
+    * warnings are silenced at each site rather than for the file. */
+   G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+   GdkPixbufAnimation *p_anim = gdk_pixbuf_loader_get_animation(p_loader);
+   G_GNUC_END_IGNORE_DEPRECATIONS
+   if (p_anim == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "could not decode animation (GdkPixbuf produced no frames)");
+   } else {
+      g_object_ref(p_anim);
+   }
+   g_object_unref(p_loader);
+   return (p_anim);
 }

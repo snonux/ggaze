@@ -12,7 +12,10 @@
  * that code, which had already begun to drift (one copy lacked the NULL
  * guards); this is the single home. The bytes -> GdkPixbuf decode through
  * a GdkPixbufLoader lives here too, since the pixbuf backend and the
- * thumbnail cache read both decode a buffer they gated first (task tb2).
+ * thumbnail cache read both decode a buffer they gated first (task tb2),
+ * and so does its bytes -> GdkPixbufAnimation twin, which the pixbuf
+ * backend uses for a multi-frame GIF/WebP (task yb2) and the viewer's
+ * per-frame texture conversion shares pixbuf_util_to_texture() with.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -47,6 +50,16 @@ GdkTexture *pixbuf_util_to_upright_texture(GdkPixbuf *p_pix);
  * with p_err set. Not orientation-applied. (transfer full) */
 GdkPixbuf *pixbuf_util_decode_bytes(const guchar *p_buf, gsize u_len,
                                     GError **p_err);
+
+/* The same decode, keeping the loader's GdkPixbufAnimation instead of its
+ * pixbuf: every frame of a multi-frame GIF/WebP, with the timing. A still
+ * comes back as a static animation (gdk_pixbuf_animation_is_static_image),
+ * and so does an animated file whose gdk-pixbuf module cannot do frames;
+ * the caller decides what to make of that. Returns a new ref, or NULL with
+ * p_err set. (transfer full) */
+GdkPixbufAnimation *pixbuf_util_decode_animation_bytes(const guchar *p_buf,
+                                                       gsize         u_len,
+                                                       GError      **p_err);
 
 G_END_DECLS
 

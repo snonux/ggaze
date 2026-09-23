@@ -138,6 +138,20 @@ test_detect = executable(
 test('detect', test_detect, suite : 'unit', env : fixtures_env,
    protocol : 'tap')
 
+# animation (yb2): the plain-C half of animated GIF/WebP playback -- the
+# decoder-free frame probe, the pixel budget, the delay clamp and the
+# texture <-> animation channel -- over the animated fixtures and
+# hand-built containers. Needs gdk-pixbuf for the decode half only.
+test_animation = executable(
+   'test_animation',
+   ['test_animation.c', ggaze_conf_h],
+   include_directories : [inc, src_inc, test_helpers_inc],
+   dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('animation', test_animation, suite : 'unit', env : fixtures_env)
+
 test_loader_pixbuf = executable(
    'test_loader_pixbuf',
    ['test_loader_pixbuf.c', ggaze_conf_h],

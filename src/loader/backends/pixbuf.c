@@ -47,6 +47,22 @@
  * worker. The GCancellable is honoured at the two points it can be: the
  * read and the moment before the (uninterruptible) decode.
  *
+ * Animated GIF/WebP (task yb2, M5): the gated bytes go through
+ * animation_probe() -- a decoder-free walk of the container -- and a file
+ * with two or more frames within the pixel budget is decoded as a
+ * GdkPixbufAnimation instead of a GdkPixbuf. What this backend returns is
+ * still one GdkTexture, the FIRST frame: that is what the texture LRU,
+ * the prefetch, the grid, the histogram, the enhance graph, the tools and
+ * the clipboard see, so none of them changed. The animation travels with
+ * that texture (animation_attach) and only the viewer looks for it. A
+ * decoder that yields a static image for a probed animation (a webp
+ * module without frame support, or the frames the decoder could not
+ * read) attaches nothing: the still is right, only the motion is
+ * missing. Beyond the budget the still path runs, which decodes the first
+ * frame exactly as it did before this task. No EXIF orientation is
+ * applied on the animated path: GIF carries none, and a rotated first
+ * frame over unrotated frames would be worse than none.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -55,6 +71,7 @@
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 
+#include "../animation.h"
 #include "../detect.h"
 #include "../loader.h"
 #include "../pixbuf-util.h"
@@ -103,6 +120,69 @@ _pixbuf_bytes_decodable(const guint8 *p_buf, gsize u_len, GError **p_err) {
    return (_pixbuf_reject_if_oversized_jpeg(p_buf, u_len, p_err));
 }
 
+/* The still path: one GdkPixbuf, upright (decision #26), as a texture. */
+static GdkTexture *
+_pixbuf_decode_still(const guchar *p_buf, gsize u_len, GError **p_err) {
+   GdkPixbuf *p_pix = pixbuf_util_decode_bytes(p_buf, u_len, p_err);
+   if (p_pix == NULL) {
+      return (NULL);
+   }
+   GdkTexture *p_tex = pixbuf_util_to_upright_texture(p_pix);
+   if (p_tex == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "could not build texture from decoded pixels");
+   }
+   g_object_unref(p_pix);
+   return (p_tex);
+}
+
+/* The animated path (top-of-file comment): the first frame as the
+ * texture, the GdkPixbufAnimation attached to it -- unless the decoder
+ * made a still of it after all, in which case the texture is that still
+ * and nothing is attached. */
+static GdkTexture *
+_pixbuf_decode_animation(const guchar *p_buf, gsize u_len, GError **p_err) {
+   GdkPixbufAnimation *p_anim =
+      pixbuf_util_decode_animation_bytes(p_buf, u_len, p_err);
+   if (p_anim == NULL) {
+      return (NULL);
+   }
+   /* The animation API is deprecated since gdk-pixbuf 2.44 (for glycin's,
+    * which fedora:40's 2.42 lacks): see pixbuf-util.c. */
+   G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+   GdkPixbuf *p_first = gdk_pixbuf_animation_get_static_image(p_anim);
+   gboolean   b_still = gdk_pixbuf_animation_is_static_image(p_anim);
+   G_GNUC_END_IGNORE_DEPRECATIONS
+   GdkTexture *p_tex =
+      (p_first != NULL) ? pixbuf_util_to_texture(p_first) : NULL;
+   if (p_tex == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "could not build texture from the animation's first frame");
+   } else if (!b_still) {
+      animation_attach(p_tex, p_anim);
+   }
+   g_object_unref(p_anim);
+   return (p_tex);
+}
+
+/* TRUE iff the gated bytes are a multi-frame GIF/WebP the viewer may play:
+ * probed animated and within the pixel budget (animation.h). An animation
+ * over budget is logged and shown as its first frame. */
+static gboolean
+_pixbuf_wants_animation(const guint8 *p_buf, gsize u_len) {
+   GgazeAnimProbe st_probe;
+   if (!animation_probe(p_buf, u_len, &st_probe)) {
+      return (FALSE);
+   }
+   if (!animation_within_budget(&st_probe)) {
+      g_debug("ggaze: animation of %u frames at %ux%u is over the pixel "
+              "budget; showing its first frame only",
+              st_probe.u_frames, st_probe.u_width, st_probe.u_height);
+      return (FALSE);
+   }
+   return (TRUE);
+}
+
 static GdkTexture *
 _pixbuf_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    gchar *c_buf = NULL;
@@ -122,20 +202,11 @@ _pixbuf_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
       g_free(c_buf);
       return (NULL);
    }
-
-   GdkPixbuf *p_pix =
-      pixbuf_util_decode_bytes((const guchar *)c_buf, u_len, p_err);
+   const guchar *p_buf = (const guchar *)c_buf;
+   GdkTexture   *p_tex = _pixbuf_wants_animation(p_buf, u_len)
+                            ? _pixbuf_decode_animation(p_buf, u_len, p_err)
+                            : _pixbuf_decode_still(p_buf, u_len, p_err);
    g_free(c_buf);
-   if (p_pix == NULL) {
-      return (NULL);
-   }
-   /* Honor EXIF Orientation so the texture is upright (decision #26). */
-   GdkTexture *p_tex = pixbuf_util_to_upright_texture(p_pix);
-   if (p_tex == NULL) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                  "could not build texture from decoded pixels");
-   }
-   g_object_unref(p_pix);
    return (p_tex);
 }
 
