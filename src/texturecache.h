@@ -26,8 +26,11 @@ void          texturecache_delete(TextureCache *p_cache);
 
 /* Look up p_file; returns its GdkTexture (transfer none) or NULL, and marks it
  * most-recently-used. An entry whose file changed on disk since it was put
- * (mtime or size differ, or the file is gone) is evicted and NULL returned,
- * so in-place edits never show stale pixels. */
+ * (mtime -- to the nanosecond where the filesystem records it -- size or
+ * inode differ, or the file is gone) is evicted and NULL returned, so
+ * in-place edits never show stale pixels. The one rewrite this cannot tell
+ * is a same-size one within the same second on a filesystem that keeps
+ * whole seconds only. */
 GdkTexture *texturecache_get(TextureCache *p_cache, GFile *p_file);
 
 /* Drop p_file's entry if present. */

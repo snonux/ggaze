@@ -47,7 +47,7 @@ ggaze
 ├── tool-ctrl.{c,h}       # the modal c / R tool session over the viewer (GEGL only)
 ├── navigator.{c,h}       # directory listing, sort, filter, prev/next, wrap, marks, monitor; "changed" carries flags
 ├── thumbnail.{c,h}      # freedesktop thumbnail cache (normal/large/x-large), bounded pool
-├── texturecache.{c,h}   # bounded LRU of decoded textures, mtime/size-validated
+├── texturecache.{c,h}   # bounded LRU of decoded textures, stamp-validated (mtime to the ns, size, inode)
 ├── settings.{c,h}       # GSettings schema wrapper
 ├── prefs.{c,h}          # Preferences dialog
 └── shortcuts.{c,h}      # the ONE key table: bindings, ? help, header tooltips, menu labels
@@ -304,7 +304,13 @@ feels instant.
   `GCancellable` so a rapid `jjjj` cancels stale work).
 - Thumbnail I/O on a low-priority thread or `GThreadPool`.
 - A bounded LRU of decoded `GdkTexture`s (e.g. 4) to bound memory on large
-  folders / huge images. The enhance controller may hold two more outside
+  folders / huge images. Every entry carries the file's stamp at put time
+  (mtime to the nanosecond where the filesystem records it, byte count,
+  inode) and a `get` re-checks it with one stat: a file rewritten in
+  place -- even within the same second to the same byte count -- or
+  atomically replaced is evicted and decoded afresh, never shown stale.
+  A whole-second filesystem falls back to seconds + size, which cannot
+  tell a same-second same-size rewrite (decision #47). The enhance controller may hold two more outside
   that cap — the current file's original as the viewer last showed it (the
   identity the tools and hold-`Space` compare against, learned at the
   window's texture choke point) and the rendered preview — bounded to those

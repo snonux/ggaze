@@ -267,8 +267,9 @@ viewload_load_current(ViewLoad *p_vl) {
       return;
    }
    /* Cache hit: show immediately, no async load. texturecache_get validates
-    * the file's mtime/size, so a file rewritten in place (external editor,
-    * script) misses and is decoded afresh. */
+    * the file's stamp (mtime to the nanosecond, size, inode), so a file
+    * rewritten in place (external editor, script) -- even within the same
+    * second to the same byte count -- misses and is decoded afresh. */
    GdkTexture *p_cached = texturecache_get(p_vl->p_cache, p_cur);
    if (p_cached != NULL) {
       _restart_visible_cancel(p_vl); /* an in-flight load is now stale */
