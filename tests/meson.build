@@ -69,7 +69,10 @@ gsettings_env.set('GSETTINGS_BACKEND', 'memory')
 gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 
 # Shared test helpers (AGENTS.md: "Shared helpers go in tests/helpers/").
-# Grid-cell activation and alert-dialog driving are used by more than one
+# Grid-cell activation, alert-dialog driving and the large-view readiness
+# waits (GGTEST_WAIT_FOR_TEXTURE / GGTEST_WAIT_FOR_VIEW: the viewer shows the
+# FULL decode of a known size, not the JPEG preview, and for a presented
+# window inside a settled allocation -- 2d2) are used by more than one
 # suite, so they live here instead of being copy-pasted per binary;
 # mem_file.c (a GFile served from memory, for cancelling INSIDE a read) is
 # the loader suites' stream-path driver; open_counter.c (an inotify count
@@ -620,15 +623,26 @@ test_window = executable(
 test('window', test_window, suite : 'integration', env : fixtures_env,
    is_parallel : false)
 
+# Links the helpers for GGTEST_WAIT_FOR_VIEW (gtk_helpers.h "large-view
+# readiness"): the subtests read a scale that is only meaningful off the
+# full decode inside a settled allocation (2d2).
+#
+# timeout : 90, not meson's default 30: that wait's ceiling is 10 s, scaled
+# x3 under ASan (wait_until.c), i.e. 30 s -- exactly meson's default. A view
+# that never gets ready must fail on the wait's own g_error, which names the
+# call site and what the viewer showed, and not on meson killing the binary
+# first with nothing but "TIMEOUT"; 90 s leaves room for the wait plus the
+# rest of the suite on a loaded sanitizer lane.
 test_viewer = executable(
    'test_viewer',
    ['test_viewer.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
-   link_with : ggaze_lib,
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
-test('viewer', test_viewer, suite : 'integration', env : fixtures_env)
+test('viewer', test_viewer, suite : 'integration', env : fixtures_env,
+   timeout : 90)
 
 # info_overlay: the InfoOverlay driven directly on a bare GtkOverlay (no
 # GgazeWindow), for the paths the window suites cannot reach -- a plot-only

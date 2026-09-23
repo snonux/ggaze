@@ -121,8 +121,14 @@ that cost a full investigation to learn, so they are written down here:
   `gtk_alert_dialog_choose()`'s dialog — it is an ordinary `GtkWindow` in
   `gtk_window_list_toplevels()`, so its buttons can be found by label and
   clicked, which is how the dirty-preview prompt is answered in tests; the
-  window-teardown rule (1w0); and `ggtest_focus_viewer()` (5w0), which every
-  suite that pops one of the window's popovers must call.
+  window-teardown rule (1w0); `ggtest_focus_viewer()` (5w0), which every
+  suite that pops one of the window's popovers must call; and the large-view
+  readiness waits (2d2), `GGTEST_WAIT_FOR_TEXTURE()` (the viewer holds a
+  texture of the caller's known, EXIF-upright decoded size — not the JPEG
+  backend's 1/8-scale preview, which for the 6×3 `plain.jpg` is 1×1) and
+  `GGTEST_WAIT_FOR_VIEW()` (that, inside a non-empty allocation that held
+  still for a run of polls — presented windows only), used by `test_viewer`
+  and `test_enhance_flow` before any scale, pan or texture read.
   `wait_until.{c,h}` (plain GLib, hd2): `ggtest_wait_until()` polls a
   condition under a monotonic deadline scaled by `ggtest_wait_scale()`
   (sanitizer lanes, `GGAZE_TEST_TIMEOUT_SCALE`) — the replacement for any

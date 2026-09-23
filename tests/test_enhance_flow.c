@@ -152,13 +152,34 @@ ref_viewer_texture(GgazeWindow *p_win) {
    return (g_object_ref(p_tex));
 }
 
+/* tests/fixtures/plain.jpg's decoded (and upright: orientation 1) size, which
+ * every open of it below waits for. */
+#define PLAIN_JPG_W 6
+#define PLAIN_JPG_H 3
+
+/* Wait until the viewer holds the i_w x i_h full decode of the file just
+ * opened (gtk_helpers.h "large-view readiness"), then settle.
+ *
+ * The SIZE is the point (2d2). This used to wait for any non-NULL texture and
+ * then drain a fixed 200 ms, but the JPEG backend shows a 1/8-scale preview
+ * first -- 1x1 for plain.jpg -- so on a loaded lane the preview could still
+ * be on screen when the drain ran out and be taken for the original (a
+ * "p_orig" ref, a render base). The 200 ms drain stays as a SETTLE for the
+ * idles that follow a load (info card, panel previews), not as the wait: the
+ * assertions after it are the check. A timeout names this line, not the
+ * caller's; GLib's TAP line names the subtest. */
 static void
-wait_for_load(GgazeWindow *p_win) {
-   for (guint u = 0; u < 3000 && viewer_texture(p_win) == NULL; u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_nonnull(viewer_texture(p_win));
+wait_for_load(GgazeWindow *p_win, gint i_w, gint i_h) {
+   GGTEST_WAIT_FOR_TEXTURE(p_win, i_w, i_h);
+   ggtest_drain_main(200);
+}
+
+/* wait_for_load() for a PRESENTED window: also waits for the viewer's
+ * allocation to settle (GGTEST_WAIT_FOR_VIEW), which the drag subtests' widget
+ * -> image pixel mapping and the panel's layout lean on. */
+static void
+wait_for_view(GgazeWindow *p_win, gint i_w, gint i_h) {
+   GGTEST_WAIT_FOR_VIEW(p_win, i_w, i_h);
    ggtest_drain_main(200);
 }
 
@@ -361,7 +382,7 @@ open_presented(gboolean b_thumbnails, const char *c_tmpl, char **c_dir_out,
    g_object_unref(p_file);
    gtk_window_set_default_size(GTK_WINDOW(p_win), 900, 700);
    gtk_window_present(GTK_WINDOW(p_win));
-   wait_for_load(p_win);
+   wait_for_view(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    *c_dir_out  = c_dir;
    *c_path_out = c_path;
    return (p_win);
@@ -570,12 +591,15 @@ fixture_open_clean(DirtyFixture *p_fx, const char *c_tmpl,
    for (guint u = 0; c_names[u] != NULL; u++) {
       copy_fixture(p_fx->c_dir, c_names[u]);
    }
+   /* The load wait below matches plain.jpg's decoded size, so the start file
+    * has to be plain.jpg; every caller's list starts with it. */
+   g_assert_cmpstr(c_names[0], ==, "plain.jpg");
    p_fx->c_path = g_build_filename(p_fx->c_dir, c_names[0], NULL);
    p_fx->p_file = g_file_new_for_path(p_fx->c_path);
    p_fx->p_win  = new_window();
    g_object_ref(p_fx->p_win);
    ggaze_window_open(p_fx->p_win, p_fx->p_file);
-   wait_for_load(p_fx->p_win);
+   wait_for_load(p_fx->p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
 }
 
@@ -795,7 +819,7 @@ test_apply_is_async_and_original_untouched(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    g_assert_false(ggaze_window_enhance_is_dirty(p_win));
 
    GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
@@ -836,7 +860,7 @@ test_toggle_off_resets_to_original(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
@@ -899,7 +923,7 @@ test_hold_space_compares_then_restores(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
@@ -988,7 +1012,7 @@ test_info_plots_preview(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    GdkTexture *p_orig = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
@@ -1064,7 +1088,7 @@ test_hold_flag_not_stuck_after_mask_cleared(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
@@ -1123,7 +1147,7 @@ test_save_exports_collision_safe_copy(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    gsize u_before_len;
    char *c_before = load_bytes(c_path, &u_before_len);
@@ -1180,7 +1204,7 @@ test_navigate_when_not_dirty_is_immediate(void) {
    GFile       *p_f0  = g_file_new_for_path(c_p0);
    GgazeWindow *p_win = new_window();
    ggaze_window_open(p_win, p_f0);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    g_assert_false(ggaze_window_enhance_is_dirty(p_win));
    fire(p_win, "win.next"); /* not dirty -> _maybe_save_then proceeds inline */
@@ -1285,7 +1309,7 @@ test_close_request_gates_dirty_enhance(void) {
    { /* control: a clean window is never blocked and never prompts */
       GgazeWindow *p_clean = new_window();
       ggaze_window_open(p_clean, p_file);
-      wait_for_load(p_clean);
+      wait_for_load(p_clean, PLAIN_JPG_W, PLAIN_JPG_H);
       gboolean b_stop = FALSE;
       g_signal_emit_by_name(p_clean, "close-request", &b_stop);
       g_assert_false(b_stop);
@@ -1297,7 +1321,7 @@ test_close_request_gates_dirty_enhance(void) {
 
    GgazeWindow *p_win = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
    wait_for_texture_change(p_win, p_orig_tex);
@@ -2797,15 +2821,10 @@ tool_fx_open(ToolFx *p_fx, gboolean b_present) {
    }
    ggaze_window_open(p_fx->p_win, p_file);
    g_object_unref(p_file);
-   wait_for_load(p_fx->p_win);
    if (b_present) {
-      GtkWidget *p_v = gtk_stack_get_child_by_name(
-         ggaze_window_get_stack(p_fx->p_win), "large");
-      for (guint u = 0; u < 3000 && gtk_widget_get_width(p_v) == 0; u++) {
-         g_main_context_iteration(g_main_context_default(), FALSE);
-         g_usleep(1000);
-      }
-      g_assert_cmpint(gtk_widget_get_width(p_v), >, 0);
+      wait_for_view(p_fx->p_win, TOOL_W, TOOL_H);
+   } else {
+      wait_for_load(p_fx->p_win, TOOL_W, TOOL_H);
    }
    p_fx->p_orig = ref_viewer_texture(p_fx->p_win);
    g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
@@ -2835,7 +2854,7 @@ tool_fx_open_siblings(ToolFx *p_fx, guint u_siblings) {
    p_fx->p_win   = new_window();
    ggaze_window_open(p_fx->p_win, p_file);
    g_object_unref(p_file);
-   wait_for_load(p_fx->p_win);
+   wait_for_load(p_fx->p_win, TOOL_W, TOOL_H); /* opened on tool.png */
    p_fx->p_orig = ref_viewer_texture(p_fx->p_win);
    g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
 }
@@ -2846,19 +2865,15 @@ tool_fx_open_with_sibling(ToolFx *p_fx) {
    tool_fx_open_siblings(p_fx, 1);
 }
 
-/* Pump until the viewer shows an i_w x i_h texture (a render landed with
- * that size), up to 10 s; asserts it did. */
+/* Wait until the viewer shows an i_w x i_h texture (a render or a load
+ * landed with that size) on the shared scaled deadline (GGTEST_WAIT_FOR_
+ * TEXTURE, which g_error()s out if it never does), then settle 50 ms and
+ * assert the texture is STILL that size: a render that lands during the
+ * settle and replaces it is a failure here, as it was before the shared
+ * helper replaced this suite's own iteration-counted loop. */
 static void
 wait_for_texture_size(GgazeWindow *p_win, gint i_w, gint i_h) {
-   for (guint u = 0; u < 10000; u++) {
-      GdkTexture *p_tex = viewer_texture(p_win);
-      if (p_tex != NULL && gdk_texture_get_width(p_tex) == i_w &&
-          gdk_texture_get_height(p_tex) == i_h) {
-         break;
-      }
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
+   GGTEST_WAIT_FOR_TEXTURE(p_win, i_w, i_h);
    ggtest_drain_main(50);
    GdkTexture *p_tex = viewer_texture(p_win);
    g_assert_nonnull(p_tex);

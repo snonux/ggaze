@@ -2,14 +2,20 @@
  * ggaze — shared GTK test helpers (AGENTS.md: "Shared helpers go in
  * tests/helpers/")
  *
- * Two groups, both needed by more than one suite:
+ * Helpers needed by more than one suite, in the order they appear below
+ * (and in gtk_helpers.c):
  *
  *   - grid cell activation: reach the GtkFlowBox GgazeGrid keeps private
  *     inside its GtkScrolledWindow and emit "child-activated" on one of its
  *     cells (what a double-click / Enter on a thumbnail does). Needs no
  *     laid-out geometry, so callers never have to present a toplevel.
+ *   - window focus and window teardown: the focus grab every popover suite
+ *     needs, and the one teardown rule for every suite.
  *   - alert-dialog driving: find, count and press buttons on the dialogs
  *     gtk_alert_dialog_choose() puts up.
+ *   - large-view readiness: wait until a window's viewer shows the full
+ *     decode (and, for a presented window, inside a settled allocation), the
+ *     precondition of every scale or pan read (2d2).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -21,6 +27,7 @@
 #include <gtk/gtk.h>
 
 #include "gridview.h"
+#include "viewer.h"
 #include "window.h"
 
 /* --- grid cells ---------------------------------------------------------- */
@@ -267,5 +274,85 @@ GtkWindow *ggtest_assert_dialog_up_at(const char *c_loc, GtkWindow *p_own,
 
 #define GGTEST_ASSERT_DIALOG_UP(p_own, c_button)                               \
    ggtest_assert_dialog_up_at(G_STRLOC, (p_own), (c_button))
+
+/* --- large-view readiness -------------------------------------------------
+ *
+ * Two waits on p_win's viewer (its stack's "large" child), both bounded by
+ * ggtest_wait_until() on a scaled monotonic ceiling (gtk_helpers.c
+ * GGTEST_VIEW_WAIT_MS), and both g_error() out naming the call site and what
+ * was last seen when it expires. Call them through the macros below, which
+ * supply c_loc (the call site, as for GGTEST_ASSERT_DIALOG_UP). Both return
+ * the viewer (borrowed).
+ *
+ *   - GGTEST_WAIT_FOR_TEXTURE(): the viewer holds a texture of i_tex_w x
+ *     i_tex_h. Needs no allocation, so it works on a window the test never
+ *     presented, and asserts nothing about which stack page is on screen.
+ *   - GGTEST_WAIT_FOR_VIEW(): that, AND the viewer's allocation is non-empty
+ *     and was unchanged across the last GGTEST_VIEW_SETTLE_POLLS polls; on
+ *     success it also asserts the stack's visible child is "large", since
+ *     the scale and pan reads it prepares for mean nothing on a hidden page.
+ *     Only for a presented window: an unpresented one is never allocated, so
+ *     this would run out the ceiling.
+ *
+ * WHY THE TEXTURE SIZE, not "texture is non-NULL" (2d2): the JPEG backend's
+ * two-phase load (loader/backends/jpeg.c) hands the viewer a 1/8-scale
+ * preview before the full decode (viewload.h "show_partial"), and for
+ * tests/fixtures/plain.jpg (6x3) that preview is 1x1 -- so a scale read taken
+ * between the two textures was the 1x1 stand-in's fit (about 344 in a 600x400
+ * window on Xvfb) rather than the file's (about 98), and a zoom-in asserted
+ * against it "shrank" the picture when the real decode landed a millisecond
+ * later. That was test_viewer's zoom_in_never_shrinks_a_tiny_image flaking
+ * under load; test_enhance_flow's opens of the same fixture had the same
+ * race. The gap between preview and full decode is the width of a starved
+ * worker thread's schedule, so it opened only on a loaded lane with jpeg
+ * enabled (the minimal lane's pixbuf path shows no preview). Matching the
+ * SIZE rather than a load-finished flag needs no test hook in the product and
+ * also rejects a texture of the wrong file (last-write-wins gone wrong).
+ *
+ * What the size match can and cannot tell apart:
+ *
+ *   - Pass the size the viewer will SHOW, i.e. the EXIF-upright one: for an
+ *     orientation 5-8 file that is the stored size with width and height
+ *     swapped (the loader turns every full decode upright, decision #26;
+ *     the JPEG preview is NOT oriented, so for such a file its shape can
+ *     differ from the full decode's in the other axis too).
+ *   - It discriminates the preview only when the preview's size differs,
+ *     i.e. when ceil(w/8) != w or ceil(h/8) != h. A JPEG no more than 1 px
+ *     in each direction has a preview identical to its full decode, and the
+ *     wait cannot tell the two apart (nor, for such a file, does it matter).
+ *
+ * WHY THE ALLOCATION IS MATCHED BY STILLNESS and not against the 600x400 a
+ * suite requests through gtk_window_set_default_size(): the toplevel's
+ * allocation is not that number on every backend. Measured with a probe on
+ * gtk4-4.22.5, a 600x400 default size allocates the GtkWindow widget at
+ * 590x390 on Xvfb (X11 solid-csd, a 5 px border inside the surface, which is
+ * the 600x400) but at 600x400 on Wayland (the CSD shadow lives outside the
+ * widget, in a 650x450 surface), and a tiling compositor then re-configures
+ * it to whatever it likes (1276x771 under headless sway). The viewer's share
+ * below the header bar is theme-dependent on top of that. A wait for "600x400
+ * minus chrome" would have to know the backend and the theme, and would time
+ * out on any desktop that overrides the size.
+ *
+ * WHAT THE STILLNESS CHECK DOES NOT PROMISE: it is a count of polls, not a
+ * duration, so under load it bounds nothing in time. It guards a PROMPT
+ * relayout -- one already queued when the texture lands -- not a late one; a
+ * configure arriving after the wait returned is not caught. On Xvfb the probe
+ * saw the toplevel go from 0x0 straight to its final allocation in one
+ * configure, so there is normally nothing to guard. What keeps a late one
+ * harmless for the suites that assert on a fit: a LARGER late allocation only
+ * raises the fit scale, which cannot fail test_viewer's "fits above 64x" and
+ * "zoom-in never shrinks" premises; only a shrinking relayout could, and no
+ * backend measured produced one. */
+GgazeViewer *ggtest_wait_for_texture_at(const char *c_loc, GgazeWindow *p_win,
+                                        int i_tex_w, int i_tex_h);
+
+GgazeViewer *ggtest_wait_for_view_at(const char *c_loc, GgazeWindow *p_win,
+                                     int i_tex_w, int i_tex_h);
+
+#define GGTEST_WAIT_FOR_TEXTURE(p_win, i_tex_w, i_tex_h)                       \
+   ggtest_wait_for_texture_at(G_STRLOC, (p_win), (i_tex_w), (i_tex_h))
+
+#define GGTEST_WAIT_FOR_VIEW(p_win, i_tex_w, i_tex_h)                          \
+   ggtest_wait_for_view_at(G_STRLOC, (p_win), (i_tex_w), (i_tex_h))
 
 #endif /* GTK_HELPERS_H */
