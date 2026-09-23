@@ -40,6 +40,18 @@
  * first frame while a crop / straighten tool is up (hold_first_frame),
  * since the tool frames and applies against the first frame.
  *
+ * Touch gestures (task zb2): GtkGestureZoom pinches (touchscreen, and a
+ * touchpad pinch too) and GtkGestureSwipe swipes (touch only). The math --
+ * zoom about a point, the pinch's zoom, what counts as a swipe or a
+ * two-finger tap -- is gesture-math.c's, so the wheel, the keys and a
+ * pinch share one zoom rule with one clamp and one NaN guard. Decisions:
+ * a swipe is refused while the picture is zoomed wider than the widget
+ * (the same finger pans it) and while a tool overlay is installed (the
+ * tool owns every drag); a pinch ends the one-finger drag it grew out of;
+ * a two-finger tap leaves the view as it was. None of the gestures claims
+ * its sequences, so the drag gesture keeps working for one finger and the
+ * mouse path is untouched.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -51,12 +63,13 @@
 #include <glib.h>
 #include <graphene.h>
 
+#include "gesture-math.h"
 #include "loader/animation.h"
 #include "settings.h"
 
+/* One wheel notch / key press. The limits (GGAZE_ZOOM_MIN/MAX) live in
+ * gesture-math.h with the clamp that applies them. */
 #define GGAZE_ZOOM_FACTOR 1.25
-#define GGAZE_ZOOM_MIN 0.02
-#define GGAZE_ZOOM_MAX 64.0
 
 struct _GgazeViewer {
    GtkWidget           parent_instance;
@@ -89,11 +102,38 @@ struct _GgazeViewer {
    guint    u_wake_id;            /* the timeout that re-adds it */
    guint    u_ticks;              /* tick callbacks run (test seam) */
    gboolean b_hold;               /* a tool holds the first frame */
+   /* Pointer drag bookkeeping for the touch gestures (zb2): a pinch ends
+    * the one-finger drag it grew out of (see _drag_abandon). */
+   GtkGesture *p_drag_gesture; /* borrowed: the widget owns it */
+   gboolean    b_dragging;     /* between drag-begin and drag-end */
+   gboolean    b_drag_dead;    /* abandoned by a pinch: ignore the rest */
+   gdouble     d_drag_dx;      /* the drag's last offset from its start */
+   gdouble     d_drag_dy;
+   /* Pinch / two-finger tap (zb2, top-of-file comment). */
+   gboolean b_pinching;      /* two touches down */
+   gboolean b_pinch_can_tap; /* not a touchpad pinch, not cancelled */
+   gdouble  d_pinch_zoom0;   /* the scale drawn when the pinch began */
+   gdouble  d_pinch_cx0;     /* its midpoint then, widget px */
+   gdouble  d_pinch_cy0;
+   gdouble  d_pinch_max_move; /* how far the midpoint strayed */
+   gdouble  d_pinch_max_dev;  /* how far the scale strayed from 1 */
+   gint64   i_pinch_start_us;
+   gboolean b_pre_fit; /* the view before the pinch, put back after a tap */
+   gdouble  d_pre_zoom;
+   gdouble  d_pre_pan_x;
+   gdouble  d_pre_pan_y;
+   /* Swipe (zb2): where the finger went down and where it is now. */
+   gboolean b_swipe_spoiled; /* a pinch happened during this swipe */
+   gdouble  d_swipe_x0;
+   gdouble  d_swipe_y0;
+   gdouble  d_swipe_x;
+   gdouble  d_swipe_y;
 };
 
 G_DEFINE_TYPE(GgazeViewer, ggaze_viewer, GTK_TYPE_WIDGET)
 
-static guint u_navigate_sig = 0;
+static guint u_navigate_sig    = 0;
+static guint u_toggle_info_sig = 0;
 
 /* --- animation playback -------------------------------------------------- */
 
@@ -223,8 +263,8 @@ _tex_h(GgazeViewer *p_v) {
  *
  * Note this is NOT bounded by GGAZE_ZOOM_MAX -- an image small enough relative
  * to the window fits at far more than 6400% (a 6x3 image in a 600x400 window
- * fits at 100x). _zoom_at relies on that being expressible; see the ceiling it
- * derives from this (jx0). */
+ * fits at 100x). _zoom_at relies on that being expressible; see the ceiling
+ * gesture_math_clamp_zoom derives from this (jx0). */
 static gdouble
 _fit_scale(GgazeViewer *p_v, int i_w, int i_h) {
    int i_tw = _tex_w(p_v);
@@ -290,51 +330,39 @@ _current_scale(GgazeViewer *p_v) {
 }
 
 /* Zoom around widget point (d_cx, d_cy), keeping that point over the same
- * image pixel. _compute_geom clamps on the next draw. */
+ * image pixel -- the one zoom path the wheel, the keys and a pinch share.
+ * The rule itself, the 2 %..6400 % clamp with its ceiling raised to the
+ * fit ratio (jx0) and the non-finite guard (hx0) are gesture-math.c's
+ * gesture_math_zoom_about; _compute_geom clamps the pan on the next draw.
+ *
+ * hx0 in short: a non-finite centre or zoom is rejected, not stored. CLAMP
+ * cannot filter NaN, and a single NaN reaching d_pan_x/d_pan_y is not a
+ * one-frame glitch: the draw rect goes NaN, the image disappears, and
+ * because every later zoom derives the new pan from the old one the widget
+ * never recovers. Bailing keeps the last good geometry on screen. */
 static void
 _zoom_at(GgazeViewer *p_v, gdouble d_cx, gdouble d_cy, gdouble d_new_zoom) {
    if (p_v->p_texture == NULL) {
       return;
    }
-   /* Reject a non-finite centre or zoom instead of storing it (hx0). CLAMP
-    * cannot filter NaN -- both of its comparisons are false, so NaN passes
-    * straight through -- and a single NaN reaching d_pan_x/d_pan_y is not a
-    * one-frame glitch: it makes the draw rect NaN, the image disappears, and
-    * because every later zoom derives the new pan from the old one the widget
-    * never recovers. Bailing keeps the last good geometry on screen. */
-   if (!isfinite(d_cx) || !isfinite(d_cy) || !isfinite(d_new_zoom)) {
+   int         i_w    = gtk_widget_get_width(GTK_WIDGET(p_v));
+   int         i_h    = gtk_widget_get_height(GTK_WIDGET(p_v));
+   GestureView t_view = {.i_w     = i_w,
+                         .i_h     = i_h,
+                         .i_tex_w = _tex_w(p_v),
+                         .i_tex_h = _tex_h(p_v),
+                         .d_fit   = _fit_scale(p_v, i_w, i_h)};
+   _compute_geom(p_v, i_w, i_h, &t_view.d_scale, &t_view.d_x, &t_view.d_y, NULL,
+                 NULL);
+   gdouble d_zoom, d_pan_x, d_pan_y;
+   if (!gesture_math_zoom_about(&t_view, d_cx, d_cy, d_new_zoom, &d_zoom,
+                                &d_pan_x, &d_pan_y)) {
       return;
    }
-   int i_w = gtk_widget_get_width(GTK_WIDGET(p_v));
-   int i_h = gtk_widget_get_height(GTK_WIDGET(p_v));
-
-   /* Ceiling is the NORMAL limit or the fit ratio, whichever is larger (jx0).
-    * Clamping to GGAZE_ZOOM_MAX alone is wrong whenever fit-to-window already
-    * exceeds it -- a small image in a big window fits at 100x -- because then
-    * the very first zoom-in clamped 100 -> 64 and made the picture SMALLER,
-    * the opposite of what was asked. Letting the ceiling rise to the fit ratio
-    * turns that into a no-op at the top end instead of a reversal, while
-    * keeping the normal 6400% limit for every image that fits below it. */
-   gdouble d_max = MAX(GGAZE_ZOOM_MAX, _fit_scale(p_v, i_w, i_h));
-   d_new_zoom    = CLAMP(d_new_zoom, GGAZE_ZOOM_MIN, d_max);
-
-   gdouble s_old;
-   gdouble x_old, y_old;
-   _compute_geom(p_v, i_w, i_h, &s_old, &x_old, &y_old, NULL, NULL);
-
-   /* Image-space pixel under the cursor before zoom. */
-   gdouble img_x = (s_old > 0.0) ? (d_cx - x_old) / s_old : 0.0;
-   gdouble img_y = (s_old > 0.0) ? (d_cy - y_old) / s_old : 0.0;
-
-   p_v->b_fit  = FALSE;
-   p_v->d_zoom = d_new_zoom;
-
-   gdouble s_new  = d_new_zoom;
-   gdouble want_x = d_cx - img_x * s_new;
-   gdouble want_y = d_cy - img_y * s_new;
-   p_v->d_pan_x = want_x - ((gdouble)i_w - (gdouble)_tex_w(p_v) * s_new) / 2.0;
-   p_v->d_pan_y = want_y - ((gdouble)i_h - (gdouble)_tex_h(p_v) * s_new) / 2.0;
-
+   p_v->b_fit   = FALSE;
+   p_v->d_zoom  = d_zoom;
+   p_v->d_pan_x = d_pan_x;
+   p_v->d_pan_y = d_pan_y;
    gtk_widget_queue_draw(GTK_WIDGET(p_v));
 }
 
@@ -439,11 +467,17 @@ ggaze_viewer_class_init(GgazeViewerClass *p_klass) {
    p_wc->unmap          = ggaze_viewer_unmap;
    p_oc->dispose        = ggaze_viewer_dispose;
    gtk_widget_class_set_css_name(p_wc, "ggazeviewer");
-   /* "navigate": emitted by the scroll wheel in GGAZE_SCROLL_NAVIGATE mode.
-    * The int arg is +1 (next) or -1 (prev). */
+   /* "navigate": emitted by the scroll wheel in GGAZE_SCROLL_NAVIGATE mode
+    * and by a horizontal touch swipe (zb2). The int arg is +1 (next) or -1
+    * (prev). The window routes it through its Save/Discard/Cancel gate. */
    u_navigate_sig =
       g_signal_new("navigate", G_OBJECT_CLASS_TYPE(p_oc), G_SIGNAL_RUN_LAST, 0,
                    NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
+   /* "toggle-info": a two-finger tap (zb2). An intent, like "navigate": the
+    * viewer does not know the window's action names. */
+   u_toggle_info_sig =
+      g_signal_new("toggle-info", G_OBJECT_CLASS_TYPE(p_oc), G_SIGNAL_RUN_LAST,
+                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 /* --- controllers ---------------------------------------------------------- */
@@ -466,10 +500,35 @@ _drag_begin_cb(GtkGestureDrag *p_gesture, gdouble d_x, gdouble d_y,
    p_v->d_drag_start_y     = d_y;
    p_v->d_drag_start_pan_x = p_v->d_pan_x;
    p_v->d_drag_start_pan_y = p_v->d_pan_y;
-   p_v->b_drag_to_overlay  = (p_v->fn_drag != NULL);
+   p_v->d_drag_dx          = 0.0;
+   p_v->d_drag_dy          = 0.0;
+   p_v->b_dragging         = TRUE;
+   /* A drag that starts while two fingers pinch is part of the pinch. */
+   p_v->b_drag_dead       = p_v->b_pinching;
+   p_v->b_drag_to_overlay = (p_v->fn_drag != NULL && !p_v->b_drag_dead);
    if (p_v->b_drag_to_overlay) {
       p_v->fn_drag(GGAZE_VIEWER_DRAG_BEGIN, d_x, d_y, p_v->p_overlay_data);
    }
+}
+
+/* A pinch began while one finger was dragging (zb2): end that drag where the
+ * finger is now -- a tool gets its END there, so the crop rectangle keeps
+ * what was dragged so far and nothing more; a pan simply stops -- and ignore
+ * whatever the drag gesture still reports. The pinch also DENIES the drag
+ * gesture's sequence (_pinch_begin), which makes GTK end it for real; this
+ * flag is what keeps the viewer's own state right in between, and when the
+ * gesture is driven by emitted signals rather than touches (tests). */
+static void
+_drag_abandon(GgazeViewer *p_v) {
+   if (!p_v->b_dragging || p_v->b_drag_dead) {
+      return;
+   }
+   if (p_v->b_drag_to_overlay && p_v->fn_drag != NULL) {
+      p_v->fn_drag(GGAZE_VIEWER_DRAG_END, p_v->d_drag_start_x + p_v->d_drag_dx,
+                   p_v->d_drag_start_y + p_v->d_drag_dy, p_v->p_overlay_data);
+   }
+   p_v->b_drag_to_overlay = FALSE;
+   p_v->b_drag_dead       = TRUE;
 }
 
 static void
@@ -477,6 +536,11 @@ _drag_update_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
                 gpointer p_data) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_data);
    (void)p_gesture;
+   if (p_v->b_drag_dead) {
+      return;
+   }
+   p_v->d_drag_dx = d_dx;
+   p_v->d_drag_dy = d_dy;
    if (p_v->b_drag_to_overlay) {
       if (p_v->fn_drag != NULL) {
          p_v->fn_drag(GGAZE_VIEWER_DRAG_UPDATE, p_v->d_drag_start_x + d_dx,
@@ -499,11 +563,13 @@ _drag_end_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
              gpointer p_data) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_data);
    (void)p_gesture;
-   if (p_v->b_drag_to_overlay && p_v->fn_drag != NULL) {
+   if (p_v->b_drag_to_overlay && p_v->fn_drag != NULL && !p_v->b_drag_dead) {
       p_v->fn_drag(GGAZE_VIEWER_DRAG_END, p_v->d_drag_start_x + d_dx,
                    p_v->d_drag_start_y + d_dy, p_v->p_overlay_data);
    }
    p_v->b_drag_to_overlay = FALSE;
+   p_v->b_dragging        = FALSE;
+   p_v->b_drag_dead       = FALSE;
 }
 
 /* The zoom centre for a scroll event: the pointer position translated into
@@ -587,6 +653,134 @@ _scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
    return (TRUE);
 }
 
+/* --- touch gestures (zb2) ------------------------------------------------ */
+
+/* The midpoint of a gesture's touches in widget coordinates. FALSE, the
+ * outputs untouched, when the gesture has no points -- it is being driven
+ * by emitted signals (tests) -- or GTK hands back something non-finite (the
+ * hx0 invariant: nothing non-finite reaches the zoom state). The
+ * is_active check is not decoration: gtk_gesture_get_bounding_box_center
+ * inspects the last event, and with no points that is NULL (a
+ * Gdk-CRITICAL on gtk 4.22). */
+static gboolean
+_gesture_midpoint(GtkGesture *p_g, gdouble *p_x, gdouble *p_y) {
+   gdouble d_x, d_y;
+   if (!gtk_gesture_is_active(p_g) ||
+       !gtk_gesture_get_bounding_box_center(p_g, &d_x, &d_y) ||
+       !isfinite(d_x) || !isfinite(d_y)) {
+      return (FALSE);
+   }
+   *p_x = d_x;
+   *p_y = d_y;
+   return (TRUE);
+}
+
+/* GtkGestureZoom recognised two touches (or a touchpad pinch started). */
+static void
+_pinch_begin_cb(GtkGesture *p_g, GdkEventSequence *p_seq, gpointer p_data) {
+   GgazeViewer *p_v = GGAZE_VIEWER(p_data);
+   (void)p_seq;
+   gdouble d_cx = (gdouble)gtk_widget_get_width(GTK_WIDGET(p_v)) / 2.0;
+   gdouble d_cy = (gdouble)gtk_widget_get_height(GTK_WIDGET(p_v)) / 2.0;
+   _gesture_midpoint(p_g, &d_cx, &d_cy);
+   ggaze_viewer_pinch_begin(p_v, d_cx, d_cy);
+   /* A touchpad pinch zooms like a touchscreen one but is never a tap:
+    * resting two fingers on a touchpad must not toggle the info card. */
+   GdkEvent *p_ev =
+      gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(p_g));
+   if (p_ev != NULL && gdk_event_get_event_type(p_ev) == GDK_TOUCHPAD_PINCH) {
+      p_v->b_pinch_can_tap = FALSE;
+   }
+}
+
+/* The finger distance changed: zoom about the midpoint where it is now
+ * (the start midpoint while the gesture reports none). */
+static void
+_pinch_scale_cb(GtkGestureZoom *p_g, gdouble d_scale, gpointer p_data) {
+   GgazeViewer *p_v  = GGAZE_VIEWER(p_data);
+   gdouble      d_cx = p_v->d_pinch_cx0;
+   gdouble      d_cy = p_v->d_pinch_cy0;
+   _gesture_midpoint(GTK_GESTURE(p_g), &d_cx, &d_cy);
+   ggaze_viewer_pinch_update(p_v, d_scale, d_cx, d_cy);
+}
+
+/* A sequence was cancelled (another widget claimed it, the window lost the
+ * touch): whatever this was, it was not a tap. "end" follows. */
+static void
+_pinch_cancel_cb(GtkGesture *p_g, GdkEventSequence *p_seq, gpointer p_data) {
+   (void)p_g;
+   (void)p_seq;
+   GGAZE_VIEWER(p_data)->b_pinch_can_tap = FALSE;
+}
+
+static void
+_pinch_end_cb(GtkGesture *p_g, GdkEventSequence *p_seq, gpointer p_data) {
+   (void)p_g;
+   (void)p_seq;
+   ggaze_viewer_pinch_end(GGAZE_VIEWER(p_data));
+}
+
+/* One finger went down: remember where. A pinch already in progress spoils
+ * the swipe (its first finger is this one). NaN when GTK has no point for
+ * the sequence, which gesture_math_swipe_direction refuses. */
+static void
+_swipe_begin_cb(GtkGesture *p_g, GdkEventSequence *p_seq, gpointer p_data) {
+   GgazeViewer *p_v = GGAZE_VIEWER(p_data);
+   gdouble      d_x = NAN;
+   gdouble      d_y = NAN;
+   gtk_gesture_get_point(p_g, p_seq, &d_x, &d_y);
+   p_v->d_swipe_x0      = d_x;
+   p_v->d_swipe_y0      = d_y;
+   p_v->d_swipe_x       = d_x;
+   p_v->d_swipe_y       = d_y;
+   p_v->b_swipe_spoiled = p_v->b_pinching;
+}
+
+static void
+_swipe_update_cb(GtkGesture *p_g, GdkEventSequence *p_seq, gpointer p_data) {
+   GgazeViewer *p_v = GGAZE_VIEWER(p_data);
+   gdouble      d_x, d_y;
+   if (gtk_gesture_get_point(p_g, p_seq, &d_x, &d_y)) {
+      p_v->d_swipe_x = d_x;
+      p_v->d_swipe_y = d_y;
+   }
+}
+
+/* The finger lifted with velocity (d_vx, d_vy): judge the whole path. */
+static void
+_swipe_cb(GtkGestureSwipe *p_g, gdouble d_vx, gdouble d_vy, gpointer p_data) {
+   GgazeViewer *p_v = GGAZE_VIEWER(p_data);
+   (void)p_g;
+   if (p_v->b_swipe_spoiled) {
+      return;
+   }
+   ggaze_viewer_swipe(p_v, p_v->d_swipe_x - p_v->d_swipe_x0,
+                      p_v->d_swipe_y - p_v->d_swipe_y0, d_vx, d_vy);
+}
+
+/* Pinch (GtkGestureZoom: two touches, or a touchpad pinch) and swipe
+ * (GtkGestureSwipe, touch only so a mouse drag stays a pan). Neither
+ * claims its sequences, so the drag gesture keeps seeing the first finger
+ * -- a one-finger drag still pans or drags the tool's rectangle -- until a
+ * pinch starts and abandons it (_drag_abandon). The mouse and the wheel go
+ * through none of this. */
+static void
+_init_touch_gestures(GgazeViewer *p_v) {
+   GtkGesture *p_zoom = gtk_gesture_zoom_new();
+   gtk_widget_add_controller(GTK_WIDGET(p_v), GTK_EVENT_CONTROLLER(p_zoom));
+   g_signal_connect(p_zoom, "begin", G_CALLBACK(_pinch_begin_cb), p_v);
+   g_signal_connect(p_zoom, "scale-changed", G_CALLBACK(_pinch_scale_cb), p_v);
+   g_signal_connect(p_zoom, "cancel", G_CALLBACK(_pinch_cancel_cb), p_v);
+   g_signal_connect(p_zoom, "end", G_CALLBACK(_pinch_end_cb), p_v);
+
+   GtkGesture *p_swipe = gtk_gesture_swipe_new();
+   gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(p_swipe), TRUE);
+   gtk_widget_add_controller(GTK_WIDGET(p_v), GTK_EVENT_CONTROLLER(p_swipe));
+   g_signal_connect(p_swipe, "begin", G_CALLBACK(_swipe_begin_cb), p_v);
+   g_signal_connect(p_swipe, "update", G_CALLBACK(_swipe_update_cb), p_v);
+   g_signal_connect(p_swipe, "swipe", G_CALLBACK(_swipe_cb), p_v);
+}
+
 static void
 ggaze_viewer_init(GgazeViewer *p_v) {
    p_v->p_texture = NULL;
@@ -599,7 +793,8 @@ ggaze_viewer_init(GgazeViewer *p_v) {
 
    gtk_widget_set_focusable(GTK_WIDGET(p_v), TRUE);
 
-   GtkGesture *p_drag = gtk_gesture_drag_new();
+   GtkGesture *p_drag  = gtk_gesture_drag_new();
+   p_v->p_drag_gesture = p_drag;
    gtk_widget_add_controller(GTK_WIDGET(p_v), GTK_EVENT_CONTROLLER(p_drag));
    g_signal_connect(p_drag, "drag-begin", G_CALLBACK(_drag_begin_cb), p_v);
    g_signal_connect(p_drag, "drag-update", G_CALLBACK(_drag_update_cb), p_v);
@@ -609,6 +804,7 @@ ggaze_viewer_init(GgazeViewer *p_v) {
       gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
    gtk_widget_add_controller(GTK_WIDGET(p_v), p_scroll);
    g_signal_connect(p_scroll, "scroll", G_CALLBACK(_scroll_cb), p_v);
+   _init_touch_gestures(p_v);
    /* No key controller here: every key (zoom, pan, 0 = fit toggle, arrows)
     * is bound in shortcuts.c's single table to a win.* action the window
     * routes to the public methods below. A second, focus-dependent binding
@@ -786,4 +982,116 @@ ggaze_viewer_set_scroll_behavior(GgazeViewer        *p_viewer,
                                  GgazeScrollBehavior e_scroll) {
    g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
    p_viewer->e_scroll = e_scroll;
+}
+
+/* --- touch gestures, public half (zb2; viewer.h) -------------------------- */
+
+void
+ggaze_viewer_pinch_begin(GgazeViewer *p_viewer, gdouble d_cx, gdouble d_cy) {
+   g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
+   /* The first finger's drag is over: it becomes half of this pinch. Deny
+    * it to GTK too, so the gesture ends for real rather than panning (or
+    * dragging the crop rectangle) under the pinch. */
+   _drag_abandon(p_viewer);
+   gtk_gesture_set_state(p_viewer->p_drag_gesture, GTK_EVENT_SEQUENCE_DENIED);
+   p_viewer->b_pinching       = TRUE;
+   p_viewer->b_pinch_can_tap  = TRUE;
+   p_viewer->b_swipe_spoiled  = TRUE;
+   p_viewer->d_pinch_zoom0    = _current_scale(p_viewer);
+   p_viewer->d_pinch_cx0      = d_cx;
+   p_viewer->d_pinch_cy0      = d_cy;
+   p_viewer->d_pinch_max_move = 0.0;
+   p_viewer->d_pinch_max_dev  = 0.0;
+   p_viewer->i_pinch_start_us = g_get_monotonic_time();
+   p_viewer->b_pre_fit        = p_viewer->b_fit;
+   p_viewer->d_pre_zoom       = p_viewer->d_zoom;
+   p_viewer->d_pre_pan_x      = p_viewer->d_pan_x;
+   p_viewer->d_pre_pan_y      = p_viewer->d_pan_y;
+}
+
+/* Record how far the gesture strayed from a tap: the midpoint's distance
+ * from where it began and the scale's distance from 1. Non-finite values
+ * count as "far" -- whatever they were, they were not a tap. */
+static void
+_pinch_track(GgazeViewer *p_v, gdouble d_scale, gdouble d_cx, gdouble d_cy) {
+   gdouble d_move = hypot(d_cx - p_v->d_pinch_cx0, d_cy - p_v->d_pinch_cy0);
+   gdouble d_dev  = fabs(d_scale - 1.0);
+   p_v->d_pinch_max_move =
+      isfinite(d_move) ? MAX(p_v->d_pinch_max_move, d_move) : INFINITY;
+   p_v->d_pinch_max_dev =
+      isfinite(d_dev) ? MAX(p_v->d_pinch_max_dev, d_dev) : INFINITY;
+}
+
+void
+ggaze_viewer_pinch_update(GgazeViewer *p_viewer, gdouble d_scale, gdouble d_cx,
+                          gdouble d_cy) {
+   g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
+   if (!p_viewer->b_pinching) {
+      return;
+   }
+   _pinch_track(p_viewer, d_scale, d_cx, d_cy);
+   /* Absolute, from the zoom the pinch began at: rounding cannot build up
+    * over the many updates of one pinch. Refused scales (0, NaN) and a
+    * non-finite midpoint (_zoom_at) leave the view as it is. */
+   gdouble d_zoom;
+   if (gesture_math_pinch_zoom(p_viewer->d_pinch_zoom0, d_scale, &d_zoom)) {
+      _zoom_at(p_viewer, d_cx, d_cy, d_zoom);
+   }
+}
+
+gboolean
+ggaze_viewer_pinch_end(GgazeViewer *p_viewer) {
+   g_return_val_if_fail(GGAZE_IS_VIEWER(p_viewer), FALSE);
+   if (!p_viewer->b_pinching) {
+      return (FALSE);
+   }
+   p_viewer->b_pinching = FALSE;
+   gint64 i_dur         = g_get_monotonic_time() - p_viewer->i_pinch_start_us;
+   if (!p_viewer->b_pinch_can_tap ||
+       !gesture_math_is_two_finger_tap(i_dur, p_viewer->d_pinch_max_move,
+                                       p_viewer->d_pinch_max_dev)) {
+      return (FALSE);
+   }
+   /* A tap is not a zoom: the few percent two resting fingers wobble by
+    * are undone, and a fitted view stays fitted (so a later resize still
+    * refits it). */
+   p_viewer->b_fit   = p_viewer->b_pre_fit;
+   p_viewer->d_zoom  = p_viewer->d_pre_zoom;
+   p_viewer->d_pan_x = p_viewer->d_pre_pan_x;
+   p_viewer->d_pan_y = p_viewer->d_pre_pan_y;
+   gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
+   g_signal_emit(p_viewer, u_toggle_info_sig, 0);
+   return (TRUE);
+}
+
+/* TRUE when a one-finger horizontal drag pans the picture: zoomed in past
+ * the widget's width. A swipe is then a pan, never a page turn. */
+static gboolean
+_pans_horizontally(GgazeViewer *p_v) {
+   if (p_v->b_fit) {
+      return (FALSE);
+   }
+   gdouble d_dw = 0.0;
+   int     i_w  = gtk_widget_get_width(GTK_WIDGET(p_v));
+   _compute_geom(p_v, i_w, gtk_widget_get_height(GTK_WIDGET(p_v)), NULL, NULL,
+                 NULL, &d_dw, NULL);
+   return (d_dw > (gdouble)i_w + 0.5);
+}
+
+gint
+ggaze_viewer_swipe(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy,
+                   gdouble d_vx, gdouble d_vy) {
+   g_return_val_if_fail(GGAZE_IS_VIEWER(p_viewer), 0);
+   /* Refused: nothing shown; a crop / straighten tool is up (its overlay
+    * owns every drag, and navigating would abandon the tool); or the
+    * finger was panning a zoomed-in picture. */
+   if (p_viewer->p_texture == NULL || p_viewer->fn_drag != NULL ||
+       _pans_horizontally(p_viewer)) {
+      return (0);
+   }
+   gint i_dir = gesture_math_swipe_direction(d_dx, d_dy, d_vx, d_vy);
+   if (i_dir != 0) {
+      g_signal_emit(p_viewer, u_navigate_sig, 0, i_dir);
+   }
+   return (i_dir);
 }

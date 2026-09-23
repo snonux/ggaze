@@ -153,6 +153,7 @@ static void _action_menu(GSimpleAction *p_a, GVariant *p_v, gpointer p_data);
 static void _action_empty_trash(GSimpleAction *p_a, GVariant *p_v,
                                 gpointer p_data);
 static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
+static void _on_viewer_toggle_info(GgazeViewer *p_v, gpointer p_data);
 
 /* POPOVER KEYBOARD FOCUS -- who focuses the first row (dw0).
  *
@@ -1973,9 +1974,11 @@ _on_folder_pref_changed(GSettings *p_gs, const char *c_key, gpointer p_data) {
    }
 }
 
-/* Scroll-wheel navigate (GGAZE_SCROLL_NAVIGATE): advance the navigator,
- * prompting Save/Discard/Cancel first if an unsaved (GEGL) enhance preview is
- * active, same as the h/l/g/G actions (_action_prev/next/first/last). */
+/* Scroll-wheel navigate (GGAZE_SCROLL_NAVIGATE) and a touch swipe (zb2):
+ * advance the navigator, prompting Save/Discard/Cancel first if an unsaved
+ * (GEGL) enhance preview is active, same as the h/l/g/G actions
+ * (_action_prev/next/first/last). The viewer already refuses a swipe while
+ * a crop / straighten tool is up (viewer.h ggaze_viewer_swipe). */
 static void
 _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data) {
    (void)p_v;
@@ -1988,6 +1991,14 @@ _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data) {
    } else {
       save_gate_maybe_save_then(p_win->p_save_gate, _proceed_prev, p_win, NULL);
    }
+}
+
+/* A two-finger tap on the viewer (zb2): exactly what `i` does, through the
+ * same action, so the touch path cannot drift from the key's. */
+static void
+_on_viewer_toggle_info(GgazeViewer *p_v, gpointer p_data) {
+   (void)p_v;
+   g_action_group_activate_action(G_ACTION_GROUP(p_data), "info", NULL);
 }
 
 static void
@@ -3320,6 +3331,8 @@ _init_stack_and_viewer(GgazeWindow *p_win) {
                        VIEW_NAMES[GGAZE_VIEW_LARGE]);
    g_signal_connect(p_win->p_viewer, "navigate",
                     G_CALLBACK(_on_viewer_navigate), p_win);
+   g_signal_connect(p_win->p_viewer, "toggle-info",
+                    G_CALLBACK(_on_viewer_toggle_info), p_win);
    _apply_viewer_prefs(p_win);
 
    _set_view(p_win, GGAZE_VIEW_EMPTY);

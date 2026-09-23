@@ -3819,6 +3819,60 @@ test_tool_key_controller_claims_keys_only_while_active(void) {
    tool_fx_close(&fx);
 }
 
+/* --- touch swipe (zb2) ---------------------------------------------------- */
+
+/* The window's GgazeViewer (its stack's "large" child), borrowed. */
+static GgazeViewer *
+large_viewer(GgazeWindow *p_win) {
+   GtkStack *p_stack = ggaze_window_get_stack(p_win);
+   return (GGAZE_VIEWER(gtk_stack_get_child_by_name(p_stack, "large")));
+}
+
+/* A leftward swipe (viewer.h ggaze_viewer_swipe, what the GtkGestureSwipe
+ * handler calls) is a navigation like `l`: away from a dirty preview it
+ * raises the Save/Discard/Cancel prompt instead of moving. Cancel keeps
+ * the preview and the file; a second swipe answered Discard moves on. */
+static void
+test_swipe_away_from_dirty_preview_prompts(void) {
+   DirtyFixture fx = {0};
+   fixture_open(&fx, "ggaze-enhance-swipe-XXXXXX");
+   GgazeViewer *p_v = large_viewer(fx.p_win);
+   g_assert_cmpint(ggaze_viewer_swipe(p_v, -200.0, 0.0, -900.0, 0.0), ==, 1);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   assert_showing(fx.p_win, "plain.jpg");
+   answer_prompt(&fx, "Cancel");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   assert_showing(fx.p_win, "plain.jpg");
+   assert_ref_settled(&fx);
+   g_assert_cmpint(ggaze_viewer_swipe(p_v, -200.0, 0.0, -900.0, 0.0), ==, 1);
+   answer_prompt(&fx, "Discard");
+   assert_showing(fx.p_win, "rot6.jpg");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   fixture_teardown(&fx);
+}
+
+/* While the crop tool is up a swipe navigates nowhere -- the tool owns the
+ * drag, and a navigation would abandon it -- and the tool stays; once it is
+ * cancelled the same swipe goes to the previous file. */
+static void
+test_swipe_refused_while_tool_active(void) {
+   ToolFx fx;
+   tool_fx_open_with_sibling(&fx);
+   GgazeViewer *p_v = large_viewer(fx.p_win);
+   fire(fx.p_win, "win.crop");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_cmpint(ggaze_viewer_swipe(p_v, 200.0, 0.0, 900.0, 0.0), ==, 0);
+   ggtest_drain_main(200);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "tool.png"));
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_cmpint(ggaze_viewer_swipe(p_v, 200.0, 0.0, 900.0, 0.0), ==, -1);
+   ggtest_drain_main(300);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "a.jpg"));
+   tool_fx_close(&fx);
+}
+
 /* A discard while a tool is up ends the tool BEFORE the transform is reset
  * -- the Original card and `0` with the panel open both go through it --
  * so the straighten session's working angle cannot come back: afterwards
@@ -4949,6 +5003,11 @@ add_tool_review_tests(void) {
                    test_crop_outside_the_view_comes_back);
    g_test_add_func("/enhance_flow/tool_key_controller_claims_keys_only_active",
                    test_tool_key_controller_claims_keys_only_while_active);
+   /* zb2: the touch swipe goes through the same gate and tool rules. */
+   g_test_add_func("/enhance_flow/swipe_away_from_dirty_preview_prompts",
+                   test_swipe_away_from_dirty_preview_prompts);
+   g_test_add_func("/enhance_flow/swipe_refused_while_tool_active",
+                   test_swipe_refused_while_tool_active);
 }
 
 /* wb2 second review round: a discard ends the tool first, the crop tool
