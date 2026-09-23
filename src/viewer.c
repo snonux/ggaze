@@ -50,8 +50,12 @@
  * tool owns every drag); a pinch ends the one-finger drag it grew out of
  * (a tool gets a CANCEL, not an END: the drag was not finished); a pinch
  * pans with its midpoint while it zooms, so two fingers moved together
- * drag the picture along; a two-finger tap leaves the view as it was
- * before its first finger went down. None of the gestures claims
+ * drag the picture along -- except over a fitted picture while the scale
+ * stays within a tap's wobble of 1 (a two-finger pan reports ~1.01): that
+ * picture has nothing to pan and stays fitted, so `0`, a resize refit and
+ * a swipe keep working; a two-finger tap leaves the view as it was
+ * before its first finger went down, and undoes what that finger did to a
+ * tool (DRAG_REVERT, viewer.h). None of the gestures claims
  * its sequences, so the drag gesture keeps working for one finger and the
  * mouse path is untouched.
  *
@@ -73,6 +77,15 @@
 /* One wheel notch / key press. The limits (GGAZE_ZOOM_MIN/MAX) live in
  * gesture-math.h with the clamp that applies them. */
 #define GGAZE_ZOOM_FACTOR 1.25
+
+/* The zoom / pan state a gesture may have to put back: the view before a
+ * two-finger tap's first finger went down, the view a pinch began at. */
+typedef struct {
+   gboolean b_fit;
+   gdouble  d_zoom;
+   gdouble  d_pan_x;
+   gdouble  d_pan_y;
+} ViewState;
 
 struct _GgazeViewer {
    GtkWidget           parent_instance;
@@ -126,11 +139,11 @@ struct _GgazeViewer {
    gdouble  d_pinch_max_move; /* how far the midpoint strayed */
    gdouble  d_pinch_max_dev;  /* how far the scale strayed from 1 */
    gint64   i_pinch_start_us;
-   gboolean b_pre_fit; /* the view before the tap's first finger went down
+   gboolean b_pinch_from_tool; /* it took a tool's drag over: a tap sends
+                                * the tool a DRAG_REVERT */
+   ViewState t_pinch0; /* the view the pinch began at (the fit detent) */
+   ViewState t_pre;    /* the view before the tap's first finger went down
                         * (_snapshot_view), put back after a tap */
-   gdouble d_pre_zoom;
-   gdouble d_pre_pan_x;
-   gdouble d_pre_pan_y;
    /* Swipe (zb2): where the finger went down and where it is now. */
    gboolean b_swipe_spoiled; /* a pinch happened during this swipe */
    gdouble  d_swipe_x0;
@@ -380,24 +393,60 @@ _zoom_at(GgazeViewer *p_v, gdouble d_cx, gdouble d_cy, gdouble d_new_zoom) {
  * one finger came first, else at the pinch's -- so the few px a first
  * finger pans before the second lands are undone too. */
 static void
+_view_save(const GgazeViewer *p_v, ViewState *p_out) {
+   p_out->b_fit   = p_v->b_fit;
+   p_out->d_zoom  = p_v->d_zoom;
+   p_out->d_pan_x = p_v->d_pan_x;
+   p_out->d_pan_y = p_v->d_pan_y;
+}
+
+static void
+_view_restore(GgazeViewer *p_v, const ViewState *p_in) {
+   p_v->b_fit   = p_in->b_fit;
+   p_v->d_zoom  = p_in->d_zoom;
+   p_v->d_pan_x = p_in->d_pan_x;
+   p_v->d_pan_y = p_in->d_pan_y;
+   gtk_widget_queue_draw(GTK_WIDGET(p_v));
+}
+
+static void
 _snapshot_view(GgazeViewer *p_v) {
-   p_v->b_pre_fit   = p_v->b_fit;
-   p_v->d_pre_zoom  = p_v->d_zoom;
-   p_v->d_pre_pan_x = p_v->d_pan_x;
-   p_v->d_pre_pan_y = p_v->d_pan_y;
+   _view_save(p_v, &p_v->t_pre);
 }
 
 /* Forget a pinch in progress (zb2): a new texture (set_texture) or an
  * unmap ends it as no tap and no zoom -- the rest of that pinch, whatever
  * GtkGestureZoom still reports, is ignored, since update / end need
- * b_pinching -- and the saved view becomes the view now, so a restore can
+ * b_pinching -- and the saved views become the view now, so a restore can
  * never put an old image's zoom and pan on a new one. */
 static void
 _pinch_reset(GgazeViewer *p_v) {
-   p_v->b_pinching      = FALSE;
-   p_v->b_pinch_can_tap = FALSE;
-   p_v->d_pinch_zoom0   = 1.0;
+   p_v->b_pinching        = FALSE;
+   p_v->b_pinch_can_tap   = FALSE;
+   p_v->b_pinch_from_tool = FALSE;
+   p_v->d_pinch_zoom0     = 1.0;
    _snapshot_view(p_v);
+   _view_save(p_v, &p_v->t_pinch0);
+}
+
+static void _drag_abandon(GgazeViewer *p_v);
+
+/* Forget a drag and a pinch in progress (zb2 review): a new texture or an
+ * unmap. A tool drag gets its CANCEL first (viewer.h: taken away, not
+ * finished); then the rest of that drag -- whatever the drag gesture
+ * still reports until its own end -- is ignored (b_drag_dead), since its
+ * pan origin and its tap time / wander belong to the old picture or the
+ * old mapping, and a pinch that follows starts afresh rather than "from
+ * the drag". Safe at window teardown: the window drops the overlay
+ * (tool_ctrl_dispose) before its children are unmapped. */
+static void
+_gestures_reset(GgazeViewer *p_v) {
+   _drag_abandon(p_v);
+   p_v->b_dragging        = FALSE;
+   p_v->b_drag_to_overlay = FALSE;
+   p_v->b_drag_dead       = TRUE; /* until the next BEGIN or END */
+   p_v->d_drag_max_move   = 0.0;
+   _pinch_reset(p_v);
 }
 
 /* --- GtkWidget vfuncs ----------------------------------------------------- */
@@ -479,9 +528,10 @@ ggaze_viewer_map(GtkWidget *p_widget) {
 static void
 ggaze_viewer_unmap(GtkWidget *p_widget) {
    _anim_stop(GGAZE_VIEWER(p_widget));
-   /* An unmapped widget gets no more touches; a pinch it was in must not
-    * wake up as a tap or a zoom on the next map (hardening, zb2). */
-   _pinch_reset(GGAZE_VIEWER(p_widget));
+   /* An unmapped widget gets no more touches; a drag or pinch it was in
+    * must not wake up as a pan, a tap or a zoom on the next map
+    * (hardening, zb2). */
+   _gestures_reset(GGAZE_VIEWER(p_widget));
    GTK_WIDGET_CLASS(ggaze_viewer_parent_class)->unmap(p_widget);
 }
 
@@ -523,11 +573,13 @@ ggaze_viewer_class_init(GgazeViewerClass *p_klass) {
  * handed to the tool in absolute widget coordinates (GtkGestureDrag reports
  * offsets from the start point; the tool wants positions). Which of the two
  * it is gets decided at BEGIN and holds for the whole gesture: a tool that
- * starts mid-drag never sees an UPDATE without its BEGIN, and a tool that
- * goes away mid-drag (Esc while dragging the rectangle) hands the rest of
- * the gesture to panning from where the pointer is NOW -- the pan origin is
- * re-based at that moment, so the first pan step is not the whole offset
- * accumulated since the press. */
+ * starts during a PAN drag never sees an UPDATE without its BEGIN (one
+ * that REPLACES the tool drag's overlay mid-drag does -- viewer.h, both
+ * tools ignore it), and a tool that goes away mid-drag (Esc while
+ * dragging the rectangle) hands the rest of the gesture to panning from
+ * where the pointer is NOW -- the pan origin is re-based at that moment,
+ * so the first pan step is not the whole offset accumulated since the
+ * press. */
 static void
 _drag_begin_cb(GtkGestureDrag *p_gesture, gdouble d_x, gdouble d_y,
                gpointer p_data) {
@@ -880,9 +932,9 @@ ggaze_viewer_set_texture(GgazeViewer *p_viewer, GdkTexture *p_texture) {
    p_viewer->d_zoom  = 1.0;
    p_viewer->d_pan_x = 0.0;
    p_viewer->d_pan_y = 0.0;
-   /* A pinch over the old picture is over (_pinch_reset): its zoom-at-begin
-    * and its saved view belong to that picture. */
-   _pinch_reset(p_viewer);
+   /* A drag or pinch over the old picture is over (_gestures_reset): its
+    * pan origin, zoom-at-begin and saved views belong to that picture. */
+   _gestures_reset(p_viewer);
    _anim_start(p_viewer);
    gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
 }
@@ -1041,6 +1093,8 @@ ggaze_viewer_pinch_begin(GgazeViewer *p_viewer, gdouble d_cx, gdouble d_cy,
                          gboolean b_touchpad) {
    g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
    gboolean b_from_drag = p_viewer->b_dragging && !p_viewer->b_drag_dead;
+   /* Whether a tool must undo that drag should this turn out a tap. */
+   p_viewer->b_pinch_from_tool = b_from_drag && p_viewer->b_drag_to_overlay;
    /* The first finger's drag is over: it becomes half of this pinch. Deny
     * it to GTK too, so the gesture ends for real rather than panning (or
     * dragging the crop rectangle) under the pinch. */
@@ -1056,6 +1110,7 @@ ggaze_viewer_pinch_begin(GgazeViewer *p_viewer, gdouble d_cx, gdouble d_cy,
    p_viewer->b_pinch_can_tap = !b_touchpad;
    p_viewer->b_swipe_spoiled = TRUE;
    p_viewer->d_pinch_zoom0   = _current_scale(p_viewer);
+   _view_save(p_viewer, &p_viewer->t_pinch0);
    p_viewer->d_pinch_cx0     = d_cx;
    p_viewer->d_pinch_cy0     = d_cy;
    p_viewer->d_pinch_last_cx = d_cx;
@@ -1101,6 +1156,16 @@ _pinch_follow(GgazeViewer *p_v, gdouble d_cx, gdouble d_cy) {
    gtk_widget_queue_draw(GTK_WIDGET(p_v));
 }
 
+/* TRUE while a pinch that began over a fitted picture has zoomed it by no
+ * more than a two-finger tap may wobble (GESTURE_TAP_MAX_SCALE_DEV): the
+ * fit detent. A non-finite scale is outside it (and then refused by the
+ * zoom, as ever). */
+static gboolean
+_pinch_in_fit_detent(const GgazeViewer *p_v, gdouble d_scale) {
+   return (p_v->t_pinch0.b_fit &&
+           fabs(d_scale - 1.0) <= GESTURE_TAP_MAX_SCALE_DEV);
+}
+
 void
 ggaze_viewer_pinch_update(GgazeViewer *p_viewer, gdouble d_scale, gdouble d_cx,
                           gdouble d_cy) {
@@ -1121,6 +1186,18 @@ ggaze_viewer_pinch_update(GgazeViewer *p_viewer, gdouble d_scale, gdouble d_cx,
    if (!isfinite(d_cx) || !isfinite(d_cy)) {
       return;
    }
+   if (_pinch_in_fit_detent(p_viewer, d_scale)) {
+      /* A two-finger pan over a fitted picture: GtkGestureZoom reports a
+       * scale a little off 1 on every move, and zooming by it would turn
+       * fit off for good (`0`, a resize refit, a swipe all read b_fit).
+       * The picture fits: it has nothing to pan, so it stays as the pinch
+       * found it -- also after a pinch out and back. The midpoint is
+       * still tracked, so a real zoom that follows starts from here. */
+      _view_restore(p_viewer, &p_viewer->t_pinch0);
+      p_viewer->d_pinch_last_cx = d_cx;
+      p_viewer->d_pinch_last_cy = d_cy;
+      return;
+   }
    gdouble d_zoom;
    if (gesture_math_pinch_zoom(p_viewer->d_pinch_zoom0, d_scale, &d_zoom)) {
       _zoom_at(p_viewer, p_viewer->d_pinch_last_cx, p_viewer->d_pinch_last_cy,
@@ -1135,8 +1212,10 @@ ggaze_viewer_pinch_end(GgazeViewer *p_viewer) {
    if (!p_viewer->b_pinching) {
       return (FALSE);
    }
-   p_viewer->b_pinching = FALSE;
-   gint64 i_dur         = g_get_monotonic_time() - p_viewer->i_pinch_start_us;
+   gboolean b_from_tool        = p_viewer->b_pinch_from_tool;
+   p_viewer->b_pinching        = FALSE;
+   p_viewer->b_pinch_from_tool = FALSE;
+   gint64 i_dur = g_get_monotonic_time() - p_viewer->i_pinch_start_us;
    if (!p_viewer->b_pinch_can_tap ||
        !gesture_math_is_two_finger_tap(i_dur, p_viewer->d_pinch_max_move,
                                        p_viewer->d_pinch_max_dev)) {
@@ -1145,11 +1224,17 @@ ggaze_viewer_pinch_end(GgazeViewer *p_viewer) {
    /* A tap is not a zoom: the few percent two resting fingers wobble by,
     * and the few px they (or the first finger alone) pan by, are undone,
     * and a fitted view stays fitted (so a later resize still refits it). */
-   p_viewer->b_fit   = p_viewer->b_pre_fit;
-   p_viewer->d_zoom  = p_viewer->d_pre_zoom;
-   p_viewer->d_pan_x = p_viewer->d_pre_pan_x;
-   p_viewer->d_pan_y = p_viewer->d_pre_pan_y;
-   gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
+   _view_restore(p_viewer, &p_viewer->t_pre);
+   /* Nor is it an edit: when the first finger was dragging a tool (the
+    * crop rectangle's corner), the tool puts back what that finger's
+    * jitter did before the CANCEL (viewer.h, DRAG_REVERT). The point is
+    * where that drag last was. */
+   if (b_from_tool && p_viewer->fn_drag != NULL) {
+      p_viewer->fn_drag(GGAZE_VIEWER_DRAG_REVERT,
+                        p_viewer->d_drag_start_x + p_viewer->d_drag_dx,
+                        p_viewer->d_drag_start_y + p_viewer->d_drag_dy,
+                        p_viewer->p_overlay_data);
+   }
    g_signal_emit(p_viewer, u_toggle_info_sig, 0);
    return (TRUE);
 }

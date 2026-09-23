@@ -206,6 +206,64 @@ test_pinch_pans_with_the_midpoint(void) {
    fx_close(&fx);
 }
 
+/* A two-finger pan over a FITTED picture (GtkGestureZoom reports a scale
+ * a hair off 1 on every move) keeps it fitted -- it has nothing to pan --
+ * so `0` still goes to 100 % and a swipe still turns the page (zoomed by
+ * 1.01 it would be "wider than the widget" and refused). A pinch out and
+ * back within the same wobble returns to fit too (zb2 second review). */
+static void
+test_two_finger_pan_keeps_fit(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   gdouble d_fit = ggaze_viewer_get_scale(fx.p_viewer);
+   gdouble d_px, d_py;
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.01, 360.0, 205.0);
+   ggaze_viewer_pinch_update(fx.p_viewer, 0.99, 420.0, 210.0);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer)); /* it moved */
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, d_fit);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 0.0);
+   g_assert_cmpfloat(d_py, ==, 0.0);
+   /* Out to 1.5x and back to 1.02x: fitted again, not 1.02 x fit. */
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.5, 300.0, 200.0);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), >, d_fit);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.02, 340.0, 200.0);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, d_fit);
+   /* Still fitted: the swipe navigates. */
+   g_assert_cmpint(ggaze_viewer_swipe(fx.p_viewer, -200.0, 10.0, -900.0, 0.0),
+                   ==, 1);
+   GGTEST_WAIT_FOR_TEXTURE(fx.p_win, B_W, B_H);
+   fx_close(&fx);
+}
+
+/* Pinching further out at the 6400 % ceiling zooms no more, but the picture
+ * still moves with the fingers: the image pixel under the midpoint stays
+ * under it as the midpoint moves (zb2 second review). */
+static void
+test_pinch_at_max_zoom_still_pans(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1e9, 300.0, 200.0);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, GGAZE_ZOOM_MAX);
+   gdouble d_ix0, d_iy0, d_ix, d_iy, d_px0, d_py0, d_px, d_py;
+   image_point_at(fx.p_viewer, 300.0, 200.0, &d_ix0, &d_iy0);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px0, &d_py0);
+   ggaze_viewer_pinch_update(fx.p_viewer, 2e9, 330.0, 215.0);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, GGAZE_ZOOM_MAX);
+   image_point_at(fx.p_viewer, 330.0, 215.0, &d_ix, &d_iy);
+   g_assert_cmpfloat(fabs(d_ix - d_ix0), <, 1e-6);
+   g_assert_cmpfloat(fabs(d_iy - d_iy0), <, 1e-6);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(fabs(d_px - d_px0 - 30.0), <, 1e-6);
+   g_assert_cmpfloat(fabs(d_py - d_py0 - 15.0), <, 1e-6);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   fx_close(&fx);
+}
+
 /* The wheel's clamp (2 %..6400 %) and its hx0 guards apply to a pinch:
  * NaN / Inf / zero / negative scales and a non-finite midpoint change
  * nothing, and an update or end without a begin is ignored. */
@@ -538,6 +596,88 @@ test_new_texture_or_unmap_ends_the_pinch(void) {
    fx_close(&fx);
 }
 
+/* A two-finger TAP whose first finger was dragging a tool: the tool gets
+ * the CANCEL when the second lands and then, as the pinch ends as a tap, a
+ * DRAG_REVERT at the same point (viewer.h), so it can undo the jitter. A
+ * pinch that is no tap sends none (zb2 second review). */
+static void
+test_tap_reverts_a_tool_drag(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   DragLog t_log = {0};
+   ggaze_viewer_set_overlay(fx.p_viewer, NULL, log_drag_cb, &t_log);
+   GtkEventController *p_drag =
+      controller_of(fx.p_viewer, GTK_TYPE_GESTURE_DRAG);
+   g_signal_emit_by_name(p_drag, "drag-begin", 100.0, 100.0);
+   g_signal_emit_by_name(p_drag, "drag-update", 3.0, 2.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 100.0, FALSE);
+   g_assert_cmpint(t_log.e_last, ==, GGAZE_VIEWER_DRAG_CANCEL);
+   g_assert_true(ggaze_viewer_pinch_end(fx.p_viewer));
+   g_assert_cmpuint(t_log.u_calls, ==, 4);
+   g_assert_cmpint(t_log.e_last, ==, GGAZE_VIEWER_DRAG_REVERT);
+   g_assert_cmpfloat(t_log.d_last_x, ==, 103.0);
+   g_signal_emit_by_name(p_drag, "drag-end", 3.0, 2.0);
+   g_assert_cmpuint(t_log.u_calls, ==, 4);
+   /* A real pinch: CANCEL only. */
+   g_signal_emit_by_name(p_drag, "drag-begin", 100.0, 100.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 100.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.5, 150.0, 100.0);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   g_assert_cmpuint(t_log.u_calls, ==, 6);
+   g_assert_cmpint(t_log.e_last, ==, GGAZE_VIEWER_DRAG_CANCEL);
+   g_signal_emit_by_name(p_drag, "drag-end", 0.0, 0.0);
+   ggaze_viewer_set_overlay(fx.p_viewer, NULL, NULL, NULL);
+   fx_close(&fx);
+}
+
+/* An unmap in the middle of a tool drag CANCELs it (the tool is told), and
+ * the rest of that drag reaches nobody after the remap; a pinch then is a
+ * fresh one -- not "from the drag": it sends no second CANCEL, it is a
+ * tap on its own time, and it sends no REVERT for a drag it did not take
+ * over. A new texture in the middle of a pan drag ends it the same way:
+ * what the finger reports next pans nothing (zb2 second review). */
+static void
+test_unmap_or_new_texture_ends_a_drag(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   DragLog t_log = {0};
+   ggaze_viewer_set_overlay(fx.p_viewer, NULL, log_drag_cb, &t_log);
+   GtkEventController *p_drag =
+      controller_of(fx.p_viewer, GTK_TYPE_GESTURE_DRAG);
+   g_signal_emit_by_name(p_drag, "drag-begin", 100.0, 100.0);
+   g_signal_emit_by_name(p_drag, "drag-update", 3.0, 2.0);
+   gtk_widget_set_visible(GTK_WIDGET(fx.p_viewer), FALSE);
+   g_assert_cmpuint(t_log.u_calls, ==, 3);
+   g_assert_cmpint(t_log.e_last, ==, GGAZE_VIEWER_DRAG_CANCEL);
+   gtk_widget_set_visible(GTK_WIDGET(fx.p_viewer), TRUE);
+   g_signal_emit_by_name(p_drag, "drag-update", 10.0, 0.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 100.0, FALSE);
+   g_assert_true(ggaze_viewer_pinch_end(fx.p_viewer));
+   g_signal_emit_by_name(p_drag, "drag-end", 10.0, 0.0);
+   g_assert_cmpuint(t_log.u_calls, ==, 3);
+   ggaze_viewer_set_overlay(fx.p_viewer, NULL, NULL, NULL);
+   /* A pan drag at 100 %, then a new texture under it. */
+   ggaze_viewer_toggle_fit_100(fx.p_viewer);
+   gdouble d_px, d_py;
+   g_signal_emit_by_name(p_drag, "drag-begin", 100.0, 100.0);
+   g_signal_emit_by_name(p_drag, "drag-update", 20.0, 0.0);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 20.0);
+   GBytes *p_px =
+      g_bytes_new_take(g_malloc0((gsize)B_W * B_H * 4), (gsize)B_W * B_H * 4);
+   GdkTexture *p_tex = gdk_memory_texture_new(B_W, B_H, GDK_MEMORY_R8G8B8A8,
+                                              p_px, (gsize)B_W * 4);
+   g_bytes_unref(p_px);
+   ggaze_viewer_set_texture(fx.p_viewer, p_tex);
+   g_signal_emit_by_name(p_drag, "drag-update", 60.0, 0.0);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 0.0);
+   g_signal_emit_by_name(p_drag, "drag-end", 60.0, 0.0);
+   g_object_unref(p_tex);
+   ggtest_drain_main(200);
+   fx_close(&fx);
+}
+
 /* --- swipe --------------------------------------------------------------- */
 
 static gboolean
@@ -651,6 +791,10 @@ main(int i_argc, char **c_argv) {
                    test_pinch_clamps_and_guards);
    g_test_add_func("/gestures/pinch_pans_with_the_midpoint",
                    test_pinch_pans_with_the_midpoint);
+   g_test_add_func("/gestures/two_finger_pan_keeps_fit",
+                   test_two_finger_pan_keeps_fit);
+   g_test_add_func("/gestures/pinch_at_max_zoom_still_pans",
+                   test_pinch_at_max_zoom_still_pans);
    g_test_add_func("/gestures/zoom_controller_drives_the_pinch",
                    test_zoom_controller_drives_the_pinch);
    g_test_add_func("/gestures/swipe_controller_navigates_unless_spoiled",
@@ -667,6 +811,10 @@ main(int i_argc, char **c_argv) {
                    test_touchpad_pinch_is_never_a_tap);
    g_test_add_func("/gestures/new_texture_or_unmap_ends_the_pinch",
                    test_new_texture_or_unmap_ends_the_pinch);
+   g_test_add_func("/gestures/tap_reverts_a_tool_drag",
+                   test_tap_reverts_a_tool_drag);
+   g_test_add_func("/gestures/unmap_or_new_texture_ends_a_drag",
+                   test_unmap_or_new_texture_ends_a_drag);
    g_test_add_func("/gestures/swipe_navigates", test_swipe_navigates);
    g_test_add_func("/gestures/swipe_and_wheel_stop_the_slideshow",
                    test_swipe_and_wheel_stop_the_slideshow);

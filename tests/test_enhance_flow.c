@@ -3895,7 +3895,10 @@ viewer_drag_gesture(GgazeViewer *p_v) {
  * tool (`R`) makes a pinch, and the line is dropped: the viewer sends a
  * CANCEL, not an END (viewer.h), so the first finger's (1, 1) px jitter --
  * a 45 degree line -- levels nothing: no render, no angle in the title,
- * and the tool stays up. The rest of that drag reaches the tool neither. */
+ * and the tool stays up. The rest of that drag reaches the tool neither.
+ * What proves the line was DROPPED (not merely never ended): a stray END
+ * with no BEGIN, straight into the tool, still levels nothing -- with the
+ * line kept it would level by the jitter (zb2 second review). */
 static void
 test_pinch_in_straighten_levels_nothing(void) {
    ToolFx fx;
@@ -3919,6 +3922,50 @@ test_pinch_in_straighten_levels_nothing(void) {
    g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, u_before);
    g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, d_x0 + 1.0,
+                          d_y0 + 1.0);
+   ggtest_drain_main(300);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, u_before);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   tool_fx_close(&fx);
+}
+
+/* A two-finger TAP in the crop tool whose first finger landed on the
+ * rectangle's corner and jittered before the second landed: the pinch
+ * CANCELs that drag (keeping the jittered rectangle, as a real pinch
+ * would), and when it ends as a tap the viewer sends a DRAG_REVERT, so
+ * the rectangle is what it was before the first finger went down -- a
+ * tap edits nothing (zb2 second review). */
+static void
+test_tap_in_crop_leaves_the_rect(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop");
+   GgazeViewer    *p_v = large_viewer(fx.p_win);
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   CropRect t_before, t_after;
+   gint     i_bw, i_bh;
+   g_assert_true(
+      ggaze_window_tool_crop_rect(fx.p_win, &t_before, &i_bw, &i_bh));
+   GtkEventController *p_drag = viewer_drag_gesture(p_v);
+   gdouble             d_cx   = g.d_x + TOOL_W * g.d_scale;
+   gdouble             d_cy   = g.d_y + TOOL_H * g.d_scale;
+   g_signal_emit_by_name(p_drag, "drag-begin", d_cx, d_cy);
+   g_signal_emit_by_name(p_drag, "drag-update", -6.0, -4.0); /* jitter */
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_after, &i_bw, &i_bh));
+   g_assert_cmpfloat(t_after.d_w, <, t_before.d_w); /* the jitter landed */
+   ggaze_viewer_pinch_begin(p_v, d_cx - 40.0, d_cy - 20.0, FALSE);
+   ggaze_viewer_pinch_update(p_v, 1.02, d_cx - 39.0, d_cy - 20.0);
+   g_assert_true(ggaze_viewer_pinch_end(p_v)); /* a tap */
+   g_signal_emit_by_name(p_drag, "drag-end", -6.0, -4.0);
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_after, &i_bw, &i_bh));
+   g_assert_cmpfloat(t_after.d_x, ==, t_before.d_x);
+   g_assert_cmpfloat(t_after.d_y, ==, t_before.d_y);
+   g_assert_cmpfloat(t_after.d_w, ==, t_before.d_w);
+   g_assert_cmpfloat(t_after.d_h, ==, t_before.d_h);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    tool_key(fx.p_win, GDK_KEY_Escape);
    tool_fx_close(&fx);
 }
@@ -5091,6 +5138,8 @@ add_tool_review_tests(void) {
                    test_pinch_in_straighten_levels_nothing);
    g_test_add_func("/enhance_flow/pinch_in_crop_keeps_the_dragged_rect",
                    test_pinch_in_crop_keeps_the_dragged_rect);
+   g_test_add_func("/enhance_flow/tap_in_crop_leaves_the_rect",
+                   test_tap_in_crop_leaves_the_rect);
 }
 
 /* wb2 second review round: a discard ends the tool first, the crop tool

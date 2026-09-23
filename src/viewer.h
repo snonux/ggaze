@@ -144,7 +144,16 @@ typedef enum {
     * made); the crop tool lets go and keeps the rectangle as the last
     * UPDATE left it (what the user saw while dragging). Its coordinates
     * are the last ones the drag reported. */
-   GGAZE_VIEWER_DRAG_CANCEL
+   GGAZE_VIEWER_DRAG_CANCEL,
+   /* After a CANCEL: the pinch that took the drag over ended as a
+    * two-finger tap, so the drag was the tap's first finger and nothing
+    * the user meant -- put back what it changed since its BEGIN (the crop
+    * tool restores the rectangle it grabbed; the straighten tool, whose
+    * CANCEL already dropped the line, has nothing to undo). Sent at most
+    * once, only to the overlay installed when the tap ends, which may not
+    * be the one that got the BEGIN (then it has nothing of that drag to
+    * undo and ignores it). Its coordinates are the CANCEL's. */
+   GGAZE_VIEWER_DRAG_REVERT
 } GgazeViewerDragPhase;
 
 /* Paint on top of the image. p_geom is the geometry the image was just drawn
@@ -154,10 +163,18 @@ typedef void (*GgazeViewerOverlayFn)(GtkSnapshot           *p_snap,
                                      gpointer               p_data);
 
 /* A pointer drag, in ABSOLUTE widget coordinates (begin: where it started;
- * update/end/cancel: where the pointer is now). A BEGIN is followed by at
- * most one END or CANCEL, never both (neither when the overlay is removed
- * mid-drag). While an overlay is installed the
- * drag gesture feeds this instead of panning. */
+ * update/end/cancel/revert: where the pointer is now, or last was). A
+ * BEGIN is followed by at most one END or CANCEL, never both (neither when
+ * the overlay is removed mid-drag); a CANCEL may be followed by one
+ * REVERT. A drag is also CANCELled when a new texture is set or the viewer
+ * is unmapped mid-drag (the rest of that drag then reaches nobody). While
+ * an overlay is installed the drag gesture feeds this instead of panning.
+ * The phases arrive per drag, not per overlay: an overlay installed
+ * mid-drag, in place of the one that got the BEGIN (a tool switched by
+ * key while the finger is down), receives that drag's UPDATE / END /
+ * CANCEL / REVERT without ever having seen its BEGIN, so a callback must
+ * tolerate that -- both tools ignore a phase with no grab or line of
+ * their own (tool-ctrl.c). */
 typedef void (*GgazeViewerDragFn)(GgazeViewerDragPhase e_phase, gdouble d_x,
                                   gdouble d_y, gpointer p_data);
 
@@ -196,8 +213,13 @@ void ggaze_viewer_set_scroll_behavior(GgazeViewer        *p_viewer,
  * two-finger tap instead -- when a one-finger drag came first, its time
  * and movement count, from that drag's start: the view goes back to what
  * it was before the first finger went down and "toggle-info" is emitted;
- * end returns TRUE then. update / end without a begin do nothing, and a
- * set_texture or an unmap in between ends the pinch (no tap, no zoom). */
+ * end returns TRUE then, and a tool whose drag the pinch took over gets a
+ * DRAG_REVERT after its CANCEL. A pinch that began over a fitted picture
+ * keeps it fitted while its scale stays within a tap's wobble of 1
+ * (GESTURE_TAP_MAX_SCALE_DEV): a two-finger pan reports such scales, and
+ * a fitted picture has nothing to pan. update / end without a begin do
+ * nothing, and a set_texture or an unmap in between ends the pinch (no
+ * tap, no zoom) and any drag (a tool gets a CANCEL). */
 void ggaze_viewer_pinch_begin(GgazeViewer *p_viewer, gdouble d_cx, gdouble d_cy,
                               gboolean b_touchpad);
 void ggaze_viewer_pinch_update(GgazeViewer *p_viewer, gdouble d_scale,
