@@ -210,12 +210,13 @@ ggaze matched on `G_FILE_ERROR`; callers that only check the domain
 ### Animated GIF / WebP (task yb2)
 
 **Shape.** The loader's contract stays "one `GdkTexture` per file". For a
-multi-frame GIF/WebP that texture is the **first frame** and the
-`GdkPixbufAnimation` rides on it as GObject qdata
-(`src/loader/animation.{c,h}`, `animation_attach` / `animation_lookup`, one
+multi-frame GIF/WebP that texture is the **first frame**, and the other
+frames ride on it as GObject qdata: a `GgazeAnimation`
+(`src/loader/animation.{c,h}`: one immutable `GdkTexture` per later frame
+plus every frame's delay; `animation_attach` / `animation_lookup`, one
 quark). Only `GgazeViewer` looks for it. Consequences, all by construction
-rather than by special-casing: the texture LRU bounds the animation with
-the texture it belongs to (cap 4, evicted together); prefetch caches it like
+rather than by special-casing: the texture LRU bounds the frames with the
+texture they belong to (cap 4, evicted together); prefetch caches them like
 any still; last-write-wins is unchanged; the grid's at-scale decode, the
 histogram, the enhance graph, the crop/straighten/rotate tools, the
 clipboard's `image/png` and hold-`Space` compare all operate on the first
@@ -227,57 +228,115 @@ animation restarts from frame one, the same rule under which zoom resets.
 `animation_probe()` walks a GIF's blocks (image descriptors, skipping
 extensions, colour tables and LZW sub-blocks by their length prefixes) or a
 WebP's RIFF chunks (the VP8X animation flag, one ANMF chunk per frame) and
-reports the frame count and the canvas. Two or more frames, and
-`animation_within_budget()` — frames × canvas ≤ `GGAZE_ANIM_MAX_PIXELS`
-(= `GGAZE_IMAGE_MAX_PIXELS`, 100 M pixels, i.e. 400 MB RGBA once every
-frame is held: the same worst case the cache already allows a still) — is
-what makes the pixbuf backend ask `GdkPixbufLoader` for its animation
-instead of its pixbuf. Everything else, including an animation over budget,
-takes the still path byte-for-byte as before: the first frame, nothing
-attached. A decoder that returns a static image for a probed animation (a
-webp module without frame support) also attaches nothing — the still is
-right, only the motion is missing. The walk is O(file), runs on the decode
-thread over the already-gated bytes, and never over-reads
-(`tests/test_animation.c` probes every prefix of both fixtures under ASan).
-No EXIF orientation is applied on the animated path: GIF has none, and a
-rotated first frame over unrotated frames would be wrong twice.
+reports the frame count and the canvas. Two or more frames within
+`animation_within_budget()` is what makes the pixbuf backend ask
+`GdkPixbufLoader` for its animation instead of its pixbuf. The budget has
+three parts: frames × canvas ≤ `GGAZE_ANIM_MAX_PIXELS` (=
+`GGAZE_IMAGE_MAX_PIXELS`, 100 M pixels, i.e. 400 MB RGBA with every frame
+held: the same worst case the cache already allows a still), a canvas of at
+most `GGAZE_ANIM_MAX_CANVAS_PIXELS` (4 Mi pixels, e.g. 2048 × 2048: each
+frame is uploaded on the main thread the first time it is drawn, 16 MiB at
+that size), and at most `GGAZE_ANIM_MAX_FRAMES` (1000; a crafted
+200 000-frame 1 × 1 GIF passes the pixel budget but not this). Everything
+else, including an animation over any part of the budget, takes the still
+path byte-for-byte as before: the first frame, nothing attached, a
+`g_debug` line saying so. A decoder that returns a static image for a
+probed animation (a webp module without frame support) also attaches
+nothing — the still is right, only the motion is missing. The walk is
+O(file), runs on the decode thread over the already-gated bytes, and never
+over-reads (`tests/test_animation.c` probes every prefix of both fixtures
+under ASan). No EXIF orientation is applied on the animated path: GIF has
+none, and a rotated first frame over unrotated frames would be wrong twice.
 
-**Playback** is the viewer's: `gdk_pixbuf_animation_get_iter()`, one
-`g_timeout_add()` per frame at the iterator's delay clamped by
-`animation_frame_delay_ms()` (never under `GGAZE_ANIM_MIN_DELAY_MS`, 20 ms —
-GIF stores delays in 10 ms units and 0 is common; browsers clamp the same
-way), `gdk_pixbuf_animation_iter_advance(NULL)` skipping ahead if the main
-loop was held up, and `pixbuf_util_to_texture()` per frame. Frames are
-drawn at the first frame's geometry (they are the canvas size), so zoom,
-pan, the fit ratio and the tool overlay's `GgazeViewerGeom` describe the
-canvas throughout. It runs only while the widget is mapped (`map`/`unmap`
+**Decode: every frame, once, on the worker.**
+`pixbuf_util_animation_to_texture()` steps a `GdkPixbufAnimationIter`
+through the probed number of frames on the decode thread and turns each
+into a texture of its own. Three things about gdk-pixbuf make this step
+more than a loop, all measured:
+
+- **The pixels must be copied.** gdk-pixbuf 2.42's own GIF loader (CI's
+  fedora:40, Debian trixie's 2.42.12) keeps the compressed data and
+  composites each frame **on demand into one shared buffer**, which
+  `gdk_pixbuf_animation_get_static_image()` and every iterator hand out.
+  A texture wrapping that buffer changes under its consumers at the next
+  advance: the cached "first frame" read back as the last frame drawn, and
+  the histogram and enhance workers read it while the main thread redrew
+  it (review finding 1 of yb2, reproduced on 2.42.12). Every frame texture
+  therefore owns a copy (`gdk_pixbuf_copy`; an opaque pixbuf is copied by
+  the alpha conversion anyway). glycin's frames are separate pixbufs, but
+  the copy is what makes the guarantee independent of the decoder.
+- **The clock is synthetic,** and each frame is sampled 1 ms into its slot:
+  glycin's iterator treats a slot's start as the previous frame's (sampling
+  exactly at a boundary showed frame 0 twice and lost frame 3), 2.42's as
+  the new one's.
+- **`get_delay_time()` means two things.** 2.42's GIF iterator reports the
+  time *left* in the current frame (100, then 99 a millisecond later);
+  glycin's bridge and webp-pixbuf-loader 0.2.7 report the frame's whole
+  delay. `_iter_counts_down()` asks twice inside frame 0 to tell which, and
+  the walk adds the 1 ms sampling offset back for the first kind, so every
+  frame keeps the delay the file gave it. Both report a 0 ms GIF delay as
+  100 ms.
+
+The cost of taking the frames up front is load latency: the first frame
+appears once the whole walk is done. Measured with a synthetic noisy GIF,
+120 frames of 640×480 took ~0.3–0.5 s on Fedora 44 (glycin) and ~1 s on
+2.42.12 (Debian trixie container); 10 frames of 2048×2048 took ~0.3 s and
+~1 s. The walk checks the load's `GCancellable` between frames, so `h`/`l`
+past an animation stops its decode at the next frame, and the neighbour
+prefetch pays it off the main thread. Memory is frames × canvas × 4 — RSS
+after one loop of a 120-frame 640×480 animation was 160 MB — which is what
+the pixel budget bounds.
+
+**Playback** is the viewer's, and it only picks which of those immutable
+textures to draw. A tick callback on the widget's frame clock
+(`gtk_widget_add_tick_callback`) compares the frame time with when the
+next frame is due and switches the index; the due time advances by each
+frame's delay clamped by `animation_frame_delay_ms()` (never under
+`GGAZE_ANIM_MIN_DELAY_MS`, 20 ms — GIF stores delays in 10 ms units and 0
+is common; browsers clamp the same way), and restarts from "now" after a
+stall rather than racing through the missed frames. **Per-frame
+main-thread cost** is therefore a comparison and a redraw — no decode, no
+composition, no pixel copy — plus, the first time each frame is drawn, the
+renderer's upload of that texture (≤ 16 MiB at the canvas cap); later
+loops draw the uploaded textures again instead of creating new ones. (The
+first version of this feature composited and wrapped a fresh texture per
+tick on the main thread: 1-2 ms per 640×480 frame on glycin, but ~130 ms
+per 3000×3000 frame, and a new upload every loop forever — review finding
+4.) Frames are drawn at the first frame's geometry (they are the canvas
+size), so zoom, pan, the fit ratio and the tool overlay's `GgazeViewerGeom`
+describe the canvas throughout. A delay of -1 (a non-looping GIF on its
+last frame) removes the tick callback and the frame holds. Because the walk
+takes one pass of the frames, a GIF whose loop count is finite but more
+than one plays for ever; one that plays once holds its last frame.
+
+**When it plays.** Only while the widget is mapped (`map`/`unmap`
 vfuncs): the grid page, an unpresented window and a destroyed one cost no
-frames. A delay of -1 (a non-looping GIF on its last frame) ends the
-schedule and the frame holds.
-
-**What the decoder does per frame, measured on this tree.** With
-gdk-pixbuf's in-process GIF loader (fedora:40, 2.42) every frame is
-decoded up front on the decode thread and `advance` is a composition.
-With a glycin-backed gdk-pixbuf (Fedora 44, 2.44) both GIF and WebP come
-back as `GdkPixbufGlycinAnimation`; the first pass over the frames fetches
-each from the sandboxed loader on demand — 1-2 ms per 640×480 frame on the
-main thread, worst 6 ms — after which the frames are cached and a step is
-~0. RSS after one loop of a 120-frame 640×480 animation was 160 MB, i.e.
-frames × canvas × 4: that is what the pixel budget bounds.
+frames. The ticks come from the toplevel's frame clock, which GDK stops
+driving for a surface that is not being presented — a minimized window, or
+on Wayland one the compositor sends no frame callbacks (e.g. fully
+covered) — and playback pauses with it; a partly covered window keeps
+playing. It holds the first frame while a crop / straighten tool is up
+(`ggaze_viewer_hold_first_frame`, called by `tool-ctrl.c`), since the tool
+lays out and applies against the first frame, and resumes from the first
+frame when the tool ends.
 
 **The gdk-pixbuf animation API is deprecated in 2.44** in favour of
 glycin's own, which fedora:40 does not ship and ggaze does not depend on;
-the three call sites silence the deprecation per call
-(`G_GNUC_BEGIN_IGNORE_DEPRECATIONS`) with a note saying why. Moving the
-viewer onto `GlyImage` frames is a possible follow-up once the minimum
-platform has glycin.
+the calls live in `src/loader/pixbuf-util.c` alone, which silences the
+deprecation per call site or section (`G_GNUC_BEGIN_IGNORE_DEPRECATIONS`)
+with a note saying why. Moving the decode onto `GlyImage` frames is a
+possible follow-up once the minimum platform has glycin.
 
 **WebP gap.** Animated WebP needs a gdk-pixbuf that decodes WebP frames:
-Fedora ≥ 41's glycin bridge does (verified here); the separate
-`webp-pixbuf-loader` does from 0.0.5 on; CI's fedora:40 image installs no
-WebP module at all, so there a WebP does not open and the WebP subtests
-skip, exactly as the existing WebP decode tests do. The GIF path is
-covered on every lane.
+Fedora ≥ 41's glycin bridge does (verified here), and so does the separate
+`webp-pixbuf-loader` (0.2.7 verified in a Debian trixie container). That
+module cannot iterate a WebP cut mid-frame and logs a warning plus a
+GdkPixbuf critical from inside `gdk_pixbuf_loader_write()`/`close()` before
+failing the decode; `/loader/pixbuf/truncated_animation_is_gated`
+tolerates exactly those two messages during its WebP decode. CI's
+fedora:40 image installs no WebP module at all, so there a WebP does not
+open and the WebP subtests skip, exactly as the existing WebP decode tests
+do. The GIF path is covered on every lane.
 
 ## Progressive preview (low-res first)
 

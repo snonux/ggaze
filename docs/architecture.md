@@ -35,8 +35,8 @@ ggaze
 ├── loader/
 │   ├── loader.{c,h}      # sync + async load API; sniff, dispatch, explicit pixbuf fallback
 │   ├── detect.{c,h}      # sniff format from contents (magic), not extension; dimension caps
-│   ├── animation.{c,h}   # animated GIF/WebP: decoder-free frame probe, pixel budget, delay clamp, texture <-> GdkPixbufAnimation channel
-│   ├── pixbuf-util.{c,h} # GdkPixbuf -> upright GdkTexture (shared by three decoders); bytes -> pixbuf / animation decode
+│   ├── animation.{c,h}   # animated GIF/WebP: decoder-free frame probe, playback budget, delay clamp, frame store, texture <-> frames channel
+│   ├── pixbuf-util.{c,h} # GdkPixbuf -> upright GdkTexture (shared by three decoders); bytes -> pixbuf / animation decode; animation -> one owned texture per frame
 │   └── backends/         # one file per format family, behind a backend struct
 │       ├── pixbuf.c      # fallback via GdkPixbuf (PNG/GIF/WebP/TIFF/ICO, JPEG without libjpeg)
 │       ├── jpeg.c        # libjpeg-turbo: progressive low-res preview + full decode
@@ -87,12 +87,14 @@ ggaze
   via GTK4 render nodes. Holds both the raw and GEGL-processed textures;
   `Space` swaps to the raw (compare) while held. Emits "needs-next" when nearing
   the end of a preloaded set. **Plays an animated GIF/WebP** (yb2): the
-  texture it is given is that file's first frame with the
-  `GdkPixbufAnimation` attached (`loader/animation.h`), and the viewer alone
-  iterates the frames — one timeout per frame at the clamped delay, drawn
-  at the first frame's geometry, only while mapped, restarting from the
-  first frame on every `set_texture`. Every other accessor, and every other
-  module, keeps seeing the first frame.
+  texture it is given is that file's first frame with the other frames
+  attached as textures of their own (`loader/animation.h`, decoded by the
+  loader's worker), and the viewer alone steps through them — a tick
+  callback on the frame clock picks the frame due at the clamped delay,
+  drawn at the first frame's geometry, only while mapped and while the
+  frame clock runs, restarting from the first frame on every
+  `set_texture`, holding it while a crop / straighten tool is up. Every
+  other accessor, and every other module, keeps seeing the first frame.
 - **gridview** — the *thumbnail* view. A `GtkGridView` (or `GtkFlowBox`)
   backed by a `GListModel` of the navigator's files, each cell rendered from
   the `thumbnail` cache. Thumbnail size is adjustable (`+`/`-`); cells reflow
@@ -325,12 +327,13 @@ feels instant.
 - Thumbnail I/O on a low-priority thread or `GThreadPool`.
 - A bounded LRU of decoded `GdkTexture`s (e.g. 4) to bound memory on large
   folders / huge images. An animated GIF/WebP is one entry like any still —
-  its first frame, with the `GdkPixbufAnimation` riding on that texture and
-  evicted with it; what such an entry may hold once every frame is decoded
-  is bounded by the pixel budget in `loader/animation.h` (frames × canvas ≤
-  the still cap). Frame playback happens on the main thread (a composition
-  and a texture upload per frame; with glycin, an on-demand fetch of ~1-2 ms
-  on the first pass) — the decode itself stays on the `GTask` thread.
+  its first frame, with the other frames riding on that texture and
+  evicted with it; what such an entry may hold is bounded by the playback
+  budget in `loader/animation.h` (frames × canvas ≤ the still cap, a canvas
+  ≤ 4 Mi pixels, ≤ 1000 frames). Every frame is decoded and copied into a
+  texture of its own on the `GTask` thread; playback on the main thread
+  only picks which texture to draw (plus the renderer's one-time upload of
+  each frame).
   The enhance controller may hold two more outside
   that cap — the current file's original as the viewer last showed it (the
   identity the tools and hold-`Space` compare against, learned at the
