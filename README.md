@@ -7,7 +7,9 @@ and KISS — no library, no database, no sidecars. The layout nods to gthumb
 (header bar, thumbnail grid, full-window viewer) without the weight.
 
 > **Status:** usable for its core job (browse, cull, move, open externally,
-> run scripts, quick GEGL enhance, crop / straighten / rotate 90°).
+> run scripts, quick GEGL enhance, crop / straighten / rotate 90°). Animated
+> GIF/WebP play in the large view; thumbnails and everything else use the
+> first frame.
 
 ## Quick start
 

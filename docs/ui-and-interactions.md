@@ -54,6 +54,25 @@ large→grid scrolls that cell into view and focuses it. **Marks persist across
 views** (a check badge in grid, an indicator in large), so you can mark in
 detail view and move from either.
 
+### Animated GIF / WebP
+
+- An animated GIF (or WebP, where gdk-pixbuf decodes its frames) **plays by
+  itself in the large view**, looping as the file says, from its first frame
+  each time it is shown. There is no play/pause key: `h`/`l` away and back
+  restarts it, and the grid page (or a hidden window) pauses it — frames are
+  only produced while the picture is on screen.
+- Zoom, pan, fit and `0` work as on a still; the whole animation is one
+  picture of the canvas size.
+- The **grid thumbnail is the first frame**, and so is everything that
+  reads "the picture" rather than watches it: the `i` card's dimensions and
+  histogram, `Ctrl+c`'s `image/png`, the enhance preview and `s` export, the
+  crop / straighten / rotate tools and hold-`Space`. An enhance preview is
+  therefore static; releasing `Space` shows the animation again from its
+  first frame.
+- Frame delays under 20 ms play at 20 ms (a 0 ms GIF is common). An
+  animation whose frames × canvas would exceed the still pixel cap (100 M
+  pixels) shows its first frame only, like a still.
+
 - **Move popup** — transient, opened by `m`. Lists configured destinations,
   each with an auto-assigned hotkey (`1`-`9`, `0`, then `a`-`z` in order). Type
   the hotkey to move the marked set (or the current image if none marked);
@@ -492,6 +511,8 @@ built in, all four report "GEGL not built in".
   straighten / rotate) is active; otherwise original == modified, no-op.
 - Large view only. Works with or without the enhance panel open; the panel's
   hint names it. GUI: menu *Show original* (toggle) for mouse users.
+- On an animated GIF/WebP the modified image is a still of the first frame;
+  holding `Space` shows the original animation (from its first frame).
 
 ## Hotkey visibility
 

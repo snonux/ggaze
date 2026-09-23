@@ -301,12 +301,56 @@ bounded memory.
 **Deliverables**
 - `src/loader/backends/jxl.c`, `avif.c`, `heif.c` behind meson features;
   register into the dispatcher.
-- Animated GIF/WebP via `GdkPixbufAnimation` → `GdkPaintable`.
+- Animated GIF/WebP playback (task yb2, decision #46) — done. Not a
+  `GdkPaintable` after all: the pixbuf backend decodes a multi-frame
+  GIF/WebP as a `GdkPixbufAnimation` and returns its **first frame** as the
+  one `GdkTexture` the rest of the app expects, with the animation attached
+  to that texture (`src/loader/animation.{c,h}`: `animation_attach` /
+  `animation_lookup`, GObject qdata, one quark). `GgazeViewer` alone looks
+  for it and plays it: a `GdkPixbufAnimationIter` plus one timeout per
+  frame, each frame converted to a texture and drawn at the first frame's
+  geometry, only while mapped, restarting from the first frame on every
+  `set_texture`. So the texture LRU, prefetch, last-write-wins, the grid
+  (first frame at scale), the histogram, the enhance graph, the tools, the
+  clipboard and hold-`Space` are all unchanged and all operate on the
+  first frame. Which files take the animated path is decided by a
+  **decoder-free probe** of the bytes (`animation_probe`: GIF block walk /
+  WebP RIFF chunk walk, frames + canvas) and a **pixel budget**
+  (`animation_within_budget`: frames × canvas ≤ the still cap); anything
+  else goes down the still path byte-for-byte as before. Frame delays are
+  clamped to `GGAZE_ANIM_MIN_DELAY_MS` (20 ms).
 
 **Tests**
 - Extend `test_detect` + `test_loader_*` per backend, feature-gated.
+- Unit (yb2): `test_animation.c` — the probe over `anim.gif` /
+  `anim.webp` / `zerodelay.gif`, over EVERY prefix of them (truncation
+  never over-reads, counts monotonically), over hand-built containers (a
+  local colour table, an extension cut short, a VP8X flag with no ANMF
+  frames, a chunk size past the end), the budget at its boundary and with
+  a frame count that would wrap 32 bits, the delay clamp, the animation
+  decode (still → static animation, garbage → error) and attach/lookup
+  including the animation dying with its first frame.
+  `test_loader_pixbuf.c` `/loader/pixbuf/animated_gif_attaches_animation`,
+  `/zero_delay_gif_attaches_animation`, `/animated_webp_attaches_animation`
+  (skipped where the webp module is absent or frame-less),
+  `/single_frame_gif_has_no_animation`, `/truncated_animation_is_gated`
+  (the decode gate refuses a truncated animation; a mid-frame cut answers
+  within budget), `/scaled_animation_is_first_frame`.
+  `test_viewload.c` `/viewload/animation_rides_with_the_texture` (miss,
+  neighbour prefetch and hit all hand out the same first-frame object with
+  the animation on it; the still next to it carries none).
+- Integration (yb2): `test_viewer.c` `/viewer/animation_plays_and_keeps_
+  first_frame_texture`, `/animation_survives_zoom_pan_and_overlay` (the
+  overlay hook sees the canvas geometry while frames play),
+  `/still_image_does_not_animate`, `/animation_pauses_while_unmapped` (the
+  grid page over the viewer stops playback, coming back restarts it),
+  `/zero_delay_plays_at_the_clamp`, `/unmapped_viewer_holds_first_frame`.
 
-**Acceptance:** JXL/AVIF/HEIF open when built; minimal build still green.
+**Acceptance:** JXL/AVIF/HEIF open when built; minimal build still green;
+animated GIF (and WebP where gdk-pixbuf decodes its frames) plays in the
+large view, grid thumbnails and every other consumer use the first frame,
+static images unchanged, rapid `h`/`l` scrubbing stays instant (an
+animation is one cache entry like any still).
 
 ---
 
