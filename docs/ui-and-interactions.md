@@ -35,7 +35,9 @@ The **KISS** part — things gthumb has that ggaze deliberately drops:
 - **Drag-and-drop**: drop a file or a folder onto the window to open it — a
   folder opens the grid; a file opens it (large view, parent folder as
   navigator); multiple files open the first file's folder in the grid with the
-  first selected. A drop highlight shows the window is a drop target.
+  first selected — in one pass, like a single-file open that lands in the
+  grid: the first file is loaded once, whatever its position in the sort
+  order. A drop highlight shows the window is a drop target.
 - **`o`** opens a file dialog that can pick a file or a folder.
 
 ## Views & modes

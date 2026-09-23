@@ -5117,6 +5117,65 @@ add_tool_review7_tests(void) {
                    test_failed_reload_under_the_crop_tool_says_so);
 }
 
+/* --- gd2: a multi-file open is one pass ----------------------------------
+ *
+ * With the panel up, an open re-points it at the new file and starts one
+ * thumbnail batch for it (enhance_ctrl_nav_changed -> _retarget_panel).
+ * ggaze_window_open_files used to open the first file's FOLDER and place
+ * the cursor afterwards: for a start file not sorted first that emitted
+ * "changed" and ran the whole sequence again -- two loads and two batches,
+ * the first of each cancelled. Now the start file arrives with the folder
+ * (window.c _open_now), so the load and the batch happen once. rot6.jpg
+ * sorts after plain.jpg in the second folder: the exact case that doubled. */
+static void
+test_open_many_re_points_the_panel_once(void) {
+   Settings *p_cfg = settings_new();
+   settings_set_enhance_preview_thumbnails(p_cfg, TRUE);
+   DirtyFixture             fx      = {0};
+   static const char *const c_two[] = {"plain.jpg", "rot6.jpg", NULL};
+   fixture_open_clean(&fx, "ggaze-open-many-a-XXXXXX", c_two);
+   fire(fx.p_win, "win.enhance");
+   g_assert_nonnull(find_label_prefix(find_panel(fx.p_win), "Enhance plain"));
+   g_assert_cmpuint(ggaze_window_enhance_preview_count(fx.p_win), ==, 1);
+   guint u_loads = ggaze_window_load_count(fx.p_win);
+
+   GError *p_err   = NULL;
+   char   *c_other = g_dir_make_tmp("ggaze-open-many-b-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_other, "plain.jpg");
+   copy_fixture(c_other, "rot6.jpg");
+   GFile *pp_files[2];
+   pp_files[0] = g_file_new_build_filename(c_other, "rot6.jpg", NULL);
+   pp_files[1] = g_file_new_build_filename(c_other, "plain.jpg", NULL);
+   ggaze_window_open_files(fx.p_win, pp_files, 2); /* clean: no prompt */
+   /* Synchronous through the gate (nothing dirty): final before any
+    * main-loop iteration could deliver a second "changed". */
+   g_assert_cmpuint(ggaze_window_load_count(fx.p_win), ==, u_loads + 1);
+   g_assert_cmpuint(ggaze_window_enhance_preview_count(fx.p_win), ==, 2);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, 0);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(fx.p_win)), ==,
+      "grid");
+   g_assert_nonnull(find_label_prefix(find_panel(fx.p_win), "Enhance rot6"));
+   wait_for_texture_size(fx.p_win, 4, 8); /* the start file's own decode */
+   g_assert_cmpuint(ggaze_window_load_count(fx.p_win), ==, u_loads + 1);
+   g_assert_cmpuint(ggaze_window_enhance_preview_count(fx.p_win), ==, 2);
+
+   g_object_unref(pp_files[0]);
+   g_object_unref(pp_files[1]);
+   g_settings_reset(settings_get_gsettings(p_cfg),
+                    "enhance-preview-thumbnails");
+   settings_delete(p_cfg);
+   fixture_teardown(&fx);
+   cleanup_temp_dir(c_other);
+}
+
+static void
+add_open_many_tests(void) {
+   g_test_add_func("/enhance_flow/open_many_re_points_the_panel_once",
+                   test_open_many_re_points_the_panel_once);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -5154,5 +5213,6 @@ main(int i_argc, char **c_argv) {
    add_tool_review5_tests();
    add_tool_review6_tests();
    add_tool_review7_tests();
+   add_open_many_tests();
    return (g_test_run());
 }

@@ -20,6 +20,7 @@
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <gtk/gtk.h>
 
 static GFile *
@@ -155,6 +156,97 @@ test_open_sample_image(void) {
    g_free(c_path);
 }
 
+/* --- gd2: a multi-file open is one pass ----------------------------------
+ *
+ * ggaze_window_open_files used to open the first file's FOLDER (a full
+ * open: navigator, grid, a load of the first-sorted file) and only then
+ * place the cursor on the file, which emits "changed" for any file not at
+ * index 0 and ran the choke point and the load a second time -- two loads,
+ * one of them cancelled. Now the start file travels with the folder, so the
+ * cursor is placed before the "changed" handler exists and the load count
+ * says one. The start file here is rot6.jpg, which sorts SECOND among the
+ * copied fixtures (plain.jpg < rot6.jpg < small.png): the exact case that
+ * used to double up. Its 4x8 decode landing (not plain.jpg's 6x3) proves
+ * the one load was of the start file. */
+
+/* A fresh folder holding copies of the three named fixtures. */
+static gchar *
+make_three_fixture_dir(void) {
+   static const char *const c_names[] = {"plain.jpg", "rot6.jpg", "small.png"};
+   GError                  *p_err     = NULL;
+   gchar *c_dir = g_dir_make_tmp("ggaze-open-many-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   for (guint u = 0; u < G_N_ELEMENTS(c_names); u++) {
+      GFile *p_src = fixture_file(c_names[u]);
+      gchar *c_dst = g_build_filename(c_dir, c_names[u], NULL);
+      GFile *p_dst = g_file_new_for_path(c_dst);
+      g_assert_true(g_file_copy(p_src, p_dst, G_FILE_COPY_OVERWRITE, NULL, NULL,
+                                NULL, &p_err));
+      g_assert_no_error(p_err);
+      g_object_unref(p_src);
+      g_object_unref(p_dst);
+      g_free(c_dst);
+   }
+   return (c_dir);
+}
+
+static void
+remove_dir_with_files(const gchar *c_dir) {
+   GDir *p_dir = g_dir_open(c_dir, 0, NULL);
+   g_assert_nonnull(p_dir);
+   const gchar *c_name;
+   while ((c_name = g_dir_read_name(p_dir)) != NULL) {
+      gchar *c_path = g_build_filename(c_dir, c_name, NULL);
+      g_unlink(c_path);
+      g_free(c_path);
+   }
+   g_dir_close(p_dir);
+   g_rmdir(c_dir);
+}
+
+static void
+test_open_many_starts_on_the_given_file_once(void) {
+   gchar       *c_dir = make_three_fixture_dir();
+   GgazeWindow *p_win = new_window();
+   GFile       *pp_files[3];
+   pp_files[0] = g_file_new_build_filename(c_dir, "rot6.jpg", NULL);
+   pp_files[1] = g_file_new_build_filename(c_dir, "plain.jpg", NULL);
+   pp_files[2] = g_file_new_build_filename(c_dir, "small.png", NULL);
+   g_assert_cmpuint(ggaze_window_load_count(p_win), ==, 0);
+   ggaze_window_open_files(p_win, pp_files, 3);
+   /* Nothing is dirty, so the gate ran the open synchronously: the count is
+    * final here, before any main-loop iteration could deliver a "changed". */
+   g_assert_cmpuint(ggaze_window_load_count(p_win), ==, 1);
+   GtkStack *p_stack = ggaze_window_get_stack(p_win);
+   g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
+   /* The large view is loaded behind the grid (so `t` is instant): pump
+    * until rot6.jpg's upright 4x8 decode is what it holds. */
+   GtkWidget  *p_large = gtk_stack_get_child_by_name(p_stack, "large");
+   GdkTexture *p_tex   = NULL;
+   for (guint u = 0; u < 3000; u++) {
+      p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_large));
+      if (p_tex != NULL && gdk_texture_get_width(p_tex) == 4) {
+         break;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_nonnull(p_tex);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 4);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 8);
+   /* Nothing touched the folder (thumbnails go to the XDG cache), so no
+    * rescan re-entered the load path either: still one. */
+   drain_main(200);
+   g_assert_cmpuint(ggaze_window_load_count(p_win), ==, 1);
+   for (guint u = 0; u < G_N_ELEMENTS(pp_files); u++) {
+      g_object_unref(pp_files[u]);
+   }
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(500);
+   remove_dir_with_files(c_dir);
+   g_free(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -174,5 +266,7 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/open/fixture_shows_large", test_open_fixture_shows_large);
    g_test_add_func("/open/rotated_fixture", test_open_rotated_fixture);
    g_test_add_func("/open/sample_image", test_open_sample_image);
+   g_test_add_func("/open/many_starts_on_the_given_file_once",
+                   test_open_many_starts_on_the_given_file_once);
    return (g_test_run());
 }

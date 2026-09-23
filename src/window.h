@@ -61,6 +61,13 @@ GtkStack *ggaze_window_get_stack(GgazeWindow *p_win);
  * not something the window exposes any other way. */
 void ggaze_window_clear_texture_cache(GgazeWindow *p_win);
 
+/* How many times this window has asked the view-load pipeline for the
+ * current file so far (cache hits included: the count is about how often a
+ * path requested the load, not how often a decoder ran). A test seam: an
+ * open -- a multi-file one with a start file that is not first-sorted
+ * included -- must cost exactly one (tests/test_open_and_show.c, gd2). */
+guint ggaze_window_load_count(GgazeWindow *p_win);
+
 /* The info-overlay label (`i`; also reused for transient status messages
  * like "Copied image"). Exposed so tests can assert its visibility/text
  * directly instead of reaching into private window state -- e.g. the gu0
@@ -187,6 +194,13 @@ void ggaze_window_tool_drag(GgazeWindow *p_win, GgazeViewerDragPhase e_phase,
  * tests/test_enhance_flow.c pins that a burst of N changes costs at most two
  * launches. */
 guint ggaze_window_enhance_render_count(GgazeWindow *p_win);
+
+/* How many thumbnail-preview batches the enhance side panel has started so
+ * far; always 0 without GEGL. A test seam: an open with the panel up
+ * re-points it at the new file with ONE batch, a multi-file open with a
+ * start file that is not first-sorted included (tests/test_enhance_flow.c,
+ * gd2). */
+guint ggaze_window_enhance_preview_count(GgazeWindow *p_win);
 
 /* The crop rectangle as the overlay draws it right now (tool_ctrl_get_crop_
  * rect): TRUE with the rectangle and the size of the base it is laid out on

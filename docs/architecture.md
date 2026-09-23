@@ -58,7 +58,14 @@ ggaze
 - **app** — owns the `GtkApplication`, registers actions, handles the `open`
   signal (files **or a directory** → window), single-instance behavior. A
   directory arg opens the folder in the grid; a file arg opens its parent
-  folder with that file current.
+  folder with that file current; several files open the first one's folder
+  in the grid with it current. Every open is **one pass** through
+  `window.c _open_now`: the start file and the grid/large intent travel
+  with the folder, so the cursor is placed before the navigator's `changed`
+  handler is connected and the choke point, the load and the enhance panel's
+  preview batch run once (the multi-file open used to open the folder and
+  then place the cursor, which re-ran all of it for any start file not
+  sorted first — gd2).
 - **window** — owns the two view modes (**grid** and **large**) in a
   `GtkStack`, the header bar, and the info overlay. Routes actions to
   navigator/loader/viewer/gridview; manages fullscreen state. Keeps the
