@@ -431,16 +431,20 @@ _thumb_pool_func(gpointer p_data, gpointer p_user) {
    g_object_unref(p_task);
 }
 
-/* Pool item free func (g_thread_pool_new_full): runs for any GTask still
- * queued when the pool is finally freed. Since thumbnail_delete() lets the
- * workers drain the queue (see _thumb_pool_func), that is only a request
- * pushed when no worker could be started at all; before, with
- * immediate=TRUE, it was the whole queue, and without it those tasks were
- * simply discarded -- never run, never completed, never unref'd -- leaking
- * the GTask, its GFile/ThumbTask and the GtkPicture ref the grid's callback
- * carries, once per cell still pending when a window closed. Completing
- * them as CANCELLED lets every owner release its refs through the normal
- * callback path. */
+/* Pool item free func (g_thread_pool_new_full): runs for whatever is still
+ * in the queue when the pool is finally freed. Since thumbnail_delete()
+ * frees with immediate=FALSE and the workers drain the queue (see
+ * _thumb_pool_func), in practice that is only GLib's own wake-up marker
+ * (skipped below), never a request. The one known way a real GTask could
+ * still be queued is theoretical -- no pool thread could be created at all:
+ * g_thread_pool_push() queues the task even when starting a thread fails,
+ * and with immediate=FALSE a pool with no thread is neither drained nor
+ * freed, so those requests' callbacks never run and this func never sees
+ * them either. Completing a task here as CANCELLED is kept for any queued
+ * request GLib does hand over (it is what immediate=TRUE used to rely on
+ * for the whole queue): the owner's callback still runs and releases its
+ * refs -- the GTask, its GFile/ThumbTask and the grid's GtkPicture ref --
+ * instead of the task being discarded and leaked. */
 static void
 _thumb_item_drop(gpointer p_data) {
    /* g_thread_pool_free() pushes its private wake-up marker
@@ -476,10 +480,12 @@ thumbnail_new(void) {
    p_t->p_shared        = g_new(ThumbShared, 1);
    p_t->p_shared->i_ref = 1;
    g_atomic_int_set(&p_t->p_shared->i_dead, FALSE);
-   /* Bound the decode pool to ~half the cores (max 4) so a large folder's
-    * thumbnail generation doesn't peg every CPU at 100%. g_task_return_* still
-    * delivers each result to the main thread. */
-   gint    i_max = MAX(1, MIN(g_get_num_processors() / 2, 4));
+   /* Bound the decode pool to ~half the cores (at most
+    * GGAZE_THUMB_MAX_WORKERS) so a large folder's thumbnail generation
+    * doesn't peg every CPU at 100%. g_task_return_* still delivers each
+    * result to the main thread. */
+   gint i_max =
+      MAX(1, MIN(g_get_num_processors() / 2, GGAZE_THUMB_MAX_WORKERS));
    GError *p_err = NULL;
    p_t->p_pool = g_thread_pool_new_full(_thumb_pool_func, NULL,
                                         _thumb_item_drop, i_max, FALSE, &p_err);
