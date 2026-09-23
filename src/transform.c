@@ -233,15 +233,27 @@ transform_rebase_crop(Transform *p_t, const Transform *p_old, gdouble d_orig_w,
     * transform_effective_crop's job at render / export time. Storing the
     * cut rectangle eroded a border-touching crop for good on the first
     * nudge ({0,0,100,100} on 400x300, 5 degrees and back, came out as
-    * {12,17,88,83}); a shift is exactly undone by the opposite shift. */
+    * {12,17,88,83}); a shift is exactly undone by the opposite shift. The
+    * same goes for a rectangle pushed entirely outside: clearing b_crop
+    * (an earlier version did) made "nudge away and back" lose it, so it is
+    * only reported, and the chain crops nothing while it is out there. */
    p_t->t_crop.d_x += (d_nw - d_ow) / 2.0;
    p_t->t_crop.d_y += (d_nh - d_oh) / 2.0;
    CropRect t_eff;
-   if (!transform_effective_crop(p_t, d_nw, d_nh, &t_eff)) {
-      p_t->b_crop = FALSE; /* nothing of it survives the new base */
+   return (transform_effective_crop(p_t, d_nw, d_nh, &t_eff));
+}
+
+gboolean
+transform_crop_is_outside(const Transform *p_t, gdouble d_orig_w,
+                          gdouble d_orig_h) {
+   g_return_val_if_fail(p_t != NULL, FALSE);
+   if (!p_t->b_crop || d_orig_w <= 0.0 || d_orig_h <= 0.0) {
       return (FALSE);
    }
-   return (TRUE);
+   gdouble  d_bw, d_bh;
+   CropRect t_eff;
+   transform_base_size(p_t, d_orig_w, d_orig_h, &d_bw, &d_bh);
+   return (!transform_effective_crop(p_t, d_bw, d_bh, &t_eff));
 }
 
 void
@@ -267,7 +279,7 @@ _append_part(GString *p_str, const char *c_part) {
 }
 
 char *
-transform_describe(const Transform *p_t) {
+transform_describe(const Transform *p_t, gdouble d_orig_w, gdouble d_orig_h) {
    g_return_val_if_fail(p_t != NULL, NULL);
    if (transform_is_identity(p_t)) {
       return (NULL);
@@ -296,7 +308,10 @@ transform_describe(const Transform *p_t) {
       g_free(c_part);
    }
    if (p_t->b_crop) {
-      _append_part(p_str, "crop");
+      /* Truthful about a crop the chain is not applying right now. */
+      _append_part(p_str, transform_crop_is_outside(p_t, d_orig_w, d_orig_h)
+                             ? "crop (outside view)"
+                             : "crop");
    }
    return (g_string_free(p_str, FALSE));
 }

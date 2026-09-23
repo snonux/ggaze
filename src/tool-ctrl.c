@@ -34,28 +34,27 @@ static const char *_RENDERING =
    "Preview still rendering — try again in a moment";
 static const char *_FINISH_FIRST =
    "Finish the current tool first (Enter applies, Esc cancels)";
+static const char *_RELEASE_SPACE =
+   "Release Space first — the horizon is measured on the preview";
 
 struct ToolCtrl {
    EnhanceCtrl           *p_ec;   /* borrowed: the transform being edited */
    const ToolCtrlHostOps *p_ops;  /* borrowed */
    gpointer               p_host; /* the window, borrowed */
 
-   GgazeTool e_tool;         /* which tool has the view (NONE = idle) */
-   GFile    *p_file;         /* owned: the file the tool started on, so a
-                              * navigation away can be told from a rescan */
-   Transform t_saved;        /* the transform at tool start (Esc restores) */
-   Transform t_work;         /* the transform on the preview while editing */
-   gboolean  b_crop_dropped; /* straighten: a committed crop was lost to the
-                              * shrinking base this session (said in the
-                              * status line until Enter / Esc) */
+   GgazeTool e_tool;  /* which tool has the view (NONE = idle) */
+   GFile    *p_file;  /* owned: the file the tool started on, so a
+                       * navigation away can be told from a rescan */
+   Transform t_saved; /* the transform at tool start (Esc restores) */
+   Transform t_work;  /* the transform on the preview while editing */
 
    /* crop */
    CropRect t_rect;     /* the rectangle, in base-image px */
    gboolean b_rect_set; /* t_rect has been laid out (needs the base size) */
    gdouble  d_aspect;   /* aspect lock w/h, 0 = free */
    gint     i_base_w;   /* the base size t_rect was laid out on (0 = none
-                         * yet); also what the overlay checks the texture on
-                         * screen against before drawing over it */
+                         * yet), so a base that changed size under it can
+                         * be told and the rectangle re-clamped */
    gint i_base_h;
 
    /* an in-progress pointer drag */
@@ -92,6 +91,20 @@ _redraw(ToolCtrl *p_tc) {
    if (p_v != NULL) {
       gtk_widget_queue_draw(GTK_WIDGET(p_v));
    }
+}
+
+/* TRUE iff the texture on screen is exactly the one the controller
+ * rendered for the state the tool edits -- the base the crop rectangle is
+ * laid out on, the picture a horizon slope is measured on. An identity
+ * test, not a size comparison: the same size cannot tell 0 from 180
+ * degrees, +a from -a, or a preset toggled with the tool up from the base
+ * it replaced, and a rectangle over (or a slope on) the wrong picture lies
+ * about what Enter will do. */
+static gboolean
+_shown_is_current(ToolCtrl *p_tc) {
+   GgazeViewer *p_v = _viewer(p_tc);
+   return (p_v != NULL && enhance_ctrl_is_current_render(
+                             p_tc->p_ec, ggaze_viewer_get_texture(p_v)));
 }
 
 /* --- drawing helpers ------------------------------------------------------ */
@@ -147,13 +160,13 @@ _line(GtkSnapshot *p_snap, gdouble d_x0, gdouble d_y0, gdouble d_x1,
 
 /* Dim everything outside the rectangle, draw thirds inside it, a black-
  * haloed white frame, and the four corner handles. Nothing is drawn while
- * the texture on screen is not the base the rectangle was laid out on (the
- * base preview is still rendering): a rectangle over the wrong image would
- * lie about what Enter will crop. */
+ * the texture on screen is not the rendered base the rectangle was laid
+ * out on (_shown_is_current: the base preview is still rendering, or Space
+ * holds the original): a rectangle over another picture would lie about
+ * what Enter will crop. */
 static void
 _draw_crop(ToolCtrl *p_tc, GtkSnapshot *p_snap, const GgazeViewerGeom *p_g) {
-   if (!p_tc->b_rect_set || p_g->i_img_w != p_tc->i_base_w ||
-       p_g->i_img_h != p_tc->i_base_h) {
+   if (!p_tc->b_rect_set || !_shown_is_current(p_tc)) {
       return;
    }
    const GdkRGBA t_dim    = {0.0f, 0.0f, 0.0f, 0.55f};
@@ -258,9 +271,8 @@ _begin(ToolCtrl *p_tc, GgazeTool e_tool) {
    p_tc->p_ops->ensure_large_view(p_tc->p_host);
    p_tc->e_tool = e_tool;
    g_set_object(&p_tc->p_file, p_cur);
-   p_tc->t_saved        = *enhance_ctrl_get_transform(p_tc->p_ec);
-   p_tc->t_work         = p_tc->t_saved;
-   p_tc->b_crop_dropped = FALSE;
+   p_tc->t_saved = *enhance_ctrl_get_transform(p_tc->p_ec);
+   p_tc->t_work  = p_tc->t_saved;
    ggaze_viewer_set_overlay(_viewer(p_tc), _draw_cb, _drag_cb, p_tc);
    return (TRUE);
 }
@@ -322,8 +334,20 @@ _angle_text(gdouble d_degrees) {
    return (g_strdup_printf("%s° %s", c_num, d_degrees < 0.0 ? "CCW" : "CW"));
 }
 
+/* TRUE iff the working transform carries a crop that lies entirely outside
+ * the base at the working angle: kept (a nudge back applies it again), but
+ * cropping nothing meanwhile, which the status line must say. */
+static gboolean
+_crop_outside(ToolCtrl *p_tc) {
+   gint i_ow, i_oh;
+   return (p_tc->t_work.b_crop &&
+           enhance_ctrl_get_orig_size(p_tc->p_ec, &i_ow, &i_oh) &&
+           transform_crop_is_outside(&p_tc->t_work, i_ow, i_oh));
+}
+
 /* The straighten status line: the current angle, the keys, the auto-crop
- * state. Re-shown on every change so the angle is always readable. */
+ * state, and a crop that is outside the view at this angle. Re-shown on
+ * every change so the angle is always readable. */
 static void
 _straighten_status(ToolCtrl *p_tc) {
    char *c_angle = _angle_text(p_tc->t_work.d_degrees);
@@ -331,9 +355,9 @@ _straighten_status(ToolCtrl *p_tc) {
       g_strdup_printf("Straighten %s — drag along the horizon · h/l nudge "
                       "½° · A auto-crop %s · Enter applies, Esc cancels%s",
                       c_angle, p_tc->t_work.b_autocrop ? "on" : "off",
-                      p_tc->b_crop_dropped ? " · crop removed (nothing of "
-                                             "it left at this angle)"
-                                           : "");
+                      _crop_outside(p_tc) ? " · crop outside the view at "
+                                            "this angle (nothing cropped)"
+                                          : "");
    _status(p_tc, c_msg);
    g_free(c_msg);
    g_free(c_angle);
@@ -481,16 +505,16 @@ _crop_key(ToolCtrl *p_tc, guint u_keyval) {
 /* A drag over the crop rectangle: BEGIN decides what was grabbed, every
  * later phase re-derives the rectangle from the one at BEGIN plus the total
  * offset (croprect_drag), so a drag never accumulates clamping error. The
- * whole gesture is ignored while the texture on screen is not the base the
- * rectangle is laid out on (the base preview is still rendering): pointer
- * pixels mapped through that other image's geometry would land on the
- * wrong image pixels -- the same guard under which _draw_crop hides the
- * rectangle, so nothing invisible can be edited. */
+ * whole gesture is ignored while the texture on screen is not the rendered
+ * base the rectangle is laid out on (_shown_is_current: the base preview is
+ * still rendering): pointer pixels mapped through another picture's
+ * geometry would land on the wrong image pixels -- the same guard under
+ * which _draw_crop hides the rectangle, so nothing invisible can be
+ * edited. */
 static void
 _crop_drag(ToolCtrl *p_tc, const GgazeViewerGeom *p_g,
            GgazeViewerDragPhase e_phase, gdouble d_ix, gdouble d_iy) {
-   if (!_ensure_rect(p_tc) || p_g->i_img_w != p_tc->i_base_w ||
-       p_g->i_img_h != p_tc->i_base_h) {
+   if (!_ensure_rect(p_tc) || !_shown_is_current(p_tc)) {
       return;
    }
    if (e_phase == GGAZE_VIEWER_DRAG_BEGIN) {
@@ -514,11 +538,12 @@ _crop_drag(ToolCtrl *p_tc, const GgazeViewerGeom *p_g,
 }
 
 /* Enter in the crop tool: commit the rectangle (none, if it still covers the
- * whole base) and leave. Refused while the base preview is rendering: the
- * rectangle was laid out on a size the screen does not show yet. */
+ * whole base) and leave. Refused while the screen does not show the
+ * rendered base (the base preview is still rendering): the rectangle was
+ * laid out on a picture the user has not seen it over. */
 static gboolean
 _apply_crop(ToolCtrl *p_tc) {
-   if (enhance_ctrl_is_pending(p_tc->p_ec) || !_ensure_rect(p_tc)) {
+   if (!_ensure_rect(p_tc) || !_shown_is_current(p_tc)) {
       _status(p_tc, _RENDERING);
       return (FALSE);
    }
@@ -544,9 +569,10 @@ _apply_crop(ToolCtrl *p_tc) {
 /* Every change of the angle or the auto-crop flag goes through here: the
  * base image changes size with it, so a crop committed earlier is kept over
  * the same content (transform_rebase_crop, anchored on the centre the
- * straighten turns about) or, when nothing of it is left at this angle,
- * dropped and said so in the status line -- never silently, and never with
- * a title still claiming "crop". Esc restores the crop with the rest. */
+ * straighten turns about). It is kept even when the base has shrunk past
+ * it -- nothing is cropped then, the status line (_crop_outside) and the
+ * title say so, and a nudge back applies it again; an earlier version
+ * dropped it, which lost the rectangle for good one nudge too far. */
 static void
 _change_straighten(ToolCtrl *p_tc, gdouble d_degrees, gboolean b_autocrop) {
    Transform t_old         = p_tc->t_work;
@@ -554,9 +580,8 @@ _change_straighten(ToolCtrl *p_tc, gdouble d_degrees, gboolean b_autocrop) {
    p_tc->t_work.b_autocrop = b_autocrop;
    gint i_ow, i_oh;
    if (p_tc->t_work.b_crop &&
-       enhance_ctrl_get_orig_size(p_tc->p_ec, &i_ow, &i_oh) &&
-       !transform_rebase_crop(&p_tc->t_work, &t_old, i_ow, i_oh)) {
-      p_tc->b_crop_dropped = TRUE;
+       enhance_ctrl_get_orig_size(p_tc->p_ec, &i_ow, &i_oh)) {
+      transform_rebase_crop(&p_tc->t_work, &t_old, i_ow, i_oh);
    }
    _push_work(p_tc);
    _straighten_status(p_tc);
@@ -591,13 +616,35 @@ _straighten_key(ToolCtrl *p_tc, guint u_keyval) {
    }
 }
 
+/* TRUE iff a horizon slope measured on the texture on screen means what
+ * the drag intends: the screen must show the render of t_work, since the
+ * slope ADDS to t_work's angle. While a render is pending the screen lags
+ * t_work (twenty fast `l` presses and a drag levelled by 20 degrees instead
+ * of 10), and under a held Space it shows the original (a slope against 0
+ * degrees, added to the current angle). Refusing says why. */
+static gboolean
+_horizon_measurable(ToolCtrl *p_tc) {
+   if (enhance_ctrl_is_hold_original(p_tc->p_ec)) {
+      _status(p_tc, _RELEASE_SPACE);
+      return (FALSE);
+   }
+   if (!_shown_is_current(p_tc)) {
+      _status(p_tc, _RENDERING);
+      return (FALSE);
+   }
+   return (TRUE);
+}
+
 /* A drag in the straighten tool draws the horizon; on END the line's slope
  * (relative to the preview as it is now, so it ADDS to the current angle)
- * becomes the new angle and the image levels. An UPDATE or END without a
- * BEGIN -- the drag started before `R` was pressed, or a stale end -- has
- * no line to level by and is ignored, the way _crop_drag ignores a drag
- * that began outside the rectangle (it used to apply whatever the start
- * coordinates last held: a lone END at (300, 200) levelled by 35 degrees). */
+ * becomes the new angle and the image levels -- provided the preview on
+ * screen IS the current one (_horizon_measurable), else the END is refused
+ * with a status line and the drag can be repeated once it is. An UPDATE or
+ * END without a BEGIN -- the drag started before `R` was pressed, or a
+ * stale end -- has no line to level by and is ignored, the way _crop_drag
+ * ignores a drag that began outside the rectangle (it used to apply
+ * whatever the start coordinates last held: a lone END at (300, 200)
+ * levelled by 35 degrees). */
 static void
 _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
                  gdouble d_iy) {
@@ -614,7 +661,7 @@ _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
       p_tc->b_line  = FALSE;
       gdouble d_deg = transform_horizon_degrees(p_tc->d_drag_x0,
                                                 p_tc->d_drag_y0, d_ix, d_iy);
-      if (d_deg != 0.0) {
+      if (d_deg != 0.0 && _horizon_measurable(p_tc)) {
          _change_straighten(
             p_tc, transform_clamp_angle(p_tc->t_work.d_degrees + d_deg),
             p_tc->t_work.b_autocrop);

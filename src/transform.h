@@ -150,21 +150,32 @@ gboolean transform_effective_crop(const Transform *p_t, gdouble d_base_w,
  * a quarter turn is handled exactly by transform_rotate_quarter instead). The
  * straighten turns and the auto-crop shrinks about the centre, so the crop
  * is anchored on the centre -- the same offset from it as before. The
- * rectangle is kept WHOLE (shifted, never cut down): what the chain crops is
- * transform_effective_crop, its intersection with the base, judged at render
- * and export time, so a crop reaching past a shrunken base grows back when
- * the angle comes back and the same angles give back the same rectangle
- * exactly. Returns FALSE, with b_crop cleared, when the effective crop on the
- * new base is empty (nothing of it is left); TRUE (also with no crop at all)
- * otherwise. The title only ever says "crop" for a crop that is really
- * applied. */
+ * rectangle is kept WHOLE (shifted, never cut down, never dropped): what
+ * the chain crops is transform_effective_crop, its intersection with the
+ * base, judged at render and export time, so a crop reaching past -- or
+ * lying entirely outside -- a shrunken base is applied again the moment
+ * the angle comes back, and the same angles give back the same rectangle
+ * exactly. Returns FALSE when the effective crop on the new base is empty
+ * (nothing of it is inside the view at this angle: the caller says so),
+ * TRUE otherwise (also with no crop at all). */
 gboolean transform_rebase_crop(Transform *p_t, const Transform *p_old,
                                gdouble d_orig_w, gdouble d_orig_h);
 
+/* TRUE iff p_t has a crop of which nothing lies inside the base of a
+ * d_orig_w x d_orig_h original -- kept in the state (transform_rebase_crop)
+ * but cropping nothing until the base grows back over it. FALSE with no
+ * crop, or when the original's size is not known (<= 0: nothing to judge
+ * by, so the crop is taken at its word). */
+gboolean transform_crop_is_outside(const Transform *p_t, gdouble d_orig_w,
+                                   gdouble d_orig_h);
+
 /* A short human summary for the window title, e.g. "90° CW",
- * "180°", "straighten 1.5° CCW", "crop", joined by ", ";
- * NULL for the identity. Caller frees. */
-char *transform_describe(const Transform *p_t);
+ * "180°", "straighten 1.5° CCW", "crop", joined by ", "; a crop of which
+ * nothing is inside the base of a d_orig_w x d_orig_h original reads
+ * "crop (outside view)" (sizes <= 0: unknown, plain "crop"). NULL for the
+ * identity. Caller frees. */
+char *transform_describe(const Transform *p_t, gdouble d_orig_w,
+                         gdouble d_orig_h);
 
 G_END_DECLS
 

@@ -17,10 +17,16 @@
  * it) while its rectangle is adjusted -- and commits a rectangle laid out
  * on it; the straighten tool pushes every nudge / horizon drag through
  * enhance_ctrl_set_transform so the image levels live (a committed crop
- * follows the changing base, transform_rebase_crop, or is dropped with a
- * status line when nothing of it is left), and cancel restores the
- * transform the tool started from. The one-shot `[` / `]` turns need no
- * tool and go straight to enhance_ctrl_rotate_quarter.
+ * follows the changing base, transform_rebase_crop, and is kept -- with a
+ * status line, cropping nothing -- while the base has shrunk past it), and
+ * cancel restores the transform the tool started from. The one-shot `[` /
+ * `]` turns need no tool and go straight to enhance_ctrl_rotate_quarter.
+ *
+ * Both overlays are about the pixels on screen, so both check that the
+ * texture shown is exactly what the controller rendered for the state
+ * being edited (enhance_ctrl_is_current_render): the crop rectangle is
+ * drawn over, and its drags measured on, no other picture, and a horizon
+ * drag is refused while a render is pending or Space holds the original.
  *
  * Geometry is delegated: croprect.c owns how the rectangle moves,
  * transform.c the angles and sizes, viewer.c the image-to-widget mapping.
@@ -95,7 +101,9 @@ gboolean tool_ctrl_key(ToolCtrl *p_tc, guint u_keyval, GdkModifierType e_state);
 /* A pointer drag on the viewer in widget coordinates (the viewer's overlay
  * drag callback ends here; tests call it directly). Crop: inside moves,
  * an edge or corner resizes; straighten: draws the horizon line and, on
- * END, levels it. Ignored with no tool active. */
+ * END, levels it -- refused with a status line while the texture on screen
+ * is not the one the tool's state rendered (a render pending, Space held).
+ * Ignored with no tool active. */
 void tool_ctrl_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_x,
                     gdouble d_y);
 

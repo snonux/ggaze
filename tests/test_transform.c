@@ -6,11 +6,12 @@
  * sign convention (clockwise-positive, direction of the drag irrelevant),
  * the auto-crop / bounding-box sizes, the base/output size the enhancer
  * and the tools share (with the straighten's sampler inset and its 3 px
- * minimum), a crop that follows its base without erosion or is dropped, and
- * the title description. Negative
- * rules: NaN angles and coordinates never propagate, a crop entirely
- * outside its base is no crop, a quarter turn on an empty base drops the
- * crop rather than turning it negative.
+ * minimum), a crop that follows its base without erosion and is kept even
+ * when pushed outside it (cropping nothing, said in the title), the title
+ * description, and a crop through a quarter turn plus a straighten and
+ * back. Negative rules: NaN angles and coordinates never propagate, a crop
+ * entirely outside its base crops nothing, a quarter turn on an empty base
+ * drops the crop rather than turning it negative.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -27,7 +28,7 @@ test_identity_and_equality(void) {
    transform_init(&t);
    g_assert_true(transform_is_identity(&t));
    g_assert_true(t.b_autocrop); /* decision #35: default on */
-   g_assert_null(transform_describe(&t));
+   g_assert_null(transform_describe(&t, 400, 300));
    Transform u = t;
    g_assert_true(transform_equal(&t, &u));
    u.b_autocrop = FALSE; /* no angle: auto-crop has no effect yet */
@@ -184,24 +185,41 @@ test_describe(void) {
    Transform t;
    transform_init(&t);
    t.i_quarter = 1;
-   char *c     = transform_describe(&t);
+   char *c     = transform_describe(&t, 400, 300);
    g_assert_cmpstr(c, ==, "90° CW");
    g_free(c);
    t.i_quarter = 2;
-   c           = transform_describe(&t);
+   c           = transform_describe(&t, 400, 300);
    g_assert_cmpstr(c, ==, "180°");
    g_free(c);
    t.i_quarter = 3;
    t.d_degrees = -1.5;
    t.b_crop    = TRUE;
-   c           = transform_describe(&t);
+   t.t_crop    = (CropRect){10, 10, 50, 50};
+   c           = transform_describe(&t, 400, 300);
    g_assert_cmpstr(c, ==, "90° CCW, straighten 1.5° CCW, crop");
    g_free(c);
    transform_init(&t);
    t.d_degrees = 2.0;
-   c           = transform_describe(&t);
+   c           = transform_describe(&t, 400, 300);
    g_assert_cmpstr(c, ==, "straighten 2.0° CW");
    g_free(c);
+   /* A crop of which nothing is inside the base is named as such; with the
+    * original's size unknown it is taken at its word. */
+   t.b_crop = TRUE;
+   t.t_crop = (CropRect){1000, 1000, 10, 10};
+   g_assert_true(transform_crop_is_outside(&t, 400, 300));
+   g_assert_false(transform_crop_is_outside(&t, 0, 0));
+   c = transform_describe(&t, 400, 300);
+   g_assert_cmpstr(c, ==, "straighten 2.0° CW, crop (outside view)");
+   g_free(c);
+   c = transform_describe(&t, 0, 0);
+   g_assert_cmpstr(c, ==, "straighten 2.0° CW, crop");
+   g_free(c);
+   t.t_crop = (CropRect){10, 10, 10, 10};
+   g_assert_false(transform_crop_is_outside(&t, 400, 300));
+   t.b_crop = FALSE;
+   g_assert_false(transform_crop_is_outside(&t, 400, 300));
 }
 
 /* NaN never reaches the state or the GEGL graph: a NaN angle clamps to 0,
@@ -302,11 +320,11 @@ test_straighten_size_insets_the_autocrop(void) {
 }
 
 /* A crop follows its base when a straighten changes it: anchored on the
- * centre (a centred crop stays centred), cut down to what the new base
- * still covers, and dropped -- b_crop cleared, FALSE -- when nothing of it
- * is left, so the title never says "crop" for a crop the chain skips. */
+ * centre (a centred crop stays centred), and the STORED rectangle keeps
+ * its size -- what the chain applies is the EFFECTIVE crop, the part
+ * inside the new base. No crop, or the same base, changes nothing. */
 static void
-test_rebase_crop_follows_the_centre_or_is_dropped(void) {
+test_rebase_crop_follows_the_centre(void) {
    Transform t_old, t;
    transform_init(&t_old);
    t_old.b_crop = TRUE;
@@ -319,9 +337,7 @@ test_rebase_crop_follows_the_centre_or_is_dropped(void) {
    g_assert_cmpfloat(t.t_crop.d_x + t.t_crop.d_w / 2, ==, bw / 2);
    g_assert_cmpfloat(t.t_crop.d_y + t.t_crop.d_h / 2, ==, bh / 2);
    g_assert_cmpfloat(t.t_crop.d_w, ==, 100);
-   /* The right third: partly survives a 30-degree base. The STORED
-    * rectangle keeps its size (only shifted); the EFFECTIVE crop -- what
-    * the chain applies -- is the part inside the new base. */
+   /* The right third: partly survives a 30-degree base. */
    t_old.t_crop = (CropRect){267, 0, 133, 300};
    t            = t_old;
    t.d_degrees  = 30.0;
@@ -336,15 +352,6 @@ test_rebase_crop_follows_the_centre_or_is_dropped(void) {
    g_assert_cmpfloat(eff.d_h, ==, bh);
    g_assert_cmpfloat(eff.d_w, >, 0);
    g_assert_cmpfloat(eff.d_w, <, 133);
-   /* A sliver at the far right: nothing of it is left -> no crop. */
-   t_old.t_crop = (CropRect){392, 0, 8, 300};
-   t            = t_old;
-   t.d_degrees  = 10.0;
-   g_assert_false(transform_rebase_crop(&t, &t_old, 400, 300));
-   g_assert_false(t.b_crop);
-   char *c_desc = transform_describe(&t);
-   g_assert_cmpstr(c_desc, ==, "straighten 10.0° CW"); /* truthful title */
-   g_free(c_desc);
    /* No crop: nothing to do, TRUE. Same base: unchanged. */
    transform_init(&t_old);
    t = t_old;
@@ -356,14 +363,46 @@ test_rebase_crop_follows_the_centre_or_is_dropped(void) {
    g_assert_true(croprect_equal(&t.t_crop, &t_old.t_crop));
 }
 
+/* A crop of which nothing is inside the new base is reported (FALSE) but
+ * KEPT: b_crop stays set, the chain has no effective crop to apply, the
+ * title says "crop (outside view)", and the angle coming back gives the
+ * very rectangle back, applied again. An earlier round cleared b_crop
+ * here, which lost the rectangle for good one nudge too far. */
+static void
+test_rebase_crop_outside_is_kept_and_comes_back(void) {
+   Transform t_old, t;
+   transform_init(&t_old);
+   t_old.b_crop = TRUE;
+   t_old.t_crop = (CropRect){392, 0, 8, 300}; /* a sliver at the far right */
+   t            = t_old;
+   t.d_degrees  = 10.0;
+   g_assert_false(transform_rebase_crop(&t, &t_old, 400, 300));
+   g_assert_true(t.b_crop);
+   g_assert_true(transform_crop_is_outside(&t, 400, 300));
+   gdouble  bw, bh;
+   CropRect eff;
+   transform_base_size(&t, 400, 300, &bw, &bh);
+   g_assert_false(transform_effective_crop(&t, bw, bh, &eff));
+   char *c_desc = transform_describe(&t, 400, 300);
+   g_assert_cmpstr(c_desc, ==, "straighten 10.0° CW, crop (outside view)");
+   g_free(c_desc);
+   /* Back to 0 degrees: the very sliver again, applied again. */
+   Transform t_back = t;
+   t_back.d_degrees = 0.0;
+   g_assert_true(transform_rebase_crop(&t_back, &t, 400, 300));
+   g_assert_true(croprect_equal(&t_back.t_crop, &t_old.t_crop));
+   g_assert_false(transform_crop_is_outside(&t_back, 400, 300));
+   g_assert_true(transform_effective_crop(&t_back, 400, 300, &eff));
+   g_assert_cmpfloat(eff.d_w, ==, 8);
+}
+
 /* A crop that touches the base's border is not eroded by a straighten and
  * back: the stored rectangle is only shifted (the cutting happens in
  * transform_effective_crop at render time), so 0 -> 5 -> 0 degrees gives
  * back exactly the rectangle that was committed. Before, the intersected
  * rectangle was stored, and {0,0,100,100} on 400x300 came back as
  * {12,17,88,83} -- shrunk for good on the first nudge. A centred crop
- * round-trips too, and a rectangle whose effective crop is empty on the
- * new base is reported dropped. */
+ * round-trips too. */
 static void
 test_rebase_crop_round_trips_a_border_crop(void) {
    Transform t_zero, t_five, t_back;
@@ -399,12 +438,44 @@ test_rebase_crop_round_trips_a_border_crop(void) {
    t_back.d_degrees = 0.0;
    g_assert_true(transform_rebase_crop(&t_back, &t_five, 400, 300));
    g_assert_true(croprect_equal(&t_back.t_crop, &t_zero.t_crop));
-   /* Nothing of it inside the new base: dropped, and said so. */
-   t_zero.t_crop    = (CropRect){392, 0, 8, 300};
-   t_five           = t_zero;
-   t_five.d_degrees = 10.0;
-   g_assert_false(transform_rebase_crop(&t_five, &t_zero, 400, 300));
-   g_assert_false(t_five.b_crop);
+}
+
+/* Crop + quarter turn + straighten compose: the turn carries the top-left
+ * square exactly to the top-right of the 300x400 turned base
+ * (transform_rotate_quarter), the 5-degree base shifts it about the
+ * centre and cuts it at the turned edge, and the angle coming back gives
+ * back the turned rectangle -- the whole transform equal to the turned
+ * one. */
+static void
+test_rebase_crop_composes_with_a_quarter_turn(void) {
+   Transform t_zero;
+   transform_init(&t_zero);
+   t_zero.b_crop      = TRUE;
+   t_zero.t_crop      = (CropRect){0, 0, 100, 100};
+   Transform t_turned = t_zero;
+   transform_rotate_quarter(&t_turned, 1, 400, 300);
+   g_assert_cmpint(t_turned.i_quarter, ==, 1);
+   g_assert_cmpfloat(t_turned.t_crop.d_x, ==, 200);
+   g_assert_cmpfloat(t_turned.t_crop.d_y, ==, 0);
+   Transform t_five = t_turned;
+   t_five.d_degrees = 5.0;
+   g_assert_true(transform_rebase_crop(&t_five, &t_turned, 400, 300));
+   gdouble  bw, bh;
+   CropRect eff;
+   transform_base_size(&t_five, 400, 300, &bw, &bh);
+   g_assert_cmpfloat(bw, <, 300);
+   g_assert_cmpfloat(t_five.t_crop.d_x + t_five.t_crop.d_w, >, bw);
+   g_assert_true(transform_effective_crop(&t_five, bw, bh, &eff));
+   g_assert_cmpfloat(eff.d_x + eff.d_w, ==, bw); /* cut at the turned edge */
+   g_assert_cmpfloat(eff.d_w, <, 100);
+   Transform t_back = t_five;
+   t_back.d_degrees = 0.0;
+   g_assert_true(transform_rebase_crop(&t_back, &t_five, 400, 300));
+   g_assert_true(transform_equal(&t_back, &t_turned));
+   g_assert_true(croprect_equal(&t_back.t_crop, &t_turned.t_crop));
+   char *c_desc = transform_describe(&t_back, 400, 300);
+   g_assert_cmpstr(c_desc, ==, "90° CW, crop");
+   g_free(c_desc);
 }
 
 /* The opacity guarantee of the auto-crop inset needs an inscribed
@@ -459,10 +530,14 @@ main(int i_argc, char **c_argv) {
                    test_rotate_quarter_on_empty_base_drops_the_crop);
    g_test_add_func("/transform/straighten_size_insets_the_autocrop",
                    test_straighten_size_insets_the_autocrop);
-   g_test_add_func("/transform/rebase_crop_follows_the_centre_or_is_dropped",
-                   test_rebase_crop_follows_the_centre_or_is_dropped);
+   g_test_add_func("/transform/rebase_crop_follows_the_centre",
+                   test_rebase_crop_follows_the_centre);
+   g_test_add_func("/transform/rebase_crop_outside_is_kept_and_comes_back",
+                   test_rebase_crop_outside_is_kept_and_comes_back);
    g_test_add_func("/transform/rebase_crop_round_trips_a_border_crop",
                    test_rebase_crop_round_trips_a_border_crop);
+   g_test_add_func("/transform/rebase_crop_composes_with_a_quarter_turn",
+                   test_rebase_crop_composes_with_a_quarter_turn);
    g_test_add_func("/transform/straighten_inset_needs_three_px_per_side",
                    test_straighten_inset_needs_three_px_per_side);
    return (g_test_run());

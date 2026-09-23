@@ -2576,8 +2576,16 @@ _enhance_suffix(GgazeWindow *p_win) {
    char *c_presets =
       enhancer_describe_mask(enhance_ctrl_get_presets(p_win->p_enhance_ctrl),
                              enhance_ctrl_get_mask(p_win->p_enhance_ctrl));
-   char *c_xf =
-      transform_describe(enhance_ctrl_get_transform(p_win->p_enhance_ctrl));
+   /* The original's size (0x0 while unknown) lets the suffix tell a crop
+    * the chain applies from one lying outside the straightened view. */
+   gint i_ow = 0;
+   gint i_oh = 0;
+   if (!enhance_ctrl_get_orig_size(p_win->p_enhance_ctrl, &i_ow, &i_oh)) {
+      i_ow = 0;
+      i_oh = 0;
+   }
+   char *c_xf = transform_describe(
+      enhance_ctrl_get_transform(p_win->p_enhance_ctrl), i_ow, i_oh);
    char *c_out = NULL;
    if (c_presets != NULL && c_xf != NULL) {
       c_out = g_strdup_printf("%s  \u00b7  %s", c_presets, c_xf);

@@ -404,10 +404,10 @@ _append_straighten(GeglNode *p_graph, GeglNode *p_prev, const Transform *p_xf) {
 
 /* `c`: the user's crop, clamped into the base image it was drawn on
  * (transform_effective_crop) and offset by that image's origin. An empty
- * result skips the crop rather than emitting nothing; the controller clears
- * b_crop before it gets here (enhance_ctrl_set_transform drops a crop that
- * no longer fits its base, with a status line), so this is the chain's own
- * safety net for a Transform value built by hand. */
+ * result -- a crop the straighten has pushed entirely outside its base --
+ * crops nothing rather than emitting an empty image: the controller keeps
+ * such a crop in the state (the title says "crop (outside view)") so a
+ * nudge back applies it again, and this skip is what makes that safe. */
 static GeglNode *
 _append_user_crop(GeglNode *p_graph, GeglNode *p_prev, const Transform *p_xf) {
    GeglRectangle t_bbox = gegl_node_get_bounding_box(p_prev);

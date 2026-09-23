@@ -690,33 +690,17 @@ enhance_ctrl_get_transform(EnhanceCtrl *p_ctrl) {
    return (&p_ctrl->t_xf);
 }
 
-/* Drop p_t's crop when nothing of it lies on its base any more (a crop
- * committed on one base, then a straighten that shrank the base past it):
- * the chain would skip it silently while the title said "crop". Needs the
- * original's size; unknown (no apply landed, nothing cached) means there is
- * no base to judge by and the chain's own guard is the net. */
-static void
-_drop_collapsed_crop(EnhanceCtrl *p_ctrl, Transform *p_t) {
-   gint i_ow, i_oh;
-   if (!p_t->b_crop || !_orig_size(p_ctrl, &i_ow, &i_oh)) {
-      return;
-   }
-   gdouble  d_bw, d_bh;
-   CropRect t_eff;
-   transform_base_size(p_t, i_ow, i_oh, &d_bw, &d_bh);
-   if (!transform_effective_crop(p_t, d_bw, d_bh, &t_eff)) {
-      p_t->b_crop = FALSE;
-      _show_status(p_ctrl, "Crop removed — nothing of it is left on the "
-                           "straightened image");
-   }
-}
-
+/* A crop lying entirely outside its base (committed on one base, then a
+ * straighten that shrank the base past it) is committed as it is, not
+ * dropped: the chain applies transform_effective_crop, which is empty then
+ * and crops nothing, the title says so ("crop (outside view)",
+ * transform_describe), and a nudge back over it applies it again --
+ * dropping it here lost the rectangle for good after one nudge too far. */
 void
 enhance_ctrl_set_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf) {
    g_return_if_fail(p_ctrl != NULL && p_xf != NULL);
-   Transform t_new = *p_xf;
-   _drop_collapsed_crop(p_ctrl, &t_new);
-   gboolean b_same   = transform_equal(_render_transform(p_ctrl), &t_new);
+   Transform t_new   = *p_xf;
+   gboolean  b_same  = transform_equal(_render_transform(p_ctrl), &t_new);
    p_ctrl->t_xf      = t_new;
    p_ctrl->b_preview = FALSE; /* a commit ends any tool override */
    if (b_same) {
@@ -814,6 +798,32 @@ gboolean
 enhance_ctrl_is_pending(EnhanceCtrl *p_ctrl) {
    g_return_val_if_fail(p_ctrl != NULL, FALSE);
    return (p_ctrl->b_apply_pending);
+}
+
+/* The exact identity test the tools need (see the header). Two cases: with
+ * render work the last landed texture IS the render (window._show_texture
+ * puts that very object on screen through enhance_ctrl_override_texture);
+ * without any, what the viewer should show is the current file's cached
+ * original, which viewload shows from -- and, after a cache miss, stores
+ * into -- the same texturecache entry, so its identity is the test too. A
+ * pending apply means the screen predates the state whatever it shows. */
+gboolean
+enhance_ctrl_is_current_render(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   if (p_tex == NULL || p_ctrl->b_apply_pending || !_has_navigator(p_ctrl)) {
+      return (FALSE);
+   }
+   if (_render_has_work(p_ctrl)) {
+      return (p_tex == p_ctrl->p_enhance_tex);
+   }
+   GFile *p_cur = _current_file(p_ctrl);
+   return (p_cur != NULL && p_tex == _cached_texture(p_ctrl, p_cur));
+}
+
+gboolean
+enhance_ctrl_is_hold_original(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   return (p_ctrl->b_hold_original);
 }
 
 void

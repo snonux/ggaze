@@ -156,9 +156,10 @@ const Transform *enhance_ctrl_get_transform(EnhanceCtrl *p_ctrl);
  * that renders the same as what is on screen (transform_equal) is stored
  * without a re-apply, so a tool that pushes its working state on every nudge
  * never renders twice for nothing. With an empty mask and the identity the
- * original is restored. A crop that no longer fits its base (the straighten
- * shrank it away) is dropped with a status line, so the title never claims
- * a crop the chain does not apply. */
+ * original is restored. A crop lying entirely outside its base (the
+ * straighten shrank the base past it) is kept as it is: the chain crops
+ * nothing then, the title says "crop (outside view)", and the crop is
+ * applied again as soon as the base grows back over it. */
 void enhance_ctrl_set_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf);
 
 /* Render p_xf instead of the committed transform (NULL: back to the
@@ -174,9 +175,24 @@ void enhance_ctrl_set_preview_transform(EnhanceCtrl     *p_ctrl,
 void enhance_ctrl_rotate_quarter(EnhanceCtrl *p_ctrl, gint i_dir);
 
 /* TRUE while an apply is in flight, i.e. the texture on screen predates the
- * current mask/transform. The crop tool refuses to commit a rectangle laid
- * out over a stale image. */
+ * current mask/transform. */
 gboolean enhance_ctrl_is_pending(EnhanceCtrl *p_ctrl);
+
+/* TRUE iff p_tex -- what the viewer shows -- is exactly the texture the
+ * current state renders to: the last landed apply for the current mask and
+ * render transform (a tool's override, else the committed one), with none
+ * newer in flight; or, when that state needs no GEGL at all, the cached
+ * original of the current file. It is FALSE for the picture that is still
+ * up while a render is pending, for the original shown under a held Space,
+ * and for another file's texture waiting for a load to land. The tools
+ * draw the crop rectangle over, and measure drags on, only a texture this
+ * says yes to: a size comparison could not tell 0 from 180 degrees, +a
+ * from -a, or a preset toggled under the tool from the base it replaced. */
+gboolean enhance_ctrl_is_current_render(EnhanceCtrl *p_ctrl, GdkTexture *p_tex);
+
+/* TRUE while Space is held and the original is on screen in place of the
+ * preview (enhance_ctrl_set_hold_original). */
+gboolean enhance_ctrl_is_hold_original(EnhanceCtrl *p_ctrl);
 
 /* The size of the base image the crop rectangle refers to (the original
  * after the current turn and straighten, crop ignored --
