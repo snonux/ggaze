@@ -65,6 +65,7 @@
 
 #include "croprect.h"
 #include "enhance-ui.h"
+#include "file_stamp.h"
 #include "gridview.h"
 #include "gtk_helpers.h"
 #include "histogram-view.h"
@@ -81,6 +82,7 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gtk/gtk.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -2931,9 +2933,9 @@ wait_for_fresh_texture(GgazeWindow *p_win, GdkTexture *p_a, GdkTexture *p_b) {
 }
 
 /* Rewrite c_path in place as a 200x150 PNG of another colour: another size
- * AND another byte count, so the cache's mtime/size stamp misses even when
- * the rewrite lands within the same second, and the folder monitor's
- * rescan follows (a content change, unlike touch_file's). */
+ * AND another byte count, so the cache's stamp misses on the byte count
+ * alone, whatever the clock did, and the folder monitor's rescan follows
+ * (a content change, unlike touch_file's). */
 static void
 rewrite_as_200x150(const char *c_path) {
    GdkPixbuf *p_pix = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 200, 150);
@@ -4622,23 +4624,12 @@ test_open_save_exports_then_shows_the_new_file_clean(void) {
    ggtest_cleanup_temp_dir(c_other);
 }
 
-/* Rewrite c_path as a 200x150 PNG that keeps the texture cache's stamp --
- * the old byte count (a tEXt chunk pads it: every comment character is one
- * more byte) and the old mtime -- so the viewer's reload after the folder
- * monitor's rescan is a cache HIT of the old 400x300 decode and only a
- * GEGL render ever reads the new contents: the deterministic form of "the
- * render lands before the decode", which a real rewrite only races. */
+/* Overwrite c_path IN PLACE (truncate and write: the same inode, which the
+ * cache's stamp also checks) as a 200x150 PNG of exactly i_size bytes -- a
+ * tEXt chunk pads it: every comment character is one more byte. The
+ * folder monitor sees the content change and schedules a rescan. */
 static void
-rewrite_as_200x150_same_stamp(const char *c_path) {
-   GFile     *p_f    = g_file_new_for_path(c_path);
-   GFileInfo *p_info = g_file_query_info(
-      p_f, G_FILE_ATTRIBUTE_STANDARD_SIZE "," G_FILE_ATTRIBUTE_TIME_MODIFIED,
-      G_FILE_QUERY_INFO_NONE, NULL, NULL);
-   g_assert_nonnull(p_info);
-   goffset i_size = g_file_info_get_size(p_info);
-   guint64 u_mtime =
-      g_file_info_get_attribute_uint64(p_info, G_FILE_ATTRIBUTE_TIME_MODIFIED);
-   g_object_unref(p_info);
+write_200x150_padded_in_place(const char *c_path, goffset i_size) {
    GdkPixbuf *p_pix = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 200, 150);
    gdk_pixbuf_fill(p_pix, 0x99cc33ffu);
    gchar  *c_buf = NULL;
@@ -4655,14 +4646,46 @@ rewrite_as_200x150_same_stamp(const char *c_path) {
                                            "tEXt::Comment", c_pad, NULL));
    g_assert_no_error(p_err);
    g_assert_cmpint((goffset)u_len, ==, i_size);
-   g_assert_true(g_file_set_contents(c_path, c_buf, (gssize)u_len, NULL));
-   g_assert_true(
-      g_file_set_attribute_uint64(p_f, G_FILE_ATTRIBUTE_TIME_MODIFIED, u_mtime,
-                                  G_FILE_QUERY_INFO_NONE, NULL, NULL));
+   FILE *p_fp = fopen(c_path, "wb");
+   g_assert_nonnull(p_fp);
+   g_assert_cmpuint(fwrite(c_buf, 1, u_len, p_fp), ==, u_len);
+   g_assert_cmpint(fclose(p_fp), ==, 0);
    g_free(c_pad);
    g_free(c_buf);
    g_object_unref(p_pix);
-   g_object_unref(p_f);
+}
+
+/* Rewrite c_path as 200x150 keeping the texture cache's WHOLE stamp -- the
+ * byte count, the inode (written in place) and the mtime to the
+ * nanosecond, copied back -- so the viewer's reload after the folder
+ * monitor's rescan is a cache HIT of the old 400x300 decode and only a
+ * GEGL render ever reads the new contents: the deterministic form of "the
+ * render lands before the decode", which a real rewrite only races. It is
+ * also the one rewrite the stamp cannot tell (a same-size rewrite within
+ * one coarse mtime tick, or within one second on a filesystem that keeps
+ * whole seconds only), so the tool must cope with it rather than the
+ * cache. The folder monitor ignores the mtime change itself; the rescan
+ * the in-place write scheduled is what follows. */
+static void
+rewrite_as_200x150_same_stamp(const char *c_path) {
+   GgtestFileStamp t_st;
+   ggtest_read_stamp(c_path, &t_st);
+   write_200x150_padded_in_place(c_path, t_st.i_size);
+   ggtest_set_mtime(c_path, t_st.u_sec, t_st.u_nsec);
+}
+
+/* Rewrite c_path as 200x150 within the SAME SECOND to the same byte count,
+ * in place: whole seconds, size and inode kept, only the sub-second part
+ * of the mtime moved (by half a second, so it differs whatever the clock
+ * did). The seconds + size stamp read that as unchanged (fd2); the cache
+ * must miss on the sub-second part now. */
+static void
+rewrite_as_200x150_same_second(const char *c_path) {
+   GgtestFileStamp t_st;
+   ggtest_read_stamp(c_path, &t_st);
+   write_200x150_padded_in_place(c_path, t_st.i_size);
+   ggtest_set_mtime(c_path, t_st.u_sec,
+                    (t_st.u_nsec + 500000000u) % 1000000000u);
 }
 
 /* Pump until the window title contains c_part (up to 5 s) and assert it
@@ -4729,6 +4752,47 @@ test_crop_tool_follows_a_render_of_another_size(void) {
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    fire_and_wait(fx.p_win, "win.enhance-1"); /* the render reads 200x150 */
    assert_texture_size(fx.p_win, 200, 150);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
+   g_assert_cmpint(i_bw, ==, 200);
+   g_assert_cmpint(i_bh, ==, 150);
+   g_assert_true(croprect_is_full(&t_rect, 200.0, 150.0));
+   for (guint u = 0; u < 10; u++) {
+      tool_key(fx.p_win, GDK_KEY_H);
+   }
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_texture_size(fx.p_win, 190, 150);
+   tool_fx_close(&fx);
+}
+
+/* --- fd2: the same-second, same-size rewrite ----------------------------
+ *
+ * The crop tool is open on the 400x300 base when the file is rewritten in
+ * place within the same second, to the same byte count
+ * (rewrite_as_200x150_same_second). The old stamp (whole seconds + size)
+ * read that as unchanged: the rescan's reload was a cache hit of the
+ * 400x300 decode, the stale picture stayed on screen, and the first
+ * render's 200x150 taught the tool a base the viewer never showed. The
+ * sub-second part of the mtime tells the rewrite now: the reload decodes
+ * the new picture and shows it, and the rectangle is laid out on it as
+ * for any other rewrite (test_crop_tool_relays_out_on_the_rewritten_base;
+ * here the cache had every other reason to hit). */
+static void
+test_same_second_same_size_rewrite_shows_the_new_picture(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop");
+   CropRect t_rect;
+   gint     i_bw, i_bh;
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
+   g_assert_cmpint(i_bw, ==, TOOL_W);
+   g_assert_cmpint(i_bh, ==, TOOL_H);
+   rewrite_as_200x150_same_second(fx.c_path);
+   wait_for_texture_size(fx.p_win, 200, 150); /* the rescan's reload was
+                                               * a miss: the new decode */
+   ggtest_drain_main(100);
+   g_assert_true(viewer_texture(fx.p_win) != fx.p_orig);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, 0);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
    g_assert_cmpint(i_bw, ==, 200);
@@ -5096,6 +5160,9 @@ add_tool_review6_tests(void) {
                    test_open_save_exports_then_shows_the_new_file_clean);
    g_test_add_func("/enhance_flow/crop_tool_follows_a_render_of_another_size",
                    test_crop_tool_follows_a_render_of_another_size);
+   g_test_add_func(
+      "/enhance_flow/same_second_same_size_rewrite_shows_the_new_picture",
+      test_same_second_same_size_rewrite_shows_the_new_picture);
    g_test_add_func("/enhance_flow/first_rescan_after_an_open_is_same_file",
                    test_first_rescan_after_an_open_is_a_same_file_event);
 }
