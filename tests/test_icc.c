@@ -10,7 +10,10 @@
  * is not one, an iCCP that does not inflate, a length over the cap (which
  * must allocate nothing), and 'desc' tags of both types with broken
  * offsets. Also the I/O side: a missing file is a GIO error, a file that
- * is neither PNG nor JPEG is simply "no profile".
+ * is neither PNG nor JPEG is simply "no profile". And the gate in front
+ * of babl (icc_profile_is_sane, icc_babl_kind) over fixture profiles with
+ * one field changed and over profiles built for the case (icc_build.h):
+ * every curve babl 0.1.128 crashed or aborted on is refused.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -23,6 +26,7 @@
 #include <glib/gstdio.h>
 #include <string.h>
 
+#include "icc_build.h"
 #include "streamread.h"
 
 static GFile *
@@ -702,19 +706,25 @@ test_sane_curv_count(void) {
 }
 
 /* A 'para' curve: a truncated one (type 3 needs 12 + 5 * 4 bytes), each
- * known function type at its own least size, an unknown type, and a TRC
- * of a type babl would misread as a 'curv'. */
+ * function type babl takes at its own least size, the CIE types 1 and 2
+ * (babl reads a fifth parameter out of their four) and an unknown type
+ * refused whatever their size, and a TRC of a type babl would misread as
+ * a 'curv'. */
 static void
 test_sane_para_and_trc_types(void) {
    GByteArray *p_arr = profile_copy("srgb-icc.png");
    put_be32(tag_entry(p_arr, "gTRC") + 8, 31);
    g_assert_false(is_sane(p_arr));
-   const guint32 C_NEED[] = {16, 24, 28, 32};
-   for (guint u_fn = 0; u_fn < G_N_ELEMENTS(C_NEED); u_fn++) {
-      tag_data(p_arr, "gTRC")[9] = (guint8)u_fn;
-      put_be32(tag_entry(p_arr, "gTRC") + 8, C_NEED[u_fn]);
-      g_assert_true(is_sane(p_arr));
-      put_be32(tag_entry(p_arr, "gTRC") + 8, C_NEED[u_fn] - 1);
+   const struct {
+      guint8   u_fn;
+      guint32  u_need;
+      gboolean b_ok;
+   } CASES[] = {{0, 16, TRUE}, {1, 24, FALSE}, {2, 28, FALSE}, {3, 32, TRUE}};
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      tag_data(p_arr, "gTRC")[9] = CASES[u].u_fn;
+      put_be32(tag_entry(p_arr, "gTRC") + 8, CASES[u].u_need);
+      g_assert_true(is_sane(p_arr) == CASES[u].b_ok);
+      put_be32(tag_entry(p_arr, "gTRC") + 8, CASES[u].u_need - 1);
       g_assert_false(is_sane(p_arr));
    }
    put_be32(tag_entry(p_arr, "gTRC") + 8, 32);
@@ -727,6 +737,111 @@ test_sane_para_and_trc_types(void) {
    memcpy(tag_data(p_arr, "gTRC"), "text", 4);
    g_assert_false(is_sane(p_arr));
    g_byte_array_unref(p_arr);
+}
+
+/* A 'para' with a nonzero reserved byte: babl's strcmp(data, "para")
+ * then fails at byte 4 and it reads the tag as a 'curv' of up to 0x4FFFF
+ * points (the review's SIGSEGV, byte 4 = 1, bytes 10-11 = 0xffff). Every
+ * reserved byte must be zero. A 'curv' needs none: babl reads anything
+ * that is not "para" as one. */
+static void
+test_sane_para_reserved_word(void) {
+   for (guint u_at = 4; u_at < 8; u_at++) {
+      GByteArray *p_arr             = profile_copy("srgb-icc.png");
+      tag_data(p_arr, "gTRC")[u_at] = 1;
+      g_assert_false(is_sane(p_arr));
+      g_byte_array_unref(p_arr);
+   }
+   GByteArray *p_arr = profile_copy("srgb-icc.png");
+   guint8     *p_g   = tag_data(p_arr, "gTRC");
+   p_g[4]            = 1;
+   p_g[10]           = 0xff;
+   p_g[11]           = 0xff;
+   g_assert_false(is_sane(p_arr));
+   g_byte_array_unref(p_arr);
+   p_arr                      = profile_copy("swapped.png");
+   tag_data(p_arr, "gTRC")[4] = 1;
+   g_assert_true(is_sane(p_arr));
+   g_byte_array_unref(p_arr);
+}
+
+/* An RGB profile whose three curves are the one 'para' of type u_fn with
+ * the u_n parameters p_params. */
+static gboolean
+para_profile_is_sane(guint16 u_fn, const double *p_params, gsize u_n) {
+   GBytes  *p_para = icc_build_para(u_fn, p_params, u_n);
+   GBytes  *p_icc  = icc_build_rgb("para", p_para, p_para, p_para);
+   gboolean b_sane = icc_profile_is_sane(p_icc);
+   g_bytes_unref(p_icc);
+   g_bytes_unref(p_para);
+   return (b_sane);
+}
+
+/* The piecewise types' break points against babl's assertion 0 <= x0 <
+ * 254.5 / 255 for x0 = d and x0 = c * d (each aborted babl in the
+ * review): d = 1.0, d < 0 and c < 0 are refused, as is c * d past the
+ * bound in type 4; the sRGB curve, d = 0 with any c (c * d is then 0),
+ * and a d just inside pass. Type 0 has no bound: babl clamps a negative
+ * gamma and asserts nothing. */
+static void
+test_sane_para_break_points(void) {
+   const double SRGB[5] = {2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045};
+   const struct {
+      double   f_c;
+      double   f_d;
+      gboolean b_ok;
+   } CASES[] = {
+      {1 / 12.92, 0.04045, TRUE}, {1 / 12.92, 1.0, FALSE},
+      {1 / 12.92, -0.1, FALSE},   {-0.5, 0.04, FALSE},
+      {-0.5, 0.0, TRUE},          {1.0, 0.997, TRUE},
+      {1.0, 0.9985, FALSE},       {30.0, 0.04, FALSE},
+      {24.0, 0.04, TRUE}, /* c * d = 0.96 */
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      double f_p3[5] = {SRGB[0], SRGB[1], SRGB[2], CASES[u].f_c, CASES[u].f_d};
+      double f_p4[7] = {2.2, 1.0, 0.0, CASES[u].f_c, CASES[u].f_d, 0.0, 0.0};
+      g_assert_true(para_profile_is_sane(3, f_p3, 5) == CASES[u].b_ok);
+      g_assert_true(para_profile_is_sane(4, f_p4, 7) == CASES[u].b_ok);
+   }
+   const double NEG[1] = {-1.0};
+   g_assert_true(para_profile_is_sane(0, NEG, 1));
+   const double CIE[4] = {2.2, 1.0, 0.0, 0.1};
+   g_assert_false(para_profile_is_sane(1, CIE, 3));
+   g_assert_false(para_profile_is_sane(2, CIE, 4));
+}
+
+/* An RGB profile with 'curv' tables of u_r, u_g, u_b points; b_shared
+ * gives all three the one table (u_r points). */
+static gboolean
+curv_profile_is_sane(guint32 u_r, guint32 u_g, guint32 u_b, gboolean b_shared) {
+   GBytes  *p_r    = icc_build_curv(u_r, 1.6);
+   GBytes  *p_g    = b_shared ? g_bytes_ref(p_r) : icc_build_curv(u_g, 1.7);
+   GBytes  *p_b    = b_shared ? g_bytes_ref(p_r) : icc_build_curv(u_b, 1.9);
+   GBytes  *p_icc  = icc_build_rgb("curv", p_r, p_g, p_b);
+   gboolean b_sane = icc_profile_is_sane(p_icc);
+   g_bytes_unref(p_icc);
+   g_bytes_unref(p_r);
+   g_bytes_unref(p_g);
+   g_bytes_unref(p_b);
+   return (b_sane);
+}
+
+/* The curve sizes babl's 64 KiB profile buffer cannot take (a shared
+ * 65536-point curve crashed it; 32768 points, or three distinct curves
+ * of 11000 or 20000, overrun it too), and the ones real profiles use,
+ * which fit: 1024 and 4096 points, shared or three distinct. */
+static void
+test_sane_curve_budget(void) {
+   g_assert_false(curv_profile_is_sane(65536, 0, 0, TRUE));
+   g_assert_false(curv_profile_is_sane(32768, 0, 0, TRUE));
+   g_assert_false(curv_profile_is_sane(11000, 11000, 11000, FALSE));
+   g_assert_false(curv_profile_is_sane(20000, 20000, 20000, FALSE));
+   g_assert_false(curv_profile_is_sane(4097, 0, 0, TRUE));
+   g_assert_false(curv_profile_is_sane(1024, 1024, 4097, FALSE));
+   g_assert_true(curv_profile_is_sane(4096, 0, 0, TRUE));
+   g_assert_true(curv_profile_is_sane(4096, 4096, 4096, FALSE));
+   g_assert_true(curv_profile_is_sane(1024, 1024, 1024, FALSE));
+   g_assert_true(curv_profile_is_sane(1024, 0, 0, TRUE));
 }
 
 /* The XYZ tags babl reads three numbers from: 20 bytes and the 'XYZ '
@@ -746,8 +861,178 @@ test_sane_xyz_tags(void) {
    }
 }
 
+/* --- icc_babl_kind: what babl declines before it touches a table -------- */
+
+/* A profile of class c_class, space c_space and PCS c_pcs with the tags
+ * named in c_sigs (a space-separated list of: desc wtpt rXYZ gXYZ bXYZ
+ * rTRC gTRC bTRC kTRC chrm A2B0 B2A0), red's XYZ from p_red (red's Z above
+ * its X is Argyll's swap), a 'chrm' of u_channels channels and phosphor
+ * u_phosphor. */
+typedef struct {
+   const char   *c_class;
+   const char   *c_space;
+   const char   *c_pcs;
+   const char   *c_sigs;
+   const double *p_red;
+   guint16       u_channels;
+   guint16       u_phosphor;
+} KindCase;
+
+static GBytes *
+chrm_tag(guint16 u_channels, guint16 u_phosphor) {
+   guint8 c[36] = {'c', 'h', 'r', 'm'};
+   c[8]         = (guint8)(u_channels >> 8);
+   c[9]         = (guint8)u_channels;
+   c[10]        = (guint8)(u_phosphor >> 8);
+   c[11]        = (guint8)u_phosphor;
+   return (g_bytes_new(c, sizeof(c)));
+}
+
+/* The data of tag c_sig for kind_profile(). */
+static GBytes *
+kind_tag(const KindCase *p_k, const char *c_sig, GBytes *p_curv) {
+   if (strcmp(c_sig, "chrm") == 0) {
+      return (chrm_tag(p_k->u_channels, p_k->u_phosphor));
+   }
+   if (strcmp(c_sig, "rXYZ") == 0) {
+      return (icc_build_xyz(p_k->p_red[0], p_k->p_red[1], p_k->p_red[2]));
+   }
+   if (strcmp(c_sig + 1, "TRC") == 0) {
+      return (g_bytes_ref(p_curv));
+   }
+   if (strcmp(c_sig, "desc") == 0) {
+      return (icc_build_desc("kind"));
+   }
+   if (c_sig[0] == 'A' || c_sig[0] == 'B') {
+      return (g_bytes_new_static("mft2\0\0\0\0", 8)); /* LCMS's, not babl's */
+   }
+   return (icc_build_xyz(0.3851, 0.7169, 0.0971));
+}
+
+static IccBablKind
+kind_of(const KindCase *p_k) {
+   char      **c_sigs = g_strsplit(p_k->c_sigs, " ", -1);
+   guint       u_n    = g_strv_length(c_sigs);
+   IccBuildTag t_tags[16];
+   GBytes     *p_curv = icc_build_curv(1, 2.2);
+   g_assert_cmpuint(u_n, <=, G_N_ELEMENTS(t_tags));
+   for (guint u = 0; u < u_n; u++) {
+      t_tags[u].c_sig  = c_sigs[u];
+      t_tags[u].p_data = kind_tag(p_k, c_sigs[u], p_curv);
+   }
+   GBytes *p_icc =
+      icc_build(p_k->c_class, p_k->c_space, p_k->c_pcs, t_tags, u_n);
+   g_assert_true(icc_profile_is_sane(p_icc));
+   IccBablKind e_kind = icc_babl_kind(p_icc);
+   for (guint u = 0; u < u_n; u++) {
+      g_bytes_unref(t_tags[u].p_data);
+   }
+   g_bytes_unref(p_icc);
+   g_bytes_unref(p_curv);
+   g_strfreev(c_sigs);
+   return (e_kind);
+}
+
+/* Every early exit of babl_space_from_icc() (babl-icc.c, 0.1.128) in
+ * turn, and what passes each. */
+static void
+test_babl_kind(void) {
+   static const double RED[3]  = {0.4361, 0.2225, 0.0139}; /* Z < X */
+   static const double BLUE[3] = {0.1431, 0.0606, 0.7141}; /* Z > X */
+#define RGB_TAGS "desc wtpt rXYZ gXYZ bXYZ rTRC gTRC bTRC"
+   const struct {
+      KindCase    t_k;
+      IccBablKind e_want;
+   } CASES[] = {
+      {{"mntr", "RGB ", "XYZ ", RGB_TAGS, RED, 3, 0}, ICC_BABL_RGB},
+      {{"scnr", "RGB ", "XYZ ", RGB_TAGS, RED, 3, 0}, ICC_BABL_RGB},
+      {{"prtr", "RGB ", "XYZ ", RGB_TAGS, RED, 3, 0}, ICC_BABL_NONE},
+      {{"mntr", "RGB ", "Lab ", RGB_TAGS, RED, 3, 0}, ICC_BABL_NONE},
+      {{"mntr", "Lab ", "XYZ ", RGB_TAGS, RED, 3, 0}, ICC_BABL_NONE},
+      {{"prtr", "CMYK", "Lab ", "desc A2B0", RED, 3, 0}, ICC_BABL_CMYK},
+      {{"mntr", "RGB ", "XYZ ", RGB_TAGS " A2B0 B2A0", RED, 3, 0},
+       ICC_BABL_NONE},
+      {{"mntr", "RGB ", "XYZ ", RGB_TAGS " A2B0", RED, 3, 0}, ICC_BABL_RGB},
+      {{"mntr", "RGB ", "XYZ ", RGB_TAGS " B2A0", BLUE, 3, 0}, ICC_BABL_NONE},
+      {{"mntr", "RGB ", "XYZ ", RGB_TAGS, BLUE, 3, 0}, ICC_BABL_RGB},
+      {{"mntr", "RGB ", "XYZ ", "desc wtpt rXYZ gXYZ bXYZ rTRC gTRC", RED, 3,
+        0},
+       ICC_BABL_NONE},
+      {{"mntr", "RGB ", "XYZ ", "desc rXYZ gXYZ bXYZ rTRC gTRC bTRC", RED, 3,
+        0},
+       ICC_BABL_NONE},
+      {{"mntr", "RGB ", "XYZ ", "desc wtpt chrm rTRC gTRC bTRC", RED, 3, 0},
+       ICC_BABL_RGB},
+      {{"mntr", "RGB ", "XYZ ", "desc wtpt chrm rTRC gTRC bTRC", RED, 2, 0},
+       ICC_BABL_NONE},
+      {{"mntr", "RGB ", "XYZ ", "desc wtpt chrm rTRC gTRC bTRC", RED, 3, 1},
+       ICC_BABL_NONE},
+      {{"mntr", "RGB ", "XYZ ", "desc chrm rTRC gTRC bTRC", RED, 3, 0},
+       ICC_BABL_NONE},
+      {{"mntr", "GRAY", "XYZ ", "desc wtpt kTRC", RED, 3, 0}, ICC_BABL_GRAY},
+      {{"scnr", "GRAY", "XYZ ", "desc kTRC", RED, 3, 0}, ICC_BABL_GRAY},
+      {{"mntr", "GRAY", "XYZ ", "desc wtpt rTRC", RED, 3, 0}, ICC_BABL_NONE},
+      {{"link", "GRAY", "XYZ ", "desc wtpt kTRC", RED, 3, 0}, ICC_BABL_NONE},
+   };
+#undef RGB_TAGS
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      g_test_message("case %" G_GSIZE_FORMAT, u);
+      g_assert_cmpint(kind_of(&CASES[u].t_k), ==, CASES[u].e_want);
+   }
+}
+
+/* The fixtures' kinds, and NONE for what the validator refuses. */
+static void
+test_babl_kind_fixtures(void) {
+   const struct {
+      const char *c_name;
+      IccBablKind e_want;
+   } CASES[] = {{"swapped.png", ICC_BABL_RGB},
+                {"srgb-icc.png", ICC_BABL_RGB},
+                {"grey-icc.png", ICC_BABL_GRAY},
+                {"cmyk-icc.jpg", ICC_BABL_CMYK},
+                {"badicc.png", ICC_BABL_NONE}};
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      GBytes *p_icc = read_fixture_profile(CASES[u].c_name);
+      g_assert_cmpint(icc_babl_kind(p_icc), ==, CASES[u].e_want);
+      g_bytes_unref(p_icc);
+   }
+   g_assert_cmpint(icc_babl_kind(NULL), ==, ICC_BABL_NONE);
+   GByteArray *p_arr = profile_copy("swapped.png");
+   put_be32(tag_data(p_arr, "gTRC") + 8, 0x01000000u);
+   GBytes *p_insane = g_bytes_new(p_arr->data, p_arr->len);
+   g_assert_cmpint(icc_babl_kind(p_insane), ==, ICC_BABL_NONE);
+   g_bytes_unref(p_insane);
+   g_byte_array_unref(p_arr);
+}
+
+/* The curve tags babl parses from every profile: three on an RGB one, one
+ * on a grey one, four when an RGB profile also carries a kTRC; none for
+ * what is not a profile. */
+static void
+test_babl_curve_tags(void) {
+   GBytes *p_icc = read_fixture_profile("swapped.png");
+   g_assert_cmpuint(icc_babl_curve_tags(p_icc), ==, 3);
+   g_bytes_unref(p_icc);
+   p_icc = read_fixture_profile("grey-icc.png");
+   g_assert_cmpuint(icc_babl_curve_tags(p_icc), ==, 1);
+   g_bytes_unref(p_icc);
+   p_icc = read_fixture_profile("cmyk-icc.jpg");
+   g_assert_cmpuint(icc_babl_curve_tags(p_icc), ==, 0);
+   g_bytes_unref(p_icc);
+   GBytes     *p_curv = icc_build_curv(0, 1.0);
+   IccBuildTag t_k[]  = {
+      {"rTRC", p_curv}, {"gTRC", p_curv}, {"bTRC", p_curv}, {"kTRC", p_curv}};
+   p_icc = icc_build("mntr", "RGB ", "XYZ ", t_k, G_N_ELEMENTS(t_k));
+   g_assert_cmpuint(icc_babl_curve_tags(p_icc), ==, 4);
+   g_bytes_unref(p_icc);
+   g_bytes_unref(p_curv);
+   g_assert_cmpuint(icc_babl_curve_tags(NULL), ==, 0);
+}
+
 /* Random damage to every fixture profile, many times over: the validator
- * (and icc_description over the same bytes) must never read outside them
+ * (and icc_description, icc_babl_kind and icc_babl_curve_tags over the
+ * same bytes) must never read outside them
  * -- the ASan lane is where this bites -- and whatever it passes must still
  * be what it promises for the tags babl reads. A fixed seed per run
  * (g_test_rand_*), so a failure reproduces with the printed seed. */
@@ -792,7 +1077,11 @@ test_sane_fuzz(void) {
       if (icc_profile_is_sane(p_b)) {
          u_passed++;
          g_assert_cmpuint(get_be32(p_arr->data), ==, p_arr->len);
+      } else {
+         g_assert_cmpint(icc_babl_kind(p_b), ==, ICC_BABL_NONE);
       }
+      (void)icc_babl_kind(p_b); /* reads the same tags again */
+      g_assert_cmpuint(icc_babl_curve_tags(p_b), <=, 4);
       g_free(icc_description(p_b));
       g_bytes_unref(p_b);
       g_byte_array_unref(p_arr);
@@ -839,7 +1128,14 @@ main(int argc, char **argv) {
    g_test_add_func("/icc/sane_curv_count", test_sane_curv_count);
    g_test_add_func("/icc/sane_para_and_trc_types",
                    test_sane_para_and_trc_types);
+   g_test_add_func("/icc/sane_para_reserved_word",
+                   test_sane_para_reserved_word);
+   g_test_add_func("/icc/sane_para_break_points", test_sane_para_break_points);
+   g_test_add_func("/icc/sane_curve_budget", test_sane_curve_budget);
    g_test_add_func("/icc/sane_xyz_tags", test_sane_xyz_tags);
+   g_test_add_func("/icc/babl_kind", test_babl_kind);
+   g_test_add_func("/icc/babl_kind_fixtures", test_babl_kind_fixtures);
+   g_test_add_func("/icc/babl_curve_tags", test_babl_curve_tags);
    g_test_add_func("/icc/sane_fuzz", test_sane_fuzz);
    return (g_test_run());
 }

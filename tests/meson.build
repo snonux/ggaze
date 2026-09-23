@@ -87,13 +87,17 @@ gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 # hd2); file_stamp.c (read a file's mtime-to-the-ns/size/inode stamp and
 # set its mtime back, failing clearly on a whole-second filesystem) is how
 # test_texturecache and test_enhance_flow drive the texture cache's stamp
-# into a hit or a miss (fd2).
+# into a hit or a miss (fd2); icc_build.c (ICC profiles built from
+# (signature, data) tags, gen.py's _icc_from_tags in C) is how test_icc and
+# test_enhancer_icc build the exact profile a case needs -- 'para' curves
+# of any type, 'curv' tables of any length -- instead of patching a
+# fixture's (xb2 review 4).
 test_helpers_inc = include_directories('helpers')
 test_helpers_lib = static_library(
    'ggaze_test_helpers',
    ['helpers/gtk_helpers.c', 'helpers/mem_file.c', 'helpers/open_counter.c',
     'helpers/temp_dir.c', 'helpers/wait_until.c', 'helpers/file_stamp.c',
-    ggaze_conf_h],
+    'helpers/icc_build.c', ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
    install : false,
@@ -333,9 +337,9 @@ test('info', test_info, suite : 'unit', env : fixtures_env)
 test_icc = executable(
    'test_icc',
    ['test_icc.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
-   dependencies : [glib_dep, gio_dep],
-   link_with : ggaze_lib,
+   include_directories : [inc, src_inc, test_helpers_inc],
+   dependencies : [glib_dep, gio_dep, m_dep],
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
 test('icc', test_icc, suite : 'unit', env : fixtures_env)

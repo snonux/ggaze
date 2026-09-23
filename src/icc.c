@@ -523,16 +523,83 @@ icc_description(GBytes *p_icc) {
  * count reads past the buffer or makes babl_fatal() exit the process), and
  * its tag lookup walks a tag count taken straight from the file. So a
  * profile goes to babl only when everything babl reads lies inside the
- * profile, sized for what babl reads from it (babl-icc.c, 0.1.128). */
+ * profile, sized for what babl reads from it -- and when what babl BUILDS
+ * from it stays inside babl's own fixed buffers and assertions (the curve
+ * rules below). All of it read off babl-icc.c, babl-core.c and
+ * base/babl-trc.c of babl 0.1.128, and each abort / crash reproduced
+ * there (xb2 reviews 3 and 4). */
 
-/* Parameter count of each 'para' function type babl knows (ICC.1 10.18);
- * any other type is refused (babl would fall back to a guessed gamma). */
-static const guint PARA_PARAMS[] = {1, 3, 4, 5, 7};
+/* babl asserts 0 <= x0 < 254.5 / 255 (~0.99804) for both ends of a
+ * piecewise 'para' curve's polynomial approximation (babl-polynomial.c,
+ * babl_polynomial_approximate_gamma, reached from base/babl-trc.c's
+ * babl_trc_new for BABL_TRC_FORMULA_SRGB); 0.998 keeps well clear of float
+ * rounding at the edge. */
+#define ICC_PARA_X0_LIMIT 0.998f
+
+/* babl writes the profile of every new RGB space it makes (babl-space.c,
+ * babl_space_from_rgbxyz_matrix -> babl_space_get_icc ->
+ * babl_space_to_icc_rgb) into a `char icc[65536]` on its stack and then
+ * copies out as many bytes as it allocated: a 240-byte header and tag
+ * table, 80 bytes of XYZ tags, a 'cprt' and a 'desc' (~130 bytes), and
+ * each tone curve as 12 + 2 * points bytes (a formula curve as 512
+ * points) -- one curve when r, g and b are the same babl curve, all three
+ * otherwise, even when two of them match. Past 64 KiB the copy reads off
+ * the stack (a shared 65536-point curve crashed it). With every curve at
+ * most ICC_MAX_CURVE_POINTS points, three of them and the rest fit with
+ * room to spare, whatever the curves share. */
+G_STATIC_ASSERT(240u + 80u + 256u + 3u * (12u + 2u * ICC_MAX_CURVE_POINTS) <
+                65536u);
+
+/* A big-endian s15Fixed16Number, as babl reads it (read_s15f16: the high
+ * half signed, the low half its fraction), as the float babl keeps it in.
+ * Always finite: at most +-32768. */
+static float
+_s15f16(const guint8 *p) {
+   return ((float)((gint32)_be32(p) / 65536.0));
+}
+
+/* Parameter count of each 'para' function type (ICC.1 10.18); 0 for a
+ * type babl must not see. Types 1 and 2 (the CIE 122-1966 / IEC 61966-3
+ * forms) are refused: babl_trc_formula_cie() packs 4 parameters into
+ * float[4] and base/babl-trc.c then reads a fifth, lut[4], as the curve's
+ * polynomial start -- stack garbage, an out-of-bounds read, and one bad
+ * draw from babl's x0 assertion. Real profiles use type 0 (a gamma) or
+ * type 3 (sRGB-like); any unknown type babl would replace with gamma 2.2
+ * (and complain on stderr). */
+static const guint PARA_PARAMS[] = {1, 0, 0, 5, 7};
+
+/* A 'para' curve babl can take (above): the reserved word zero -- babl
+ * tells 'para' from 'curv' with strcmp(data, "para"), so a nonzero byte 4
+ * turns the tag into a 'curv' whose "count" is the function type and
+ * padding (up to 0x4FFFF points: the 64 KiB overrun, reproduced as a
+ * SIGSEGV) -- a known function type with all its parameters, and for the
+ * piecewise types 3 and 4 the curve's break point d and its linear
+ * segment's end c * d both in [0, ICC_PARA_X0_LIMIT): babl approximates
+ * the curve from x0 = d (to linear) and x0 = c * d (from linear), each an
+ * assertion that aborts the process when it fails. Type 0's gamma needs
+ * no bound: babl clamps a negative one to 0 and asserts nothing. */
+static gboolean
+_para_is_sane(const guint8 *p_tag, guint32 u_size) {
+   guint u_fn = ((guint)p_tag[8] << 8) | p_tag[9];
+   if (_be32(p_tag + 4) != 0 || u_fn >= G_N_ELEMENTS(PARA_PARAMS) ||
+       PARA_PARAMS[u_fn] == 0 || 12u + 4u * PARA_PARAMS[u_fn] > u_size) {
+      return (FALSE);
+   }
+   if (u_fn < 3) {
+      return (TRUE);
+   }
+   float f_c  = _s15f16(p_tag + 12 + 4 * 3);
+   float f_d  = _s15f16(p_tag + 12 + 4 * 4);
+   float f_cd = f_c * f_d; /* in float, as babl multiplies them */
+   return (f_d >= 0.0f && f_d < ICC_PARA_X0_LIMIT && f_cd >= 0.0f &&
+           f_cd < ICC_PARA_X0_LIMIT);
+}
 
 /* The tone curve tags babl reads: 'curv' with 12 + 2 * count bytes and at
- * most ICC_MAX_CURVE_POINTS points, or 'para' of a known type with all its
- * s15Fixed16 parameters. A TRC tag of another type is refused: babl would
- * read it as a 'curv' count. */
+ * most ICC_MAX_CURVE_POINTS points, or a 'para' _para_is_sane() takes. A
+ * TRC tag of another type is refused: babl would read it as a 'curv'
+ * count. (A 'curv' needs no zero reserved word: babl reads anything that
+ * is not "para" as a 'curv', which it then is.) */
 static gboolean
 _trc_is_sane(const guint8 *p_tag, guint32 u_size) {
    if (u_size < 12) {
@@ -544,13 +611,10 @@ _trc_is_sane(const guint8 *p_tag, guint32 u_size) {
               12u + 2u * (guint64)u_count <= u_size);
    }
    if (memcmp(p_tag, "para", 4) == 0) {
-      guint u_fn = ((guint)p_tag[8] << 8) | p_tag[9];
-      return (u_fn < G_N_ELEMENTS(PARA_PARAMS) &&
-              12u + 4u * PARA_PARAMS[u_fn] <= u_size);
+      return (_para_is_sane(p_tag, u_size));
    }
    return (FALSE);
 }
-
 /* The type and least size of every other tag babl (or, for 'chad', LCMS
  * behind babl's CMYK path) reads a fixed layout from: three s15Fixed16
  * numbers after the 8-byte type header for an XYZ tag, the channel count,
@@ -611,4 +675,90 @@ icc_profile_is_sane(GBytes *p_icc) {
       }
    }
    return (TRUE);
+}
+
+/* --- what babl will make of it --------------------------------------------
+ *
+ * babl_space_from_icc()'s own early exits (babl-icc.c, 0.1.128, with
+ * BABL_ICC_INTENT_DEFAULT = relative colorimetric, accuracy wanted), in
+ * its order, so a caller can keep babl from being asked at all: a CMYK
+ * profile goes to LCMS whatever its class; otherwise the colour space must
+ * be RGB or grey, the class a display or input one, the PCS XYZ, and a
+ * profile with both A2B0 and B2A0 is left to LCMS. Those checks cost babl
+ * nothing; the ones after them -- a curve missing, no primaries, chrm with
+ * other than 3 channels or phosphor 0, Argyll's inconsistent CLUT +
+ * matrix profiles -- come AFTER babl has parsed (and kept) the profile's
+ * tone curves, so they are checked here too. */
+
+static gboolean
+_has_tag(const guint8 *p, gsize u_len, const char *c_sig) {
+   const guint8 *p_tag  = NULL;
+   gsize         u_size = 0;
+   return (_find_tag(p, u_len, c_sig, &p_tag, &u_size));
+}
+
+/* The primaries babl reads from an RGB profile: the XYZ tags and the white
+ * point -- and then, with a CLUT beside them, red's Z not above its X
+ * (Argyll's deliberately swapped matrix, which babl refuses) -- or else a
+ * 'chrm' of 3 channels and phosphor type 0 with the white point. */
+static gboolean
+_rgb_primaries_ok(const guint8 *p, gsize u_len) {
+   const guint8 *p_tag  = NULL;
+   gsize         u_size = 0;
+   if (_find_tag(p, u_len, "rXYZ", &p_tag, &u_size) &&
+       _has_tag(p, u_len, "gXYZ") && _has_tag(p, u_len, "bXYZ") &&
+       _has_tag(p, u_len, "wtpt")) {
+      gboolean b_clut =
+         _has_tag(p, u_len, "A2B0") || _has_tag(p, u_len, "B2A0");
+      return (!b_clut || (gint32)_be32(p_tag + 16) <= (gint32)_be32(p_tag + 8));
+   }
+   if (_find_tag(p, u_len, "chrm", &p_tag, &u_size) &&
+       _has_tag(p, u_len, "wtpt")) {
+      guint u_channels = ((guint)p_tag[8] << 8) | p_tag[9];
+      guint u_phosphor = ((guint)p_tag[10] << 8) | p_tag[11];
+      return (u_channels == 3 && u_phosphor == 0);
+   }
+   return (FALSE);
+}
+
+IccBablKind
+icc_babl_kind(GBytes *p_icc) {
+   if (!icc_profile_is_sane(p_icc)) {
+      return (ICC_BABL_NONE);
+   }
+   gsize         u_len;
+   const guint8 *p = g_bytes_get_data(p_icc, &u_len);
+   if (memcmp(p + 16, "CMYK", 4) == 0) {
+      return (ICC_BABL_CMYK);
+   }
+   gboolean b_rgb  = memcmp(p + 16, "RGB ", 4) == 0;
+   gboolean b_gray = memcmp(p + 16, "GRAY", 4) == 0;
+   gboolean b_class =
+      memcmp(p + 12, "mntr", 4) == 0 || memcmp(p + 12, "scnr", 4) == 0;
+   if (!(b_rgb || b_gray) || !b_class || memcmp(p + 20, "XYZ ", 4) != 0 ||
+       (_has_tag(p, u_len, "A2B0") && _has_tag(p, u_len, "B2A0"))) {
+      return (ICC_BABL_NONE);
+   }
+   if (b_gray) {
+      return (_has_tag(p, u_len, "kTRC") ? ICC_BABL_GRAY : ICC_BABL_NONE);
+   }
+   gboolean b_curves = _has_tag(p, u_len, "rTRC") &&
+                       _has_tag(p, u_len, "gTRC") && _has_tag(p, u_len, "bTRC");
+   return (b_curves && _rgb_primaries_ok(p, u_len) ? ICC_BABL_RGB
+                                                   : ICC_BABL_NONE);
+}
+
+guint
+icc_babl_curve_tags(GBytes *p_icc) {
+   static const char *C_SIGS[] = {"rTRC", "gTRC", "bTRC", "kTRC"};
+   if (!icc_is_profile(p_icc)) {
+      return (0);
+   }
+   gsize         u_len;
+   const guint8 *p   = g_bytes_get_data(p_icc, &u_len);
+   guint         u_n = 0;
+   for (gsize u = 0; u < G_N_ELEMENTS(C_SIGS); u++) {
+      u_n += _has_tag(p, u_len, C_SIGS[u]) ? 1 : 0;
+   }
+   return (u_n);
 }
