@@ -43,6 +43,20 @@ locked in decision #37.
   babl + LCMS (`gegl:icc-file-loader`, `gegl:lcms-from-profile`,
   `gegl:convert-color-space`) — no separate lcms2 wiring. Without GEGL, stay
   sRGB-only.
+- **Resolved (xb2, decision #45):** with GEGL, the enhance preview and the
+  `s` export of a PNG/JPEG are colour-managed: `gegl:png-load` /
+  `gegl:jpg-load` tag the buffer with the embedded profile's babl space, the
+  chain runs in it, the preview asks babl for sRGB, and `gegl:png-save` /
+  `gegl:jpg-save` write the source's profile back byte for byte (a WebP
+  export is `gegl:convert-space`d to sRGB, since `gegl:webp-save` embeds
+  none). Two names above do not exist on gegl 0.4.72 (`gegl:icc-file-loader`,
+  `gegl:convert-color-space`; the real ops are `gegl:icc-load`,
+  `gegl:convert-space`, `gegl:cast-space`) and no op beyond the loaders,
+  savers and `gegl:convert-space` was needed. The plain view stays as the
+  decoder delivers it (sRGB assumed), and the info card names the colour
+  space in every build (`icc.{c,h}`). Left open: LUT-based profiles (babl
+  parses matrix/TRC profiles only, so such a file is edited as sRGB), profiles
+  in WebP/AVIF/HEIF/JXL, managing the plain view, and non-sRGB displays.
 
 ## H. Scroll behavior default
 - Scroll = zoom (feh-style `--scale-zoom`) vs scroll = next/prev.

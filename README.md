@@ -41,7 +41,7 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `H` / `L`, `Shift+←`/`→` | pan left / right (large) |
 | `+` / `-`, `Ctrl+±` | zoom in / out (large) · grow / shrink thumbnails (grid) |
 | `0` / `Ctrl+0`     | zoom fit ↔ 100% (large) · reset thumbnail size (grid) |
-| `i`               | toggle info overlay (EXIF + RGB/luminance histogram) |
+| `i`               | toggle info overlay (EXIF + colour space + RGB/luminance histogram) |
 | `v` / `V` / `Ctrl+a` | mark / range-mark / mark all |
 | `d` / `Delete`     | trash to `.Trash` (undoable), then next |
 | `D` / `Shift+Delete` | delete permanently |
@@ -55,7 +55,7 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `c`               | crop tool (GEGL): drag or `h`/`l`/`j`/`k` move, `H`/`L`/`J`/`K` resize, `1`–`4` aspect, `0` free; `Enter` applies, `Esc` cancels |
 | `R`               | straighten tool (GEGL): drag along the horizon or `h`/`l` nudge ±0.5°, `A` auto-crop; `Enter` / `Esc` |
 | `]` / `[`         | rotate 90° clockwise / counter-clockwise (GEGL, non-destructive; repeat for 180°/270°) |
-| `s` / `Ctrl+S`     | save an enhanced copy — presets, crop, straighten and rotation composed (original is never modified; a saved preview no longer prompts) |
+| `s` / `Ctrl+S`     | save an enhanced copy — presets, crop, straighten and rotation composed (original is never modified; a saved preview no longer prompts; with GEGL a PNG/JPEG copy keeps its embedded ICC profile) |
 | `Space` (hold)     | compare original vs modified |
 | `f` / `F11`        | fullscreen |
 | `S` / `F5`         | slideshow |

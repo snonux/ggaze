@@ -140,8 +140,8 @@ when adding an optional backend — gate code with `GGAZE_HAVE_*` from
 - Plain-C modules (`navigator`, `loader`, `detect`, `thumbnail`, `trash`,
   `mover`, `opener`, `runner`, `enhancer`, `info`, `histogram`,
   `texturecache`, `clipboard`, `viewload`, `pathutil`, `settings-pair`,
-  `undo`, `croprect`, `transform`) own no GtkWidget and are unit-tested
-  standalone.
+  `undo`, `croprect`, `transform`, `icc`, `streamread`, `intact`) own no
+  GtkWidget and are unit-tested standalone.
 
 ## Memory (C has no GC)
 
@@ -176,7 +176,7 @@ src/undo.{c,h}        which of trash/move `u` undoes
 src/pathutil.{c,h}    stem/ext split, safe mkdir -p, non-colliding child names
 src/settings-pair.{c,h} the (name, value) pair of the a(ss) lists
 src/ggaze-enums.h     shared preference enums
-src/enhancer.{c,h}    optional GEGL presets (built-in table + user graphs), export naming
+src/enhancer.{c,h}    optional GEGL presets (built-in table + user graphs), export naming, ICC-aware load/export
 src/enhancer-gegl.h   the GEGL buffer/texture/export operations (sync + async)
 src/enhance-ctrl.{c,h} optional enhance feature controller (mask, previews, side panel, saved flag, async save)
 src/enhance-ui.{c,h}  optional pure enhance side-panel widget construction
@@ -188,10 +188,13 @@ src/thumbnail.{c,h}   freedesktop TMS cache (bounded pool)
 src/texturecache.{c,h} bounded LRU of decoded GdkTextures (mtime/size validated)
 src/settings.{c,h}    GSettings wrapper (org.buetow.ggaze)
 src/prefs.{c,h}       Preferences dialog (schema-driven enums, list editors)
-src/info.{c,h}        EXIF/dimensions gather (libexif)
+src/info.{c,h}        EXIF/dimensions/colour-space gather (libexif, icc)
+src/icc.{c,h}         embedded ICC profile of a PNG/JPEG + its desc name (plain C, every build)
+src/streamread.{c,h}  bounded GInputStream reads (exact / skip, EOF vs error) for icc + intact
 src/loader/loader.{c,h}   sync + async load API; sniff, dispatch, explicit pixbuf fallback
 src/loader/detect.{c,h}   content-sniff format detection + the one dimension cap
 src/loader/pixbuf-util.{c,h} GdkPixbuf -> upright GdkTexture
+src/loader/intact.{c,h}   is a PNG/JPEG container complete? (gate before GEGL's loaders)
 src/loader/backends/       pixbuf.c jpeg.c jxl.c avif.c heif.c
 ```
 

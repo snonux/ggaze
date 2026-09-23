@@ -172,7 +172,16 @@ Small card, top-left or bottom-right:
   is binned in the background), and `t` to the grid under a card takes the
   plot down while the text stays (`t` back fills it in again). The text and
   the auto-hide timer are not touched by any of that.
-- color space (once color management lands)
+- **color space** (decision #45): the embedded ICC profile's own name for a
+  PNG or JPEG that carries one, with what this build does with it —
+  `Color space: Display P3 (embedded ICC; managed on enhance/export)` with
+  GEGL, `…; not managed in this build)` without. A PNG/JPEG with no profile
+  reads `sRGB (assumed, no embedded profile)`; a profile container that is
+  there but broken (or holds no profile) reads `embedded ICC profile
+  unreadable (shown as sRGB)` — never a silent sRGB. WebP/AVIF/HEIF/JXL are
+  not searched and read `not read for this format (shown as sRGB)`. The plain
+  large view is not colour-managed by ggaze (it shows what the decoder
+  delivers); the enhance preview and the `s` export are, with GEGL.
 Loaded lazily; never blocks display of the pixels. The histogram is gathered
 in the same background task as the EXIF text, only once `i` is pressed. The
 binning itself is subsampled to at most 512×512 pixels, so that part costs
