@@ -72,11 +72,15 @@ gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 # Grid-cell activation and alert-dialog driving are used by more than one
 # suite, so they live here instead of being copy-pasted per binary;
 # mem_file.c (a GFile served from memory, for cancelling INSIDE a read) is
-# the loader suites' stream-path driver.
+# the loader suites' stream-path driver; open_counter.c (an inotify count
+# of the opens of one file) is how test_loader_pixbuf proves gdk-pixbuf was
+# not consulted and test_thumbnail that a pre-cancelled request opened
+# nothing.
 test_helpers_inc = include_directories('helpers')
 test_helpers_lib = static_library(
    'ggaze_test_helpers',
-   ['helpers/gtk_helpers.c', 'helpers/mem_file.c', ggaze_conf_h],
+   ['helpers/gtk_helpers.c', 'helpers/mem_file.c', 'helpers/open_counter.c',
+    ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
    install : false,
@@ -108,8 +112,8 @@ test('app', test_app,
 
 # test_detect, test_loader_pixbuf and test_thumbnail share
 # tests/helpers/tiny_images.h (the smallest real 1x1 file per format, as
-# inline bytes) via test_helpers_inc; test_loader_pixbuf also links the
-# helpers library for mem_file.c.
+# inline bytes) via test_helpers_inc; test_loader_pixbuf and
+# test_thumbnail also link the helpers library (mem_file.c, open_counter.c).
 #
 # The unit binaries that g_test_skip() one of their cases (test_detect's
 # /proc/self/mem failed read, test_enhancer's and test_thumbnail's
@@ -117,10 +121,12 @@ test('app', test_app,
 # exitcode protocol a skipped case is invisible -- the binary exits 0 and
 # meson prints a plain OK -- while over TAP (GLib's default output since
 # 2.62) meson parses the per-case "ok N ... # SKIP" lines: the result
-# line counts only the cases that ran ("35 subtests passed" where 36 are
-# registered), the testlog names the skipped case with its reason, and
-# the whole test reads SKIP when every case skips. (meson 1.11 prints no
-# separate skipped count in that line; that is meson's, not ours.)
+# line reports the passed count only ("35 subtests passed" where 36 are
+# registered -- a skipped case is neither passed nor failed, so it shows
+# up nowhere in that line), the testlog names the skipped case with its
+# reason, and the whole test reads SKIP when every case skips. That the
+# summary line carries no skipped count is how meson's TAP reporting
+# works, not something ours could change.
 test_detect = executable(
    'test_detect',
    ['test_detect.c', ggaze_conf_h],
@@ -228,7 +234,7 @@ test_thumbnail = executable(
    ['test_thumbnail.c', ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
-   link_with : ggaze_lib,
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
 test('thumbnail', test_thumbnail, suite : 'unit', env : fixtures_env,

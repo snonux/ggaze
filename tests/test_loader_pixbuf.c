@@ -57,6 +57,7 @@
 #include "ggaze-config.h"
 #include "loader/detect.h"
 #include "mem_file.h"
+#include "open_counter.h"
 #include "tiny_images.h"
 
 static GdkTexture *
@@ -443,20 +444,6 @@ test_tiny_images_load(void) {
    }
 }
 
-/* inotify_init1()/inotify_add_watch() fail for reasons that have nothing
- * to do with the loader -- fs.inotify.max_user_instances exhausted by a
- * desktop full of file watchers is the usual one -- so both harnesses
- * below report such a failure with its errno text, where a bare
- * "assertion failed: (fd >= 0)" reads like a wrong open count. */
-static void
-_assert_inotify_ok(int i_ret, const char *c_call) {
-   if (i_ret < 0) {
-      g_error("%s failed: %s (fs.inotify.max_user_instances or "
-              "max_user_watches exhausted?)",
-              c_call, g_strerror(errno));
-   }
-}
-
 /* --- FIFO harness ------------------------------------------------------- */
 
 /* A helper thread that serves a FIFO to the loader under test, one writer
@@ -490,7 +477,7 @@ _assert_inotify_ok(int i_ret, const char *c_call) {
  *    link GGAZE_FIFO_WRITER_NAME, and an inotify watch on the DIRECTORY
  *    reports each open under the name it went through. (A watch on the
  *    FIFO itself carries no name and merges the two adjacent IN_OPENs into
- *    one event, the coalescing OpenCounter describes.) An open that no
+ *    one event: the coalescing open_counter.h describes.) An open that no
  *    reader IN_OPEN follows before the main thread is done was that
  *    leftover count: closed, not counted, never written to.
  *
@@ -737,10 +724,10 @@ _fifo_start(FifoWriter *p_w) {
    g_assert_cmpint(mkfifo(p_w->c_fifo, 0600), ==, 0);
    g_assert_cmpint(link(p_w->c_fifo, p_w->c_writer_link), ==, 0);
    p_w->i_inotify = inotify_init1(IN_CLOEXEC);
-   _assert_inotify_ok(p_w->i_inotify, "inotify_init1");
-   _assert_inotify_ok(inotify_add_watch(p_w->i_inotify, p_w->c_tmpdir,
-                                        IN_OPEN | IN_CLOSE_NOWRITE),
-                      "inotify_add_watch");
+   ggtest_assert_inotify_ok(p_w->i_inotify, "inotify_init1");
+   ggtest_assert_inotify_ok(inotify_add_watch(p_w->i_inotify, p_w->c_tmpdir,
+                                              IN_OPEN | IN_CLOSE_NOWRITE),
+                            "inotify_add_watch");
    /* Should a reader ever close early, the writer must see EPIPE, not
     * take the whole test binary down with SIGPIPE. */
    signal(SIGPIPE, SIG_IGN);
@@ -864,64 +851,27 @@ test_fifo_two_chunk_jpeg_peek(void) {
 
 /* --- open counting on a regular file ------------------------------------ */
 
-/* How many times a regular temp file is opened during one call: an
- * inotify watch on the file. The kernel queues IN_OPEN inside openat()
- * itself, synchronously, whoever the opener is (this process or a glycin
- * sandbox), so once the call under test has returned the queue holds
- * exactly its opens: no helper thread, no deadline, no assumption about
- * which end closes first. One kernel rule shapes the watch: inotify
- * COALESCES an event identical (wd, mask, cookie, name) to the one at the
- * tail of its unread queue, so two back-to-back IN_OPENs would count as
- * one (observed: 1 for the two opens of the oversized case). Watching
- * IN_CLOSE_NOWRITE as well keeps every IN_OPEN distinct, because each
- * open the loader makes is closed before the next -- the sniff stream is
- * unreffed before detect's peek opens, that closes before gdk-pixbuf's
- * fopen -- so the queue alternates OPEN, CLOSE, OPEN, CLOSE and nothing
- * merges; _open_counter_finish() asserts that alternation. The count is
- * the only proof from OUTSIDE the loader that gdk-pixbuf was NOT
- * consulted -- the sniff is one open, detect's SOF peek another, and
- * gdk_pixbuf_get_file_info() would be a third. Linux-only, like the app. */
+/* A temp file holding the bytes under test plus the shared inotify open
+ * counter on it (tests/helpers/open_counter.h explains why the count is
+ * exact and why IN_CLOSE is watched too). The count is the only proof
+ * from OUTSIDE the loader that gdk-pixbuf was NOT consulted -- the sniff
+ * is one open, detect's SOF peek another, and gdk_pixbuf_get_file_info()
+ * would be a third. */
 typedef struct {
-   gchar *c_path;
-   int    i_inotify;
+   gchar            *c_path;
+   GgtestOpenCounter s_counter;
 } OpenCounter;
 
 static void
 _open_counter_start(OpenCounter *p_c, const guint8 *p_buf, gsize u_len) {
-   p_c->c_path    = write_tmp(p_buf, u_len);
-   p_c->i_inotify = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-   _assert_inotify_ok(p_c->i_inotify, "inotify_init1");
-   _assert_inotify_ok(inotify_add_watch(p_c->i_inotify, p_c->c_path,
-                                        IN_OPEN | IN_CLOSE_NOWRITE),
-                      "inotify_add_watch");
+   p_c->c_path = write_tmp(p_buf, u_len);
+   ggtest_open_counter_start(&p_c->s_counter, p_c->c_path);
 }
 
-/* Drain the queue (non-blocking: EAGAIN is "empty", anything else a
- * failure), count the IN_OPEN events while asserting each is followed by
- * its IN_CLOSE_NOWRITE before the next (the alternation the comment above
- * relies on), tear down. A watch on a FILE never carries a name, so every
- * event is exactly sizeof(struct inotify_event). */
+/* The exact number of opens; tears the watch and the temp file down. */
 static guint
 _open_counter_finish(OpenCounter *p_c) {
-   struct inotify_event evs[64];
-   guint                u_opens = 0;
-   gboolean             b_open  = FALSE; /* an OPEN awaits its CLOSE */
-   for (;;) {
-      ssize_t i_n = read(p_c->i_inotify, evs, sizeof(evs));
-      if (i_n < 0) {
-         g_assert_cmpint(errno, ==, EAGAIN);
-         break;
-      }
-      g_assert_cmpint(i_n % (ssize_t)sizeof(evs[0]), ==, 0);
-      for (ssize_t i = 0; i < i_n / (ssize_t)sizeof(evs[0]); i++) {
-         gboolean b_is_open = (evs[i].mask & IN_OPEN) != 0;
-         g_assert_cmpint(b_is_open, !=, b_open);
-         b_open = b_is_open;
-         u_opens += b_is_open ? 1 : 0;
-      }
-   }
-   g_assert_false(b_open);
-   close(p_c->i_inotify);
+   guint u_opens = ggtest_open_counter_finish(&p_c->s_counter);
    unlink(p_c->c_path);
    g_free(p_c->c_path);
    return (u_opens);

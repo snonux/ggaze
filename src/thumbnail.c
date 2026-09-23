@@ -297,7 +297,13 @@ _thumb_task_free(gpointer p_void) {
 /* Return TRUE (having completed p_task with G_IO_ERROR_CANCELLED) if the
  * request was cancelled. Checked twice in _thumb_run: once before any I/O so a
  * detached grid releases the GTask -- and the picture ref it carries --
- * promptly, and again right before the expensive decode. */
+ * promptly, and again right before the expensive decode. Neither check is
+ * the only guard: every GIO call the worker makes takes the task's
+ * cancellable and refuses a cancelled one before touching the file
+ * (g_file_query_info(), g_file_read()), so the pre-I/O contract the test
+ * pins (nothing opened, no directory created) holds through GIO as well;
+ * the bails are what keep the worker from making those calls at all and
+ * the one place this module states the rule. */
 static gboolean
 _thumb_bail_if_cancelled(GTask *p_task, GCancellable *p_cancel) {
    if (!g_cancellable_is_cancelled(p_cancel)) {
@@ -330,10 +336,13 @@ _thumb_run(GTask *p_task) {
       return;
    }
 
-   /* File mtime + size (for verify + Thumb::Size). */
+   /* File mtime + size (for verify + Thumb::Size). The stat takes the
+    * task's cancellable like every other call here: a request cancelled
+    * between the bail above and this line is refused by GIO instead of
+    * going on to create the bucket directory for nothing. */
    GFileInfo *p_info =
       g_file_query_info(p_tt->p_file, "standard::size,time::modified",
-                        G_FILE_QUERY_INFO_NONE, NULL, &p_err);
+                        G_FILE_QUERY_INFO_NONE, p_cancel, &p_err);
    if (p_info == NULL) {
       g_task_return_error(p_task, p_err);
       return;
