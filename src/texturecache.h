@@ -58,9 +58,9 @@ GdkTexture *texturecache_get(TextureCache *p_cache, GFile *p_file);
  * BEFORE the decode at no extra query. p_stamp is written on every call;
  * it is only meaningful on a miss. b_valid is FALSE where nothing was read
  * (a hit on an entry put with a NULL stamp, or trusted by
- * texturecache_put() because the file could not be queried) and where the file could not
- * be queried; a put under that invalid stamp stores an entry the next get
- * treats as stale, so the vanished-then-recreated file is re-read. */
+ * texturecache_put() because the file could not be queried) and where the file
+ * could not be queried; a put under that invalid stamp stores an entry the next
+ * get treats as stale, so the vanished-then-recreated file is re-read. */
 GdkTexture *texturecache_lookup(TextureCache *p_cache, GFile *p_file,
                                 TextureStamp *p_stamp);
 
