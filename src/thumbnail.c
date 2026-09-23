@@ -43,17 +43,41 @@
  * overshooting the cap costs one chunk, not a whole-file load. */
 #define GGAZE_THUMB_READ_CHUNK (64u * 1024u)
 
+/* What outlives the Thumbnail: thumbnail_delete() does not wait for the
+ * pool's running decodes, and the queued requests are completed by the
+ * pool's threads after it has returned, so "is the owner gone?" has to be
+ * asked of memory the owner does not free. Refcounted: one ref per queued
+ * request (ThumbTask) plus the Thumbnail's own. */
+typedef struct {
+   gint i_ref;
+   gint i_dead; /* atomic; set once by thumbnail_delete() */
+} ThumbShared;
+
 struct Thumbnail {
-   GThreadPool *p_pool; /* bounded decode pool, keeps the laptop off 100% */
+   GThreadPool *p_pool;   /* bounded decode pool, keeps the laptop off 100% */
+   ThumbShared *p_shared; /* owned ref */
 };
 
 typedef struct {
-   Thumbnail *p_t;
-   GFile     *p_file;       /* owned */
-   int        i_size;       /* requested size */
-   int        i_bucket;     /* bucket size actually cached */
-   char      *c_cache_path; /* owned */
+   ThumbShared *p_shared;     /* owned ref */
+   GFile       *p_file;       /* owned */
+   int          i_size;       /* requested size */
+   int          i_bucket;     /* bucket size actually cached */
+   char        *c_cache_path; /* owned */
 } ThumbTask;
+
+static ThumbShared *
+_thumb_shared_ref(ThumbShared *p_s) {
+   g_atomic_int_inc(&p_s->i_ref);
+   return (p_s);
+}
+
+static void
+_thumb_shared_unref(ThumbShared *p_s) {
+   if (g_atomic_int_dec_and_test(&p_s->i_ref)) {
+      g_free(p_s);
+   }
+}
 
 /* --- helpers ------------------------------------------------------------- */
 
@@ -289,6 +313,7 @@ _generate(GFile *p_file, int i_bucket, const char *c_cache_path, gint64 i_mtime,
 static void
 _thumb_task_free(gpointer p_void) {
    ThumbTask *p_tt = (ThumbTask *)p_void;
+   _thumb_shared_unref(p_tt->p_shared);
    g_clear_object(&p_tt->p_file);
    g_free(p_tt->c_cache_path);
    g_free(p_tt);
@@ -377,21 +402,44 @@ _thumb_run(GTask *p_task) {
 
 /* Bounded pool worker: run the decode, then drop our task ref. g_task_return_*
  * marshals the callback to the main thread regardless of which thread calls
- * it, so this is safe from a worker. */
+ * it, so this is safe from a worker.
+ *
+ * A request the pool gets to after thumbnail_delete() is completed as
+ * CANCELLED without touching the file: the grid that asked is gone, and
+ * this is the ONLY path by which a queued request reliably completes at
+ * shutdown (hd2). thumbnail_delete() used to free the pool with
+ * immediate=TRUE, trusting g_thread_pool_new_full()'s item free func for
+ * the queue -- but a worker that was idle in the queue's pop when the
+ * requests arrived, and gets the CPU only after the free, wakes holding a
+ * request the pool then neither runs nor frees (glib/gthreadpool.c
+ * g_thread_pool_thread_proxy: a task popped after "running" dropped and
+ * "immediate" set is discarded). That never happens unloaded, and read
+ * "23 == 24" once on a loaded parallel lane: one grid cell whose callback
+ * never ran, its GtkPicture ref leaked. With immediate=FALSE every queued
+ * request is handed to a worker and answered here. */
 static void
 _thumb_pool_func(gpointer p_data, gpointer p_user) {
    (void)p_user;
-   GTask *p_task = G_TASK(p_data);
-   _thumb_run(p_task);
+   GTask     *p_task = G_TASK(p_data);
+   ThumbTask *p_tt   = (ThumbTask *)g_task_get_task_data(p_task);
+   if (g_atomic_int_get(&p_tt->p_shared->i_dead)) {
+      g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                              "thumbnail pool shut down");
+   } else {
+      _thumb_run(p_task);
+   }
    g_object_unref(p_task);
 }
 
-/* Pool item free func (g_thread_pool_new_full): runs for every GTask still
- * queued when thumbnail_delete() drops the pool. Without it those tasks were
+/* Pool item free func (g_thread_pool_new_full): runs for any GTask still
+ * queued when the pool is finally freed. Since thumbnail_delete() lets the
+ * workers drain the queue (see _thumb_pool_func), that is only a request
+ * pushed when no worker could be started at all; before, with
+ * immediate=TRUE, it was the whole queue, and without it those tasks were
  * simply discarded -- never run, never completed, never unref'd -- leaking
  * the GTask, its GFile/ThumbTask and the GtkPicture ref the grid's callback
- * carries, once per cell still pending when a window closed. Completing them
- * as CANCELLED lets every owner release its refs through the normal
+ * carries, once per cell still pending when a window closed. Completing
+ * them as CANCELLED lets every owner release its refs through the normal
  * callback path. */
 static void
 _thumb_item_drop(gpointer p_data) {
@@ -424,7 +472,10 @@ _thumb_pool_func_wrap(GTask *p_task, gpointer p_src, gpointer p_task_data,
 
 Thumbnail *
 thumbnail_new(void) {
-   Thumbnail *p_t = g_new(Thumbnail, 1);
+   Thumbnail *p_t       = g_new(Thumbnail, 1);
+   p_t->p_shared        = g_new(ThumbShared, 1);
+   p_t->p_shared->i_ref = 1;
+   g_atomic_int_set(&p_t->p_shared->i_dead, FALSE);
    /* Bound the decode pool to ~half the cores (max 4) so a large folder's
     * thumbnail generation doesn't peg every CPU at 100%. g_task_return_* still
     * delivers each result to the main thread. */
@@ -444,11 +495,17 @@ thumbnail_delete(Thumbnail *p_t) {
    if (p_t == NULL) {
       return;
    }
+   /* Mark the owner gone BEFORE the pool is released: every queued request
+    * a worker takes from now on is answered CANCELLED by _thumb_pool_func
+    * without a decode. immediate=FALSE so the workers really take them
+    * all (immediate=TRUE can drop one: see _thumb_pool_func); wait=FALSE
+    * so a decode already running does not block the caller -- the last
+    * worker out frees the pool. */
+   g_atomic_int_set(&p_t->p_shared->i_dead, TRUE);
    if (p_t->p_pool != NULL) {
-      /* Drop queued work immediately (each queued GTask is completed as
-       * CANCELLED by _thumb_item_drop); don't block on running decodes. */
-      g_thread_pool_free(p_t->p_pool, TRUE, FALSE);
+      g_thread_pool_free(p_t->p_pool, FALSE, FALSE);
    }
+   _thumb_shared_unref(p_t->p_shared);
    g_free(p_t);
 }
 
@@ -460,7 +517,7 @@ thumbnail_get_async(Thumbnail *p_t, GFile *p_file, int i_size,
    g_return_if_fail(G_IS_FILE(p_file));
    int        i_bucket = _bucket_for(i_size);
    ThumbTask *p_tt     = g_new(ThumbTask, 1);
-   p_tt->p_t           = p_t;
+   p_tt->p_shared      = _thumb_shared_ref(p_t->p_shared);
    p_tt->p_file        = (GFile *)g_object_ref(p_file);
    p_tt->i_size        = i_size;
    p_tt->i_bucket      = i_bucket;

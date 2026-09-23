@@ -40,7 +40,15 @@ typedef struct Thumbnail Thumbnail;
 #define GGAZE_THUMB_ENTRY_MAX_BYTES (16u * 1024u * 1024u)
 
 Thumbnail *thumbnail_new(void);
-void       thumbnail_delete(Thumbnail *p_t);
+
+/* Returns at once; a decode already running finishes on its own thread.
+ * Every request handed to thumbnail_get_async() still completes -- one
+ * the pool had started as a texture, one it had not as
+ * G_IO_ERROR_CANCELLED -- so each caller's callback runs and releases what
+ * it holds (the grid's GtkPicture ref per cell). Pinned by
+ * test_delete_completes_queued_requests, which also caught the one way a
+ * request used to go missing under load (hd2, see _thumb_pool_func). */
+void thumbnail_delete(Thumbnail *p_t);
 
 /* Asynchronously get a thumbnail for p_file at ~i_size px (the nearest TMS
  * bucket >= i_size is cached). Returns the GdkTexture via p_cb on the main

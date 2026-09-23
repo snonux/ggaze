@@ -51,6 +51,7 @@
 #include "loader/detect.h"
 #include "open_counter.h"
 #include "tiny_images.h"
+#include "wait_until.h"
 
 /* Dimensions of the marker PNG the persistence tests plant in the cache. Not
  * a size any real thumbnail of the fixtures could have, so "did this texture
@@ -640,7 +641,27 @@ test_cache_dir_not_creatable(void) {
 /* Regression: thumbnail_delete() with requests still queued used to discard
  * the queued GTasks without completing them, leaking each one (and the refs
  * its callback data carried). Every request must now finish -- as a texture
- * or as G_IO_ERROR_CANCELLED -- so the owners' callbacks run and release. */
+ * or as G_IO_ERROR_CANCELLED -- so the owners' callbacks run and release.
+ *
+ * How long that takes is not a property of the test: thumbnail_delete()
+ * returns at once, and every request -- the ones the pool's workers (up
+ * to 4) had already taken, NULL cancellables so they decode to the end,
+ * and the ones still queued, which the workers answer CANCELLED after the
+ * owner is gone -- completes on a pool thread whenever that thread gets
+ * the CPU. So the test waits for the COUNT, under a budget that only says
+ * how long it is willing to wait before calling it a bug. It used to be
+ * 2000 iterations of a 1 ms sleep, ~2 s however starved the pool was, and
+ * on a parallel --repeat lane at load average ~10 that read 23 == 24
+ * (hd2). The bounded wait told the two readings apart: with the budget at
+ * 20 s the count still stuck at 23 of 24 (4 of 300 runs on 8 loaded
+ * cores), so it was a lost completion in thumbnail.c and not a slow lane
+ * -- g_thread_pool_free(immediate=TRUE) let a worker that woke late drop
+ * the request it had popped (see _thumb_pool_func in thumbnail.c). 20 s
+ * (scaled for sanitizer lanes and GGAZE_TEST_TIMEOUT_SCALE) is two orders
+ * above the unloaded time and under the suite's meson timeout, so a
+ * regression fails the named assertion below, not the harness. */
+#define GGAZE_QUEUE_DRAIN_BUDGET_US (20 * G_USEC_PER_SEC)
+
 static guint GGAZE_DONE_COUNT;
 
 static void
@@ -658,6 +679,14 @@ _count_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    GGAZE_DONE_COUNT++;
 }
 
+/* GgtestCondFn: every one of the p_data (a guint) requests has completed.
+ * ">=" and not "==" so an over-completion (a callback run twice) does not
+ * make the wait burn its whole budget before the "==" assertion names it. */
+static gboolean
+_all_requests_done(gpointer p_data) {
+   return (GGAZE_DONE_COUNT >= GPOINTER_TO_UINT(p_data));
+}
+
 static void
 test_delete_completes_queued_requests(void) {
    Thumbnail  *p_t  = thumbnail_new();
@@ -670,9 +699,13 @@ test_delete_completes_queued_requests(void) {
                           _count_done_cb, NULL);
    }
    thumbnail_delete(p_t); /* queue still holds most of the requests */
-   for (guint u = 0; u < 2000 && GGAZE_DONE_COUNT < u_n; u++) {
-      g_main_context_iteration(NULL, FALSE);
-      g_usleep(1000);
+   if (!ggtest_wait_until(_all_requests_done, GUINT_TO_POINTER(u_n),
+                          GGAZE_QUEUE_DRAIN_BUDGET_US)) {
+      g_error("thumbnail_delete(): only %u of %u queued requests completed "
+              "within %d s (scale x%g)",
+              GGAZE_DONE_COUNT, u_n,
+              (int)(GGAZE_QUEUE_DRAIN_BUDGET_US / G_USEC_PER_SEC),
+              ggtest_wait_scale());
    }
    g_assert_cmpuint(GGAZE_DONE_COUNT, ==, u_n);
    g_object_unref(p_a);
