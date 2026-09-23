@@ -77,6 +77,21 @@ and refuses, **in this order, before any decoder sees the file**:
 of the build and only decides what happens to a file that could be complete.
 The order is what keeps the truncated-file contract build-independent.
 
+**How exact "before any decoder sees the file" is.** The gate is
+`loader_sniff_bytes()`, a function of bytes; the entry points run it on the
+first 64 bytes of one open. Where the gated bytes are the decoded bytes the
+guarantee is exact: `loader_load()`'s pixbuf backend loads the whole file
+once and runs `loader_sniff_bytes()` on *that* buffer before the
+`GdkPixbufLoader` sees it, and the thumbnail cache read does the same with
+its entry (below). Where a gdk-pixbuf call must take a **path** --
+`gdk_pixbuf_new_from_file_at_scale()` in `loader_load_pixbuf_scaled()` and
+`gdk_pixbuf_get_file_info()` in `loader_peek_dimensions()` -- the sniff is
+one open and the decode another, and a file replaced in between (a rename
+racing a thumbnail pass) reaches gdk-pixbuf unsniffed. That is a rename
+away from the sniff on a local disk, not something an attacker steers, and
+closing it would cost the at-scale JPEG path its 1/8 DCT decode; it is
+documented, not closed.
+
 **Per-signature minimum** (`detect.c`; signature plus the fixed-size
 mandatory header structure, never entropy data, optional chunks or trailers,
 so a valid file can never fall below it; every value <= 64 so a short sniff
@@ -123,18 +138,39 @@ and a malformed marker stream defer to gdk-pixbuf's header parse, whose own
 and spawns a sandbox even for a valid one; only the rest use the gdk-pixbuf
 header parse. The previous order asked gdk-pixbuf first, which hung the
 info worker on garbage JXL even in a build with libjxl.
-`tests/test_loader_pixbuf.c` proves the "never asked" part by serving the
-file from a FIFO and counting opens: two (sniff + SOF peek) for an
-oversized header, three when the peek legitimately defers.
+`tests/test_loader_pixbuf.c` proves the "never asked" part by counting the
+opens of a regular temp file with an inotify watch (`IN_OPEN` together with
+`IN_CLOSE_NOWRITE`, because inotify coalesces an event identical to the
+tail of its unread queue and every open the loader makes is closed before
+the next, so the queue alternates and nothing merges). The kernel queues
+`IN_OPEN` inside `openat()` itself, so once `loader_peek_dimensions()` has
+returned the count is exact -- no helper thread, no deadline, no ordering
+assumption: two (sniff + SOF peek) for an oversized header, three when the
+peek legitimately defers to gdk-pixbuf's header parse (zero-height and
+SOF-less vectors), and flipping either verdict fails the count. An earlier
+version counted FIFO writer sessions instead, which is only sound for a
+file shorter than every read made of it (a file that exactly fills a
+`read_all()` is satisfied without EOF, the reader closes first, and the
+next open is served by the still-open session): it flaked ~1.5 % of runs
+and could pass the oversized case with the wrong count. The FIFO harness
+is kept for what it is sound for -- proving the two `read_all()` header
+reads (sniff and SOF peek) cope with a file delivered in two chunks.
 
-**The thumbnail cache read is gated too.** `~/.cache/thumbnails` is shared
-with every TMS-compliant app, so an entry under ggaze's name is as
-untrusted as a source file: `thumbnail.c` runs `loader_sniff_file()` (the
-gate on its own) on the entry before `gdk_pixbuf_new_from_file()` gets its
-path, and decodes it only when the sniff says PNG -- a TMS entry is a PNG
-by spec, so anything else is junk to regenerate, not to decode. The length
-gate alone would not do here: a JXL longer than its minimum but garbage
-still hangs `glycin-jxl`, in a build with libjxl included.
+**The thumbnail cache read is gated too, on the bytes it decodes.**
+`~/.cache/thumbnails` is shared with every TMS-compliant app, so an entry
+under ggaze's name is as untrusted as a source file: `thumbnail.c` loads
+the entry into memory once (`g_file_load_contents`), runs
+`loader_sniff_bytes()` on that buffer, and decodes it through a
+`GdkPixbufLoader` (`pixbuf_util_decode_bytes()`, the same routine the
+pixbuf backend uses) only when the sniff says PNG -- a TMS entry is a PNG
+by spec, so anything else is junk to regenerate, not to decode. gdk-pixbuf
+never gets the entry's path, so there is no second open for a foreign
+writer to race and no gdk-pixbuf sniff to disagree with ours; the
+`Thumb::MTime`/`Thumb::URI` tEXt options come back through the loader
+exactly as they did from `gdk_pixbuf_new_from_file()` (the persistence
+tests assert on them). The length gate alone would not do here: a JXL
+longer than its minimum but garbage still hangs `glycin-jxl`, in a build
+with libjxl included.
 
 **Minimal build.** `GGAZE_HAVE_ANY_BACKEND` (derived in `ggaze-config.h`
 from the four `GGAZE_HAVE_*` loader flags) compiles the backend table, the

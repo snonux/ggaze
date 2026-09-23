@@ -27,8 +27,12 @@
  * measured to wait forever on a truncated or garbage codestream of any
  * length. The dispatcher (loader.c) therefore refuses a file shorter than
  * its signature's minimum before this backend is reached and, without the
- * jxl feature, refuses every JXL outright (G_IO_ERROR_NOT_SUPPORTED): this
- * backend never sees a JXL in any build, so the residual glycin-jxl defect
+ * jxl feature, refuses every JXL outright (G_IO_ERROR_NOT_SUPPORTED). The
+ * dispatcher's sniff is one open and this backend's read another, though,
+ * so _pixbuf_load() runs the same gate (loader_sniff_bytes()) again on the
+ * buffer it is about to decode: a file swapped in between the two opens is
+ * gated all the same, and the GdkPixbufLoader never sees a JXL in any
+ * build -- exactly, not best-effort -- so the residual glycin-jxl defect
  * costs a "not built in" message rather than a hung worker. The
  * GCancellable is honoured at the two points it can be: the read and the
  * moment before the (uninterruptible) decode.
@@ -74,34 +78,17 @@ _pixbuf_can_load(const guint8 *p_head, gsize u_len) {
    return (TRUE);
 }
 
-/* Decode a whole file's bytes through a GdkPixbufLoader. Returns a new ref on
- * the pixbuf, or NULL with p_err. A loader must be closed before it is
- * finalized or GdkPixbuf logs a warning per corrupt file (fatal under
- * G_DEBUG=fatal-warnings), so both exits close it; on the write-failure exit
- * the close error is irrelevant (the write error is the one reported), and
- * a close that fails on truncated data may still leave a usable pixbuf. */
-static GdkPixbuf *
-_decode_bytes(const guchar *p_buf, gsize u_len, GError **p_err) {
-   GdkPixbufLoader *p_loader = gdk_pixbuf_loader_new();
-   GError          *p_sub    = NULL;
-   if (!gdk_pixbuf_loader_write(p_loader, p_buf, u_len, &p_sub)) {
-      g_propagate_error(p_err, p_sub);
-      gdk_pixbuf_loader_close(p_loader, NULL);
-      g_object_unref(p_loader);
-      return (NULL);
+/* Everything that must be true of p_buf/u_len before a GdkPixbufLoader
+ * may see it: the dispatcher's gate again (empty, truncated, JXL without
+ * libjxl -- on THESE bytes, so the check and the decode cannot be split
+ * by a swap of the file between two opens; see the top-of-file comment),
+ * then the declared-size guard for a JPEG. TRUE to decode. */
+static gboolean
+_pixbuf_bytes_decodable(const guint8 *p_buf, gsize u_len, GError **p_err) {
+   if (!loader_sniff_bytes(p_buf, u_len, NULL, p_err)) {
+      return (FALSE);
    }
-   if (!gdk_pixbuf_loader_close(p_loader, &p_sub)) {
-      g_clear_error(&p_sub);
-   }
-   GdkPixbuf *p_pix = gdk_pixbuf_loader_get_pixbuf(p_loader);
-   if (p_pix == NULL) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                  "could not decode image (GdkPixbuf produced no pixbuf)");
-   } else {
-      g_object_ref(p_pix);
-   }
-   g_object_unref(p_loader);
-   return (p_pix);
+   return (_pixbuf_reject_if_oversized_jpeg(p_buf, u_len, p_err));
 }
 
 static GdkTexture *
@@ -111,18 +98,21 @@ _pixbuf_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    if (!g_file_load_contents(p_file, p_cancel, &c_buf, &u_len, NULL, p_err)) {
       return (NULL);
    }
-   if (!_pixbuf_reject_if_oversized_jpeg((const guint8 *)c_buf, u_len, p_err)) {
+   if (!_pixbuf_bytes_decodable((const guint8 *)c_buf, u_len, p_err)) {
       g_free(c_buf);
       return (NULL);
    }
    /* Last chance to honour a superseded load: the GdkPixbufLoader below
-    * cannot be interrupted once it runs (loader.h backend contract). */
+    * cannot be interrupted once it runs (loader.h backend contract). A
+    * cancel that lands after the read's own check -- while the last read()
+    * is in flight -- is caught here and nowhere else. */
    if (g_cancellable_set_error_if_cancelled(p_cancel, p_err)) {
       g_free(c_buf);
       return (NULL);
    }
 
-   GdkPixbuf *p_pix = _decode_bytes((const guchar *)c_buf, u_len, p_err);
+   GdkPixbuf *p_pix =
+      pixbuf_util_decode_bytes((const guchar *)c_buf, u_len, p_err);
    g_free(c_buf);
    if (p_pix == NULL) {
       return (NULL);

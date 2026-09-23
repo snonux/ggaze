@@ -15,8 +15,9 @@
  * Decoding goes through loader_load_pixbuf_scaled(), so the thumbnail of a
  * JXL/AVIF/HEIF file comes from the same backend the large view uses and the
  * oversized-JPEG guard is the loader's, not a copy. The cache READ is
- * guarded too: an entry is only handed to gdk-pixbuf after
- * loader_sniff_file() says it is a PNG (see _load_cached()).
+ * guarded too: an entry is loaded into memory once, and those bytes reach a
+ * GdkPixbufLoader only after loader_sniff_bytes() says they are a PNG (see
+ * _read_png_entry()).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -111,6 +112,39 @@ _thumb_option(GdkPixbuf *p_pix, const char *c_key) {
    return (c_val);
 }
 
+/* The cache entry at c_path as a GdkPixbuf, or NULL when it is missing,
+ * unreadable, not a PNG or undecodable -- every one of which means
+ * "regenerate". The entry is read into memory ONCE and both the gate and
+ * the decode run on that buffer: gdk-pixbuf never gets the path, so there
+ * is no second open for a foreign writer to race, and no gdk-pixbuf
+ * sniff of its own to disagree with ours. The gate is the loader's
+ * (loader_sniff_bytes(): empty, truncated, JXL without libjxl) plus "is a
+ * PNG": the length gate alone would not do -- a JXL longer than its
+ * minimum but garbage still hangs glycin-jxl forever (task tb2), and this
+ * pool worker cannot be cancelled once a GdkPixbufLoader has the bytes.
+ * The tEXt options _load_cached() verifies survive the loader path (they
+ * are read from the PNG chunks, not from the file name). */
+static GdkPixbuf *
+_read_png_entry(const char *c_path) {
+   GFile   *p_entry = g_file_new_for_path(c_path);
+   gchar   *c_buf   = NULL;
+   gsize    u_len   = 0;
+   gboolean b_read =
+      g_file_load_contents(p_entry, NULL, &c_buf, &u_len, NULL, NULL);
+   g_object_unref(p_entry);
+   if (!b_read) {
+      return (NULL);
+   }
+   GgazeFormat e_format = GGAZE_FMT_UNKNOWN;
+   GdkPixbuf  *p_pix    = NULL;
+   if (loader_sniff_bytes((const guint8 *)c_buf, u_len, &e_format, NULL) &&
+       e_format == GGAZE_FMT_PNG) {
+      p_pix = pixbuf_util_decode_bytes((const guchar *)c_buf, u_len, NULL);
+   }
+   g_free(c_buf);
+   return (p_pix);
+}
+
 /* Load a cached PNG into a texture, but only if the entry really describes the
  * current state of p_file:
  *   - Thumb::MTime must equal i_mtime -- the spec's staleness check, so an
@@ -126,27 +160,14 @@ _thumb_option(GdkPixbuf *p_pix, const char *c_key) {
  * NULL, which makes the caller regenerate. A cache must never be able to turn
  * a displayable image into an error.
  *
- * The entry is sniffed before gdk-pixbuf gets its path, and only a PNG is
- * decoded at all: a TMS entry is a PNG by spec, so anything else under our
- * name is someone's junk (a foreign writer, a torn write, a mislabelled
- * file), to be regenerated rather than decoded. The loader's length gate
- * alone would not do -- a JXL longer than its minimum but garbage still
- * hangs glycin-jxl forever (task tb2), and this pool worker cannot be
- * cancelled once gdk_pixbuf_new_from_file() has the file. */
+ * Only a PNG is decoded at all: a TMS entry is a PNG by spec, so anything
+ * else under our name is someone's junk (a foreign writer, a torn write, a
+ * mislabelled file), to be regenerated rather than decoded -- see
+ * _read_png_entry() for why the check is on the loaded bytes. */
 static GdkTexture *
 _load_cached(GFile *p_file, const char *c_path, gint64 i_mtime) {
-   GError     *p_err    = NULL;
-   GFile      *p_entry  = g_file_new_for_path(c_path);
-   GgazeFormat e_format = GGAZE_FMT_UNKNOWN;
-   gboolean    b_ok     = loader_sniff_file(p_entry, NULL, &e_format, &p_err);
-   g_object_unref(p_entry);
-   if (!b_ok || e_format != GGAZE_FMT_PNG) {
-      g_clear_error(&p_err);
-      return (NULL); /* not a PNG: never decoded, regenerated instead */
-   }
-   GdkPixbuf *p_pix = gdk_pixbuf_new_from_file(c_path, &p_err);
+   GdkPixbuf *p_pix = _read_png_entry(c_path);
    if (p_pix == NULL) {
-      g_clear_error(&p_err);
       return (NULL);
    }
    const char *c_m       = _thumb_option(p_pix, "Thumb::MTime");

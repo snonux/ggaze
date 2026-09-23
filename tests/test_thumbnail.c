@@ -32,12 +32,14 @@
 #include <gio/gio.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utime.h>
 
 #include "ggaze-config.h"
 #include "loader/detect.h"
+#include "tiny_images.h"
 
 /* Dimensions of the marker PNG the persistence tests plant in the cache. Not
  * a size any real thumbnail of the fixtures could have, so "did this texture
@@ -748,12 +750,31 @@ _plant_entry(GFile *p_file, const guint8 *p_buf, gsize u_len) {
    return (c_ent);
 }
 
+/* TRUE iff the file at c_path starts with the 8-byte PNG signature. */
+static gboolean
+_starts_with_png_signature(const char *c_path) {
+   static const guint8 sig[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+   gchar              *c_buf = NULL;
+   gsize               u_len = 0;
+   if (!g_file_get_contents(c_path, &c_buf, &u_len, NULL)) {
+      return (FALSE);
+   }
+   gboolean b_png =
+      (u_len >= sizeof(sig) && memcmp(c_buf, sig, sizeof(sig)) == 0);
+   g_free(c_buf);
+   return (b_png);
+}
+
 /* A cache entry holding p_buf/u_len must be REGENERATED, fast: the request
  * still yields a real (non-marker) thumbnail of the source within the 5 s
  * budget, and the entry afterwards describes the source again. Pre-fix
  * _load_cached() called gdk_pixbuf_new_from_file() on the entry with no
  * gate, so a foreign corrupt entry sniffing as JXL reached glycin from the
- * pool worker and hung it (task tb2). */
+ * pool worker and hung it (task tb2). The rewritten entry is checked for
+ * the PNG signature BEFORE _cached_mtime() hands its path to gdk-pixbuf:
+ * were the entry not rewritten (the planted bytes still there), that call
+ * would be exactly the glycin hang this test exists to catch, and a
+ * regression must fail an assertion, not the meson timeout. */
 static void
 _assert_entry_regenerated_fast(const guint8 *p_buf, gsize u_len) {
    char  *c_tmp  = _copy_fixture_to_tmp("plain.jpg");
@@ -768,6 +789,7 @@ _assert_entry_regenerated_fast(const guint8 *p_buf, gsize u_len) {
    g_assert_false(_is_marker(p_tex));
    g_assert_cmpint(gdk_texture_get_width(p_tex), <=, 128);
    g_object_unref(p_tex);
+   g_assert_true(_starts_with_png_signature(c_ent));
    g_assert_cmpint(_cached_mtime(c_ent), ==, _mtime_of(p_file));
 
    g_free(c_ent);
@@ -798,12 +820,7 @@ test_garbage_jxl_entry_regenerated(void) {
  * non-PNG is treated as junk and regenerated rather than shown. */
 static void
 test_non_png_entry_regenerated(void) {
-   const guint8 gif[] = {0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01,
-                         0x00, 0xf0, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00,
-                         0x00, 0x21, 0xf9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
-                         0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
-                         0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b};
-   _assert_entry_regenerated_fast(gif, G_N_ELEMENTS(gif));
+   _assert_entry_regenerated_fast(TINY_GIF, sizeof(TINY_GIF));
 }
 
 /* Registration is split by theme so no function approaches the 50-line

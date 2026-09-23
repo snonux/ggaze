@@ -39,6 +39,7 @@
 #include "loader/loader.h"
 #include "loader/pixbuf-util.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <gdk/gdk.h>
 #include <gio/gio.h>
@@ -55,6 +56,7 @@
 
 #include "ggaze-config.h"
 #include "loader/detect.h"
+#include "mem_file.h"
 #include "tiny_images.h"
 
 static GdkTexture *
@@ -444,13 +446,18 @@ test_tiny_images_load(void) {
 /* --- FIFO harness ------------------------------------------------------- */
 
 /* A helper thread that serves a FIFO to the loader under test, one writer
- * session per reader that opens it, and COUNTS those sessions. Two things
- * are proven with it: that the header read copes with a file that arrives
- * in two pieces (test_fifo_two_chunk_read), and how many times an entry
- * point opens its file -- the sniff is one open, a backend's read or
- * detect's SOF peek another, and a gdk-pixbuf call would be one more. The
- * open count is the only proof from outside the loader that gdk-pixbuf was
- * NOT consulted (test_oversized_jpeg_peek_skips_pixbuf).
+ * session per reader that opens it. It proves that the header reads cope
+ * with a file that arrives in two pieces (test_fifo_two_chunk_read for the
+ * sniff, test_fifo_two_chunk_jpeg_peek for detect's SOF peek). It also
+ * counts the sessions, but that count is only sound for a file SHORTER
+ * than every read the loader makes of it: then every session ends in the
+ * writer's close (the reader's EOF), so the reader cannot close before
+ * the writer and the next open is a new session. A file that exactly
+ * fills a read_all() is satisfied without EOF, the reader closes first,
+ * and its next open is served by the still-open session -- one open
+ * counted for two (observed: a 64-byte JPEG against the 64-byte sniff,
+ * ~1.5 % of runs). Open counts on regular files are therefore taken with
+ * inotify instead (OpenCounter below), never with this harness.
  *
  * Every wait is bounded by one deadline (GGAZE_FIFO_BUDGET_US) so a broken
  * loader fails a named assertion instead of meson's 30 s binary timeout:
@@ -666,18 +673,21 @@ test_fifo_two_chunk_read(void) {
    g_object_unref(p_file);
 }
 
-/* A 64-byte JPEG -- SOI, one baseline SOF0 declaring u_h x u_w with three
- * components, an SOS, zero fill -- for the peek tests below: it clears
- * the 25-byte minimum, detect's SOF scan finds the frame header at offset
- * 2, and gdk-pixbuf's header parse (should it be consulted) reports the
- * same size. Fits one atomic pipe write, so a FIFO reader sees it whole. */
+/* A GGAZE_SOF_JPEG_LEN-byte JPEG -- SOI, one baseline SOF0 declaring
+ * u_h x u_w with three components, an SOS -- for the peek tests below: it
+ * clears the 25-byte minimum, detect's SOF scan finds the frame header at
+ * offset 2, and gdk-pixbuf's header parse (should it be consulted) reports
+ * the same size. Deliberately SHORTER than the 64-byte sniff, so that
+ * served from the FIFO every read of it runs to EOF and the session count
+ * is sound (see the harness comment). */
+#define GGAZE_SOF_JPEG_LEN 35
+
 static void
 _build_sof_jpeg(guint8 *p_out, guint16 u_w, guint16 u_h) {
-   const guint8 head[] = {0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0,    0,
-                          0,    0,    0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01,
-                          0x03, 0x11, 0x01, 0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01,
-                          0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00};
-   memset(p_out, 0, 64);
+   const guint8 head[GGAZE_SOF_JPEG_LEN] = {
+      0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0,    0,    0,    0,    0x03,
+      0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xFF, 0xDA, 0x00,
+      0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00};
    memcpy(p_out, head, sizeof(head));
    p_out[7]  = (guint8)(u_h >> 8);
    p_out[8]  = (guint8)(u_h & 0xFF);
@@ -685,20 +695,112 @@ _build_sof_jpeg(guint8 *p_out, guint16 u_w, guint16 u_h) {
    p_out[10] = (guint8)(u_w & 0xFF);
 }
 
-/* loader_peek_dimensions() on a FIFO serving p_jpg: returns the peek's
- * verdict, stores the number of times the file was opened in *p_opens and
- * asserts the budget. The sniff is open one and detect's SOF peek open
- * two; gdk_pixbuf_get_file_info() would be a third. */
-static gboolean
-_peek_via_fifo(const guint8 *p_jpg, guint *p_opens) {
-   FifoWriter w = {.p_img = p_jpg, .u_len = 64, .u_first_chunk = 0};
+/* detect_jpeg_peek_dims_from_path() must read min(file, 64 KB), not
+ * "whatever the first read() returned", for the same reason as the sniff:
+ * with a single g_input_stream_read() a 10-byte first chunk was scanned as
+ * the whole file, its SOF payload was cut off, the peek reported NOT_JPEG
+ * and loader_peek_dimensions() fell through to gdk-pixbuf's header parse
+ * -- a third open, the very sandbox spawn the SOF peek exists to avoid,
+ * and the wrong verdict for a FIFO, a pipe or a GVFS stream that happens
+ * to deliver in pieces. With read_all the oversized header is seen whole
+ * in session two and refused there: FALSE, and exactly two sessions
+ * (sniff + SOF peek). Reverting detect.c to a single read makes this
+ * assert 3. */
+static void
+test_fifo_two_chunk_jpeg_peek(void) {
+   guint8 jpg[GGAZE_SOF_JPEG_LEN];
+   _build_sof_jpeg(jpg, 65500, 65500);
+   FifoWriter w = {.p_img = jpg, .u_len = sizeof(jpg), .u_first_chunk = 10};
+   g_assert_cmpuint(w.u_len, <, GGAZE_DETECT_SNIFF_LEN);
    _fifo_start(&w);
+
    GFile   *p_file = g_file_new_for_path(w.c_fifo);
+   int      i_w = -1, i_h = -1;
+   gboolean b_ok    = loader_peek_dimensions(p_file, &i_w, &i_h);
+   guint    u_opens = _fifo_finish(&w);
+   g_assert_false(b_ok);
+   g_assert_cmpuint(u_opens, ==, 2);
+   g_object_unref(p_file);
+}
+
+/* --- open counting on a regular file ------------------------------------ */
+
+/* How many times a regular temp file is opened during one call: an
+ * inotify watch on the file. The kernel queues IN_OPEN inside openat()
+ * itself, synchronously, whoever the opener is (this process or a glycin
+ * sandbox), so once the call under test has returned the queue holds
+ * exactly its opens: no helper thread, no deadline, no assumption about
+ * which end closes first. One kernel rule shapes the watch: inotify
+ * COALESCES an event identical (wd, mask, cookie, name) to the one at the
+ * tail of its unread queue, so two back-to-back IN_OPENs would count as
+ * one (observed: 1 for the two opens of the oversized case). Watching
+ * IN_CLOSE_NOWRITE as well keeps every IN_OPEN distinct, because each
+ * open the loader makes is closed before the next -- the sniff stream is
+ * unreffed before detect's peek opens, that closes before gdk-pixbuf's
+ * fopen -- so the queue alternates OPEN, CLOSE, OPEN, CLOSE and nothing
+ * merges; _open_counter_finish() asserts that alternation. The count is
+ * the only proof from OUTSIDE the loader that gdk-pixbuf was NOT
+ * consulted -- the sniff is one open, detect's SOF peek another, and
+ * gdk_pixbuf_get_file_info() would be a third. Linux-only, like the app. */
+typedef struct {
+   gchar *c_path;
+   int    i_inotify;
+} OpenCounter;
+
+static void
+_open_counter_start(OpenCounter *p_c, const guint8 *p_buf, gsize u_len) {
+   p_c->c_path    = write_tmp(p_buf, u_len);
+   p_c->i_inotify = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
+   g_assert_cmpint(p_c->i_inotify, >=, 0);
+   g_assert_cmpint(inotify_add_watch(p_c->i_inotify, p_c->c_path,
+                                     IN_OPEN | IN_CLOSE_NOWRITE),
+                   >=, 0);
+}
+
+/* Drain the queue (non-blocking: EAGAIN is "empty", anything else a
+ * failure), count the IN_OPEN events while asserting each is followed by
+ * its IN_CLOSE_NOWRITE before the next (the alternation the comment above
+ * relies on), tear down. A watch on a FILE never carries a name, so every
+ * event is exactly sizeof(struct inotify_event). */
+static guint
+_open_counter_finish(OpenCounter *p_c) {
+   struct inotify_event evs[64];
+   guint                u_opens = 0;
+   gboolean             b_open  = FALSE; /* an OPEN awaits its CLOSE */
+   for (;;) {
+      ssize_t n = read(p_c->i_inotify, evs, sizeof(evs));
+      if (n < 0) {
+         g_assert_cmpint(errno, ==, EAGAIN);
+         break;
+      }
+      g_assert_cmpint(n % (ssize_t)sizeof(evs[0]), ==, 0);
+      for (ssize_t i = 0; i < n / (ssize_t)sizeof(evs[0]); i++) {
+         gboolean b_is_open = (evs[i].mask & IN_OPEN) != 0;
+         g_assert_cmpint(b_is_open, !=, b_open);
+         b_open = b_is_open;
+         u_opens += b_is_open ? 1 : 0;
+      }
+   }
+   g_assert_false(b_open);
+   close(p_c->i_inotify);
+   unlink(p_c->c_path);
+   g_free(p_c->c_path);
+   return (u_opens);
+}
+
+/* loader_peek_dimensions() on a regular file holding p_jpg: returns the
+ * peek's verdict, stores the exact number of opens in *p_opens and asserts
+ * the budget. */
+static gboolean
+_peek_counting_opens(const guint8 *p_jpg, gsize u_len, guint *p_opens) {
+   OpenCounter c;
+   _open_counter_start(&c, p_jpg, u_len);
+   GFile   *p_file = g_file_new_for_path(c.c_path);
    int      i_w = -1, i_h = -1;
    gint64   i_start = g_get_monotonic_time();
    gboolean b_ok    = loader_peek_dimensions(p_file, &i_w, &i_h);
    gdouble  d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
-   *p_opens         = _fifo_finish(&w);
+   *p_opens         = _open_counter_finish(&c);
    g_object_unref(p_file);
    g_assert_cmpfloat(d_secs, <, 5.0);
    return (b_ok);
@@ -708,16 +810,18 @@ _peek_via_fifo(const guint8 *p_jpg, guint *p_opens) {
  * must say so WITHOUT asking gdk-pixbuf: the old code returned a plain
  * FALSE for "oversized" and "SOF not in the prefix" alike and fell through
  * to gdk_pixbuf_get_file_info() -- a glycin sandbox spawn on Fedora >= 41
- * whose 65500x65500 answer was then rejected a second time. Two opens
- * (sniff + SOF peek) prove the third call never happened; the zero-height
- * test right below proves the same harness does see a third open when the
- * peek does defer. */
+ * whose 65500x65500 answer was then rejected a second time. Exactly two
+ * opens (sniff + SOF peek) prove the third call never happened; the two
+ * tests right below prove the same counter does see the third open when
+ * the peek legitimately defers. (An earlier version counted FIFO sessions
+ * and could pass with 2 even when gdk-pixbuf WAS asked: see the harness
+ * comment above.) */
 static void
 test_oversized_jpeg_peek_skips_pixbuf(void) {
-   guint8 jpg[64];
+   guint8 jpg[GGAZE_SOF_JPEG_LEN];
    _build_sof_jpeg(jpg, 65500, 65500);
    guint u_opens = 0;
-   g_assert_false(_peek_via_fifo(jpg, &u_opens));
+   g_assert_false(_peek_counting_opens(jpg, sizeof(jpg), &u_opens));
    g_assert_cmpuint(u_opens, ==, 2);
 }
 
@@ -729,10 +833,10 @@ test_oversized_jpeg_peek_skips_pixbuf(void) {
  * real decoder judge such a file, and that parse's own > 0 check. */
 static void
 test_zero_height_jpeg_peek_is_false(void) {
-   guint8 jpg[64];
+   guint8 jpg[GGAZE_SOF_JPEG_LEN];
    _build_sof_jpeg(jpg, 6, 0);
    guint u_opens = 0;
-   g_assert_false(_peek_via_fifo(jpg, &u_opens));
+   g_assert_false(_peek_counting_opens(jpg, sizeof(jpg), &u_opens));
    g_assert_cmpuint(u_opens, ==, 3);
 }
 
@@ -748,7 +852,7 @@ test_sofless_jpeg_peek_defers_to_pixbuf(void) {
    guint8 jpg[64] = {0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F',
                      'I',  'F',  0,    1,    1,    0,    0,   0};
    guint  u_opens = 0;
-   g_assert_false(_peek_via_fifo(jpg, &u_opens));
+   g_assert_false(_peek_counting_opens(jpg, sizeof(jpg), &u_opens));
    g_assert_cmpuint(u_opens, ==, 3);
 }
 
@@ -787,6 +891,79 @@ test_padded_past_prefix_jpeg_peek_refused(void) {
    unlink(c_path);
    g_free(c_path);
    g_byte_array_unref(p_buf);
+}
+
+/* --- the pixbuf backend on a GFile served from memory ------------------ */
+
+/* The backend's post-read cancel check (pixbuf.c: "last chance to honour a
+ * superseded load") has a TRUE branch only a cancel that lands AFTER the
+ * read's own pre-read check can reach -- i.e. while the final read() is in
+ * flight. A cancel from another thread hits that window by luck; the
+ * memory-served GFile (tests/helpers/mem_file.c) hits it every time by
+ * cancelling from inside the stream's read_fn as it reports EOF. Control
+ * first: unarmed, the file decodes as 1x1, which proves the stream path
+ * is real and that a load is two opens (sniff, then backend). Then armed
+ * on the fourth open overall -- the armed load's SECOND, so the
+ * dispatcher's sniff (its first) passes untouched and it is the backend's
+ * g_file_load_contents() that returns success on a GCancellable cancelled
+ * meanwhile: the only place left to notice is the check under test, and
+ * the verdict must be G_IO_ERROR_CANCELLED with nothing decoded. */
+static void
+test_cancel_between_read_and_decode(void) {
+   if (!_pixbuf_module_usable("gif")) {
+      return;
+   }
+   GFile      *p_file = ggtest_mem_file_new(TINY_GIF, sizeof(TINY_GIF));
+   GError     *p_err  = NULL;
+   GdkTexture *p_tex  = loader_load(p_file, NULL, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_tex);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 1);
+   g_assert_cmpuint(ggtest_mem_file_opens(p_file), ==, 2);
+   g_object_unref(p_tex);
+
+   GCancellable *p_cancel = g_cancellable_new();
+   ggtest_mem_file_cancel_at_eof(p_file, p_cancel, 4);
+   p_tex = loader_load(p_file, p_cancel, &p_err);
+   g_assert_null(p_tex);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+   g_assert_true(g_cancellable_is_cancelled(p_cancel));
+   g_assert_cmpuint(ggtest_mem_file_opens(p_file), ==, 4);
+   g_error_free(p_err);
+   g_object_unref(p_cancel);
+   g_object_unref(p_file);
+}
+
+/* The dispatcher's sniff and the backend's read are two opens, so the
+ * backend re-runs the gate on the bytes it actually loaded (pixbuf.c
+ * _pixbuf_bytes_decodable()): called DIRECTLY -- as a swap of the file
+ * between the two opens would in effect call it -- with a truncated JXL
+ * and with nothing, it must refuse with the gate's INVALID_DATA and never
+ * reach the GdkPixbufLoader (budget). */
+static void
+test_backend_regates_loaded_bytes(void) {
+   const guint8 jxl[] = {0xFF, 0x0A, 0x10, 0x00};
+   const struct {
+      const char   *c_name;
+      const guint8 *p_buf;
+      gsize         u_len;
+   } vecs[] = {
+      {"truncated JXL", jxl, sizeof(jxl)},
+      {"empty", jxl, 0},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(vecs); u++) {
+      g_test_message("%s", vecs[u].c_name);
+      GFile      *p_file  = ggtest_mem_file_new(vecs[u].p_buf, vecs[u].u_len);
+      gint64      i_start = g_get_monotonic_time();
+      GError     *p_err   = NULL;
+      GdkTexture *p_tex   = pixbuf_backend.load(p_file, NULL, &p_err);
+      gdouble     d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
+      g_assert_null(p_tex);
+      g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+      g_assert_cmpfloat(d_secs, <, 5.0);
+      g_error_free(p_err);
+      g_object_unref(p_file);
+   }
 }
 
 /* loader_load_async()/loader_load_finish(): the GTask wrapper the window
@@ -1069,6 +1246,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/loader/pixbuf/tiny_images_load", test_tiny_images_load);
    g_test_add_func("/loader/pixbuf/fifo_two_chunk_read",
                    test_fifo_two_chunk_read);
+   g_test_add_func("/loader/pixbuf/fifo_two_chunk_jpeg_peek",
+                   test_fifo_two_chunk_jpeg_peek);
    g_test_add_func("/loader/pixbuf/oversized_jpeg_peek_skips_pixbuf",
                    test_oversized_jpeg_peek_skips_pixbuf);
    g_test_add_func("/loader/pixbuf/zero_height_jpeg_peek_is_false",
@@ -1077,6 +1256,10 @@ main(int i_argc, char **c_argv) {
                    test_sofless_jpeg_peek_defers_to_pixbuf);
    g_test_add_func("/loader/pixbuf/padded_past_prefix_jpeg_peek_refused",
                    test_padded_past_prefix_jpeg_peek_refused);
+   g_test_add_func("/loader/pixbuf/cancel_between_read_and_decode",
+                   test_cancel_between_read_and_decode);
+   g_test_add_func("/loader/pixbuf/backend_regates_loaded_bytes",
+                   test_backend_regates_loaded_bytes);
    g_test_add_func("/loader/pixbuf/load_async", test_load_async);
    g_test_add_func("/loader/pixbuf/truncated_thumbnail_and_peek",
                    test_truncated_thumbnail_and_peek);

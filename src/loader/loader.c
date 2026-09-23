@@ -12,9 +12,8 @@
  * own.
  *
  * Before any backend -- or, on the thumbnail and info paths, any gdk-pixbuf
- * call that takes a path, the thumbnail cache's own PNG read included (it
- * calls loader_sniff_file(), the gate on its own) -- sees the file, the
- * sniffed header goes through _sniff_header(), which refuses, in this order:
+ * call that takes a path -- sees the file, the sniffed header goes through
+ * _sniff_header(), which refuses, in this order:
  *
  *   1. an empty file                       G_IO_ERROR_INVALID_DATA
  *   2. a file shorter than the smallest complete file of its signature's
@@ -38,6 +37,23 @@
  * of a decode, and a garbage one costs nothing instead of a hung worker
  * that can never be cancelled. glycin-avif/heif return promptly on bad
  * input, so AVIF/HEIF stay on the fallback.
+ *
+ * How exact "never" is depends on whether the gated bytes are the decoded
+ * bytes. The gate on bytes is loader_sniff_bytes(); _sniff_header() is the
+ * same gate on one open's first 64 bytes. loader_load() is exact: the
+ * pixbuf backend loads the whole file once and runs loader_sniff_bytes()
+ * on THAT buffer before decoding it, and the thumbnail cache read
+ * (thumbnail.c) does the same with its entry, so a file swapped between
+ * two opens cannot slip an ungated byte into a GdkPixbufLoader. The two
+ * calls that must hand gdk-pixbuf a PATH -- gdk_pixbuf_new_from_file_at_
+ * scale() in loader_load_pixbuf_scaled() and gdk_pixbuf_get_file_info() in
+ * loader_peek_dimensions() -- are best-effort by construction: the sniff
+ * is one open and the decode another, and a file replaced in between (a
+ * rename racing a thumbnail pass) reaches gdk-pixbuf unsniffed. That
+ * window is a rename away from the sniff on a local disk, not something
+ * an attacker steers, and the alternative (loading the whole file to
+ * decode a thumbnail) would cost the at-scale JPEG path its 1/8 DCT
+ * decode; it is documented rather than closed.
  *
  * GGAZE_HAVE_ANY_BACKEND (ggaze-config.h) is 0 in the minimal build (every
  * loader feature off, the lane CI's coverage gate measures): the backend
@@ -158,13 +174,40 @@ _refuse_unbuilt_format(const guint8 *p_head, gsize u_len, GError **p_err) {
 #endif
 }
 
-/* Read the sniff header and refuse what no decoder should see, in the
+/* The gate itself, on bytes: refuse what no decoder should see, in the
  * order the top-of-file comment gives: an empty file (reported as
  * G_IO_ERROR_INVALID_DATA rather than handed on -- the sync path used to
  * return NULL with NO error for it, which made downstream
  * g_task_return_error(NULL) callers hang their GTask forever), a file
  * shorter than its signature's minimum, and a format the build cannot
- * decode. Returns the byte count read into p_head, or -1 with p_err set. */
+ * decode. Only the first GGAZE_DETECT_SNIFF_LEN bytes matter: every rule
+ * in detect's minimum table is <= that, so a longer buffer is gated
+ * exactly like its own sniff-length prefix would be. */
+gboolean
+loader_sniff_bytes(const guint8 *p_bytes, gsize u_len, GgazeFormat *p_format,
+                   GError **p_err) {
+   g_return_val_if_fail(p_bytes != NULL || u_len == 0, FALSE);
+   gsize u_head = MIN(u_len, (gsize)GGAZE_DETECT_SNIFF_LEN);
+   if (u_head == 0) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                  "empty file (0 bytes)");
+      return (FALSE);
+   }
+   if (!detect_reject_truncated(p_bytes, u_head, p_err)) {
+      return (FALSE);
+   }
+   if (!_refuse_unbuilt_format(p_bytes, u_head, p_err)) {
+      return (FALSE);
+   }
+   if (p_format != NULL) {
+      *p_format = detect_format(p_bytes, u_head);
+   }
+   return (TRUE);
+}
+
+/* Read one open's sniff header and run loader_sniff_bytes() on it: the
+ * gate as every path-taking entry point applies it. Returns the byte count
+ * read into p_head, or -1 with p_err set. */
 static gssize
 _sniff_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head,
               GError **p_err) {
@@ -173,15 +216,7 @@ _sniff_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head,
    if (i_read < 0) {
       return (-1);
    }
-   if (i_read == 0) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                  "empty file (0 bytes)");
-      return (-1);
-   }
-   if (!detect_reject_truncated(p_head, (gsize)i_read, p_err)) {
-      return (-1);
-   }
-   if (!_refuse_unbuilt_format(p_head, (gsize)i_read, p_err)) {
+   if (!loader_sniff_bytes(p_head, (gsize)i_read, NULL, p_err)) {
       return (-1);
    }
    return (i_read);
@@ -212,21 +247,6 @@ _dispatch(GFile *p_file, GCancellable *p_cancel, LoaderProgressCb p_progress,
    (void)p_progress_data;
 #endif
    return (p_be->load(p_file, p_cancel, p_err));
-}
-
-gboolean
-loader_sniff_file(GFile *p_file, GCancellable *p_cancel, GgazeFormat *p_format,
-                  GError **p_err) {
-   g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
-   guint8 head[GGAZE_DETECT_SNIFF_LEN];
-   gssize i_read = _sniff_header(p_file, p_cancel, head, p_err);
-   if (i_read < 0) {
-      return (FALSE);
-   }
-   if (p_format != NULL) {
-      *p_format = detect_format(head, (gsize)i_read);
-   }
-   return (TRUE);
 }
 
 GdkTexture *
@@ -367,7 +387,8 @@ loader_load_pixbuf_scaled(GFile *p_file, int i_max_px, GCancellable *p_cancel,
    /* The same empty/truncated gate as the full load runs before the
     * path-taking gdk_pixbuf_new_from_file_at_scale() below, which would
     * otherwise stall the thumbnail pool on a truncated JXL exactly like the
-    * large view (task tb2). */
+    * large view (task tb2). Best-effort, not exact: the at-scale call
+    * reopens the path (top-of-file comment). */
    guint8 head[GGAZE_DETECT_SNIFF_LEN];
    gssize i_read = _sniff_header(p_file, p_cancel, head, p_err);
    if (i_read < 0) {
@@ -537,7 +558,9 @@ loader_peek_dimensions(GFile *p_file, int *p_w, int *p_h) {
       return (FALSE);
    }
    /* An empty, truncated or not-built-in file has no dimensions and must
-    * not reach any decoder (glycin stall, task tb2). */
+    * not reach any decoder (glycin stall, task tb2). Every size source
+    * below reopens the path, so this is best-effort against a swap in
+    * between (top-of-file comment). */
    guint8   head[GGAZE_DETECT_SNIFF_LEN];
    gssize   i_read = _sniff_header(p_file, NULL, head, NULL);
    gboolean b_ok   = FALSE;

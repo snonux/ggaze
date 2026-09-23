@@ -92,10 +92,16 @@ ggaze
   header (decoder-free; an oversized or prefix-exceeding header fails
   closed without asking gdk-pixbuf, a zero side is never reported), a
   backend-claimed format through that backend, and only the rest through
-  `gdk_pixbuf_get_file_info`. `loader_sniff_file` exposes the gate alone
-  for the thumbnail cache read, which decodes a PNG entry only. Side
-  effect: a missing or unreadable file fails the thumbnail path as a
-  `G_IO_ERROR` from the sniff, no longer as gdk-pixbuf's `G_FILE_ERROR`.
+  `gdk_pixbuf_get_file_info`. `loader_sniff_bytes` is the gate on bytes
+  already in memory: the pixbuf backend re-runs it on the buffer it
+  decodes, and the thumbnail cache read loads its entry once, gates those
+  bytes and decodes a PNG entry only (through a `GdkPixbufLoader`, never by
+  path) -- so wherever the gated bytes are the decoded bytes the guarantee
+  is exact, and only the two path-taking gdk-pixbuf calls (the at-scale
+  thumbnail decode, the header-only size peek) remain best-effort against
+  a file swapped between the sniff's open and theirs. Side effect: a
+  missing or unreadable file fails the thumbnail path as a `G_IO_ERROR`
+  from the sniff, no longer as gdk-pixbuf's `G_FILE_ERROR`.
   Details in [tech-stack.md](tech-stack.md) "The decode gate".
 - **navigator** — given a starting file, lists the parent directory, filters
   to image MIME types, sorts (name/time/size), exposes `current/prev/next`.

@@ -387,18 +387,26 @@ detect_jpeg_peek_dims_from_path(const char *c_path, guint32 *p_w,
                                           * produce its own error */
    }
    guint8 buf[GGAZE_JPEG_PEEK_LEN];
-   gssize n =
-      g_input_stream_read(G_INPUT_STREAM(p_in), buf, sizeof(buf), NULL, NULL);
+   gsize  u_read = 0;
+   /* g_input_stream_read_all(), not a single read: a single read may return
+    * fewer bytes than the file holds on a FIFO, a pipe or a GVFS stream
+    * (loader.c's _read_header() has the same note), and a short single read
+    * would then be mistaken for the whole file below. With read_all only
+    * EOF can end the read early, which is what makes "u_read < sizeof(buf)"
+    * mean "the whole file was seen". A failed read is NOT_JPEG like an
+    * unreadable file: the real decoder produces its own error. */
+   gboolean b_ok = g_input_stream_read_all(G_INPUT_STREAM(p_in), buf,
+                                           sizeof(buf), &u_read, NULL, NULL);
    g_object_unref(p_in);
-   if (n <= 0) {
+   if (!b_ok || u_read == 0) {
       return (GGAZE_JPEG_PEEK_NOT_JPEG);
    }
-   /* b_capped: TRUE iff we filled the whole read buffer, meaning the file may
+   /* b_capped: TRUE iff the whole buffer filled, meaning the file may
     * continue past it and a "no SOF found" verdict would be inconclusive,
-    * not definitive. A short read (n < sizeof(buf)) hit real EOF, so the
-    * whole file was seen. */
-   gboolean b_capped = ((gsize)n == sizeof(buf));
-   return (_jpeg_peek_scan(buf, (gsize)n, b_capped, p_w, p_h));
+    * not definitive. Anything less hit EOF (see above), so the whole file
+    * was seen. */
+   gboolean b_capped = (u_read == sizeof(buf));
+   return (_jpeg_peek_scan(buf, u_read, b_capped, p_w, p_h));
 }
 
 gboolean

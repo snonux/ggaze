@@ -81,6 +81,15 @@ a popover on a never-presented toplevel maps on X11 but not on Wayland, and
 X11 seat grabs are display-global (see `tests/meson.build`, "suites that need
 exclusive use of the display's seat grab").
 
+`test_loader_pixbuf` **fails** (does not skip) when a gdk-pixbuf module that
+gdk-pixbuf2 itself ships -- `png`, `gif`, `jpeg` -- is missing: on CI's
+`fedora:40` and on any desktop that is a broken test machine, not an
+optional feature, and a silent skip once hid a dead test for weeks. On a box
+deliberately stripped of those modules, set
+`GGAZE_TEST_ALLOW_MISSING_PIXBUF_LOADERS=1` to skip the affected decodes
+instead. Optional modules (`webp`, `tiff`, `ico`, `jxl`) are always skipped
+when absent.
+
 Shared helpers go in `tests/helpers/`; fixtures in `tests/fixtures/` (grow per
 milestone). Integration suites land with the milestone that first makes a flow
 possible — see `docs/IMPLEMENTATION.md` "Planned integration suites".

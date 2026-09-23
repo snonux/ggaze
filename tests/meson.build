@@ -22,6 +22,17 @@
 #   GGAZE_SAMPLE_DIR    local ./sample-images (not git-tracked; tests skip
 #                       cleanly when absent so CI stays green)
 #   GIO_USE_VFS=local   avoid gvfs daemon-VFS internal leaks under ASan
+#
+# One opt-out, never set by this file:
+#   GGAZE_TEST_ALLOW_MISSING_PIXBUF_LOADERS=1
+#                       test_loader_pixbuf FAILS when a gdk-pixbuf module
+#                       gdk-pixbuf2 itself ships (png, gif, jpeg) is missing:
+#                       on CI's fedora:40 and on any desktop that is a broken
+#                       test machine, not an optional feature, and a silent
+#                       skip once hid a dead FIFO test for weeks. On a box
+#                       deliberately stripped of those modules, set this to
+#                       skip the affected decodes instead. Optional modules
+#                       (webp, tiff, ico, jxl) are always skipped when absent.
 
 fixtures_env = environment()
 fixtures_env.set('GIO_USE_VFS', 'local')
@@ -59,11 +70,13 @@ gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 
 # Shared test helpers (AGENTS.md: "Shared helpers go in tests/helpers/").
 # Grid-cell activation and alert-dialog driving are used by more than one
-# suite, so they live here instead of being copy-pasted per binary.
+# suite, so they live here instead of being copy-pasted per binary;
+# mem_file.c (a GFile served from memory, for cancelling INSIDE a read) is
+# the loader suites' stream-path driver.
 test_helpers_inc = include_directories('helpers')
 test_helpers_lib = static_library(
    'ggaze_test_helpers',
-   ['helpers/gtk_helpers.c', ggaze_conf_h],
+   ['helpers/gtk_helpers.c', 'helpers/mem_file.c', ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
    install : false,
@@ -93,8 +106,10 @@ test('app', test_app,
    depends : ggaze_exe,
 )
 
-# test_detect and test_loader_pixbuf share tests/helpers/tiny_images.h (the
-# smallest real 1x1 file per format, as inline bytes) via test_helpers_inc.
+# test_detect, test_loader_pixbuf and test_thumbnail share
+# tests/helpers/tiny_images.h (the smallest real 1x1 file per format, as
+# inline bytes) via test_helpers_inc; test_loader_pixbuf also links the
+# helpers library for mem_file.c.
 test_detect = executable(
    'test_detect',
    ['test_detect.c', ggaze_conf_h],
@@ -110,7 +125,7 @@ test_loader_pixbuf = executable(
    ['test_loader_pixbuf.c', ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
-   link_with : ggaze_lib,
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
 test('loader_pixbuf', test_loader_pixbuf, suite : 'unit', env : fixtures_env)
@@ -199,7 +214,7 @@ test('trash', test_trash, suite : 'unit', env : fixtures_env)
 test_thumbnail = executable(
    'test_thumbnail',
    ['test_thumbnail.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
    link_with : ggaze_lib,
    install : false,

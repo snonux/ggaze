@@ -17,8 +17,15 @@
  * format (detect_reject_truncated(), G_IO_ERROR_INVALID_DATA), and -- when
  * the jxl feature is off -- any JXL at all (G_IO_ERROR_NOT_SUPPORTED, "JXL
  * support is not built in"), so no JXL that gdk-pixbuf would forward to
- * glycin-jxl ever reaches it: that loader waits forever on garbage and
- * cannot be cancelled (task tb2). See docs/tech-stack.md "Image decode".
+ * glycin-jxl reaches it: that loader waits forever on garbage and cannot
+ * be cancelled (task tb2). The guarantee is exact where the gated bytes
+ * are the decoded bytes (loader_load(): the pixbuf backend re-runs the
+ * gate, loader_sniff_bytes(), on the bytes it decodes) and best-effort
+ * where a gdk-pixbuf call must take a PATH (the scaled thumbnail decode,
+ * the header-only size peek): there the sniff and the decode are two
+ * opens, and a file swapped in between -- a rename under a running
+ * thumbnail pass -- is decoded unsniffed. See docs/tech-stack.md "The
+ * decode gate".
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -81,23 +88,29 @@ GdkTexture *loader_load_finish(GAsyncResult *p_res, GError **p_err);
  * full decode and are scaled afterwards -- which is what keeps the grid from
  * staying blank for exactly the formats the large view can show. The same
  * oversized-JPEG, empty/truncated-file and JXL-not-built-in guards the full
- * path uses run here, so a crafted header cannot stall the thumbnail pool.
- * Because the sniff opens the file first, a missing or unreadable file is
+ * path uses run here, so a crafted header cannot stall the thumbnail pool
+ * (best-effort for the at-scale path, which decodes by PATH after the
+ * sniff's own open: see the top-of-file comment). Because the sniff opens
+ * the file first, a missing or unreadable file is
  * reported as a G_IO_ERROR (NOT_FOUND, PERMISSION_DENIED, ...) from GIO,
  * no longer as the G_FILE_ERROR gdk-pixbuf's path-taking call used to
  * raise. Caller unrefs. */
 GdkPixbuf *loader_load_pixbuf_scaled(GFile *p_file, int i_max_px,
                                      GCancellable *p_cancel, GError **p_err);
 
-/* The decode gate on its own -- the empty / truncated / not-built-in
- * refusals every entry point above runs first -- for a caller that must
- * hand a path to gdk-pixbuf itself (thumbnail.c reading a cache PNG that
- * any other TMS app may have written). TRUE when a decoder may see the
- * file, with the sniffed format in *p_format (may be NULL;
+/* The decode gate on its own, on bytes already in memory -- the empty /
+ * truncated / not-built-in refusals every entry point above runs first --
+ * for a caller that decodes a buffer it read itself (thumbnail.c reading a
+ * cache PNG that any other TMS app may have written; the pixbuf backend
+ * re-gating what it loaded). Gating the very bytes that are then decoded
+ * is what makes the guarantee exact: a sniff of one open followed by a
+ * decode of another can be defeated by a swap in between. Only the first
+ * GGAZE_DETECT_SNIFF_LEN bytes are inspected. TRUE when a decoder may see
+ * the bytes, with the sniffed format in *p_format (may be NULL;
  * GGAZE_FMT_UNKNOWN for bytes carrying no signature, which the gate does
  * not constrain); FALSE with a G_IO_ERROR in p_err otherwise. */
-gboolean loader_sniff_file(GFile *p_file, GCancellable *p_cancel,
-                           GgazeFormat *p_format, GError **p_err);
+gboolean loader_sniff_bytes(const guint8 *p_bytes, gsize u_len,
+                            GgazeFormat *p_format, GError **p_err);
 
 /* The STORED pixel dimensions of p_file (before EXIF orientation, as an
  * EXIF card reports them) from the cheapest safe source: a JPEG's SOF

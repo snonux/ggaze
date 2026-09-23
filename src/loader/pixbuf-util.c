@@ -64,3 +64,32 @@ pixbuf_util_to_upright_texture(GdkPixbuf *p_pix) {
    g_object_unref(p_up);
    return (p_tex);
 }
+
+GdkPixbuf *
+pixbuf_util_decode_bytes(const guchar *p_buf, gsize u_len, GError **p_err) {
+   /* A loader must be closed before it is finalized or GdkPixbuf logs a
+    * warning per corrupt file (fatal under G_DEBUG=fatal-warnings), so
+    * both exits close it; on the write-failure exit the close error is
+    * irrelevant (the write error is the one reported), and a close that
+    * fails on truncated data may still leave a usable pixbuf. */
+   GdkPixbufLoader *p_loader = gdk_pixbuf_loader_new();
+   GError          *p_sub    = NULL;
+   if (!gdk_pixbuf_loader_write(p_loader, p_buf, u_len, &p_sub)) {
+      g_propagate_error(p_err, p_sub);
+      gdk_pixbuf_loader_close(p_loader, NULL);
+      g_object_unref(p_loader);
+      return (NULL);
+   }
+   if (!gdk_pixbuf_loader_close(p_loader, &p_sub)) {
+      g_clear_error(&p_sub);
+   }
+   GdkPixbuf *p_pix = gdk_pixbuf_loader_get_pixbuf(p_loader);
+   if (p_pix == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "could not decode image (GdkPixbuf produced no pixbuf)");
+   } else {
+      g_object_ref(p_pix);
+   }
+   g_object_unref(p_loader);
+   return (p_pix);
+}
