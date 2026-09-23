@@ -204,7 +204,11 @@ _jpeg_add_part(IccParts *p_parts, GBytes *p_seg, GError **p_err) {
 }
 
 /* Concatenate the slots in order; NULL without an error when no ICC segment
- * was seen at all, INVALID_DATA for a gap in the sequence. */
+ * was seen at all, INVALID_DATA for a gap in the sequence. No size cap is
+ * checked here because none can be exceeded: a segment carries at most
+ * 65533 - 14 bytes of profile and the count is one byte, so the join is at
+ * most 255 * 65519 bytes (~15.9 MiB), under ICC_MAX_PROFILE_LEN. */
+G_STATIC_ASSERT(255u * (65533u - 14u) <= ICC_MAX_PROFILE_LEN);
 static GBytes *
 _jpeg_join_parts(IccParts *p_parts, GError **p_err) {
    if (p_parts->u_count == 0) {
@@ -212,43 +216,19 @@ _jpeg_join_parts(IccParts *p_parts, GError **p_err) {
    }
    GByteArray *p_out = g_byte_array_new();
    for (guint u = 0; u < p_parts->u_count; u++) {
-      GBytes       *p_b = g_ptr_array_index(p_parts->p_parts, u);
-      gsize         u_n = 0;
-      const guint8 *p_d = p_b != NULL ? g_bytes_get_data(p_b, &u_n) : NULL;
-      if (p_b == NULL || (gsize)p_out->len + u_n > ICC_MAX_PROFILE_LEN) {
+      GBytes *p_b = g_ptr_array_index(p_parts->p_parts, u);
+      if (p_b == NULL) {
          g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                     p_b == NULL ? "icc: JPEG ICC segment %u of %u is missing"
-                                 : "icc: JPEG ICC segments %u of %u exceed "
-                                   "the profile cap",
-                     u + 1, p_parts->u_count);
+                     "icc: JPEG ICC segment %u of %u is missing", u + 1,
+                     p_parts->u_count);
          g_byte_array_unref(p_out);
          return (NULL);
       }
+      gsize         u_n = 0;
+      const guint8 *p_d = g_bytes_get_data(p_b, &u_n);
       g_byte_array_append(p_out, p_d, (guint)u_n);
    }
    return (g_byte_array_free_to_bytes(p_out));
-}
-
-/* The next marker code: an 0xFF prefix (0xFF fill bytes may repeat) then
- * the code. A byte that is not 0xFF where a marker must start is a broken
- * marker stream (STREAMREAD_ERROR with INVALID_DATA). */
-static StreamReadStatus
-_jpeg_next_marker(GInputStream *p_in, guint8 *p_code, GError **p_err) {
-   guint8           u_byte;
-   StreamReadStatus e_rd = streamread_exact(p_in, &u_byte, 1, p_err);
-   if (e_rd != STREAMREAD_OK) {
-      return (e_rd);
-   }
-   if (u_byte != 0xFF) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                  "icc: JPEG marker expected, found 0x%02x", u_byte);
-      return (STREAMREAD_ERROR);
-   }
-   do {
-      e_rd = streamread_exact(p_in, &u_byte, 1, p_err);
-   } while (e_rd == STREAMREAD_OK && u_byte == 0xFF);
-   *p_code = u_byte;
-   return (e_rd);
 }
 
 /* Markers that carry no length field: TEM, RSTn, SOI. */
@@ -300,7 +280,7 @@ _jpeg_walk(GInputStream *p_in, GError **p_err) {
    IccParts t_parts = {g_ptr_array_new_with_free_func(_bytes_free), 0};
    for (;;) {
       guint8 u_code = 0;
-      if (_jpeg_next_marker(p_in, &u_code, p_err) != STREAMREAD_OK ||
+      if (streamread_jpeg_marker(p_in, &u_code, p_err) != STREAMREAD_OK ||
           u_code == 0xDA || u_code == 0xD9) {
          break;
       }
@@ -356,8 +336,11 @@ icc_read_embedded(GFile *p_file, GError **p_err) {
    GFileInputStream *p_in    = g_file_read(p_file, NULL, &p_local);
    GBytes           *p_icc   = NULL;
    if (p_in != NULL) {
-      p_icc = _walk_stream(G_INPUT_STREAM(p_in), &p_local);
-      g_input_stream_close(G_INPUT_STREAM(p_in), NULL, NULL);
+      /* Buffered: the marker search reads a byte at a time. */
+      GInputStream *p_buf = g_buffered_input_stream_new(G_INPUT_STREAM(p_in));
+      p_icc               = _walk_stream(p_buf, &p_local);
+      g_input_stream_close(p_buf, NULL, NULL);
+      g_object_unref(p_buf);
       g_object_unref(p_in);
    }
    if (p_local != NULL) {

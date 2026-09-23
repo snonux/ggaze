@@ -23,6 +23,8 @@
 #include <glib/gstdio.h>
 #include <string.h>
 
+#include "streamread.h"
+
 static GFile *
 fixture(const char *c_name) {
    const char *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
@@ -242,6 +244,27 @@ test_jpeg_broken_sequences_are_invalid_data(void) {
 
 /* A segment whose declared length runs past the file's end, a length
  * field below its own size, and a byte where a marker must start. */
+/* Stray bytes between segments, and a stuffed FF 00 where a marker was
+ * due, are skipped the way libjpeg skips them: the profile after them is
+ * still found (xb2 review: the walk used to call such a file broken, and
+ * the info card said "unreadable"). */
+static void
+test_jpeg_padding_between_segments_is_skipped(void) {
+   GByteArray  *p_jpg   = jpeg_head();
+   const guint8 C_PAD[] = {0x00, 0x11, 0x22, 0xFF, 0x00, 0x33};
+   g_byte_array_append(p_jpg, C_PAD, sizeof(C_PAD));
+   append_icc_app2(p_jpg, 1, 1, "padded");
+   append_sos(p_jpg);
+   GError *p_err = NULL;
+   GBytes *p_icc = extract_array(p_jpg, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_icc);
+   g_assert_cmpmem(g_bytes_get_data(p_icc, NULL), g_bytes_get_size(p_icc),
+                   "padded", 6);
+   g_bytes_unref(p_icc);
+   g_byte_array_unref(p_jpg);
+}
+
 static void
 test_jpeg_broken_markers_are_invalid_data(void) {
    GByteArray *p_short = jpeg_head();
@@ -254,9 +277,12 @@ test_jpeg_broken_markers_are_invalid_data(void) {
    g_byte_array_append(p_len, C_BAD, sizeof(C_BAD));
    assert_invalid(p_len);
 
-   GByteArray  *p_junk   = jpeg_head();
-   const guint8 C_JUNK[] = {0x12, 0x34};
-   g_byte_array_append(p_junk, C_JUNK, sizeof(C_JUNK));
+   /* Junk where a marker should start is padding (libjpeg skips it), but
+    * not without end: past STREAMREAD_JPEG_MAX_PAD it is no marker stream. */
+   GByteArray *p_junk = jpeg_head();
+   g_byte_array_set_size(p_junk, p_junk->len + STREAMREAD_JPEG_MAX_PAD + 8);
+   memset(p_junk->data + p_junk->len - STREAMREAD_JPEG_MAX_PAD - 8, 0x12,
+          STREAMREAD_JPEG_MAX_PAD + 8);
    assert_invalid(p_junk);
 
    /* EOF right after SOI, or inside a fill run: nothing found, no error. */
@@ -501,6 +527,8 @@ main(int argc, char **argv) {
                    test_jpeg_segments_are_joined_in_sequence_order);
    g_test_add_func("/icc/jpeg_broken_sequences_are_invalid_data",
                    test_jpeg_broken_sequences_are_invalid_data);
+   g_test_add_func("/icc/jpeg_padding_between_segments_is_skipped",
+                   test_jpeg_padding_between_segments_is_skipped);
    g_test_add_func("/icc/jpeg_broken_markers_are_invalid_data",
                    test_jpeg_broken_markers_are_invalid_data);
    g_test_add_func("/icc/png_iccp_that_does_not_inflate_is_invalid_data",

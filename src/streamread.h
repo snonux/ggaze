@@ -10,7 +10,9 @@
  * for simply means "not there" (or "truncated"), while an I/O error is
  * reported as such. Shared by icc.c (the embedded-profile walk) and
  * loader/intact.c (the completeness check); each used to carry its own
- * copy.
+ * copy -- of these and of the JPEG marker step below, which is here for
+ * the same reason: two walkers that must agree with libjpeg on where the
+ * next marker is.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -35,6 +37,23 @@ StreamReadStatus streamread_exact(GInputStream *p_in, guint8 *p_buf,
 /* Skip exactly u_len bytes. */
 StreamReadStatus streamread_skip(GInputStream *p_in, gsize u_len,
                                  GError **p_err);
+
+/* Advance to the next JPEG marker and store its code in *p_code, the way
+ * libjpeg's next_marker() does: bytes that are not 0xFF ahead of the
+ * marker (padding some writers leave between segments; libjpeg warns
+ * "extraneous bytes before marker" and decodes on) are skipped, 0xFF fill
+ * bytes are skipped, and FF 00 (a stuffed zero, not a marker) is skipped
+ * too. So a walker does not refuse a file for padding libjpeg reads past.
+ * The padding (stray and fill bytes together) is capped at
+ * STREAMREAD_JPEG_MAX_PAD, far above the few bytes a writer leaves: more
+ * than that is not a JPEG marker stream (INVALID_DATA), and without the
+ * cap a file of junk after its SOI would be read to its end one byte at a
+ * time. EOF before a marker is STREAMREAD_EOF. Read through a buffered
+ * stream: this reads a byte at a time. */
+#define STREAMREAD_JPEG_MAX_PAD 65536u
+
+StreamReadStatus streamread_jpeg_marker(GInputStream *p_in, guint8 *p_code,
+                                        GError **p_err);
 
 G_END_DECLS
 
