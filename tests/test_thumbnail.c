@@ -942,11 +942,16 @@ _assert_refused_as_cancelled(GFile *p_file, int i_size,
  * that meets it: _thumb_run() bails before any call, and every GIO call
  * it would make takes the task's cancellable and refuses a cancelled one
  * itself (g_file_query_info(), g_file_read()), so neutralising the bails
- * alone still passes here (GIO refuses the stat first). A regression
- * that puts I/O in front of the cancel checks is what fails, both
- * verified with the bails gone: the stat without its cancellable, as
- * thumbnail.c had it before tb2, creates the bucket directory; the entry
- * read without its cancellable opens the entry (count 1, not 0). */
+ * alone still passes here (GIO refuses the stat first). Measured with
+ * the bails gone, the single regression this test catches is the STAT
+ * losing its cancellable, as thumbnail.c had it before tb2: the worker
+ * gets past the stat and creates the bucket directory (with the read's
+ * cancellable gone as well it also opens the entry, count 1). The entry
+ * READ losing its cancellable on its own does NOT fail here -- the stat
+ * is refused first, so the read is never reached and every count stays
+ * 0; that one is pinned by test_cancel_mid_entry_read, which parks the
+ * worker inside the read loop and fails "the reader kept the entry open
+ * after the cancel". */
 static void
 test_precancelled_request(void) {
    char  *c_tmp  = _copy_fixture_to_tmp("plain.jpg");
