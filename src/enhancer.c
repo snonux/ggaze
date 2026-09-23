@@ -21,9 +21,15 @@
 #include <glib/gstdio.h>
 #include <string.h>
 
+#include <gdk-pixbuf/gdk-pixbuf.h>
+
 #include "enhancer-gegl.h"
 #include "ggaze-config.h"
-#include "loader/loader.h" /* orientation-aware load -> upright texture */
+#include "info.h"               /* EXIF Orientation for the GEGL decode */
+#include "loader/detect.h"      /* format sniff + the shared size caps */
+#include "loader/intact.h"      /* GEGL's loaders spin on a truncated file */
+#include "loader/loader.h"      /* orientation-aware load -> upright texture */
+#include "loader/pixbuf-util.h" /* the orientation permutation */
 #include "pathutil.h"
 #include "transform.h"
 
@@ -520,6 +526,33 @@ enhancer_apply(GeglBuffer *p_in, const EnhancerPreset *p_preset,
    return (p_out);
 }
 
+/* --- export (decision #45: the profile travels with the pixels) ---------
+ *
+ * The buffer's babl format carries the image's colour space (see the
+ * ICC-aware load below). gegl:png-save and gegl:jpg-save embed that space's
+ * profile -- for a space made from an embedded ICC profile babl hands the
+ * original bytes back, so the export carries the source's profile byte for
+ * byte. gegl:webp-save embeds nothing, so a buffer in another space is
+ * converted to sRGB first: an untagged file is read as sRGB by every
+ * viewer, and writing wide-gamut pixels into one would shift its colours.
+ * An sRGB buffer (every file without a profile, exactly as before) takes
+ * neither branch: its export is today's export. */
+
+/* TRUE iff p_buf's space is sRGB (untagged, or a profile babl identified
+ * as sRGB). */
+static gboolean
+_buffer_is_srgb(GeglBuffer *p_buf) {
+   const Babl *p_space = babl_format_get_space(gegl_buffer_get_format(p_buf));
+   return (p_space == NULL || p_space == babl_space("sRGB"));
+}
+
+/* Whether the saver op writes the buffer space's ICC profile into the file.
+ * The PNG and JPEG savers do (measured, gegl 0.4.72); webp-save does not. */
+static gboolean
+_saver_embeds_profile(const char *c_op) {
+   return (!g_str_equal(c_op, "gegl:webp-save"));
+}
+
 /* Pick the GEGL saver op and (for jpeg) quality from the output extension.
  * Returns the op name, or NULL if the extension is unsupported / the op is
  * not installed. ju0: never write JPEG bytes into a .png. */
@@ -545,6 +578,47 @@ _saver_for_ext(GFile *p_out) {
    return (c_op);
 }
 
+/* Run the save graph: buffer-source [-> convert-space sRGB when the saver
+ * cannot carry the buffer's profile] -> the saver op at c_path. */
+static void
+_run_save_graph(GeglBuffer *p_buf, const char *c_op, const char *c_path) {
+   GeglNode *p_graph = gegl_node_new();
+   GeglNode *p_prev  = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-source", "buffer", p_buf, NULL);
+   if (!_saver_embeds_profile(c_op) && !_buffer_is_srgb(p_buf) &&
+       gegl_has_operation("gegl:convert-space")) {
+      GeglNode *p_cv =
+         gegl_node_new_child(p_graph, "operation", "gegl:convert-space",
+                             "space-name", "sRGB", NULL);
+      gegl_node_link(p_prev, p_cv);
+      p_prev = p_cv;
+   }
+   GeglNode *p_save;
+   if (g_str_equal(c_op, "gegl:jpg-save")) {
+      p_save = gegl_node_new_child(p_graph, "operation", c_op, "path", c_path,
+                                   "quality", 95, NULL);
+   } else {
+      p_save =
+         gegl_node_new_child(p_graph, "operation", c_op, "path", c_path, NULL);
+   }
+   gegl_node_link(p_prev, p_save);
+   gegl_node_process(p_save);
+   g_object_unref(p_graph);
+}
+
+/* ku0: a real write is a non-empty file that is new, or changed since the
+ * stat taken before the save (a pre-existing path proves nothing). */
+static gboolean
+_save_produced_file(const char *c_path, gboolean b_existed,
+                    const GStatBuf *p_before) {
+   GStatBuf st_after;
+   if (g_stat(c_path, &st_after) != 0 || st_after.st_size <= 0) {
+      return (FALSE);
+   }
+   return (!b_existed || st_after.st_mtime != p_before->st_mtime ||
+           st_after.st_size != p_before->st_size);
+}
+
 /* Save p_buf to p_out with the format chosen by the output extension.
  * ju0: pick the saver by extension (jpg q95 / png / webp). ku0: verify the
  * save actually produced a non-empty, newer file instead of trusting a
@@ -564,30 +638,10 @@ _save_buffer(GeglBuffer *p_buf, GFile *p_out, GError **p_err) {
                   "enhancer: unsupported export extension");
       return (FALSE);
    }
-   GStatBuf  st_before;
-   gboolean  b_existed = (g_stat(c_path, &st_before) == 0);
-   GeglNode *p_graph   = gegl_node_new();
-   GeglNode *p_src     = gegl_node_new_child(
-      p_graph, "operation", "gegl:buffer-source", "buffer", p_buf, NULL);
-   GeglNode *p_save;
-   if (g_str_equal(c_op, "gegl:jpg-save")) {
-      p_save = gegl_node_new_child(p_graph, "operation", c_op, "path", c_path,
-                                   "quality", 95, NULL);
-   } else {
-      p_save =
-         gegl_node_new_child(p_graph, "operation", c_op, "path", c_path, NULL);
-   }
-   gegl_node_link(p_src, p_save);
-   gegl_node_process(p_save);
-   g_object_unref(p_graph);
-   GStatBuf st_after;
-   gboolean b_ok = FALSE;
-   if (g_stat(c_path, &st_after) == 0 && st_after.st_size > 0) {
-      if (!b_existed || st_after.st_mtime != st_before.st_mtime ||
-          st_after.st_size != st_before.st_size) {
-         b_ok = TRUE;
-      }
-   }
+   GStatBuf st_before;
+   gboolean b_existed = (g_stat(c_path, &st_before) == 0);
+   _run_save_graph(p_buf, c_op, c_path);
+   gboolean b_ok = _save_produced_file(c_path, b_existed, &st_before);
    g_free(c_path);
    if (!b_ok) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -714,9 +768,39 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
 
 #if GGAZE_HAVE_GEGL
 
-/* Plain gegl:load into a GeglBuffer (no EXIF orientation). Used as the
- * fallback in enhancer_load when the loader's texture is not the RGBA8 layout
- * the fast path handles (no backend produces such a texture today). */
+/* --- load ------------------------------------------------------------------
+ *
+ * Two paths, one result: an upright RGBA8 GeglBuffer whose babl format
+ * carries the image's colour space.
+ *
+ * PNG and JPEG (decision #45) decode through GEGL's own gegl:png-load /
+ * gegl:jpg-load, which read the embedded ICC profile and TAG the buffer's
+ * format with the space it describes -- they never convert a pixel. That
+ * tag is the whole of the colour management: the preset chain runs in the
+ * image's own space (GEGL's ops negotiate their formats with the input's
+ * space), enhancer_buffer_to_texture() asks babl for sRGB pixels and so gets
+ * the colorimetric conversion the preview needs, and the savers write the
+ * space's profile back into the export. A file without a profile, or with
+ * one babl cannot use (a LUT-based profile, garbage in an iCCP), is tagged
+ * sRGB by the loader itself: today's pixels exactly. Why not ggaze's loader
+ * plus a tag: gdk-pixbuf may or may not have converted the pixels already
+ * (a glycin desktop does, fedora:40's native loaders do not), and tagging
+ * converted pixels would manage them twice. The gate stays: the same sniff
+ * (loader_sniff_bytes: empty / truncated / not-built-in refusals) and the
+ * same size caps before the decoder sees the file, plus one more the GEGL
+ * loaders need: the container must be complete (loader/intact.h), because
+ * gegl:png-load / gegl:jpg-load start the file over on a premature EOF and
+ * never return. The decoded extent must then match the header's, so a
+ * loader that failed part-way (GEGL's loaders yield an empty or odd-sized
+ * buffer rather than an error) is reported. The EXIF Orientation is
+ * applied here, since GEGL's loaders do not.
+ *
+ * Every other format keeps the previous path: ggaze's orientation-aware
+ * loader, pixels copied as sRGB. */
+
+/* Plain gegl:load into a GeglBuffer (no EXIF orientation). The fallback in
+ * _load_via_loader when the loader's texture is not the RGBA8 layout the
+ * fast path handles (no backend produces such a texture today). */
 static GeglBuffer *
 _enhancer_load_gegl(GFile *p_file, GError **p_err) {
    char *c_path = g_file_get_path(p_file);
@@ -744,16 +828,15 @@ _enhancer_load_gegl(GFile *p_file, GError **p_err) {
    return (p_buf);
 }
 
-GeglBuffer *
-enhancer_load(GFile *p_file, GError **p_err) {
-   g_return_val_if_fail(p_file != NULL, NULL);
-   /* Load via ggaze's own loader so the EXIF Orientation every backend honors
-    * (decision #26) is applied -- gegl:load does NOT auto-rotate, so the
-    * enhance live preview and the A-menu per-preset preview thumbnails would
-    * otherwise render un-rotated for images whose stored orientation is not
-    * 1 (portrait phone JPEGs, rot6.jpg, ...). The loader returns an upright
-    * GdkTexture (RGBA8) for any supported format; copy its pixels into a
-    * GeglBuffer for the GEGL preset chain. */
+/* The non-PNG/JPEG path: ggaze's own loader, so the EXIF Orientation every
+ * backend honors (decision #26) is applied -- gegl:load does NOT auto-rotate,
+ * so the enhance live preview and the per-preset preview thumbnails would
+ * otherwise render un-rotated for images whose stored orientation is not 1.
+ * The loader returns an upright GdkTexture (RGBA8) for any supported format;
+ * its pixels are copied into a GeglBuffer tagged sRGB (these decoders make
+ * no other promise). */
+static GeglBuffer *
+_load_via_loader(GFile *p_file, GError **p_err) {
    GError     *p_load_err = NULL;
    GdkTexture *p_tex      = loader_load(p_file, NULL, &p_load_err);
    if (p_tex == NULL) {
@@ -765,14 +848,23 @@ enhancer_load(GFile *p_file, GError **p_err) {
    GdkMemoryFormat e_fmt = gdk_texture_get_format(p_tex);
    GeglBuffer     *p_buf = NULL;
    if (i_w > 0 && i_h > 0 && e_fmt == GDK_MEMORY_R8G8B8A8) {
-      const Babl   *p_fmt    = babl_format("R'G'B'A u8");
-      gint          i_stride = i_w * 4;
-      gpointer      p_data   = g_malloc((gsize)i_stride * (gsize)i_h);
-      GeglRectangle rect     = {0, 0, i_w, i_h};
-      gdk_texture_download(p_tex, p_data, (gsize)i_stride);
-      p_buf = gegl_buffer_new(&rect, p_fmt);
-      gegl_buffer_set(p_buf, &rect, 0, p_fmt, p_data, i_stride);
-      g_free(p_data);
+      /* Read the pixels in an EXPLICIT R8G8B8A8 layout. gdk_texture_download()
+       * hands back GDK_MEMORY_DEFAULT -- premultiplied B8G8R8A8 on a
+       * little-endian host (loader.c's scaled path says the same) -- and
+       * copying that into an "R'G'B'A u8" buffer swapped red and blue on
+       * every enhance decode that came this way (found by xb2's WebP
+       * round trip: the exported blue reloaded red). */
+      const Babl           *p_fmt = babl_format("R'G'B'A u8");
+      GeglRectangle         rect  = {0, 0, i_w, i_h};
+      GdkTextureDownloader *p_dl  = gdk_texture_downloader_new(p_tex);
+      gdk_texture_downloader_set_format(p_dl, GDK_MEMORY_R8G8B8A8);
+      gsize   u_stride = 0;
+      GBytes *p_bytes  = gdk_texture_downloader_download_bytes(p_dl, &u_stride);
+      p_buf            = gegl_buffer_new(&rect, p_fmt);
+      gegl_buffer_set(p_buf, &rect, 0, p_fmt, g_bytes_get_data(p_bytes, NULL),
+                      (gint)u_stride);
+      g_bytes_unref(p_bytes);
+      gdk_texture_downloader_free(p_dl);
    }
    g_object_unref(p_tex);
    if (p_buf != NULL) {
@@ -792,6 +884,224 @@ enhancer_load(GFile *p_file, GError **p_err) {
    return (_enhancer_load_gegl(p_file, p_err));
 }
 
+/* GEGL's ICC-aware loader for a sniffed format: PNG and JPEG only, and only
+ * when the op is installed (both ship with core GEGL; a build that lacks
+ * one simply keeps the loader path for that format). */
+static const char *
+_gegl_loader_for(GgazeFormat e_fmt) {
+   const char *c_op = NULL;
+   if (e_fmt == GGAZE_FMT_PNG) {
+      c_op = "gegl:png-load";
+   } else if (e_fmt == GGAZE_FMT_JPEG) {
+      c_op = "gegl:jpg-load";
+   }
+   return (c_op != NULL && gegl_has_operation(c_op) ? c_op : NULL);
+}
+
+/* The stored size from the header, within the shared caps: a PNG's IHDR
+ * straight out of the sniffed head (never gdk_pixbuf_get_file_info, which
+ * is a sandbox spawn on a glycin desktop), a JPEG's SOF through
+ * loader_peek_dimensions() (the info card's three-way verdict: oversized
+ * or prefix-exceeding headers are refused). FALSE with INVALID_DATA, or
+ * with the cap's own error (detect_dims_within_bounds) for a PNG over the
+ * dimension cap. */
+static gboolean
+_peek_stored_size(GFile *p_file, GgazeFormat e_fmt, const guint8 *p_head,
+                  gsize u_len, int *p_w, int *p_h, GError **p_err) {
+   if (e_fmt == GGAZE_FMT_JPEG) {
+      if (loader_peek_dimensions(p_file, p_w, p_h)) {
+         return (TRUE);
+      }
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                  "enhancer: JPEG header refused (unreadable or oversized)");
+      return (FALSE);
+   }
+   /* signature 8, length 4, "IHDR" 4, width 4, height 4 */
+   if (u_len < 24 || memcmp(p_head + 12, "IHDR", 4) != 0) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                  "enhancer: PNG without an IHDR chunk");
+      return (FALSE);
+   }
+   guint32 u_w =
+      GUINT32_FROM_BE(*(const guint32 *)(gconstpointer)(p_head + 16));
+   guint32 u_h =
+      GUINT32_FROM_BE(*(const guint32 *)(gconstpointer)(p_head + 20));
+   if (u_w == 0 || u_h == 0) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                  "enhancer: PNG declares an empty image");
+      return (FALSE);
+   }
+   if (!detect_dims_within_bounds("enhancer", u_w, u_h, NULL, p_err)) {
+      return (FALSE);
+   }
+   *p_w = (int)u_w;
+   *p_h = (int)u_h;
+   return (TRUE);
+}
+
+/* The size mismatch error: the decoder saw c_got_w x c_got_h where the
+ * header promised i_w x i_h (a corrupt file the gate could not see). */
+static void
+_set_extent_error(const char *c_op, int i_got_w, int i_got_h, int i_w, int i_h,
+                  GError **p_err) {
+   g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+               "enhancer: %s decoded %dx%d of a %dx%d image (corrupt or "
+               "truncated file)",
+               c_op, i_got_w, i_got_h, i_w, i_h);
+}
+
+/* Run the loader op c_op on c_path into a new buffer. GEGL's loaders
+ * report a failed decode by yielding no buffer or an empty / odd-sized
+ * one, never an error, so the extent is checked against the header's
+ * stored size twice: the op's bounding box BEFORE processing (a header the
+ * decoder itself rejects -- an IHDR with a bad CRC -- gives an empty box,
+ * and processing that would only earn a GEGL "0px rectangle" warning), and
+ * the produced buffer after it. */
+static GeglBuffer *
+_load_via_gegl_op(const char *c_op, const char *c_path, int i_w, int i_h,
+                  GError **p_err) {
+   GeglBuffer *p_buf   = NULL;
+   GeglNode   *p_graph = gegl_node_new();
+   GeglNode   *p_load =
+      gegl_node_new_child(p_graph, "operation", c_op, "path", c_path, NULL);
+   GeglRectangle t_box = gegl_node_get_bounding_box(p_load);
+   if (t_box.width != i_w || t_box.height != i_h) {
+      _set_extent_error(c_op, t_box.width, t_box.height, i_w, i_h, p_err);
+      g_object_unref(p_graph);
+      return (NULL);
+   }
+   GeglNode *p_sink = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-sink", "buffer", &p_buf, NULL);
+   gegl_node_link(p_load, p_sink);
+   gegl_node_process(p_sink);
+   g_object_unref(p_graph);
+   if (p_buf == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "enhancer: %s produced no image for %s", c_op, c_path);
+   } else if (gegl_buffer_get_width(p_buf) != i_w ||
+              gegl_buffer_get_height(p_buf) != i_h) {
+      _set_extent_error(c_op, gegl_buffer_get_width(p_buf),
+                        gegl_buffer_get_height(p_buf), i_w, i_h, p_err);
+      g_clear_object(&p_buf);
+   }
+   return (p_buf);
+}
+
+static void
+_free_pixels(guchar *p_pixels, gpointer p_data) {
+   (void)p_data;
+   g_free(p_pixels);
+}
+
+/* The working space the chain runs in for a decoded buffer: the image's
+ * own space when it is an RGB one (a matrix/TRC profile babl parsed, or
+ * sRGB), so presets and export stay in the source's gamut; sRGB for a CMYK
+ * or grey profile (a CMYK JPEG with its press profile), whose pixels have
+ * no meaning in an "R'G'B'A" format of that space -- the gegl_buffer_get()
+ * below then does the colorimetric CMYK/grey -> sRGB conversion. */
+static const Babl *
+_working_space(GeglBuffer *p_buf) {
+   const Babl *p_space = babl_format_get_space(gegl_buffer_get_format(p_buf));
+   if (p_space == NULL || babl_space_is_cmyk(p_space) ||
+       babl_space_is_gray(p_space)) {
+      return (babl_space("sRGB"));
+   }
+   return (p_space);
+}
+
+/* p_buf as the RGBA8 layout the chain has always run on, in the working
+ * space (above), with the EXIF Orientation i_orient (1-8, 0 = none)
+ * applied. The permutation is pixbuf-util's (the one every loader backend
+ * uses), fed through a GdkPixbuf wrapped around the pixels with the
+ * orientation set as its option; the pixbuf borrows nothing after the copy
+ * out. */
+static GeglBuffer *
+_rgba8_upright(GeglBuffer *p_buf, int i_orient) {
+   const Babl *p_fmt =
+      babl_format_with_space("R'G'B'A u8", _working_space(p_buf));
+   const GeglRectangle *p_rect   = gegl_buffer_get_extent(p_buf);
+   int                  i_stride = p_rect->width * 4;
+   guint8 *p_px = g_malloc((gsize)i_stride * (gsize)p_rect->height);
+   gegl_buffer_get(p_buf, p_rect, 1.0, p_fmt, p_px, i_stride, GEGL_ABYSS_NONE);
+   GdkPixbuf *p_pix =
+      gdk_pixbuf_new_from_data(p_px, GDK_COLORSPACE_RGB, TRUE, 8, p_rect->width,
+                               p_rect->height, i_stride, _free_pixels, NULL);
+   if (i_orient > 1) {
+      char c_orient[4];
+      g_snprintf(c_orient, sizeof(c_orient), "%d", i_orient);
+      gdk_pixbuf_set_option(p_pix, "orientation", c_orient);
+   }
+   GdkPixbuf    *p_up  = pixbuf_util_upright(p_pix);
+   GeglRectangle t_out = {0, 0, gdk_pixbuf_get_width(p_up),
+                          gdk_pixbuf_get_height(p_up)};
+   GeglBuffer   *p_out = gegl_buffer_new(&t_out, p_fmt);
+   gegl_buffer_set(p_out, &t_out, 0, p_fmt, gdk_pixbuf_read_pixels(p_up),
+                   gdk_pixbuf_get_rowstride(p_up));
+   g_object_unref(p_up);
+   g_object_unref(p_pix);
+   return (p_out);
+}
+
+/* The ICC-aware path (section comment above). *p_taken says whether the
+ * file is this path's to decode: FALSE means "not a PNG / JPEG, use the
+ * loader" (no error set); TRUE with a NULL return means it failed here. */
+static GeglBuffer *
+_load_icc_aware(GFile *p_file, const char *c_path, gboolean *p_taken,
+                GError **p_err) {
+   guint8 c_head[GGAZE_DETECT_SNIFF_LEN];
+   gssize i_n = loader_read_header(p_file, NULL, c_head, sizeof(c_head), p_err);
+   *p_taken   = TRUE;
+   GgazeFormat e_fmt = GGAZE_FMT_UNKNOWN;
+   if (i_n < 0 || !loader_sniff_bytes(c_head, (gsize)i_n, &e_fmt, p_err)) {
+      return (NULL); /* unreadable, or refused by the decode gate */
+   }
+   const char *c_op = _gegl_loader_for(e_fmt);
+   if (c_op == NULL) {
+      *p_taken = FALSE;
+      return (NULL);
+   }
+   int i_w = 0, i_h = 0;
+   if (!_peek_stored_size(p_file, e_fmt, c_head, (gsize)i_n, &i_w, &i_h,
+                          p_err)) {
+      return (NULL);
+   }
+   if (!(e_fmt == GGAZE_FMT_PNG ? intact_png(p_file, p_err)
+                                : intact_jpeg(p_file, p_err))) {
+      return (NULL); /* GEGL's loader would spin on it: refused instead */
+   }
+   GeglBuffer *p_raw = _load_via_gegl_op(c_op, c_path, i_w, i_h, p_err);
+   if (p_raw == NULL) {
+      return (NULL);
+   }
+   /* PNG has no EXIF orientation the loader would honour; JPEG does. */
+   int i_orient = e_fmt == GGAZE_FMT_JPEG ? info_exif_orientation(c_path) : 0;
+   GeglBuffer *p_out = _rgba8_upright(p_raw, i_orient);
+   g_object_unref(p_raw);
+   return (p_out);
+}
+
+GeglBuffer *
+enhancer_load(GFile *p_file, GError **p_err) {
+   g_return_val_if_fail(p_file != NULL, NULL);
+   char *c_path = g_file_get_path(p_file);
+   if (c_path == NULL) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "enhancer: non-local load path");
+      return (NULL);
+   }
+   gboolean    b_taken = FALSE;
+   GeglBuffer *p_buf   = _load_icc_aware(p_file, c_path, &b_taken, p_err);
+   g_free(c_path);
+   if (b_taken) {
+      return (p_buf);
+   }
+   return (_load_via_loader(p_file, p_err));
+}
+
+/* Asks babl for sRGB pixels ("R'G'B'A u8" without a space IS sRGB): for a
+ * buffer tagged with another space this is the colorimetric conversion that
+ * makes the preview's colours right on an sRGB display (decision #45); for
+ * an sRGB buffer it is the plain copy it always was. */
 GdkTexture *
 enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err) {
    g_return_val_if_fail(p_buf != NULL, NULL);

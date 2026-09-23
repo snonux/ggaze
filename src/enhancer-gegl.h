@@ -50,7 +50,11 @@ GeglBuffer *enhancer_apply_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
  * extension: .jpg/.jpeg -> gegl:jpg-save (quality 95), .png -> gegl:png-save,
  * .webp -> gegl:webp-save (if available). Other extensions fail with
  * G_IO_ERROR_NOT_SUPPORTED. Success is verified by a real stat of the output
- * (not pre-existence). Returns TRUE on success. */
+ * (not pre-existence). Colour (decision #45): the PNG and JPEG savers embed
+ * the buffer's colour space as its ICC profile -- for a source with an
+ * embedded profile, that profile byte for byte; WebP cannot carry one, so
+ * a non-sRGB buffer is converted to sRGB before that saver. An sRGB buffer
+ * exports exactly as before. Returns TRUE on success. */
 gboolean enhancer_export(GeglBuffer *p_in, const EnhancerPreset *p_preset,
                          GFile *p_out, GError **p_err);
 
@@ -71,14 +75,21 @@ void     enhancer_export_chain_async(GFile *p_src, const GPtrArray *p_presets,
                                      GAsyncReadyCallback p_cb, gpointer p_data);
 gboolean enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err);
 
-/* Load a file into a GeglBuffer, upright (EXIF Orientation applied). Loads
- * through ggaze's own orientation-aware loader (not gegl:load, which does
- * not auto-rotate) and copies the upright RGBA8 pixels into a GeglBuffer.
- * Returns a new buffer (caller unrefs) or NULL with p_err set. */
+/* Load a file into an upright (EXIF Orientation applied) RGBA8 GeglBuffer
+ * whose babl format carries the image's colour space (decision #45): a PNG
+ * or JPEG decodes through GEGL's ICC-aware gegl:png-load / gegl:jpg-load,
+ * which tag the buffer with the embedded profile's space (sRGB when there
+ * is none, or none babl can use), behind the loader's own decode gate
+ * (empty / truncated / oversized refusals, G_IO_ERROR_INVALID_DATA) and
+ * with the orientation applied here; every other format goes through
+ * ggaze's orientation-aware loader and is tagged sRGB. Returns a new
+ * buffer (caller unrefs) or NULL with p_err set. */
 GeglBuffer *enhancer_load(GFile *p_file, GError **p_err);
 
-/* Convert a GeglBuffer to a GdkTexture for preview (RGBA8 bytes). Returns a
- * new GdkTexture (caller unrefs) or NULL with p_err set. Needs no display. */
+/* Convert a GeglBuffer to a GdkTexture for preview: sRGB RGBA8 bytes, so a
+ * buffer in another space is colour-converted here (babl), which is what
+ * makes a wide-gamut preview look right. Returns a new GdkTexture (caller
+ * unrefs) or NULL with p_err set. Needs no display. */
 GdkTexture *enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err);
 
 /* Async: load p_file, apply the enabled-preset chain (u_mask) and the

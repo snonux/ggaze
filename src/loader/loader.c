@@ -121,10 +121,12 @@ static const GgazeLoaderBackend *BACKENDS[] = {
  * stream, and a short read here would make detect_reject_truncated() take
  * a valid file delivered in two writes for a truncated one. Only EOF may
  * end the header early, which is exactly what makes the byte count
- * min(file length, u_max) and the gate's reasoning sound. */
-static gssize
-_read_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head, gsize u_max,
-             GError **p_err) {
+ * min(file length, u_max) and the gate's reasoning sound. Public since
+ * xb2: the enhancer sniffs the same way before picking GEGL's ICC-aware
+ * loader for a PNG / JPEG (loader.h). */
+gssize
+loader_read_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head,
+                   gsize u_max, GError **p_err) {
    GError           *p_sub = NULL;
    GFileInputStream *p_in  = g_file_read(p_file, p_cancel, &p_sub);
    if (p_in == NULL) {
@@ -272,8 +274,8 @@ loader_sniff_bytes_for_fallback(const guint8 *p_bytes, gsize u_len,
 static gssize
 _sniff_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head,
               GError **p_err) {
-   gssize i_read =
-      _read_header(p_file, p_cancel, p_head, GGAZE_DETECT_SNIFF_LEN, p_err);
+   gssize i_read = loader_read_header(p_file, p_cancel, p_head,
+                                      GGAZE_DETECT_SNIFF_LEN, p_err);
    if (i_read < 0) {
       return (-1);
    }

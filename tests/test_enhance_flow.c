@@ -69,6 +69,7 @@
 #include "gtk_helpers.h"
 #include "histogram-view.h"
 #include "histogram.h"
+#include "icc.h"
 #include "settings.h"
 #include "transform.h"
 #include "viewer.h"
@@ -5110,6 +5111,91 @@ add_tool_review6_tests(void) {
                    test_first_rescan_after_an_open_is_a_same_file_event);
 }
 
+/* --- xb2: colour management (decision #45) ------------------------------
+ *
+ * swapped.png stores pure red under a profile with sRGB's red and blue
+ * primaries swapped. The enhance preview on screen must be BLUE (the chain
+ * is colour-managed end to end: GEGL's ICC-aware loader tags the buffer,
+ * babl converts for the texture), and the `s` export must carry the
+ * source's profile byte for byte. Nothing here says what the plain view
+ * shows: that depends on whether the host's gdk-pixbuf loaders apply
+ * profiles (a glycin desktop does, fedora:40's native loaders do not) and
+ * is, by decision #45, not ggaze's to manage. */
+/* The 6x3 preview's pixel (0, 0) is blue, read in an explicit R8G8B8A8
+ * layout: gdk_texture_download() would hand back GDK_MEMORY_DEFAULT,
+ * B8G8R8A8 on little-endian hosts. */
+static void
+assert_texture_is_blue_6x3(GdkTexture *p_tex) {
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 6);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 3);
+   GdkTextureDownloader *p_dl = gdk_texture_downloader_new(p_tex);
+   gdk_texture_downloader_set_format(p_dl, GDK_MEMORY_R8G8B8A8);
+   gsize   u_stride   = 0;
+   GBytes *p_bytes    = gdk_texture_downloader_download_bytes(p_dl, &u_stride);
+   const guint8 *c_px = g_bytes_get_data(p_bytes, NULL);
+   g_assert_cmpuint(c_px[2], >=, 240); /* blue: managed */
+   g_assert_cmpuint(c_px[0], <=, 15);
+   g_bytes_unref(p_bytes);
+   gdk_texture_downloader_free(p_dl);
+}
+
+/* c_out embeds p_src's ICC profile byte for byte. */
+static void
+assert_same_profile(GFile *p_src, const char *c_out) {
+   GError *p_err  = NULL;
+   GFile  *p_out  = g_file_new_for_path(c_out);
+   GBytes *p_want = icc_read_embedded(p_src, &p_err);
+   g_assert_no_error(p_err);
+   GBytes *p_got = icc_read_embedded(p_out, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_got);
+   g_assert_true(g_bytes_equal(p_want, p_got));
+   g_bytes_unref(p_want);
+   g_bytes_unref(p_got);
+   g_object_unref(p_out);
+}
+
+static void
+test_icc_preview_is_managed_and_export_keeps_profile(void) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-icc-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "swapped.png");
+   char        *c_path = g_build_filename(c_dir, "swapped.png", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GgazeWindow *p_win  = new_window();
+   ggaze_window_open(p_win, p_file);
+   wait_for_load(p_win);
+
+   GdkTexture *p_orig = ref_viewer_texture(p_win);
+   fire(p_win, "win.enhance-3"); /* Contrast: keeps a pure colour pure */
+   wait_for_texture_change(p_win, p_orig);
+   GdkTexture *p_prev = ref_viewer_texture(p_win);
+   g_assert_true(p_prev != p_orig);
+   assert_texture_is_blue_6x3(p_prev);
+   g_object_unref(p_prev);
+
+   char *c_out = g_build_filename(c_dir, "swapped-enhanced.png", NULL);
+   fire(p_win, "win.enhance-save");
+   wait_for_file(c_out);
+   ggtest_drain_main(100);
+   assert_same_profile(p_file, c_out);
+   g_free(c_out);
+   g_object_unref(p_orig);
+   g_object_unref(p_file);
+   g_free(c_path);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   ggtest_drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+
+static void
+add_icc_tests(void) {
+   g_test_add_func("/enhance_flow/icc_preview_is_managed_and_export_keeps_"
+                   "profile",
+                   test_icc_preview_is_managed_and_export_keeps_profile);
+}
+
 /* Seventh review round: a failed reload under the crop tool is named. */
 static void
 add_tool_review7_tests(void) {
@@ -5154,5 +5240,6 @@ main(int i_argc, char **c_argv) {
    add_tool_review5_tests();
    add_tool_review6_tests();
    add_tool_review7_tests();
+   add_icc_tests();
    return (g_test_run());
 }
