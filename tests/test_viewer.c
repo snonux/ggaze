@@ -39,9 +39,10 @@
  * the frames advance on their own while the widget is mapped, the first
  * frame stays THE texture (what the cache, the histogram and hold-Space
  * compare against), zoom / pan / the overlay geometry are the canvas's,
- * a still never animates, an unmapped viewer (the grid page) plays
- * nothing and resumes on remap, and a 0 ms delay plays at the clamp
- * instead of spinning the main loop.
+ * with the same pixels after frames played, a still never animates (nor
+ * does one set after an animation), an unmapped viewer (the grid page)
+ * plays nothing and resumes on remap, a tool's hold keeps the first frame
+ * up, and a 0 ms delay plays at the clamp instead of spinning.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -455,30 +456,60 @@ wait_past_first_frame(GgazeViewer *p_v) {
    return (FALSE);
 }
 
+/* A copy of p_tex's pixels (premultiplied BGRA, tightly packed). */
+static guint8 *
+pixels_of(GdkTexture *p_tex, gsize *p_len) {
+   gsize u_stride = 4u * (gsize)gdk_texture_get_width(p_tex);
+   *p_len         = u_stride * (gsize)gdk_texture_get_height(p_tex);
+   guint8 *p_px   = g_malloc0(*p_len);
+   gdk_texture_download(p_tex, p_px, u_stride);
+   return (p_px);
+}
+
+/* Pump until the frame on screen is another texture than p_from (or 3 s).
+ * TRUE when it happened. */
+static gboolean
+wait_frame_change(GgazeViewer *p_v, GdkTexture *p_from) {
+   for (guint u = 0; u < 3000; u++) {
+      if (ggaze_viewer_get_frame(p_v) != p_from) {
+         return (TRUE);
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   return (FALSE);
+}
+
 /* The core promise: the frames advance by themselves, and the texture the
- * rest of the app sees stays the first frame, canvas-sized, throughout. */
+ * rest of the app sees stays the first frame, canvas-sized, throughout --
+ * the same object AND the same pixels. The pixel compare is review finding
+ * 1 of yb2: on gdk-pixbuf 2.42 the first-frame texture used to share the
+ * GIF loader's composite buffer, so after a few frames it read back as
+ * whichever frame was drawn last. Six changes cover every frame of the
+ * four-frame fixture at least once. */
 static void
 test_animation_plays_and_keeps_first_frame_texture(void) {
    ViewerFx fx;
    fx_open_fixture(&fx, "anim.gif", ANIM_W, ANIM_H);
    GdkTexture *p_tex = ggaze_viewer_get_texture(fx.p_viewer);
    g_assert_nonnull(animation_lookup(p_tex));
-   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 8);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, ANIM_W);
    g_assert_cmpuint(green_of(p_tex), >, 240);
+   gsize   u_len    = 0;
+   guint8 *p_before = pixels_of(p_tex, &u_len);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
    g_assert_true(wait_past_first_frame(fx.p_viewer));
+   for (guint u = 0; u < 6; u++) {
+      GdkTexture *p_now = ggaze_viewer_get_frame(fx.p_viewer);
+      g_assert_true(wait_frame_change(fx.p_viewer, p_now));
+   }
    g_assert_true(ggaze_viewer_get_texture(fx.p_viewer) == p_tex);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
-   /* And it keeps going: another frame after this one. */
-   GdkTexture *p_now =
-      (GdkTexture *)g_object_ref(ggaze_viewer_get_frame(fx.p_viewer));
-   for (guint u = 0; u < 3000 && ggaze_viewer_get_frame(fx.p_viewer) == p_now;
-        u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_true(ggaze_viewer_get_frame(fx.p_viewer) != p_now);
-   g_object_unref(p_now);
+   gsize   u_len_after = 0;
+   guint8 *p_after     = pixels_of(p_tex, &u_len_after);
+   g_assert_cmpmem(p_before, u_len, p_after, u_len_after);
+   g_free(p_before);
+   g_free(p_after);
    fx_close(&fx);
 }
 
@@ -564,18 +595,79 @@ test_animation_pauses_while_unmapped(void) {
 }
 
 /* A 0 ms frame delay plays at GGAZE_ANIM_MIN_DELAY_MS, not as fast as the
- * main loop can spin: the frames still advance, and the loop stays
- * responsive enough that a 100-iteration drain takes about its 100 ms. */
+ * frame clock ticks: over a one-second window the frame on screen changes
+ * at most W / 20 ms + 2 times -- the dues are at least the clamp apart,
+ * plus one for the fencepost and one for a first change whose due fell
+ * up to a tick before the window opened. Anything spinning (a change per
+ * tick is ~60 in that second, per main-loop turn hundreds) fails; the
+ * frames must also keep changing (at least one change), or "no spin"
+ * would be satisfied by not playing at all. */
 static void
 test_zero_delay_plays_at_the_clamp(void) {
    ViewerFx fx;
    fx_open_fixture(&fx, "zerodelay.gif", ANIM_W, ANIM_H);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
    g_assert_true(wait_past_first_frame(fx.p_viewer));
-   gint64 i_start = g_get_monotonic_time();
-   ggtest_drain_main(100);
-   g_assert_cmpint(g_get_monotonic_time() - i_start, <, 1000000);
+   guint       u_changes = 0;
+   GdkTexture *p_last    = ggaze_viewer_get_frame(fx.p_viewer);
+   gint64      i_start   = g_get_monotonic_time();
+   while (g_get_monotonic_time() - i_start < G_USEC_PER_SEC) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      GdkTexture *p_now = ggaze_viewer_get_frame(fx.p_viewer);
+      if (p_now != p_last) {
+         u_changes++;
+         p_last = p_now;
+      }
+      g_usleep(500);
+   }
+   gint64 i_window_ms = (g_get_monotonic_time() - i_start) / 1000;
+   g_assert_cmpuint(u_changes, >=, 1);
+   g_assert_cmpuint(u_changes, <=,
+                    (guint)(i_window_ms / GGAZE_ANIM_MIN_DELAY_MS) + 2u);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   fx_close(&fx);
+}
+
+/* A still set after an animation stops the playback: nothing scheduled,
+ * and what is drawn is the still itself, not a frame of the animation
+ * that played before. */
+static void
+test_still_after_animation_stops_playback(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "anim.gif", ANIM_W, ANIM_H);
+   g_assert_true(wait_past_first_frame(fx.p_viewer));
+   GdkTexture *p_still = gdk_texture_new_from_filename(fx.c_img, NULL);
+   g_assert_nonnull(p_still);
+   g_assert_null(animation_lookup(p_still)); /* GDK's own decode */
+   ggaze_viewer_set_texture(fx.p_viewer, p_still);
+   g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
+   ggtest_drain_main(150);
+   g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
+   g_assert_true(ggaze_viewer_get_frame(fx.p_viewer) == p_still);
+   g_object_unref(p_still);
+   fx_close(&fx);
+}
+
+/* A tool's hold: playback stops on the FIRST frame at once, stays there
+ * across a set_texture of the same animation (a render landing under the
+ * tool), and resumes from the first frame on release. */
+static void
+test_hold_first_frame_pauses_and_resumes(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "anim.gif", ANIM_W, ANIM_H);
+   GdkTexture *p_tex = ggaze_viewer_get_texture(fx.p_viewer);
+   g_assert_true(wait_past_first_frame(fx.p_viewer));
+   ggaze_viewer_hold_first_frame(fx.p_viewer, TRUE);
+   g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
+   g_assert_true(ggaze_viewer_get_frame(fx.p_viewer) == p_tex);
+   ggaze_viewer_set_texture(fx.p_viewer, p_tex);
+   ggtest_drain_main(250); /* more than two frame periods */
+   g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
+   g_assert_true(ggaze_viewer_get_frame(fx.p_viewer) == p_tex);
+   ggaze_viewer_hold_first_frame(fx.p_viewer, FALSE);
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   g_assert_true(ggaze_viewer_get_frame(fx.p_viewer) == p_tex);
+   g_assert_true(wait_past_first_frame(fx.p_viewer));
    fx_close(&fx);
 }
 
@@ -598,6 +690,11 @@ test_unmapped_viewer_holds_first_frame(void) {
    ggtest_drain_main(60);
    g_assert_false(ggaze_viewer_is_animating(GGAZE_VIEWER(p_v)));
    g_assert_true(ggaze_viewer_get_frame(GGAZE_VIEWER(p_v)) == p_tex);
+   /* A hold and its release do not start anything on an unmapped viewer
+    * either. */
+   ggaze_viewer_hold_first_frame(GGAZE_VIEWER(p_v), TRUE);
+   ggaze_viewer_hold_first_frame(GGAZE_VIEWER(p_v), FALSE);
+   g_assert_false(ggaze_viewer_is_animating(GGAZE_VIEWER(p_v)));
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_v), NULL);
    g_assert_null(ggaze_viewer_get_frame(GGAZE_VIEWER(p_v)));
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_v), p_tex);
@@ -661,6 +758,10 @@ main(int i_argc, char **c_argv) {
                    test_animation_pauses_while_unmapped);
    g_test_add_func("/viewer/zero_delay_plays_at_the_clamp",
                    test_zero_delay_plays_at_the_clamp);
+   g_test_add_func("/viewer/still_after_animation_stops_playback",
+                   test_still_after_animation_stops_playback);
+   g_test_add_func("/viewer/hold_first_frame_pauses_and_resumes",
+                   test_hold_first_frame_pauses_and_resumes);
    g_test_add_func("/viewer/unmapped_viewer_holds_first_frame",
                    test_unmapped_viewer_holds_first_frame);
    return (g_test_run());

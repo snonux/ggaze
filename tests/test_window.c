@@ -440,11 +440,21 @@ test_info_shows_histogram(void) {
 }
 
 /* yb2: on an animated GIF the `i` card plots the FIRST frame -- the one
- * texture the window, the cache and the viewer agree on -- and keeps that
- * plot while the frames play, because the frames never become "the
- * texture". anim.gif's first frame is solid (0, 255, 0): all 48 samples
- * in green's top bin and red's bottom one, before and after playback has
- * moved on to another frame (which would bin very differently). */
+ * texture the window, the cache and the viewer agree on -- also when the
+ * card is raised again after the frames have played, because the frames
+ * never become "the texture" and the first frame's pixels never change
+ * (review finding 1: on gdk-pixbuf 2.42 they used to be the GIF loader's
+ * shared composite buffer, so a gather after playback binned a later
+ * frame). anim.gif's first frame is solid (0, 255, 0): all 48 samples in
+ * green's top bin and red's bottom one; every later frame bins elsewhere
+ * (tests/fixtures/gen.py ANIM_FRAME_RGB). */
+static void
+assert_first_frame_plot(const Histogram *p_h) {
+   g_assert_cmpuint(p_h->u_bins[HISTOGRAM_CHANNEL_G][HISTOGRAM_BINS - 1], ==,
+                    48);
+   g_assert_cmpuint(p_h->u_bins[HISTOGRAM_CHANNEL_R][0], ==, 48);
+}
+
 static void
 test_info_plots_animation_first_frame(void) {
    GError *p_err = NULL;
@@ -462,11 +472,9 @@ test_info_plots_animation_first_frame(void) {
 
    GdkTexture *p_tex = viewer_texture(p_win);
    g_assert_nonnull(animation_lookup(p_tex));
-   const Histogram *p_h = show_info_expect_plot(p_win, 8 * 6);
-   g_assert_cmpuint(p_h->u_bins[HISTOGRAM_CHANNEL_G][HISTOGRAM_BINS - 1], ==,
-                    48);
-   g_assert_cmpuint(p_h->u_bins[HISTOGRAM_CHANNEL_R][0], ==, 48);
+   assert_first_frame_plot(show_info_expect_plot(p_win, 8 * 6));
 
+   /* Let the playback move on past the first frame... */
    GtkStack    *p_stack = ggaze_window_get_stack(p_win);
    GgazeViewer *p_v =
       GGAZE_VIEWER(gtk_stack_get_child_by_name(p_stack, "large"));
@@ -476,9 +484,11 @@ test_info_plots_animation_first_frame(void) {
    }
    g_assert_true(ggaze_viewer_get_frame(p_v) != p_tex); /* playing */
    g_assert_true(viewer_texture(p_win) == p_tex);
-   p_h = wait_for_plot(p_win, 8 * 6);
-   g_assert_cmpuint(p_h->u_bins[HISTOGRAM_CHANNEL_G][HISTOGRAM_BINS - 1], ==,
-                    48);
+   /* ... then drop the plot and gather it afresh: a NEW histogram of the
+    * texture as it is now, not the one kept from before playback. */
+   fire(p_win, "win.info"); /* off */
+   assert_no_plot(p_win);
+   assert_first_frame_plot(show_info_expect_plot(p_win, 8 * 6));
 
    close_window_and_folder(p_win, c_dir);
 }
