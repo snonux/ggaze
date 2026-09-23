@@ -425,9 +425,15 @@ built in, all four report "GEGL not built in".
     and re-centred on the centre the straighten turns about, and only the
     part of it inside the straightened image is cropped (in the preview and
     the export). So a rectangle touching the border is never eroded — nudge
-    away and back and the crop is exactly what it was. When nothing of it
-    lies inside the image at the new angle it is removed and the status
-    line says so (`Esc` brings it back with the old angle).
+    away and back and the crop is exactly what it was, unconditionally: when
+    nothing of it lies inside the image at the new angle it is kept but
+    crops nothing, the title says `crop (outside view)`, the status line
+    says so, and `s` exports without a crop until a nudge back (or `Esc`)
+    brings the image back over it.
+  - A horizon drag is measured on the picture on screen, so it is refused
+    (with a status line) while a render is still pending after fast nudges
+    ("Preview still rendering") or while `Space` holds the original
+    ("Release Space first"); repeat the drag once the preview is back.
 - **`[` / `]` → rotate 90°:** one-shot, no overlay — `]` clockwise, `[`
   counterclockwise; repeat to reach 180°/270°, four presses are the original
   again. Non-destructive (`gegl:rotate`, an exact pixel permutation); a crop
@@ -436,8 +442,17 @@ built in, all four report "GEGL not built in".
   (`h` moves the rectangle instead of going to the previous image), the
   other tool's key and `[`/`]` are refused until `Enter`/`Esc`, and any key
   not listed keeps its usual meaning. Navigating away, or leaving the large
-  view, ends a tool without applying it. `?` lists the tool keys under
+  view, ends a tool without applying it; so does discarding the preview
+  under it — `0` or the Original card with the panel open, the gate's
+  Discard, the slideshow's auto-advance, or a render that failed — the
+  tool is gone before the transform is reset, so nothing it was editing
+  can come back on a later nudge or `Enter`. `?` lists the tool keys under
   *Tools*.
+- The crop rectangle is drawn over, and its drags measured on, only the
+  exact picture rendered for the current state (not merely one of the same
+  size): after `]` `]` then `c`, or a preset toggled with the tool up, the
+  rectangle appears — and `Enter` is accepted — once that render is on
+  screen.
 - All compose with enhance presets in the same preview graph; hold `Space`
   compares against the original as usual.
 

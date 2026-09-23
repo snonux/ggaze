@@ -205,15 +205,28 @@ which the enhancer appends to the chain after the colour presets in decision
   cut — the cut is `transform_effective_crop`'s at render and export time —
   so a border-touching crop is not eroded by a straighten and back (0° → 5°
   → 0° gives back the exact rectangle; `tests/test_transform.c` pins it),
-  and it is dropped with a status line when its effective crop on the new
-  base is empty. The inset's opacity guarantee needs an inscribed rectangle
+  and one pushed entirely outside the new base is kept too: its effective
+  crop is empty, so the chain crops nothing (`_append_user_crop` skips it,
+  in the preview and the export), the title says `crop (outside view)`
+  (`transform_describe` with the original's size) and the status line says
+  so, and the angle coming back applies it again — dropping it (an earlier
+  round did) lost the rectangle one nudge too far. A horizon drag is
+  accepted only on the render of the current state
+  (`enhance_ctrl_is_current_render`; refused while pending or under a held
+  `Space`), since its slope adds to the current angle. The inset's opacity
+  guarantee needs an inscribed rectangle
   of at least 2 × inset + 1 = 3 px per side; below that
   `transform_straighten_size` floors at 1×1 inside the blend margin
   (documented, not refused: a 3×2 image has nothing to straighten).
 - **`c` — crop**: `gegl:crop` of the rectangle, intersected with the base
   image and snapped to whole pixels (`transform_effective_crop`). Interactive
   overlay (`tool-ctrl.c` draws it on the viewer's overlay hook); mouse drag or
-  keyboard; `Enter` applies. While the tool is open the base is shown
+  keyboard; `Enter` applies. The overlay is drawn, drags are measured and
+  `Enter` is accepted only while the texture on screen IS the render of
+  the tool's state (`enhance_ctrl_is_current_render`: the last landed
+  apply, or the cached original when nothing needs GEGL — an identity, not
+  a size comparison, which could not tell 0° from 180° or a preset toggled
+  under the tool from the base it replaced). While the tool is open the base is shown
   through a *preview override* (`enhance_ctrl_set_preview_transform`), not
   a commit: the committed crop keeps counting as work, so `s` in the tool
   exports it, navigation prompts for it, and a saved crop stays saved
