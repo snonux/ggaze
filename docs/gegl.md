@@ -256,10 +256,12 @@ GEGL-free geometry those tools and the chain share, `tool-ctrl.{c,h}` the
 interactive crop/straighten session over the viewer.
 
 `enhancer_load` does NOT use `gegl:load` (which ignores EXIF Orientation).
-A PNG or JPEG with an embedded ICC profile decodes through `gegl:png-load` /
-`gegl:jpg-load` for their ICC awareness (see "Color management" below) with the Orientation applied by the
-enhancer itself (pixbuf-util's permutation, the one every backend uses);
-every other file (an untagged PNG/JPEG included) loads through ggaze's own orientation-aware loader
+A local PNG or JPEG whose embedded ICC profile is not sRGB decodes through
+`gegl:png-load` / `gegl:jpg-load` for their ICC awareness (see "Color
+management" below) with the Orientation applied by the enhancer itself
+(pixbuf-util's permutation, the one every backend uses); every other file
+(an untagged or sRGB-profiled PNG/JPEG included) loads through ggaze's own
+orientation-aware loader
 (`loader_load`, every backend honors Orientation per decision #26) and its
 upright RGBA8 pixels are copied into an sRGB-tagged `GeglBuffer`. Either way
 the live preview and the per-preset preview thumbnails render upright for
@@ -279,15 +281,19 @@ gboolean         enhancer_export_chain(GeglBuffer *p_in,
  * also reports the original's upright size (the crop tool's base). */
 void       enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
                                       guint8 u_mask, const Transform *p_xf,
+                                      gboolean b_want_original,
                                       GCancellable *p_cancel,
                                       GAsyncReadyCallback p_cb, gpointer p_data);
 GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, gint *p_orig_w,
-                                        gint *p_orig_h, GError **p_err);
+                                        gint *p_orig_h,
+                                        GdkTexture **pp_original,
+                                        GError **p_err);
 ```
 
 Viewer integration: when a preset is active, the decoded pixels are imported
-into a `GeglBuffer` (GEGL's ICC-aware loader for PNG/JPEG, the
-orientation-aware loader otherwise; see `enhancer_load` above), the enhancer processes
+into a `GeglBuffer` (GEGL's ICC-aware loader for a PNG/JPEG with a
+non-sRGB profile, the orientation-aware loader otherwise; see
+`enhancer_load` above), the enhancer processes
 it, and the output buffer is rendered back to a `GdkTexture` for display.
 This path is heavier, so it is strictly on-demand and off the main thread;
 the window compares a generation counter on completion so a superseded
@@ -316,32 +322,40 @@ overwriting whatever the user is now looking at (last-write-wins).
 
 ## Color management (decision #45)
 
-Scope: the enhance preview and the `s` export, with GEGL. The plain large
-view (GdkPixbuf + the direct backends) is not managed by ggaze: it shows what
-the decoder delivers and assumes sRGB (a glycin desktop happens to convert
-PNG/JPEG to sRGB itself; fedora:40's native loaders do not).
+Scope: the enhance preview, its hold-`Space` compare and the `s` export,
+with GEGL. The plain large view (GdkPixbuf + the direct backends) is not
+managed by ggaze: it shows what the decoder delivers and assumes sRGB (a
+glycin desktop happens to convert PNG/JPEG to sRGB itself; fedora:40's
+native loaders do not).
 
 Op names, measured on gegl 0.4.72 / babl 0.1.128. The names in earlier
 drafts of this page — `gegl:icc-file-loader`, `gegl:cast-color-space`,
 `gegl:convert-color-space` — do not exist. What exists: `gegl:icc-load` /
 `gegl:icc-save`, `gegl:cast-space`, `gegl:convert-space`,
 `gegl:lcms-from-profile`, and the format loaders/savers. Of those, ggaze
-needs only the loaders, the savers and `gegl:convert-space`:
+needs only the PNG/JPEG loaders and savers:
 
 1. **Decode** (`enhancer_load`). `gegl:png-load` / `gegl:jpg-load` read the
    embedded profile (PNG iCCP, JPEG APP2) and **tag** the buffer's babl
    format with the space babl builds from it (`babl_space_from_icc`); no
-   pixel is converted. Only a file that embeds a profile takes this path
-   (`icc.c`'s header walk decides): an untagged PNG/JPEG, or an iCCP/APP2
-   holding no profile, keeps the loader path and decodes exactly as before.
-   A profile babl cannot use (LUT-based) is tagged sRGB by the GEGL loader.
-   The loader path (tag sRGB) is not used for profiled files because gdk-pixbuf may or may not have converted the pixels
-   already, and tagging converted pixels would manage them twice.
+   pixel is converted. Only a local PNG/JPEG whose profile babl parses to a
+   space **other than sRGB** takes this path (`icc.c` reads the bytes, the
+   enhancer makes the same `babl_space_from_icc` call GEGL's loader will):
+   an untagged file, an iCCP/APP2 holding no profile, a profile babl cannot
+   use, and an **sRGB profile** (babl folds an equivalent profile onto its
+   own sRGB space) all keep the loader path — faster, and byte for byte
+   what they decoded to before xb2 (a test compares an sRGB-profiled PNG and
+   JPEG with the same files stripped of their profile). A matrix/TRC RGB,
+   a grey TRC and — through the lcms2 babl links against — a CMYK profile
+   are managed. The loader path (tag sRGB) is not used for a managed file
+   because gdk-pixbuf may or may not have converted the pixels already, and
+   tagging converted pixels would manage them twice.
 2. **Working space.** The pixels are copied to `R'G'B'A u8` *in the image's
    own space* (`babl_format_with_space`), so presets, crop and rotation run
    in the source gamut and the export loses nothing. A CMYK or grey profile
    has no meaning in an RGB format, so such a buffer is converted to sRGB at
-   this step (babl, colorimetric) and edited as sRGB.
+   this step (babl, colorimetric) and edited as sRGB. The EXIF Orientation
+   is applied here (pixbuf-util's permutation), since GEGL's loaders do not.
 3. **Preview** (`enhancer_buffer_to_texture`). It asks for `R'G'B'A u8`
    without a space — sRGB — so babl performs the image-space → sRGB
    conversion; that is what makes a wide-gamut preview look right on an sRGB
@@ -349,32 +363,82 @@ needs only the loaders, the savers and `gegl:convert-space`:
 4. **Export.** `gegl:png-save` and `gegl:jpg-save` embed the buffer space's
    ICC profile — for a space made from an embedded profile babl returns the
    original bytes, so the copy carries the source profile **byte for byte**
-   (the tests compare them). `gegl:webp-save` embeds nothing, so a non-sRGB
-   buffer goes through `gegl:convert-space` (`space-name` sRGB) first; an
-   untagged file is read as sRGB by every viewer. An sRGB buffer takes
-   neither branch: its export is exactly the pre-xb2 export.
+   (the tests compare them). `gegl:webp-save` embeds nothing and needs no
+   conversion node either: it reads the buffer as space-less `R'G'B'A u8`,
+   i.e. sRGB, so babl converts on the way out (a test with
+   `gegl:convert-space` hidden proves it), and an untagged WebP is what every
+   viewer reads as sRGB. An sRGB buffer exports exactly as before.
 
-**The gate stays in front of GEGL's loaders.** They are handed a file only
-after the loader's own sniff (`loader_read_header` + `loader_sniff_bytes`:
-empty / truncated-signature / not-built-in refusals), the shared dimension
-caps from the header (PNG IHDR, JPEG SOF via `loader_peek_dimensions`), and
-`loader/intact.c`'s completeness check: `gegl:png-load` / `gegl:jpg-load`
-restart the file on a premature EOF (libpng then reports a duplicate iCCP,
-libjpeg a second SOF) and **never return** on a truncated file, so a PNG must
-reach IEND and a JPEG its EOI before GEGL sees it. Finally the op's bounding
-box, and then the decoded buffer, must match the header size — GEGL's loaders
-report a corrupt file (an IHDR with a bad CRC) as an empty extent, not an
-error. Each refusal is a `G_IO_ERROR` the status line shows.
+**Hold-`Space` compares managed against managed.** The plain view is not
+managed, so on a host whose decoder leaves the pixels alone (fedora:40's
+native loaders) a profiled image's plain view and its enhance preview differ
+in colour before any preset has changed a pixel. So hold-`Space` over a
+managed preview does not put the plain decode back: the render worker also
+returns the file's **identity chain through the same managed decode**
+(`enhancer_apply_chain_finish`'s `pp_original`, asked for once per file and
+converted to sRGB like the preview), and the controller shows that while
+`Space` is held — the compare shows exactly what the presets did. It is
+dropped with the file (navigation, a rewrite); until the first render of a
+file lands, and for every unmanaged file, hold-`Space` shows the plain
+decode as before. Turning the preview on or off (`0`, `Esc`, the Original
+card) still switches between the plain view and the managed preview, so on
+such a host that switch can show a colour shift the preset did not cause —
+the managed side is the correct one.
+
+**The managed path never gives a verdict of its own.** It either yields a
+buffer it can vouch for or *declines*, and a declined file takes the loader
+path, which decodes it — or refuses it with its usual error — exactly as
+before xb2. GEGL's loaders fail badly where the loader fails cleanly, so a
+file reaches them only through:
+
+- the loader's own sniff (`loader_read_header` + `loader_sniff_bytes`) and
+  the shared dimension caps;
+- `loader/intact.c`, which walks the whole container and reads the stored
+  size on the way (PNG IHDR; the JPEG's first SOF wherever it lies — a Pixel
+  photo's SOF sits past 64 KiB of EXIF/XMP, a CMYK file's behind a 187 KB
+  press profile, where a bounded header peek gave up and refused them):
+  - **truncated** files: `gegl:png-load` / `gegl:jpg-load` restart the file
+    on a premature EOF (libpng then reports a duplicate iCCP, libjpeg a second
+    SOF) and **never return**, so a PNG must reach IEND and a JPEG its EOI;
+  - **corrupt PNG image data**: libpng's error inside `gegl:png-load` is
+    logged as "failed to open file" and the op yields a header-sized black or
+    partial buffer, no error. So the walk checks the critical chunks' CRCs,
+    inflates the IDAT stream (into a scratch buffer) to the rows IHDR promises
+    (Adam7 included) and checks every row's filter byte;
+  - **JPEGs libjpeg gives up on**: `gegl:jpg-load` installs `jpeg_std_error()`
+    with no longjmp handler, so libjpeg's fatal errors (two SOF markers, a
+    bogus Huffman table, ...) **exit the process**. The file is decoded once
+    by the same libjpeg at 1/8 scale under a longjmp handler first
+    (`intact_jpeg_decodes`); a build without the `jpeg` feature has no libjpeg
+    to do that with and keeps every JPEG on the loader path;
+  - padding between JPEG segments is skipped as libjpeg skips it
+    (`streamread_jpeg_marker`), not refused;
+- after the decode, the op's bounding box and the buffer must match the
+  stored size (a header libjpeg rejects gives an empty extent, not an error).
+
+**The file-swap window.** The managed path opens the file several times —
+the sniff, the profile walk, the completeness walk, the libjpeg pass, GEGL's
+own open, and libexif for the orientation — and only the walks before
+GEGL's open vouch for the bytes GEGL reads. A file *replaced* between the last
+walk and that open by a truncated one can still spin GEGL's loader in a
+worker that cannot be cancelled (GEGL processing never can), and one
+replaced by a JPEG libjpeg gives up on can still exit the process. GEGL's
+loaders take a path, not a descriptor, so the window cannot be closed from
+here; it is kept short (the stored size comes from the completeness walk, so
+no separate header peek opens the file), and the same race exists for
+gdk-pixbuf's path-taking calls on the loader path (tech-stack.md "The
+decode gate").
 
 **Unsupported ops degrade, never fail.** Without `gegl:png-load` /
 `gegl:jpg-load` installed that format keeps the loader path (sRGB); without
-`gegl:convert-space` a WebP export is written unconverted. Without GEGL
-(the minimal lane) none of this is compiled; the info card still names the
+a saver the export is refused as unsupported (the tests reach both through
+`enhancer_test_set_missing_op`). A non-local file (GVFS) keeps the loader
+path, since GEGL's loaders need a path. Without GEGL (the minimal lane) none
+of this is compiled, `intact.c` included; the info card still names the
 colour space and says it is not managed in this build.
 
-**Left open:** LUT-based profiles (babl parses matrix/TRC profiles only;
-`gegl:lcms-from-profile` would need an lcms2 handle wired by hand), profiles
-in WebP/AVIF/HEIF/JXL, a managed plain view, and non-sRGB displays.
+**Left open:** RGB profiles babl cannot parse (LUT-only), profiles in
+WebP/AVIF/HEIF/JXL, a managed plain view, and non-sRGB displays.
 
 ## Costs & trade-offs
 

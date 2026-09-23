@@ -190,11 +190,11 @@ src/settings.{c,h}    GSettings wrapper (org.buetow.ggaze)
 src/prefs.{c,h}       Preferences dialog (schema-driven enums, list editors)
 src/info.{c,h}        EXIF/dimensions/colour-space gather (libexif, icc)
 src/icc.{c,h}         embedded ICC profile of a PNG/JPEG + its desc name (plain C, every build)
-src/streamread.{c,h}  bounded GInputStream reads (exact / skip, EOF vs error) for icc + intact
+src/streamread.{c,h}  bounded GInputStream reads (exact / skip / JPEG marker, EOF vs error) for icc + intact
 src/loader/loader.{c,h}   sync + async load API; sniff, dispatch, explicit pixbuf fallback
 src/loader/detect.{c,h}   content-sniff format detection + the one dimension cap
 src/loader/pixbuf-util.{c,h} GdkPixbuf -> upright GdkTexture
-src/loader/intact.{c,h}   is a PNG/JPEG container complete? (gate before GEGL's loaders)
+src/loader/intact.{c,h}   GEGL builds: will GEGL's PNG/JPEG loader get through it? (complete, sound data, libjpeg ok)
 src/loader/backends/       pixbuf.c jpeg.c jxl.c avif.c heif.c
 ```
 

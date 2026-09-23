@@ -168,15 +168,18 @@ ggaze
   active and renders the result back to a `GdkTexture`. The crop/straighten/
   rotate tools add `gegl:rotate`/`gegl:crop` to the same graph via the
   enhancer, from one plain-C `Transform` (decision #35 order). GEGL also
-  backs color-managed decode/export (decision #45): a profiled PNG/JPEG
-  decodes through GEGL's ICC-aware loaders behind the loader's gate and
-  `loader/intact.c`'s completeness check, the chain runs in the image's
-  space, the preview is converted to sRGB, and the PNG/JPEG savers keep the
-  profile. Owns no GTK state.
+  backs color-managed decode/export (decision #45): a PNG/JPEG with a
+  non-sRGB profile decodes through GEGL's ICC-aware loaders when the
+  loader's gate and `loader/intact.c` vouch for it (anything else takes the
+  loader path, as before), the chain runs in the image's space, the preview
+  and the hold-`Space` original are converted to sRGB, and the PNG/JPEG
+  savers keep the profile. Owns no GTK state.
 - **icc** — plain C: the embedded ICC profile of a PNG (iCCP) or JPEG (APP2
   ICC_PROFILE) and its `desc` name, for the info card's colour-space line in
   every build (no GEGL, no babl). **streamread** holds the bounded stream
-  reads it shares with **loader/intact** (is a PNG/JPEG container complete?).
+  reads and the JPEG marker step it shares with **loader/intact** (GEGL
+  builds only: will GEGL's PNG/JPEG loader get through this file? --
+  container complete, PNG image data sound, libjpeg decodes it).
 - **clipboard** — stateless provider builders for the `GdkClipboard`:
   `clipboard_build_texture_provider(GdkTexture *)` offers the DISPLAYED
   texture as `image/png` (already decoded, so only the PNG encode runs, on

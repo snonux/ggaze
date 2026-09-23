@@ -105,7 +105,7 @@ drift from the live bindings.
 | `+` / `=`, `Ctrl++` | zoom in (large) / grow thumbnails (grid) |
 | `-` / `_`, `Ctrl+-` | zoom out (large) / shrink thumbnails (grid) |
 | `0`, `Ctrl+0`  | zoom fit ↔ 100% (large) / reset thumbnail size (grid) |
-| `Space`        | hold to compare original vs modified (large, enhance) |
+| `Space`        | hold to compare original vs modified (large, enhance; a colour-managed preview compares against the managed original) |
 | `f` / `F11`    | toggle fullscreen |
 | `s`            | save enhanced copy (GEGL); no auto-save |
 | `S` / `F5`     | start / stop slideshow (large view; any navigation key stops it) |
@@ -190,9 +190,21 @@ Small card, top-left or bottom-right:
   reads `sRGB (assumed, no embedded profile)`; a profile container that is
   there but broken (or holds no profile) reads `embedded ICC profile
   unreadable (shown as sRGB)` — never a silent sRGB. WebP/AVIF/HEIF/JXL are
-  not searched and read `not read for this format (shown as sRGB)`. The plain
-  large view is not colour-managed by ggaze (it shows what the decoder
-  delivers); the enhance preview and the `s` export are, with GEGL.
+  not searched and read `not read for this format (shown as sRGB)`. The
+  profile's name is the file's text: it is shown on one line (control
+  characters become spaces) and cut at 64 characters with `…`. Padding
+  between JPEG segments (which libjpeg skips) does not make a profile
+  "unreadable". The plain large view is not colour-managed by ggaze (it
+  shows what the decoder delivers); the enhance preview and the `s` export
+  are, with GEGL, for a PNG/JPEG whose profile is not sRGB. **Compare
+  semantics:** holding `Space` over such a managed preview shows the
+  *managed* original (the file through the same managed decode, no preset),
+  so the compare shows only what the presets did; turning the preview off
+  (`0`, `Esc`, the Original card) goes back to the plain, unmanaged view,
+  so on a host whose decoder does not apply profiles (fedora:40's native
+  loaders; a glycin desktop does apply them) that switch can show a colour
+  shift no preset caused — the managed side is the correct one. Until the
+  first render of a file lands, hold-`Space` shows the plain view.
 Loaded lazily; never blocks display of the pixels. The histogram is gathered
 in the same background task as the EXIF text, only once `i` is pressed. The
 binning itself is subsampled to at most 512×512 pixels, so that part costs

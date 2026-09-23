@@ -25,8 +25,8 @@ ggaze has **two complementary test tracks**. Both run under `meson test`.
 
 - Target the **plain-C modules** (`detect`, `navigator`, `thumbnail`,
   `trash`, `mover`, `opener`, `runner`, `enhancer`, `info`, `histogram`,
-  `texturecache`, `clipboard` helpers, `icc`, `loader/intact` +
-  `streamread`). No GTK display needed.
+  `texturecache`, `clipboard` helpers, `icc` + `streamread`, and in the
+  GEGL lane `loader/intact`). No GTK display needed.
 - GLib `GTest` framework; per-module `a(ss)`/path/EXIF fixtures.
 - **Coverage gate ≥80%** on these modules (gcov/lcov), flipped to *fail* at
   M10, *warn* before.
@@ -470,12 +470,16 @@ color management on the enhance/export path is done (xb2, decision #45; see
   silently instead of blocking on an unanswerable prompt.
 - Hold-`Space` compare (decision #23/#24): swaps to the cached original
   texture while held, restores the cached modified one on release — no GEGL
-  recompute either way.
+  recompute either way. For a colour-managed preview the original held up is
+  the managed one the render returned (decision #45), not the plain decode.
 - ICC color management via GEGL/babl (open question G, decision #45, xb2):
-  a profiled PNG/JPEG decodes through `gegl:png-load`/`gegl:jpg-load`
-  (space-tagged; untagged files keep the loader path), behind the loader's
-  gate + `loader/intact.c`; preview converted to sRGB; PNG/JPEG exports
-  keep the source profile, WebP exports are converted to sRGB. The `i` card names the colour space in every build (`icc.{c,h}`).
+  a PNG/JPEG with a non-sRGB profile decodes through
+  `gegl:png-load`/`gegl:jpg-load` (space-tagged; untagged and sRGB-profiled
+  files keep the loader path byte for byte), only when the loader's gate and
+  `loader/intact.c` vouch for it (else the loader path decides, as before);
+  preview converted to sRGB; hold-`Space` shows the managed original;
+  PNG/JPEG exports keep the source profile, WebP exports come out sRGB. The
+  `i` card names the colour space in every build (`icc.{c,h}`).
 - "GEGL not built in" status message (via the info-overlay label; this
   project has no toast infra) for `a`/`s` when the build has no GEGL; safe no-op for the numeric preset hotkeys.
 
@@ -486,18 +490,30 @@ color management on the enhance/export path is done (xb2, decision #45; see
   pixel (quarter turns as permutations, crops in base coordinates, the
   straighten's analytic sizes, a turned export). `test_croprect.c` and
   `test_transform.c` (every lane, no GEGL): the rectangle rules and the
-  angle / size maths. xb2 (ICC): `test_enhancer.c` — a profiled PNG/JPEG is
-  tagged with its space and previews managed (the fixtures store pure red
-  under a red/blue-swapped profile, so managed = blue), the space survives a
-  preset + quarter turn, untagged and sRGB-profiled files stay sRGB
-  (regression), a corrupt iCCP falls back to sRGB, PNG/JPEG exports carry the
-  source profile byte for byte and reload blue, a WebP export is converted,
-  truncated files and lying headers (no IHDR, empty, oversized, bad IHDR CRC,
-  zero-row SOF) are refused. `test_icc.c`, `test_intact.c`, `test_info.c`
-  (every lane): profile extraction (PNG iCCP, multi-segment JPEG APP2, every
-  broken container), the `desc` parser, the completeness check on cut
-  copies, and the card's colour-space line in each state, including the
-  build-dependent note (GEGL-disabled build: "not managed").
+  angle / size maths. xb2 (ICC): `test_enhancer_icc.c` (gated) — a
+  profiled PNG/JPEG is tagged with its space and previews managed (the
+  fixtures store pure red under a red/blue-swapped profile, so managed =
+  blue), also with EXIF Orientation 6 (`swapped-rot6.jpg`), CMYK
+  (`cmyk-icc.jpg`, a lut8 printer profile through babl's LCMS) and grey
+  (`grey-icc.png`/`.jpg`, linear curve) running in sRGB, and with the SOF
+  past 64 KiB or padding between segments; the space survives two presets +
+  a quarter turn; sRGB-profiled PNG/JPEG decode byte-identical to the same
+  files stripped of the profile; untagged / corrupt-iCCP / non-local
+  (`mem_file`) / GEGL-op-missing (`enhancer_test_set_missing_op`) files take
+  the loader path; every broken file (cut, lying headers, two SOFs, corrupt
+  PNG data -- bad CRC, bad deflate, short IDAT) gets exactly the loader's
+  verdict; PNG/JPEG exports carry the source profile byte for byte, a WebP
+  export comes out sRGB, a missing saver is NOT_SUPPORTED; the async render
+  returns the managed original only when managed and asked; and every
+  profiled file in `./sample-images` (skipped when absent) is vouched for
+  with its size and, when its profile is not sRGB, decodes managed.
+  `test_icc.c`, `test_info.c` (every lane) and `test_intact.c` (GEGL lane,
+  like `intact.c`): profile extraction (PNG iCCP, multi-segment JPEG APP2,
+  padding skipped, every broken container), the `desc` parser, the card's
+  colour-space line in each state (one line, capped at 64 characters, a
+  padded JPEG not "unreadable"), the completeness walk and sizes (SOF past
+  64 KiB), PNG rows (Adam7 sizes cross-checked with real interlaced files),
+  CRC / inflate / filter corruption, and the libjpeg pass (a two-SOF JPEG).
 - Integration: `test_enhance_flow.c` (gated `if gegl_dep.found()`): async
   apply swaps the texture without touching the original (byte-identical),
   toggle-off resets to the original, hold-Space compares then restores,
