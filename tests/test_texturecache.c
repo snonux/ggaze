@@ -6,8 +6,10 @@
  * on disk -- size, whole seconds, the sub-second part of the mtime and the
  * inode each on their own, and the whole-second-filesystem fallback -- and
  * that the stamp an entry is put under is the one read BEFORE the decode
- * (a write landing mid-decode must not make the old pixels fresh). Uses
- * 1x1 GdkMemoryTextures (no display needed).
+ * (a write landing mid-decode must not make the old pixels fresh), and
+ * that a pre-decode stamp which could not be read (the file briefly
+ * absent) yields an entry that is never fresh. Uses 1x1
+ * GdkMemoryTextures (no display needed).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -22,6 +24,7 @@
 #include <stdio.h>
 
 #include "file_stamp.h"
+#include "temp_dir.h"
 
 static GdkTexture *
 mk_tex(void) {
@@ -105,7 +108,9 @@ test_replace_and_miss(void) {
 /* --- stamp checks on a real file ---------------------------------------- */
 
 /* A temp folder holding one file, a cache with its entry, the entry's
- * texture: what the stamp subtests share. */
+ * texture: what the stamp subtests share. file_fx_close() takes the folder
+ * down with ggtest_cleanup_temp_dir(), which asserts every delete: a
+ * leftover (a subtest that forgot what it created) fails the suite. */
 typedef struct {
    char         *c_dir;
    char         *c_path;
@@ -133,10 +138,8 @@ file_fx_close(FileFx *p_fx) {
    g_object_unref(p_fx->p_tex);
    texturecache_delete(p_fx->p_cache);
    g_object_unref(p_fx->p_file);
-   g_remove(p_fx->c_path);
-   g_rmdir(p_fx->c_dir);
    g_free(p_fx->c_path);
-   g_free(p_fx->c_dir);
+   ggtest_cleanup_temp_dir(p_fx->c_dir); /* frees c_dir */
 }
 
 /* Overwrite c_path in place -- truncate and write, the same inode -- unlike
@@ -304,6 +307,37 @@ test_lookup_hands_out_stamp(void) {
    file_fx_close(&fx);
 }
 
+/* The file is briefly absent when the miss reads its stamp (mid-rename),
+ * reappears, and the decode succeeds: the put carries an INVALID stamp.
+ * That entry must never be fresh -- trusted, it would serve every later
+ * rewrite stale, nothing having been recorded to compare against. So even
+ * a get right after the put misses (the price: one redundant decode), and
+ * that miss hands out a real stamp; a put under it behaves normally. */
+static void
+test_invalid_lookup_stamp_never_fresh(void) {
+   FileFx fx;
+   file_fx_open(&fx, "one");
+   texturecache_remove(fx.p_cache, fx.p_file);
+   g_assert_cmpint(g_remove(fx.c_path), ==, 0); /* briefly absent */
+   TextureStamp t_pre;
+   g_assert_null(texturecache_lookup(fx.p_cache, fx.p_file, &t_pre));
+   g_assert_false(t_pre.b_valid);
+   g_assert_true(g_file_set_contents(fx.c_path, "one", -1, NULL));
+   texturecache_put_stamped(fx.p_cache, fx.p_file, fx.p_tex, &t_pre);
+   write_in_place(fx.c_path, "rewritten");
+   g_assert_null(texturecache_get(fx.p_cache, fx.p_file)); /* the finding */
+   g_assert_cmpuint(texturecache_get_size(fx.p_cache), ==, 0);
+
+   /* Unchanged file, get right after the put: still a miss, with a stamp. */
+   texturecache_put_stamped(fx.p_cache, fx.p_file, fx.p_tex, &t_pre);
+   TextureStamp t_now;
+   g_assert_null(texturecache_lookup(fx.p_cache, fx.p_file, &t_now));
+   g_assert_true(t_now.b_valid);
+   texturecache_put_stamped(fx.p_cache, fx.p_file, fx.p_tex, &t_now);
+   g_assert_true(texturecache_get(fx.p_cache, fx.p_file) == fx.p_tex);
+   file_fx_close(&fx);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -324,5 +358,7 @@ main(int i_argc, char **c_argv) {
                    test_prestamp_put_evicted_after_mid_decode_write);
    g_test_add_func("/texturecache/lookup_hands_out_stamp",
                    test_lookup_hands_out_stamp);
+   g_test_add_func("/texturecache/invalid_lookup_stamp_never_fresh",
+                   test_invalid_lookup_stamp_never_fresh);
    return (g_test_run());
 }

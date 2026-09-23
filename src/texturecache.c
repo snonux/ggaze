@@ -39,12 +39,25 @@
  * WHEN the stamp is taken matters as much as what it holds: before the
  * decode (texturecache_lookup() hands the caller the miss's stamp). Read
  * after it, a writer that finished while the decode still read the old
- * bytes would stamp the old pixels as the new file state for good. */
+ * bytes would stamp the old pixels as the new file state for good.
+ *
+ * An entry is either STAMPED (a valid t_stamp, compared on every get),
+ * UNKNOWN (put under a stamp that could not be read: never fresh) or
+ * TRUSTED (put with no stamp at all: never compared). UNKNOWN is what a
+ * decode gets whose pre-decode query failed -- the file was briefly
+ * absent mid-rename. Trusting that entry (as the cache once did) would
+ * make every later rewrite a stale hit, since nothing was ever recorded to
+ * compare against; treating it as stale costs one redundant decode on the
+ * next get, which then reads a real stamp. TRUSTED is only for a texture
+ * whose file cannot be queried by design (a synthetic GFile in a unit
+ * test): texturecache_put_stamped(NULL), or texturecache_put() on a file
+ * that does not exist. */
 typedef struct {
-   GFile       *p_file;  /* owned ref */
-   GdkTexture  *p_tex;   /* owned ref */
-   GList       *p_link;  /* node in the order queue (MRU at tail) */
-   TextureStamp t_stamp; /* file state the texture was decoded from */
+   GFile       *p_file;    /* owned ref */
+   GdkTexture  *p_tex;     /* owned ref */
+   GList       *p_link;    /* node in the order queue (MRU at tail) */
+   TextureStamp t_stamp;   /* file state the texture was decoded from */
+   gboolean     b_trusted; /* put with no stamp: fresh without a query */
 } CacheEntry;
 
 struct TextureCache {
@@ -100,24 +113,27 @@ _stamp_equal(const TextureStamp *p_a, const TextureStamp *p_b) {
 }
 
 /* TRUE iff the entry still describes the file on disk; p_now receives the
- * stamp read for the check (invalid when none was read). An entry stamped
- * invalid is trusted (nothing to compare against); one that was stamped
- * but now differs -- or cannot be queried any more -- is stale: the
- * picture was rewritten in place (external editor, script), replaced, or
- * removed. */
+ * stamp read for the check (invalid when none was read). A TRUSTED entry
+ * is fresh without a query. Any other is stale when the file now differs
+ * from its stamp or cannot be queried any more (rewritten in place by an
+ * external editor or script, replaced, removed) -- and always when the
+ * stamp itself is invalid (UNKNOWN: _stamp_equal never matches it), so
+ * the caller re-decodes under the stamp read here. */
 static gboolean
 _entry_is_fresh(const CacheEntry *p_e, TextureStamp *p_now) {
    memset(p_now, 0, sizeof(*p_now));
-   if (!p_e->t_stamp.b_valid) {
+   if (p_e->b_trusted) {
       return (TRUE);
    }
    _stamp_read(p_e->p_file, p_now);
    return (_stamp_equal(p_now, &p_e->t_stamp));
 }
 
-/* Copy p_stamp into p_e, or mark it unstamped for NULL. */
+/* Copy p_stamp into p_e (STAMPED, or UNKNOWN when it is invalid), or mark
+ * the entry TRUSTED for NULL. */
 static void
 _entry_set_stamp(CacheEntry *p_e, const TextureStamp *p_stamp) {
+   p_e->b_trusted = (p_stamp == NULL);
    if (p_stamp != NULL) {
       p_e->t_stamp = *p_stamp;
    } else {
@@ -194,9 +210,13 @@ texturecache_remove(TextureCache *p_cache, GFile *p_file) {
 void
 texturecache_put(TextureCache *p_cache, GFile *p_file, GdkTexture *p_tex) {
    g_return_if_fail(G_IS_FILE(p_file));
+   /* The texture describes the file as it is now, so a file that cannot
+    * be queried now is one that cannot be queried at all (a synthetic
+    * GFile): store it TRUSTED rather than UNKNOWN, or it could never hit. */
    TextureStamp t_now;
    _stamp_read(p_file, &t_now);
-   texturecache_put_stamped(p_cache, p_file, p_tex, &t_now);
+   texturecache_put_stamped(p_cache, p_file, p_tex,
+                            t_now.b_valid ? &t_now : NULL);
 }
 
 /* Evict LRU entries (queue head) while over capacity. */
