@@ -181,9 +181,12 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
     where the pinch began, and the picture **moves with the midpoint**:
     the image pixel under the fingers stays under them, so two fingers
     moved together at a constant distance drag the picture, as common
-    viewers do. A pinch that starts while one finger is already dragging
-    takes that drag away where the finger is — a pan stops; a crop tool
-    lets go and keeps the rectangle as far as it was dragged; a straighten
+    viewers do. Over a **fitted** picture a two-finger move whose finger
+    distance stays within 10 % keeps it fitted (it has nothing to pan, and
+    fit must survive for `0`, a window resize and the swipe); pinching out
+    and back within that 10 % returns to fit. A pinch that starts while
+    one finger is already dragging takes that drag away where the finger
+    is — a pan stops; a crop tool lets go and keeps the rectangle as far as it was dragged; a straighten
     tool drops its horizon line **without levelling** (the line was never
     finished — ending it would level by whatever the finger jittered) —
     and the second finger never drags it.
@@ -202,9 +205,13 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
     is undone, and so is any pan the first finger made before the second
     landed (the view goes back to what it was before the *first* finger
     went down, and the 250 ms and 20 px count from that finger), so a
-    fitted view stays fitted. A touchpad pinch is never a tap. A new
-    picture on screen mid-pinch (the slideshow, a preview render) ends the
-    pinch: the rest of it neither zooms nor taps.
+    fitted view stays fitted. A tap edits nothing either: when its first
+    finger had grabbed the crop rectangle, the rectangle goes back to what
+    it was before that finger went down. A touchpad pinch is never a tap.
+    A new picture on screen mid-pinch (the slideshow, a preview render) ends
+    the pinch: the rest of it neither zooms nor taps; a new picture or
+    leaving the large view mid-drag ends that drag the same way (a tool
+    lets go as on a pinch).
 
 ## Zoom behavior
 
