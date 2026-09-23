@@ -18,15 +18,21 @@
  * on it; the straighten tool pushes every nudge / horizon drag through
  * enhance_ctrl_set_transform so the image levels live (a committed crop
  * follows the changing base, transform_rebase_crop, and is kept -- with a
- * status line, cropping nothing -- while the base has shrunk past it), and
- * cancel restores the transform the tool started from. The one-shot `[` /
+ * status line, cropping nothing -- while the base has shrunk past it; `c`
+ * over such a crop starts from the whole base, which is what is cropped in
+ * effect), and cancel restores the transform the tool started from. The
+ * one-shot `[` /
  * `]` turns need no tool and go straight to enhance_ctrl_rotate_quarter.
  *
  * Both overlays are about the pixels on screen, so both check that the
  * texture shown is exactly what the controller rendered for the state
- * being edited (enhance_ctrl_is_current_render): the crop rectangle is
- * drawn over, and its drags measured on, no other picture, and a horizon
- * drag is refused while a render is pending or Space holds the original.
+ * being edited (enhance_ctrl_is_current_render, a pure identity test once
+ * the controller has learned the original -- which the tools make it do
+ * before comparing anything, so no texture-cache lookup runs per frame or
+ * per pointer motion): the crop rectangle is drawn over, and its drags
+ * measured on, no other picture, and a horizon drag, a crop drag and the
+ * crop's Enter are refused while a render is pending or Space holds the
+ * original ("Release Space first" wins over "still rendering").
  *
  * Geometry is delegated: croprect.c owns how the rectangle moves,
  * transform.c the angles and sizes, viewer.c the image-to-widget mapping.
@@ -100,23 +106,29 @@ gboolean tool_ctrl_key(ToolCtrl *p_tc, guint u_keyval, GdkModifierType e_state);
 
 /* A pointer drag on the viewer in widget coordinates (the viewer's overlay
  * drag callback ends here; tests call it directly). Crop: inside moves,
- * an edge or corner resizes; straighten: draws the horizon line and, on
- * END, levels it -- refused with a status line while the texture on screen
- * is not the one the tool's state rendered (a render pending, Space held).
- * Ignored with no tool active. */
+ * an edge or corner resizes -- a BEGIN refused while the base is not on
+ * screen (a render pending, Space held) says why and grabs nothing, so a
+ * later accepted UPDATE cannot continue a stale gesture; straighten: draws
+ * the horizon line and, on END, levels it -- refused with a status line
+ * under the same conditions. Ignored with no tool active. */
 void tool_ctrl_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_x,
                     gdouble d_y);
 
 /* Enter: commit and leave the tool. FALSE (with a status, tool still
  * active) when the crop cannot be committed yet because the base preview
- * has not rendered. */
+ * has not rendered or Space holds the original. */
 gboolean tool_ctrl_apply(ToolCtrl *p_tc);
 
 /* Esc: restore the transform the tool started from and leave. */
 void tool_ctrl_cancel(ToolCtrl *p_tc);
 
-/* Leave without touching the transform -- the image under the tool changed
- * hands (navigation reset the preview, the view left the large page). */
+/* The view left the large page under the tool: an Esc without the status
+ * line -- the straighten tool's angle goes back to what it started from
+ * (every nudge was committed only to preview it), the crop tool drops its
+ * rectangle and base override so the crop already applied is back on the
+ * preview. The window calls this BEFORE switching the stack, since the
+ * restore commits through enhance_ctrl_set_transform, which brings the
+ * large view up (a no-op while it still is). */
 void tool_ctrl_abandon(ToolCtrl *p_tc);
 
 /* The preview under the tool is being discarded (Esc outside the tool, `0`

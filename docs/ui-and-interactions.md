@@ -394,14 +394,20 @@ built in, all four report "GEGL not built in".
 
 - **`c` → crop tool:** a rectangle overlay on the image (outside dimmed,
   rule-of-thirds lines, corner handles), starting as the whole image — or as
-  the crop already applied, so it can be adjusted rather than redrawn.
+  the crop already applied, so it can be adjusted rather than redrawn. A crop
+  that a straighten has pushed entirely outside the view crops nothing, so
+  the tool starts from the whole image again then (never from a sliver
+  clamped into the border).
   - Mouse: drag inside to move, drag an edge or corner to resize.
   - Keyboard: `h`/`l`/`j`/`k` move the rectangle; `H`/`L` move its right
     edge, `J`/`K` its bottom edge (1 % of the image per press); `1`-`4` lock
     the aspect ratio (1:1, 3:2, 4:3, 16:9), `0` frees it.
   - `Enter` applies (`gegl:crop`; a rectangle still covering the whole image
-    removes the crop), `Esc` or `c` again cancels and restores. `Enter` is
-    refused while the preview under the rectangle is still rendering.
+    removes the crop), `Esc` or `c` again cancels and restores. `Enter` and
+    a drag are refused while `Space` holds the original ("Release Space
+    first") or the preview under the rectangle is still rendering ("Preview
+    still rendering"); the rectangle is hidden meanwhile, and a refused drag
+    grabs nothing, so the gesture cannot go on once the preview is back.
   - While the tool is open the image is shown **without** its crop so the
     rectangle can be adjusted — but the crop already applied still counts:
     `s` inside the tool exports the cropped copy and navigating away still
@@ -442,7 +448,10 @@ built in, all four report "GEGL not built in".
   (`h` moves the rectangle instead of going to the previous image), the
   other tool's key and `[`/`]` are refused until `Enter`/`Esc`, and any key
   not listed keeps its usual meaning. Navigating away, or leaving the large
-  view, ends a tool without applying it; so does discarding the preview
+  view, ends a tool without applying it — leaving the large view is an `Esc`:
+  a nudged straighten goes back to the angle it started with, the crop
+  tool's rectangle is dropped and the crop already applied stays. So does
+  discarding the preview
   under it — `0` or the Original card with the panel open, the gate's
   Discard, the slideshow's auto-advance, or a render that failed — the
   tool is gone before the transform is reset, so nothing it was editing

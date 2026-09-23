@@ -35,7 +35,7 @@ static const char *_RENDERING =
 static const char *_FINISH_FIRST =
    "Finish the current tool first (Enter applies, Esc cancels)";
 static const char *_RELEASE_SPACE =
-   "Release Space first — the horizon is measured on the preview";
+   "Release Space first — the tools work on the preview, not the original";
 
 struct ToolCtrl {
    EnhanceCtrl           *p_ec;   /* borrowed: the transform being edited */
@@ -105,6 +105,19 @@ _shown_is_current(ToolCtrl *p_tc) {
    GgazeViewer *p_v = _viewer(p_tc);
    return (p_v != NULL && enhance_ctrl_is_current_render(
                              p_tc->p_ec, ggaze_viewer_get_texture(p_v)));
+}
+
+/* TRUE iff the controller can name the picture the tool works on: the
+ * original's identity and size are learned from the texture cache on first
+ * need (enhance_ctrl_get_orig_size) -- one lookup then, none once known --
+ * so _shown_is_current, run per frame and per pointer motion, stays a pure
+ * comparison. FALSE while the original is not decoded yet. The crop tool
+ * gets this through _ensure_rect (the base size); the straighten tool at 0
+ * degrees, with nothing rendered, has to ask before measuring a horizon. */
+static gboolean
+_original_known(ToolCtrl *p_tc) {
+   gint i_w, i_h;
+   return (enhance_ctrl_get_orig_size(p_tc->p_ec, &i_w, &i_h));
 }
 
 /* --- drawing helpers ------------------------------------------------------ */
@@ -246,7 +259,8 @@ _drag_cb(GgazeViewerDragPhase e_phase, gdouble d_x, gdouble d_y,
 /* --- session -------------------------------------------------------------- */
 
 /* Drop the overlay and every per-session field; the transform is left to the
- * caller (apply commits it, cancel restores it, abandon leaves it). */
+ * caller (apply commits it, cancel and abandon restore it, a discard resets
+ * it). */
 static void
 _leave(ToolCtrl *p_tc) {
    p_tc->e_tool = GGAZE_TOOL_NONE;
@@ -277,9 +291,31 @@ _begin(ToolCtrl *p_tc, GgazeTool e_tool) {
    return (TRUE);
 }
 
+/* The rectangle was laid out for another base size -- the crop the tool
+ * opened on, before the base was known at all, or the file rewritten under
+ * the tool: keep it where it still covers something (croprect_clamp: an
+ * edge past the border comes back to it), and start over from the whole
+ * base when nothing of it is inside. A crop a straighten pushed entirely
+ * outside the view crops nothing (the chain applies its intersection with
+ * the base, transform_effective_crop), so the whole base IS the crop in
+ * effect; clamping such a rectangle in used to hand the user an 8-px sliver
+ * at the nearest corner that nobody drew. */
+static void
+_refit_rect(ToolCtrl *p_tc, gint i_w, gint i_h) {
+   CropRect t_in = p_tc->t_rect;
+   croprect_intersect(&t_in, i_w, i_h);
+   if (t_in.d_w <= 0.0 || t_in.d_h <= 0.0) {
+      croprect_init_full(&p_tc->t_rect, i_w, i_h);
+   } else {
+      croprect_clamp(&p_tc->t_rect, i_w, i_h);
+   }
+}
+
 /* Lay the rectangle out on the base image (the whole of it, or the crop the
- * tool started with), or re-clamp it when the base changed size under it.
- * FALSE while the base size is not known yet. */
+ * tool started with -- refitted, see _refit_rect), or refit it when the
+ * base changed size under it. FALSE while the base size is not known yet;
+ * the first success also teaches the controller the original's identity
+ * (_original_known), so every later _shown_is_current is a comparison. */
 static gboolean
 _ensure_rect(ToolCtrl *p_tc) {
    gint i_w, i_h;
@@ -291,7 +327,7 @@ _ensure_rect(ToolCtrl *p_tc) {
       croprect_init_full(&p_tc->t_rect, i_w, i_h);
       p_tc->b_rect_set = TRUE;
    } else if (i_w != p_tc->i_base_w || i_h != p_tc->i_base_h) {
-      croprect_clamp(&p_tc->t_rect, i_w, i_h);
+      _refit_rect(p_tc, i_w, i_h);
    }
    p_tc->i_base_w = i_w;
    p_tc->i_base_h = i_h;
@@ -300,7 +336,8 @@ _ensure_rect(ToolCtrl *p_tc) {
 
 /* `c`: show the base (the committed transform minus its crop) and lay the
  * rectangle out on it -- the previous crop, if there was one, so it can be
- * adjusted rather than redrawn. The base is a PREVIEW override, not a
+ * adjusted rather than redrawn (unless nothing of it is inside the base:
+ * then the whole base, _refit_rect). The base is a PREVIEW override, not a
  * commit: the committed crop keeps counting as work while the tool is open,
  * so `s` in the tool still exports it and navigating away still prompts
  * for it (committing "no crop" here used to lose it silently). */
@@ -502,19 +539,53 @@ _crop_key(ToolCtrl *p_tc, guint u_keyval) {
    return (TRUE); /* _is_crop_key said so: nothing else reaches here */
 }
 
+/* TRUE iff the rectangle can be edited or committed right now: laid out on
+ * a known base, with that base's render on screen -- and not the original
+ * Space is holding in its place. Otherwise says why, when b_say: "Release
+ * Space first" before "still rendering", as the straighten tool orders
+ * them, because under a held Space the screen shows the original whether
+ * or not a render is pending, and advising to wait for a render the user
+ * cannot see land was wrong (it used to be the only message). A drag says
+ * it on BEGIN only, not on every refused motion event. */
+static gboolean
+_crop_editable(ToolCtrl *p_tc, gboolean b_say) {
+   if (enhance_ctrl_is_hold_original(p_tc->p_ec)) {
+      if (b_say) {
+         _status(p_tc, _RELEASE_SPACE);
+      }
+      return (FALSE);
+   }
+   if (!_ensure_rect(p_tc) || !_shown_is_current(p_tc)) {
+      if (b_say) {
+         _status(p_tc, _RENDERING);
+      }
+      return (FALSE);
+   }
+   return (TRUE);
+}
+
 /* A drag over the crop rectangle: BEGIN decides what was grabbed, every
  * later phase re-derives the rectangle from the one at BEGIN plus the total
- * offset (croprect_drag), so a drag never accumulates clamping error. The
- * whole gesture is ignored while the texture on screen is not the rendered
- * base the rectangle is laid out on (_shown_is_current: the base preview is
- * still rendering): pointer pixels mapped through another picture's
- * geometry would land on the wrong image pixels -- the same guard under
- * which _draw_crop hides the rectangle, so nothing invisible can be
- * edited. */
+ * offset (croprect_drag), so a drag never accumulates clamping error. Each
+ * phase is refused while the rectangle is not editable (_crop_editable:
+ * the base preview is still rendering, Space holds the original): pointer
+ * pixels mapped through another picture's geometry would land on the wrong
+ * image pixels -- the same guard under which _draw_crop hides the
+ * rectangle, so nothing invisible can be edited. A BEGIN grabs nothing
+ * until it is accepted, and an END lets go whether or not it is: a refused
+ * BEGIN used to leave the previous gesture's grab and start point in place
+ * (a gesture whose END was refused too, or one GTK cancelled without an
+ * END), and the first UPDATE accepted after the render landed re-derived
+ * the rectangle from that stale start -- a jump to a corner resize nobody
+ * made. */
 static void
 _crop_drag(ToolCtrl *p_tc, const GgazeViewerGeom *p_g,
            GgazeViewerDragPhase e_phase, gdouble d_ix, gdouble d_iy) {
-   if (!_ensure_rect(p_tc) || !_shown_is_current(p_tc)) {
+   CropRectHit e_hit = p_tc->e_hit; /* the grab an UPDATE / END continues */
+   if (e_phase != GGAZE_VIEWER_DRAG_UPDATE) {
+      p_tc->e_hit = CROPRECT_HIT_NONE;
+   }
+   if (!_crop_editable(p_tc, e_phase == GGAZE_VIEWER_DRAG_BEGIN)) {
       return;
    }
    if (e_phase == GGAZE_VIEWER_DRAG_BEGIN) {
@@ -525,26 +596,22 @@ _crop_drag(ToolCtrl *p_tc, const GgazeViewerGeom *p_g,
       p_tc->d_drag_y0    = d_iy;
       return;
    }
-   if (p_tc->e_hit == CROPRECT_HIT_NONE) {
-      return; /* the drag started outside the rectangle */
+   if (e_hit == CROPRECT_HIT_NONE) {
+      return; /* began outside the rectangle, or its BEGIN was refused */
    }
-   croprect_drag(&p_tc->t_rect, &p_tc->t_drag_start, p_tc->e_hit,
+   croprect_drag(&p_tc->t_rect, &p_tc->t_drag_start, e_hit,
                  d_ix - p_tc->d_drag_x0, d_iy - p_tc->d_drag_y0, p_tc->d_aspect,
                  p_tc->i_base_w, p_tc->i_base_h);
-   if (e_phase == GGAZE_VIEWER_DRAG_END) {
-      p_tc->e_hit = CROPRECT_HIT_NONE;
-   }
    _redraw(p_tc);
 }
 
 /* Enter in the crop tool: commit the rectangle (none, if it still covers the
- * whole base) and leave. Refused while the screen does not show the
- * rendered base (the base preview is still rendering): the rectangle was
- * laid out on a picture the user has not seen it over. */
+ * whole base) and leave. Refused, with the reason, while the rectangle is
+ * not editable (_crop_editable): the rectangle was laid out on a picture
+ * the user has not seen it over. */
 static gboolean
 _apply_crop(ToolCtrl *p_tc) {
-   if (!_ensure_rect(p_tc) || !_shown_is_current(p_tc)) {
-      _status(p_tc, _RENDERING);
+   if (!_crop_editable(p_tc, TRUE)) {
       return (FALSE);
    }
    Transform t_new = p_tc->t_work;
@@ -628,7 +695,7 @@ _horizon_measurable(ToolCtrl *p_tc) {
       _status(p_tc, _RELEASE_SPACE);
       return (FALSE);
    }
-   if (!_shown_is_current(p_tc)) {
+   if (!_original_known(p_tc) || !_shown_is_current(p_tc)) {
       _status(p_tc, _RENDERING);
       return (FALSE);
    }
@@ -858,19 +925,28 @@ tool_ctrl_cancel(ToolCtrl *p_tc) {
                                           : "Straighten cancelled");
 }
 
+/* The view left the large page under the tool. An Esc without the status
+ * line: the crop tool drops its base override so the committed crop is
+ * back on the preview when the view returns (the override only re-renders,
+ * it never switches views), and the straighten tool restores the angle it
+ * started from -- its nudges were committed only to preview them live, and
+ * an earlier version left the last nudge applied, so leaving the large view
+ * quietly kept an edit that "ends a tool without applying it" promised to
+ * drop. The restore's commit would pull the large view up again, so the
+ * window calls this BEFORE it switches the stack (window.c _set_view). */
 void
 tool_ctrl_abandon(ToolCtrl *p_tc) {
    g_return_if_fail(p_tc != NULL);
    if (p_tc->e_tool == GGAZE_TOOL_NONE) {
       return;
    }
-   GgazeTool e_was = p_tc->e_tool;
+   GgazeTool e_was   = p_tc->e_tool;
+   Transform t_saved = p_tc->t_saved;
    _leave(p_tc);
    if (e_was == GGAZE_TOOL_CROP) {
-      /* The view left the large page under the tool: the committed crop
-       * must be back on the preview when the view returns (the override
-       * only re-renders, it never switches views). */
       enhance_ctrl_set_preview_transform(p_tc->p_ec, NULL);
+   } else {
+      enhance_ctrl_set_transform(p_tc->p_ec, &t_saved);
    }
 }
 

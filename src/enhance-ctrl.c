@@ -31,13 +31,14 @@ static gboolean    _disposed(EnhanceCtrl *p_ctrl);
 static gboolean    _has_navigator(EnhanceCtrl *p_ctrl);
 
 /* Forward decls of the internal state-machine functions. */
-static void     _sync_panel(EnhanceCtrl *p_ctrl);
-static void     _apply_async(EnhanceCtrl *p_ctrl);
-static void     _discard(EnhanceCtrl *p_ctrl);
-static void     _destroy(EnhanceCtrl *p_ctrl);
-static void     _start_previews(EnhanceCtrl *p_ctrl);
-static void     _card_toggle(EnhanceCtrl *p_ctrl, GtkWidget *p_btn);
-static gboolean _orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
+static void        _sync_panel(EnhanceCtrl *p_ctrl);
+static void        _apply_async(EnhanceCtrl *p_ctrl);
+static void        _discard(EnhanceCtrl *p_ctrl);
+static void        _destroy(EnhanceCtrl *p_ctrl);
+static void        _start_previews(EnhanceCtrl *p_ctrl);
+static void        _card_toggle(EnhanceCtrl *p_ctrl, GtkWidget *p_btn);
+static gboolean    _orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
+static GdkTexture *_learn_original(EnhanceCtrl *p_ctrl);
 
 /* --- struct --------------------------------------------------------------- */
 
@@ -96,6 +97,18 @@ struct EnhanceCtrl {
    GdkTexture   *p_enhance_tex;    /* last-applied modified texture, cached
                                     * so hold-Space can restore it without a
                                     * GEGL recompute */
+   GdkTexture *p_orig_tex;         /* the current file's ORIGINAL as this
+                                    * controller last learned it from the
+                                    * texture cache (owned ref; NULL = never
+                                    * looked up, or forgotten): the identity
+                                    * enhance_ctrl_is_current_render compares
+                                    * the screen against when nothing is
+                                    * rendered. Remembered so that test --
+                                    * run per snapshot and pointer motion by
+                                    * the tools -- never consults the cache,
+                                    * whose get stats the file and evicts a
+                                    * stale entry (a `touch` on the file
+                                    * made the crop overlay vanish) */
    GCancellable *p_enhance_cancel; /* in-flight enhance-apply GTask */
    GCancellable *p_save_cancel;    /* in-flight export (`s`); cancelled on
                                     * dispose so a closing window never gets
@@ -219,6 +232,7 @@ enhance_ctrl_delete(EnhanceCtrl *p_ctrl) {
    g_clear_object(&p_ctrl->p_save_cancel);
    g_clear_object(&p_ctrl->p_preview_cancel);
    g_clear_object(&p_ctrl->p_enhance_tex);
+   g_clear_object(&p_ctrl->p_orig_tex);
    g_clear_object(&p_ctrl->p_enhance_file);
    g_clear_pointer(&p_ctrl->p_enhancer, enhancer_delete);
    g_free(p_ctrl->c_saved_name);
@@ -237,6 +251,7 @@ enhance_ctrl_dispose(EnhanceCtrl *p_ctrl) {
    g_cancellable_cancel(p_ctrl->p_save_cancel);
    g_clear_object(&p_ctrl->p_save_cancel);
    g_clear_object(&p_ctrl->p_enhance_tex);
+   g_clear_object(&p_ctrl->p_orig_tex);
    g_clear_object(&p_ctrl->p_enhance_file);
    /* The enhancer engine is released here (in dispose, after the widgets),
     * mirroring the old window.c order: _destroy closes the UI, then the
@@ -307,14 +322,13 @@ enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold) {
    }
    p_ctrl->b_hold_original = b_hold;
    if (b_hold) {
-      GFile      *p_cur = _current_file(p_ctrl);
-      GdkTexture *p_orig =
-         p_cur != NULL ? _cached_texture(p_ctrl, p_cur) : NULL;
-      /* p_orig should always be cached: it was shown before any preset was
-       * toggled on, and the LRU (cap 4) comfortably outlives an idle
-       * hold-Space session on the same image. If it was ever evicted, this
-       * is a silent no-op rather than a synchronous re-decode on the main
-       * thread. */
+      /* The cached original -- learned on the way, so the tools can tell
+       * it on screen. It should always be cached: it was shown before any
+       * preset was toggled on, and the LRU (cap 4) comfortably outlives an
+       * idle hold-Space session on the same image. If it was ever evicted,
+       * this is a silent no-op rather than a synchronous re-decode on the
+       * main thread. */
+      GdkTexture *p_orig = _learn_original(p_ctrl);
       if (p_orig != NULL) {
          _show_texture(p_ctrl, p_orig);
       }
@@ -730,19 +744,55 @@ enhance_ctrl_set_preview_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf) {
    }
 }
 
-/* The original's size, from the last landed apply or -- before any apply,
- * the common case for the very first `]` or `c` -- from the texturecache
- * entry the viewer is showing. FALSE when neither knows it. */
-static gboolean
-_orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h) {
+/* Look the current file's original up in the texture cache and remember it
+ * (p_orig_tex; its size too when no apply has told it yet). This is the ONE
+ * place the original is fetched from the cache, and it runs on events only
+ * -- a tool starting or first needing the base size, a Space press, a
+ * rescan of the current file -- never per frame: the cache's get stats the
+ * file for freshness and evicts a stale entry, far too much for a draw
+ * callback or a pointer motion (an earlier version looked it up from
+ * enhance_ctrl_is_current_render on every snapshot, and a `touch` on the
+ * file made the crop overlay vanish mid-drag). Returns the texture
+ * (borrowed) or NULL while the file is not decoded into the cache. */
+static GdkTexture *
+_learn_original(EnhanceCtrl *p_ctrl) {
+   GFile      *p_cur = _current_file(p_ctrl);
+   GdkTexture *p_tex = p_cur != NULL ? _cached_texture(p_ctrl, p_cur) : NULL;
+   if (p_tex == NULL) {
+      return (NULL);
+   }
+   g_set_object(&p_ctrl->p_orig_tex, p_tex);
    if (p_ctrl->i_orig_w <= 0 || p_ctrl->i_orig_h <= 0) {
-      GFile      *p_cur = _current_file(p_ctrl);
-      GdkTexture *p_tex = p_cur != NULL ? _cached_texture(p_ctrl, p_cur) : NULL;
-      if (p_tex == NULL) {
-         return (FALSE);
-      }
       p_ctrl->i_orig_w = gdk_texture_get_width(p_tex);
       p_ctrl->i_orig_h = gdk_texture_get_height(p_tex);
+   }
+   return (p_tex);
+}
+
+/* Forget what is known about the original (another file, or this one
+ * rewritten in place): the next need learns it again from a fresh decode. */
+static void
+_forget_original(EnhanceCtrl *p_ctrl) {
+   g_clear_object(&p_ctrl->p_orig_tex);
+   p_ctrl->i_orig_w = 0;
+   p_ctrl->i_orig_h = 0;
+}
+
+/* The original's size, from the last landed apply or -- before any apply,
+ * the common case for the very first `]` or `c` -- from the texturecache
+ * entry the viewer is showing. FALSE when neither knows it. Also where the
+ * original's identity is learned (_learn_original) while it is not yet: the
+ * tools ask for the base size before they compare anything, so by the time
+ * enhance_ctrl_is_current_render judges a laid-out rectangle the lookup has
+ * happened, and none happens again once it succeeded. */
+static gboolean
+_orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h) {
+   if (p_ctrl->p_orig_tex == NULL || p_ctrl->i_orig_w <= 0 ||
+       p_ctrl->i_orig_h <= 0) {
+      _learn_original(p_ctrl);
+   }
+   if (p_ctrl->i_orig_w <= 0 || p_ctrl->i_orig_h <= 0) {
+      return (FALSE);
    }
    *p_w = p_ctrl->i_orig_w;
    *p_h = p_ctrl->i_orig_h;
@@ -803,10 +853,14 @@ enhance_ctrl_is_pending(EnhanceCtrl *p_ctrl) {
 /* The exact identity test the tools need (see the header). Two cases: with
  * render work the last landed texture IS the render (window._show_texture
  * puts that very object on screen through enhance_ctrl_override_texture);
- * without any, what the viewer should show is the current file's cached
- * original, which viewload shows from -- and, after a cache miss, stores
- * into -- the same texturecache entry, so its identity is the test too. A
- * pending apply means the screen predates the state whatever it shows. */
+ * without any, what the viewer should show is the current file's original,
+ * which viewload shows from -- and, after a cache miss, stores into -- the
+ * texturecache entry this controller learned p_orig_tex from, so that
+ * identity is the test. Pure comparisons, no cache lookup: this runs on
+ * every snapshot and pointer motion of a tool overlay, and the cache's get
+ * stats the file and evicts a stale entry (an original never learned is
+ * simply never current; the tools learn it before they lay anything out).
+ * A pending apply means the screen predates the state whatever it shows. */
 gboolean
 enhance_ctrl_is_current_render(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
    g_return_val_if_fail(p_ctrl != NULL, FALSE);
@@ -816,8 +870,7 @@ enhance_ctrl_is_current_render(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
    if (_render_has_work(p_ctrl)) {
       return (p_tex == p_ctrl->p_enhance_tex);
    }
-   GFile *p_cur = _current_file(p_ctrl);
-   return (p_cur != NULL && p_tex == _cached_texture(p_ctrl, p_cur));
+   return (p_tex == p_ctrl->p_orig_tex);
 }
 
 gboolean
@@ -1029,6 +1082,31 @@ enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx) {
 
 /* --- choke points -------------------------------------------------------- */
 
+/* A rescan of the SAME file: the folder monitor also fires when the current
+ * picture is rewritten in place -- an external edit through `e`, a `!`
+ * script -- possibly with another size, under the same identity, and
+ * i_orig_w/h used to stay stale then (the crop tool laid its rectangle out
+ * on the old size). The texture cache's stamp tells such a rescan from the
+ * one a save's "-enhanced" copy causes, with no second stat: its get
+ * re-checks mtime/size and evicts a stale entry, so the original still
+ * describes the file iff the cache still hands it out. Evicted (stale, or
+ * aged out of the LRU): forget size and identity -- the reload that follows
+ * this signal decodes the file as it is now and the next need learns it.
+ * Still cached but not the texture known here (never looked up, or decoded
+ * again after a miss): learn it. Unchanged: nothing to do, and a crop tool
+ * open over the file keeps its rectangle. */
+static void
+_recheck_original(EnhanceCtrl *p_ctrl, GFile *p_cur) {
+   GdkTexture *p_now = _cached_texture(p_ctrl, p_cur);
+   if (p_now == NULL) {
+      _forget_original(p_ctrl);
+   } else if (p_now != p_ctrl->p_orig_tex) {
+      g_set_object(&p_ctrl->p_orig_tex, p_now);
+      p_ctrl->i_orig_w = gdk_texture_get_width(p_now);
+      p_ctrl->i_orig_h = gdk_texture_get_height(p_now);
+   }
+}
+
 /* "changed" fires for every navigator rescan, not only an actual move to a
  * different current file -- notably, enhance-save writes the "-enhanced" copy
  * into the SAME live-monitored folder, whose GFileMonitor then schedules a
@@ -1038,7 +1116,9 @@ enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx) {
  * silently zeroed u_enhance_mask right after a successful save, discarding the
  * still-active preview the user was not done comparing/adjusting. Only reset
  * when the current file's IDENTITY actually changed; p_enhance_file is updated
- * unconditionally so the next call has an accurate baseline.
+ * unconditionally so the next call has an accurate baseline. A same-file
+ * rescan is not a no-op either: the file may have been rewritten in place
+ * (_recheck_original).
  *
  * The panel outlives the navigation: it is re-pointed at the new file (or
  * closed when the folder ran empty), so a whole folder can be worked through
@@ -1049,12 +1129,13 @@ enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl) {
    GFile   *p_cur  = _current_file(p_ctrl);
    gboolean b_same = (p_cur != NULL && p_ctrl->p_enhance_file != NULL &&
                       g_file_equal(p_cur, p_ctrl->p_enhance_file));
-   if (!b_same) {
+   if (b_same) {
+      _recheck_original(p_ctrl, p_cur);
+   } else {
       p_ctrl->u_enhance_mask = 0;
       transform_init(&p_ctrl->t_xf);
-      p_ctrl->b_preview       = FALSE; /* a tool's override goes with it */
-      p_ctrl->i_orig_w        = 0;     /* another image, another size */
-      p_ctrl->i_orig_h        = 0;
+      p_ctrl->b_preview = FALSE; /* a tool's override goes with it */
+      _forget_original(p_ctrl);  /* another image, another size */
       p_ctrl->b_saved         = FALSE;
       p_ctrl->b_have_saved    = FALSE; /* the saved pair was this file's */
       p_ctrl->b_hint_shown    = FALSE;

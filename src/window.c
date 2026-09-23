@@ -428,20 +428,25 @@ _get_view(GgazeWindow *p_win) {
 
 static void
 _set_view(GgazeWindow *p_win, GgazeViewMode e_view) {
+#if GGAZE_HAVE_GEGL
+   /* A crop / straighten session lives on the large view's canvas: leaving
+    * that page (grid, empty) ends it without applying anything -- like Esc,
+    * so a nudged straighten goes back to the angle it started from. That
+    * restore commits through enhance_ctrl_set_transform, which brings the
+    * large view up: a no-op while it still is, which is why the tool is
+    * abandoned BEFORE the stack switches (after it, the restore would yank
+    * the grid away again). NULL during construction, before
+    * _init_tool_state ran. */
+   if (e_view != GGAZE_VIEW_LARGE && p_win->p_tool_ctrl != NULL) {
+      tool_ctrl_abandon(p_win->p_tool_ctrl);
+   }
+#endif
    gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack),
                                     VIEW_NAMES[e_view]);
    /* The enhance side panel is about the image on screen: it is shown only
     * beside the large view and hidden (not closed -- its state survives a
     * `t` round trip) with the grid or the empty page. */
    gtk_widget_set_visible(p_win->p_side_slot, e_view == GGAZE_VIEW_LARGE);
-#if GGAZE_HAVE_GEGL
-   /* A crop / straighten session lives on the large view's canvas: leaving
-    * that page (grid, empty) ends it without committing anything. NULL
-    * during construction, before _init_tool_state ran. */
-   if (e_view != GGAZE_VIEW_LARGE && p_win->p_tool_ctrl != NULL) {
-      tool_ctrl_abandon(p_win->p_tool_ctrl);
-   }
-#endif
 }
 
 /* TRUE iff a folder is open; otherwise says so (the keys that need a folder

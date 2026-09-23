@@ -181,10 +181,15 @@ gboolean enhance_ctrl_is_pending(EnhanceCtrl *p_ctrl);
 /* TRUE iff p_tex -- what the viewer shows -- is exactly the texture the
  * current state renders to: the last landed apply for the current mask and
  * render transform (a tool's override, else the committed one), with none
- * newer in flight; or, when that state needs no GEGL at all, the cached
- * original of the current file. It is FALSE for the picture that is still
- * up while a render is pending, for the original shown under a held Space,
- * and for another file's texture waiting for a load to land. The tools
+ * newer in flight; or, when that state needs no GEGL at all, the original
+ * of the current file as this controller last learned it from the texture
+ * cache (enhance_ctrl_get_base_size / enhance_ctrl_get_orig_size and a
+ * Space press learn it; an original never learned is never current). It is
+ * FALSE for the picture that is still up while a render is pending, for
+ * the original shown under a held Space, and for another file's texture
+ * waiting for a load to land. Pure identity comparisons, no cache lookup:
+ * safe per snapshot and per pointer motion, and a `touch` on the file
+ * (which stales its cache entry) cannot make an overlay vanish. The tools
  * draw the crop rectangle over, and measure drags on, only a texture this
  * says yes to: a size comparison could not tell 0 from 180 degrees, +a
  * from -a, or a preset toggled under the tool from the base it replaced. */
@@ -197,7 +202,10 @@ gboolean enhance_ctrl_is_hold_original(EnhanceCtrl *p_ctrl);
 /* The size of the base image the crop rectangle refers to (the original
  * after the current turn and straighten, crop ignored --
  * transform_base_size), or FALSE when the original's size is not known yet
- * (no apply has landed for this file and its texture is not cached). */
+ * (no apply has landed for this file and its texture is not cached). The
+ * first successful call learns the original from the cache -- one lookup,
+ * none once known -- which is what lets enhance_ctrl_is_current_render
+ * recognise it on screen afterwards. */
 gboolean enhance_ctrl_get_base_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
 
 /* The original's upright size on the same terms (FALSE when unknown): what
@@ -265,7 +273,10 @@ gboolean enhance_ctrl_can_save(EnhanceCtrl *p_ctrl);
 /* --- choke points --- */
 /* The navigator "changed" choke point: reset the preview only when the
  * current file's IDENTITY actually changed (see the comment in the .c). An
- * open panel stays open and re-previews the new file. */
+ * open panel stays open and re-previews the new file. A rescan of the SAME
+ * file re-checks the original against the texture cache: rewritten in
+ * place (`e`, `!`) with another size, its size and identity are forgotten
+ * and learned again from the fresh decode. */
 void enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl);
 
 /* Drop the current enhance preview and go back to the original (Esc, `0`,
