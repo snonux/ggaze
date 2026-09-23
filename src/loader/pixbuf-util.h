@@ -78,7 +78,9 @@ GdkPixbufAnimation *pixbuf_util_decode_animation_bytes(const guchar *p_buf,
  * (animation_within_budget): its u_frames is how many frames to take and
  * its u_plays how many times they play -- read from the container rather
  * than from the iterator, because glycin's iterator loops for ever
- * whatever the file says and 2.42's webp module does too.
+ * whatever the file says, and so does webp-pixbuf-loader 0.2.7's
+ * (measured; only gdk-pixbuf 2.42's own GIF iterator ends a play-once
+ * file, and the walk never samples past the first play anyway).
  * Every texture owns its pixels (see pixbuf_util_to_texture). p_cancel is
  * checked between frames. Returns NULL with p_err set on cancel or when a
  * frame cannot be wrapped. (transfer full) */

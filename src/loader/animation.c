@@ -31,11 +31,11 @@
  * count, when there is one, is an application extension (0x21 0xFF). */
 
 enum {
-   GIF_BLOCK_EXTENSION = 0x21,
-   GIF_BLOCK_IMAGE     = 0x2C,
-   GIF_BLOCK_TRAILER   = 0x3B,
-   GIF_HEADER_LEN      = 13, /* signature + logical screen descriptor */
-   GIF_IMAGE_DESC_LEN  = 10,
+   GIF_BLOCK_EXTENSION   = 0x21,
+   GIF_BLOCK_IMAGE       = 0x2C,
+   GIF_BLOCK_TRAILER     = 0x3B,
+   GIF_HEADER_LEN        = 13, /* signature + logical screen descriptor */
+   GIF_IMAGE_DESC_LEN    = 10,
    GIF_LABEL_APPLICATION = 0xFF,
    GIF_LOOP_EXT_LEN      = 19, /* 0x21 0xFF, 1 + 11 id, 1 + 3 loop, 0 */
 };
@@ -89,9 +89,12 @@ _gif_loop_ext(const guint8 *p_buf, gsize u_len, gsize u_pos, guint *p_count) {
 
 /* How many times a GIF plays for the loop count its NETSCAPE2.0 block
  * gives: 0 is "for ever" (0 here too), N is N REPETITIONS after the first
- * play, so N + 1 plays. That is what Chrome and gdk-pixbuf 2.42's own GIF
- * loader do (io-gif.c: loop++ for a non-zero count); Firefox has at times
- * played N. A GIF without the block plays once (animation_probe). */
+ * play, so N + 1 plays. That is what Chrome does, and gdk-pixbuf 2.42's
+ * own GIF iterator (measured on Debian trixie: a count of 1 ends after
+ * two plays); Firefox has at times played N. A GIF without the block
+ * plays once (_gif_probe), which 2.42's iterator honours too (measured);
+ * glycin's loops for ever either way, which is why the count is read
+ * here and not taken from the decoder. */
 static guint
 _gif_plays_for_count(guint u_count) {
    return ((u_count == 0) ? 0 : u_count + 1);
@@ -102,8 +105,8 @@ _gif_plays_for_count(guint u_count) {
  * ones are ignored), skip whatever else is skippable. FALSE ends the walk
  * (trailer, garbage, or the buffer ran out mid-block). */
 static gboolean
-_gif_step(const guint8 *p_buf, gsize u_len, gsize *p_pos,
-          GgazeAnimProbe *p_out, gboolean *p_loop_seen) {
+_gif_step(const guint8 *p_buf, gsize u_len, gsize *p_pos, GgazeAnimProbe *p_out,
+          gboolean *p_loop_seen) {
    gsize u_pos   = *p_pos;
    guint u_count = 0;
    switch (p_buf[u_pos]) {
@@ -410,9 +413,13 @@ animation_playback_advance(const GgazeAnimation *p_anim,
 /* --- the texture <-> animation channel -------------------------------------
  *
  * The one quark the attach/lookup pair shares, made once whichever thread
- * asks first (the loader's workers attach, the main thread looks up); the
- * texture's qdata destroy notify is animation_delete, so an attached
- * animation lives exactly as long as its first frame does. */
+ * asks first (the loader's workers attach, the main thread looks up):
+ * g_once_init_enter/leave publish it with the barrier a cross-thread
+ * first use needs. Not G_DEFINE_QUARK, which reads and writes a plain
+ * static without one (a data race, if a benign one, that TSan reports)
+ * and defines a non-static symbol. The texture's qdata destroy notify is
+ * animation_delete, so an attached animation lives exactly as long as its
+ * first frame does. */
 static GQuark
 _animation_quark(void) {
    static gsize u_quark = 0;

@@ -155,8 +155,8 @@ _pixbuf_decode_still(const guchar *p_buf, gsize u_len, GError **p_err) {
  * the texture is that still and nothing is attached. */
 static GdkTexture *
 _pixbuf_decode_animation(const guchar *p_buf, gsize u_len,
-                         const GgazeAnimProbe *p_probe,
-                         GCancellable *p_cancel, GError **p_err) {
+                         const GgazeAnimProbe *p_probe, GCancellable *p_cancel,
+                         GError **p_err) {
    GdkPixbufAnimation *p_anim =
       pixbuf_util_decode_animation_bytes(p_buf, u_len, p_err);
    if (p_anim == NULL) {
@@ -210,8 +210,8 @@ _pixbuf_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    GgazeAnimProbe st_probe;
    GdkTexture    *p_tex =
       _pixbuf_playable_animation(p_buf, u_len, &st_probe)
-            ? _pixbuf_decode_animation(p_buf, u_len, &st_probe, p_cancel, p_err)
-            : _pixbuf_decode_still(p_buf, u_len, p_err);
+         ? _pixbuf_decode_animation(p_buf, u_len, &st_probe, p_cancel, p_err)
+         : _pixbuf_decode_still(p_buf, u_len, p_err);
    g_free(c_buf);
    return (p_tex);
 }

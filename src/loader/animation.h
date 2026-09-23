@@ -9,10 +9,11 @@
  *
  *   - animation_probe(): a byte-level walk of a GIF's blocks or a WebP's
  *     RIFF chunks that counts the frames and reads the canvas size and the
- *     loop count, without a decoder. It is what decides whether the pixbuf backend asks
- *     gdk-pixbuf for a GdkPixbufAnimation at all, so the still path stays
- *     byte-for-byte what it was for every file that is not a multi-frame
- *     GIF or WebP, and "is this animated" is testable on bytes alone.
+ *     loop count, without a decoder. It is what decides whether the
+ *     pixbuf backend asks gdk-pixbuf for a GdkPixbufAnimation at all, so
+ *     the still path stays byte-for-byte what it was for every file that
+ *     is not a multi-frame GIF or WebP, and "is this animated" is testable
+ *     on bytes alone.
  *   - animation_within_budget(): the memory and playback bound. Every
  *     frame of a played animation is held as its own texture (see
  *     GgazeAnimation below), so an animation costs frames x canvas x 4
@@ -22,13 +23,15 @@
  *     (GGAZE_ANIM_MAX_CANVAS_PIXELS, GGAZE_ANIM_MAX_FRAMES). Beyond any of
  *     them only the first frame is decoded and shown, as a still.
  *   - animation_frame_delay_ms(): the clamp on what a frame's delay may be.
- *     Both decoders ggaze meets already turn a 0 ms GIF delay into 100 ms
- *     before ggaze sees it (gdk-pixbuf 2.42's io-gif.c and the glycin
- *     bridge of 2.44, measured), and 2.42's GIF loader raises anything
- *     under 20 ms to 20 ms itself; what still arrives below 20 ms -- a
- *     10 ms GIF delay on glycin, a 10 ms WebP frame on either -- is
- *     raised to 20 ms here, the rate browsers clamp to, so a crafted file
- *     cannot make the viewer redraw on every vblank.
+ *     A 0 ms delay never reaches it: both decoders ggaze meets turn a 0 ms
+ *     GIF delay into 100 ms before ggaze sees it (gdk-pixbuf 2.42's
+ *     io-gif.c, and the glycin bridge of 2.44, which does the same for a
+ *     0 ms WebP frame -- measured), and 2.42's GIF loader raises anything
+ *     under 20 ms to 20 ms itself. What does arrive below 20 ms is a
+ *     10 ms GIF or WebP delay on glycin, reported as 10 (measured on
+ *     Fedora 44, glycin-loaders 2.1; tests/fixtures/fastdelay.gif); that
+ *     is raised to 20 ms here, the rate browsers clamp to, so a crafted
+ *     file cannot make the viewer redraw on every vblank.
  *   - GgazeAnimPlayback / animation_playback_advance(): which frame is on
  *     screen at a given time -- the schedule, the stall resync and the
  *     loop count -- as plain C over a caller-supplied clock, so the
@@ -104,9 +107,14 @@ gboolean animation_probe(const guint8 *p_buf, gsize u_len,
  * decoder's own frames and the copies made from them live side by side
  * until the decoder is dropped. So at this cap the worst case is 4 x 128
  * = 512 MiB held plus 3 x 256 MiB at peak, ~1.3 GiB, if every file in
- * sight is a maximal animation. The still cap (GGAZE_IMAGE_MAX_PIXELS,
- * 100 M pixels) would have allowed ~400 MB held and ~0.9 GB peak for a
- * SINGLE animation (a 98 M pixel GIF), which a viewer has no business
+ * sight is a maximal animation (the two neighbours are prefetched with
+ * all their frames: viewload.c _prefetch says why). Measured on Fedora 44
+ * (glycin), loader_load() of a 109-frame 640 x 480 GIF -- 32 M pixels,
+ * just under the cap: 135 MB more RSS held after the load, a peak of
+ * 270 MB above the baseline during it; the same clip with 110 frames is
+ * over the cap and takes the still path at 8 MB. The still cap
+ * (GGAZE_IMAGE_MAX_PIXELS, 100 M pixels) would have allowed ~400 MB held
+ * and ~0.8 GB peak for a SINGLE animation, which a viewer has no business
  * spending on a GIF. Real animations fit easily: 480 x 270 x 250 frames
  * is 32 M pixels, a 640 x 480 clip plays 109 frames; above the cap only
  * the first frame is shown, as a still. */
@@ -134,8 +142,8 @@ gboolean animation_within_budget(const GgazeAnimProbe *p_probe);
 /* The shortest delay the viewer schedules between two frames, in ms, the
  * rate browsers clamp fast GIFs to. GIF delays are stored in 10 ms units;
  * a 0 in the file never reaches this clamp (the decoders make it 100 ms,
- * see the top of this file), a 10 ms one can (glycin passes it through,
- * as both decoders do for a 10 ms WebP frame) and is raised to this. */
+ * see the top of this file), a 10 ms one does on glycin (GIF and WebP
+ * alike) and is raised to this. */
 #define GGAZE_ANIM_MIN_DELAY_MS 20
 
 /* Turn the delay a GdkPixbufAnimationIter reports into what the viewer
@@ -203,8 +211,7 @@ void animation_playback_reset(GgazeAnimPlayback *p_pb);
  * last frame holds and b_ended is set; a frame whose delay is -1 also
  * ends it, held. TRUE iff u_frame changed. */
 gboolean animation_playback_advance(const GgazeAnimation *p_anim,
-                                    GgazeAnimPlayback    *p_pb,
-                                    gint64                i_now_us);
+                                    GgazeAnimPlayback *p_pb, gint64 i_now_us);
 
 /* Make p_anim travel with p_tex, which takes ownership of it (transfer
  * full: the texture's finalize deletes it); a later attach replaces and

@@ -211,7 +211,18 @@ _frame_delay(GdkPixbufAnimationIter *p_it, gboolean b_countdown) {
  * added back so every frame keeps the delay the file gave it. A frame the
  * decoder says holds for ever (delay -1: the animation ends on it) is the
  * last one taken. FALSE with p_err set on cancel or an unwrappable
- * frame. */
+ * frame.
+ *
+ * Known limit: a 1 ms frame (only a WebP can say that; a GIF's delays are
+ * 10 ms units and 2.42 raises them to 20 ms) is shorter than any sampling
+ * point every iterator agrees on. Measured at 1 ms slots: glycin's
+ * iterator (microsecond clock) and webp-pixbuf-loader 0.2.7's
+ * (millisecond clock) give the slot's start to the previous frame,
+ * GdkPixbufSimpleAnim's and 2.42's GIF iterator (millisecond clock) give
+ * it to the new one, so no fixed offset lands inside a 1 ms slot for all
+ * of them. Such frames may be taken twice or skipped -- a stutter in an
+ * animation that plays at GGAZE_ANIM_MIN_DELAY_MS anyway, never a picture
+ * that is not one of the file's frames. */
 static gboolean
 _append_frames(GdkPixbufAnimationIter *p_it, GgazeAnimation *p_anim,
                guint u_frames, gint64 i_t0_us, gboolean b_countdown,

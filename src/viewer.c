@@ -83,12 +83,12 @@ struct _GgazeViewer {
     * to p_texture (borrowed: it lives as long as p_texture, which this
     * widget holds), or NULL for a still. */
    const GgazeAnimation *p_anim;
-   GgazeAnimPlayback     st_play;   /* frame drawn (0 is p_texture), plays
-                                     * done, when the next one is due */
-   guint                 u_tick_id; /* the tick callback, near a due time */
-   guint                 u_wake_id; /* the timeout that re-adds it */
-   guint                 u_ticks;   /* tick callbacks run (test seam) */
-   gboolean              b_hold;    /* a tool holds the first frame */
+   GgazeAnimPlayback     st_play; /* frame drawn (0 is p_texture), plays
+                                   * done, when the next one is due */
+   guint    u_tick_id;            /* the tick callback, near a due time */
+   guint    u_wake_id;            /* the timeout that re-adds it */
+   guint    u_ticks;              /* tick callbacks run (test seam) */
+   gboolean b_hold;               /* a tool holds the first frame */
 };
 
 G_DEFINE_TYPE(GgazeViewer, ggaze_viewer, GTK_TYPE_WIDGET)
@@ -152,8 +152,8 @@ _anim_keep_ticking(GgazeViewer *p_v, gint64 i_now) {
    if (i_wait_ms <= GGAZE_ANIM_TICK_LEAD_MS) {
       return (TRUE);
    }
-   p_v->u_wake_id = g_timeout_add(
-      (guint)(i_wait_ms - GGAZE_ANIM_TICK_LEAD_MS), _anim_wake_cb, p_v);
+   p_v->u_wake_id = g_timeout_add((guint)(i_wait_ms - GGAZE_ANIM_TICK_LEAD_MS),
+                                  _anim_wake_cb, p_v);
    return (FALSE);
 }
 
