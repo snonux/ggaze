@@ -4,7 +4,8 @@
  * Custom GtkWidget (decision #31). Draws the GdkTexture scaled into the widget
  * with letterboxing, zoom (fit / 100% / in / out), cursor-centered zoom,
  * drag-to-pan with clamping, and a dark background. M1: synchronous single
- * image. Compare-before/after (hold-Space) and tool overlays land in M9.
+ * image. M9 added the tool overlay hook (see viewer.h); hold-Space compare
+ * lives in enhance-ctrl.c and only swaps the texture shown here.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -32,8 +33,18 @@ struct _GgazeViewer {
    gdouble             d_pan_y;
    gdouble             d_drag_start_pan_x;
    gdouble             d_drag_start_pan_y;
-   GgazeBackground     e_bg;     /* configurable viewer background */
-   GgazeScrollBehavior e_scroll; /* what the scroll wheel does */
+   GgazeBackground     e_bg;           /* configurable viewer background */
+   GgazeScrollBehavior e_scroll;       /* what the scroll wheel does */
+   gdouble             d_drag_start_x; /* where the current drag began, in
+                                        * widget px (for the overlay's
+                                        * absolute coordinates) */
+   gdouble  d_drag_start_y;
+   gboolean b_drag_to_overlay; /* the drag in progress began with a tool
+                                * overlay installed and belongs to it */
+   /* The tool overlay (viewer.h): NULL callbacks = none installed. */
+   GgazeViewerOverlayFn fn_overlay;
+   GgazeViewerDragFn    fn_drag;
+   gpointer             p_overlay_data;
 };
 
 G_DEFINE_TYPE(GgazeViewer, ggaze_viewer, GTK_TYPE_WIDGET)
@@ -231,6 +242,12 @@ ggaze_viewer_snapshot(GtkWidget *p_widget, GtkSnapshot *p_snap) {
    graphene_rect_t rect =
       GRAPHENE_RECT_INIT((float)x, (float)y, (float)dw, (float)dh);
    gtk_snapshot_append_texture(p_snap, p_v->p_texture, &rect);
+   if (p_v->fn_overlay != NULL) {
+      GgazeViewerGeom t_geom;
+      if (ggaze_viewer_get_geometry(p_v, &t_geom)) {
+         p_v->fn_overlay(p_snap, &t_geom, p_v->p_overlay_data);
+      }
+   }
 }
 
 static void
@@ -257,15 +274,28 @@ ggaze_viewer_class_init(GgazeViewerClass *p_klass) {
 
 /* --- controllers ---------------------------------------------------------- */
 
+/* A drag either pans the image or, while a tool overlay is installed, is
+ * handed to the tool in absolute widget coordinates (GtkGestureDrag reports
+ * offsets from the start point; the tool wants positions). Which of the two
+ * it is gets decided at BEGIN and holds for the whole gesture: a tool that
+ * starts mid-drag never sees an UPDATE without its BEGIN, and a tool that
+ * goes away mid-drag (Esc while dragging the rectangle) hands the rest of
+ * the gesture to panning from where the pointer is NOW -- the pan origin is
+ * re-based at that moment, so the first pan step is not the whole offset
+ * accumulated since the press. */
 static void
 _drag_begin_cb(GtkGestureDrag *p_gesture, gdouble d_x, gdouble d_y,
                gpointer p_data) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_data);
    (void)p_gesture;
-   (void)d_x;
-   (void)d_y;
+   p_v->d_drag_start_x     = d_x;
+   p_v->d_drag_start_y     = d_y;
    p_v->d_drag_start_pan_x = p_v->d_pan_x;
    p_v->d_drag_start_pan_y = p_v->d_pan_y;
+   p_v->b_drag_to_overlay  = (p_v->fn_drag != NULL);
+   if (p_v->b_drag_to_overlay) {
+      p_v->fn_drag(GGAZE_VIEWER_DRAG_BEGIN, d_x, d_y, p_v->p_overlay_data);
+   }
 }
 
 static void
@@ -273,9 +303,33 @@ _drag_update_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
                 gpointer p_data) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_data);
    (void)p_gesture;
+   if (p_v->b_drag_to_overlay) {
+      if (p_v->fn_drag != NULL) {
+         p_v->fn_drag(GGAZE_VIEWER_DRAG_UPDATE, p_v->d_drag_start_x + d_dx,
+                      p_v->d_drag_start_y + d_dy, p_v->p_overlay_data);
+         return;
+      }
+      /* The overlay left mid-gesture: from here on this is a pan, measured
+       * from the current offset so nothing jumps. */
+      p_v->d_drag_start_pan_x = p_v->d_pan_x - d_dx;
+      p_v->d_drag_start_pan_y = p_v->d_pan_y - d_dy;
+      p_v->b_drag_to_overlay  = FALSE;
+   }
    p_v->d_pan_x = p_v->d_drag_start_pan_x + d_dx;
    p_v->d_pan_y = p_v->d_drag_start_pan_y + d_dy;
    gtk_widget_queue_draw(GTK_WIDGET(p_v));
+}
+
+static void
+_drag_end_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
+             gpointer p_data) {
+   GgazeViewer *p_v = GGAZE_VIEWER(p_data);
+   (void)p_gesture;
+   if (p_v->b_drag_to_overlay && p_v->fn_drag != NULL) {
+      p_v->fn_drag(GGAZE_VIEWER_DRAG_END, p_v->d_drag_start_x + d_dx,
+                   p_v->d_drag_start_y + d_dy, p_v->p_overlay_data);
+   }
+   p_v->b_drag_to_overlay = FALSE;
 }
 
 /* The zoom centre for a scroll event: the pointer position translated into
@@ -375,6 +429,7 @@ ggaze_viewer_init(GgazeViewer *p_v) {
    gtk_widget_add_controller(GTK_WIDGET(p_v), GTK_EVENT_CONTROLLER(p_drag));
    g_signal_connect(p_drag, "drag-begin", G_CALLBACK(_drag_begin_cb), p_v);
    g_signal_connect(p_drag, "drag-update", G_CALLBACK(_drag_update_cb), p_v);
+   g_signal_connect(p_drag, "drag-end", G_CALLBACK(_drag_end_cb), p_v);
 
    GtkEventController *p_scroll =
       gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
@@ -475,6 +530,35 @@ ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy) {
    }
    p_viewer->d_pan_x += d_dx;
    p_viewer->d_pan_y += d_dy;
+   gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
+}
+
+gboolean
+ggaze_viewer_get_geometry(GgazeViewer *p_viewer, GgazeViewerGeom *p_out) {
+   g_return_val_if_fail(GGAZE_IS_VIEWER(p_viewer), FALSE);
+   g_return_val_if_fail(p_out != NULL, FALSE);
+   if (p_viewer->p_texture == NULL) {
+      return (FALSE);
+   }
+   gdouble d_scale, d_x, d_y;
+   _compute_geom(p_viewer, gtk_widget_get_width(GTK_WIDGET(p_viewer)),
+                 gtk_widget_get_height(GTK_WIDGET(p_viewer)), &d_scale, &d_x,
+                 &d_y, NULL, NULL);
+   p_out->d_x     = d_x;
+   p_out->d_y     = d_y;
+   p_out->d_scale = d_scale;
+   p_out->i_img_w = _tex_w(p_viewer);
+   p_out->i_img_h = _tex_h(p_viewer);
+   return (TRUE);
+}
+
+void
+ggaze_viewer_set_overlay(GgazeViewer *p_viewer, GgazeViewerOverlayFn fn_draw,
+                         GgazeViewerDragFn fn_drag, gpointer p_data) {
+   g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
+   p_viewer->fn_overlay     = fn_draw;
+   p_viewer->fn_drag        = fn_drag;
+   p_viewer->p_overlay_data = p_data;
    gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
 }
 

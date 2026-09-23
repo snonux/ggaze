@@ -229,6 +229,28 @@ test_trash = executable(
 )
 test('trash', test_trash, suite : 'unit', env : fixtures_env)
 
+# wb2: the crop/straighten/rotate geometry is plain C (no GTK, no GEGL), so
+# these run in every lane, the minimal one included.
+test_croprect = executable(
+   'test_croprect',
+   ['test_croprect.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, m_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('croprect', test_croprect, suite : 'unit', env : fixtures_env)
+
+test_transform = executable(
+   'test_transform',
+   ['test_transform.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, m_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('transform', test_transform, suite : 'unit', env : fixtures_env)
+
 test_thumbnail = executable(
    'test_thumbnail',
    ['test_thumbnail.c', ggaze_conf_h],
@@ -854,10 +876,23 @@ if gegl_dep.found()
    # plain lane needs 69.5 s for the same set), so 180 s is ~2.5x headroom --
    # generous enough for a loaded CI box, tight enough that a real hang is
    # caught in three minutes rather than five. Re-measure this when the
-   # subtest count grows: the margin shrinks with every one added.
+   # subtest count grows: the margin shrinks with every one added. wb2 added
+   # 15 tool subtests, its review rounds 26 more (second
+   # round: discard hooks, foreign keys, the drag guard; third round: the
+   # exact-render guard, refused horizon drags, every discard path, a crop
+   # kept outside the view; fourth round: a refused drag BEGIN, the overlay
+   # under a touch, `c` over an outside crop, a same-file rewrite; fifth
+   # round: a same-file reload refreshes the original's identity, a rewrite
+   # under a preset re-renders, the crop tool follows a rewrite with no
+   # input; sixth round: an open of a first-sorted file ends the tool and
+   # the saved transform, Save-then-open, a render of another size before
+   # the decode, an open's rescan baseline; seventh round: a failed reload
+   # under the crop tool -- 94 in all): measured 136-144 s in the plain
+   # lane and 151 s in the ASan lane on a box shared with another test
+   # loop, so the 360 s budget is ~2.4x headroom over the slower ASan lane.
    test('enhance_flow', test_enhance_flow,
       suite : 'integration', env : fixtures_env, depends : ggaze_gschemas,
-      timeout : 180, is_parallel : false)
+      timeout : 360, is_parallel : false)
 endif
 
 subdir('integration')

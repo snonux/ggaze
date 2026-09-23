@@ -6,7 +6,9 @@
  * after the user moved on is dropped (last-write-wins); a corrupt current
  * file clears the canvas and reports a status line instead of leaving the
  * previous picture on screen; a texture rewritten in place is decoded
- * afresh (cache staleness); dispose mid-load never calls the host again.
+ * afresh (cache staleness); dispose mid-load never calls the host again;
+ * a JPEG's low-res partial reaches the host through show_partial, never
+ * show_texture, and a PNG shows no partial at all.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -18,17 +20,20 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 
+#include "ggaze-config.h"
 #include "navigator.h"
 
 /* --- fake host ----------------------------------------------------------- */
 
 typedef struct {
-   GdkTexture *p_shown;   /* last texture handed to show_texture (ref'd) */
-   guint       u_shows;   /* show_texture calls (incl. NULL) */
-   guint       u_clears;  /* show_texture(NULL) calls */
-   guint       u_headers; /* update_header calls */
-   char       *c_status;  /* last status line */
-   gboolean    b_dead;    /* set after dispose: any call is a bug */
+   GdkTexture *p_shown;    /* last texture handed to show_texture (ref'd) */
+   guint       u_shows;    /* show_texture calls (incl. NULL) */
+   guint       u_partials; /* show_partial calls (a progressive loader's
+                            * low-res stand-in; never counted as a show) */
+   guint    u_clears;      /* show_texture(NULL) calls */
+   guint    u_headers;     /* update_header calls */
+   char    *c_status;      /* last status line */
+   gboolean b_dead;        /* set after dispose: any call is a bug */
 } FakeHost;
 
 static void
@@ -40,6 +45,20 @@ _fh_show_texture(gpointer p_host, GdkTexture *p_tex) {
    if (p_tex == NULL) {
       p_h->u_clears++;
    }
+}
+
+/* A partial is counted apart from the shows and never remembered as
+ * p_shown: the window's host op treats it the same way (it is not the
+ * file's picture, and a host that learns the original from what it showed
+ * must not learn a low-res stand-in), so a pipeline that handed a partial
+ * to show_texture instead would count it as a show here and fail the
+ * partial assertions below. */
+static void
+_fh_show_partial(gpointer p_host, GdkTexture *p_tex) {
+   FakeHost *p_h = (FakeHost *)p_host;
+   g_assert_false(p_h->b_dead);
+   g_assert_nonnull(p_tex);
+   p_h->u_partials++;
 }
 
 static void
@@ -59,6 +78,7 @@ _fh_show_status(gpointer p_host, const char *c_msg) {
 
 static const ViewLoadHostOps FAKE_OPS = {
    .show_texture  = _fh_show_texture,
+   .show_partial  = _fh_show_partial,
    .update_header = _fh_update_header,
    .show_status   = _fh_show_status,
 };
@@ -168,11 +188,50 @@ test_miss_then_hit(void) {
    pump_until_cached(p_vl, navigator_get_current(p_nav));
    g_assert_nonnull(st_h.p_shown);
    g_assert_nonnull(viewload_get_cached(p_vl, navigator_get_current(p_nav)));
+   /* The JPEG backend's low-res first pass went through show_partial, and
+    * what the host was left showing is the full decode -- the very object
+    * the cache holds -- not the stand-in. Without the direct JPEG backend
+    * (the minimal lane) GdkPixbuf decodes it in one go and shows none. */
+#if GGAZE_HAVE_JPEG
+   g_assert_cmpuint(st_h.u_partials, >=, 1);
+#else
+   g_assert_cmpuint(st_h.u_partials, ==, 0);
+#endif
+   g_assert_true(st_h.p_shown ==
+                 viewload_get_cached(p_vl, navigator_get_current(p_nav)));
 
    guint u_before = st_h.u_shows;
    viewload_load_current(p_vl); /* hit: synchronous */
    g_assert_cmpuint(st_h.u_shows, ==, u_before + 1);
    pump(100); /* let the prefetch round finish */
+
+   viewload_delete(p_vl);
+   fake_host_clear(&st_h);
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   cleanup_temp_dir(c_dir);
+}
+
+/* A PNG has no progressive pass: its load shows no partial, whatever the
+ * lane, and what is shown is again the cached object. */
+static void
+test_png_shows_no_partial(void) {
+   char      *c_dir = make_folder();
+   GFile     *p_dir = g_file_new_for_path(c_dir);
+   Navigator *p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, FALSE, TRUE);
+   FakeHost   st_h  = {0};
+   ViewLoad  *p_vl  = viewload_new(&FAKE_OPS, &st_h, 4);
+   viewload_set_navigator(p_vl, p_nav);
+
+   g_assert_true(navigator_next(p_nav)); /* b.png */
+   viewload_load_current(p_vl);
+   pump_until_cached(p_vl, navigator_get_current(p_nav));
+   g_assert_cmpuint(st_h.u_partials, ==, 0);
+   g_assert_nonnull(st_h.p_shown);
+   g_assert_true(st_h.p_shown ==
+                 viewload_get_cached(p_vl, navigator_get_current(p_nav)));
+   pump(100); /* the neighbour prefetch: no partials from it either */
+   g_assert_cmpuint(st_h.u_partials, ==, 0);
 
    viewload_delete(p_vl);
    fake_host_clear(&st_h);
@@ -300,6 +359,7 @@ int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
    g_test_add_func("/viewload/miss_then_hit", test_miss_then_hit);
+   g_test_add_func("/viewload/png_shows_no_partial", test_png_shows_no_partial);
    g_test_add_func("/viewload/last_write_wins", test_last_write_wins);
    g_test_add_func("/viewload/failure_clears_and_reports",
                    test_failure_clears_and_reports);

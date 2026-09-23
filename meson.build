@@ -25,6 +25,11 @@ gio_dep        = dependency('gio-2.0')
 adwaita_dep    = dependency('libadwaita-1')
 gdkpixbuf_dep  = dependency('gdk-pixbuf-2.0')  # pixbuf loader backend
 libexif_dep    = dependency('libexif')           # EXIF gather (info overlay, M4)
+# libm for the plain-C geometry modules (croprect/transform use sin/cos/
+# floor); GTK pulls it in transitively everywhere else, but the unit tests
+# that link only glib + the static ggaze library need it spelled out.
+cc    = meson.get_compiler('c')
+m_dep = cc.find_library('m', required : false)
 
 # --- Optional backends (feature: auto/disabled/enabled). See meson_options.txt.
 gegl_dep    = dependency('gegl-0.4', required : get_option('gegl'))
@@ -83,6 +88,8 @@ ggaze_src = files(
       'src/mover.c',
       'src/opener.c',
       'src/pathutil.c',
+      'src/croprect.c',
+      'src/transform.c',
       'src/runner.c',
       'src/settings.c',
       'src/settings-pair.c',
@@ -113,7 +120,8 @@ if libjpeg_dep.found()
    ggaze_extra_deps += libjpeg_dep
 endif
 if gegl_dep.found()
-   ggaze_src += files('src/enhancer.c', 'src/enhance-ui.c', 'src/enhance-ctrl.c')
+   ggaze_src += files('src/enhancer.c', 'src/enhance-ui.c', 'src/enhance-ctrl.c',
+      'src/tool-ctrl.c')
    ggaze_extra_deps += gegl_dep
 endif
 
@@ -121,12 +129,13 @@ ggaze_lib = static_library('ggaze',
    ggaze_src,
    include_directories : [inc, src_inc],
    dependencies : [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep,
-      libexif_dep] + ggaze_extra_deps,
+      libexif_dep, m_dep] + ggaze_extra_deps,
    c_args : ggaze_c_args,
    install : false,
 )
 
-ggaze_deps = [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep, libexif_dep]
+ggaze_deps = [gtk4_dep, glib_dep, gio_dep, adwaita_dep, gdkpixbuf_dep, libexif_dep,
+   m_dep]
 
 subdir('src')
 subdir('data')

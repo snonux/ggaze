@@ -20,6 +20,10 @@
 
 #include <gtk/gtk.h>
 
+#include "croprect.h"    /* CropRect, for the crop-rectangle seam */
+#include "ggaze-enums.h" /* GgazeTool */
+#include "viewer.h"      /* GgazeViewerDragPhase */
+
 G_BEGIN_DECLS
 
 #define GGAZE_TYPE_WINDOW (ggaze_window_get_type())
@@ -153,6 +157,45 @@ gboolean ggaze_window_enhance_is_dirty(GgazeWindow *p_win);
  * still-held Space key can never leave it stuck TRUE (tu0 review round 2,
  * issue 4). */
 void ggaze_window_set_hold_original(GgazeWindow *p_win, gboolean b_hold);
+
+/* --- the crop / straighten tools (c / R; docs/ui-and-interactions.md) -----
+ *
+ * Which interactive tool has the large view right now (always
+ * GGAZE_TOOL_NONE without GEGL). */
+GgazeTool ggaze_window_get_tool(GgazeWindow *p_win);
+
+/* Offer a key press to the active tool: TRUE iff it consumed it. This is the
+ * testable entry point the window's own capture-phase key controller calls
+ * for every key while a tool is active (the tool keys -- h/l/j/k, H/L/J/K,
+ * 1-4/0, +/-, A, Enter, Esc -- are modal and are NOT in shortcuts.c's action
+ * table; that table documents them as help-only rows). Always FALSE without
+ * GEGL. */
+gboolean ggaze_window_tool_key(GgazeWindow *p_win, guint u_keyval,
+                               GdkModifierType e_state);
+
+/* A pointer drag over the viewer, in viewer-widget coordinates, delivered to
+ * the active tool (crop: move / resize the rectangle; straighten: draw and,
+ * on END, level a horizon line). The viewer's drag gesture feeds the same
+ * path; this is the hook tests use instead of synthesising pointer events.
+ * A no-op with no tool active or without GEGL. */
+void ggaze_window_tool_drag(GgazeWindow *p_win, GgazeViewerDragPhase e_phase,
+                            gdouble d_x, gdouble d_y);
+
+/* How many enhance preview renders (a full decode + GEGL chain in a worker)
+ * this window has launched so far; always 0 without GEGL. A test seam: the
+ * controller coalesces renders (at most one in flight plus one queued), and
+ * tests/test_enhance_flow.c pins that a burst of N changes costs at most two
+ * launches. */
+guint ggaze_window_enhance_render_count(GgazeWindow *p_win);
+
+/* The crop rectangle as the overlay draws it right now (tool_ctrl_get_crop_
+ * rect): TRUE with the rectangle and the size of the base it is laid out on
+ * iff the crop tool is up and its overlay is visible over the texture on
+ * screen; FALSE while it is hidden, with no tool, and always without GEGL.
+ * A test seam for "the overlay follows a rewrite of the file with no key
+ * pressed" (tests/test_enhance_flow.c). */
+gboolean ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
+                                     gint *p_base_w, gint *p_base_h);
 
 /* --- INTERNAL: bulk-delete safety (used by the confirm-dialog flow and the
  * delete-safety regression test) -------------------------------------------

@@ -346,6 +346,8 @@ test_shortcut_full_table_registered(void) {
       "win.enhance-save", "win.enhance-1",     "win.enhance-2",
       "win.enhance-3",    "win.enhance-4",     "win.enhance-5",
       "win.enhance-6",    "win.enhance-7",     "win.enhance-8",
+      "win.crop",         "win.straighten",    "win.rotate-cw",
+      "win.rotate-ccw",
    };
    GgazeWindow           *p_win = new_window();
    GtkShortcutController *p_sc  = find_shortcut_controller(GTK_WIDGET(p_win));
@@ -372,9 +374,10 @@ test_shortcut_full_table_registered(void) {
    }
    /* Every SHORTCUTS[] row with an action registers one shortcut; most
     * actions appear at least twice (a vi-style key and a traditional one:
-    * h/Left/PageUp, g/Home, d/Delete, s/Ctrl+S, ...). The hold-Space
-    * help-only row does not. Keep this in step with the table. */
-   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 70);
+    * h/Left/PageUp, g/Home, d/Delete, s/Ctrl+S, ...). The help-only rows
+    * (hold-Space, the modal crop/straighten tool keys) do not. Keep this in
+    * step with the table: 70 before wb2 + c / R / ] / [ = 74. */
+   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 74);
    g_object_unref(p_sc);
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(200);
@@ -409,9 +412,11 @@ test_help_window_from_table(void) {
    g_assert_true(GTK_IS_SHORTCUTS_WINDOW(p_w));
    /* Merged rows: the SHORTCUTS[] rows collapse by shared title within a
     * group (each action's vi-style and traditional keys, and enhance 1..8,
-    * become one row each), plus the help-only hold-Space row. Keep in step
-    * with the table. */
-   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 38);
+    * become one row each), plus the help-only rows (hold-Space and the
+    * modal tool keys). Keep in step with the table: 38 before wb2 + the
+    * Tools group's 11 merged rows (c, R, ], [, crop move / resize / aspect,
+    * straighten nudge / auto-crop, Enter, Esc) = 49. */
+   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 49);
    gtk_window_destroy(GTK_WINDOW(p_w));
    drain_main(200);
 }

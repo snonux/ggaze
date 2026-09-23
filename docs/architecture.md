@@ -42,6 +42,9 @@ ggaze
 │       ├── jxl.c         # libjxl
 │       ├── avif.c        # libavif
 │       └── heif.c        # libheif
+├── croprect.{c,h}        # crop rectangle rules (move/resize/aspect/hit/drag/turn), plain C
+├── transform.{c,h}       # rotate 90 / straighten / crop state + the sizes everyone agrees on, plain C
+├── tool-ctrl.{c,h}       # the modal c / R tool session over the viewer (GEGL only)
 ├── navigator.{c,h}       # directory listing, sort, filter, prev/next, wrap, marks, monitor; "changed" carries flags
 ├── thumbnail.{c,h}      # freedesktop thumbnail cache (normal/large/x-large), bounded pool
 ├── texturecache.{c,h}   # bounded LRU of decoded textures, mtime/size-validated
@@ -61,8 +64,9 @@ ggaze
   navigator/loader/viewer/gridview; manages fullscreen state. Keeps the
   navigator cursor in sync so switching grid↔large preserves position. Tracks
   the enhance "dirty" flag and gates navigation on it (prompt
-  Save/Discard/Cancel when an un-exported enhance preview is active). Hosts
-  interactive tool overlays (crop, straighten) in large view. Has a
+  Save/Discard/Cancel when an un-exported enhance preview is active). Routes
+  the `c`/`R`/`[`/`]` tool actions to `tool-ctrl` / `enhance-ctrl` and claims
+  a tool's modal keys ahead of the global shortcut table. Has a
   `GtkDropTarget` accepting dropped files/folders (open them).
 - **viewer** — the *large* view. Pure display widget. Takes a `GdkTexture`
   (or `GtkSnapshot` paintable). Owns zoom level, pan offset, fit mode. Draws
@@ -149,9 +153,9 @@ ggaze
   `enhancer_export(GeglBuffer *in, EnhancerPreset *, GFile *out, GError **)`.
   The window imports the decoded image into a `GeglBuffer` when a preset is
   active and renders the result back to a `GdkTexture`. The crop/straighten/
-  rotate tools add `gegl:crop`/`gegl:rotate`/`gegl:rotate-on-center` to the same
-  graph via the enhancer. GEGL also backs color-managed decode/export (ICC).
-  Owns no GTK state.
+  rotate tools add `gegl:rotate`/`gegl:crop` to the same graph via the
+  enhancer, from one plain-C `Transform` (decision #35 order). GEGL also
+  backs color-managed decode/export (ICC, not yet wired). Owns no GTK state.
 - **clipboard** — stateless provider builders for the `GdkClipboard`:
   `clipboard_build_texture_provider(GdkTexture *)` offers the DISPLAYED
   texture as `image/png` (already decoded, so only the PNG encode runs, on
@@ -300,7 +304,14 @@ feels instant.
   `GCancellable` so a rapid `jjjj` cancels stale work).
 - Thumbnail I/O on a low-priority thread or `GThreadPool`.
 - A bounded LRU of decoded `GdkTexture`s (e.g. 4) to bound memory on large
-  folders / huge images.
+  folders / huge images. The enhance controller may hold two more outside
+  that cap — the current file's original as the viewer last showed it (the
+  identity the tools and hold-`Space` compare against, learned at the
+  window's texture choke point) and the rendered preview — bounded to those
+  two, and released on navigation (an open or a drop of another file
+  included: the open path runs the same identity reset, since a file that
+  sorts first in its folder never emits "changed"), on a rewrite's rescan,
+  and in dispose.
 
 ## Threading / cancellation invariant
 

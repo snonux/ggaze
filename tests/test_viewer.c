@@ -313,6 +313,75 @@ test_zoom_in_never_shrinks_a_tiny_image(void) {
    g_free(c_path);
 }
 
+/* The viewer's GtkGestureDrag (its handlers are static; the test drives
+ * them by emitting the gesture's own signals, which is what GTK does). */
+static GtkGesture *
+drag_gesture_of(GgazeViewer *p_v) {
+   GListModel *p_ctrls = gtk_widget_observe_controllers(GTK_WIDGET(p_v));
+   GtkGesture *p_drag  = NULL;
+   for (guint i = 0; i < g_list_model_get_n_items(p_ctrls); i++) {
+      GtkEventController *p_c = g_list_model_get_item(p_ctrls, i);
+      if (GTK_IS_GESTURE_DRAG(p_c) && p_drag == NULL) {
+         p_drag = GTK_GESTURE(p_c); /* borrowed: the widget owns it */
+      }
+      g_object_unref(p_c);
+   }
+   g_object_unref(p_ctrls);
+   g_assert_nonnull(p_drag);
+   return (p_drag);
+}
+
+static void
+overlay_drag_cb(GgazeViewerDragPhase e_phase, gdouble d_x, gdouble d_y,
+                gpointer p_data) {
+   (void)e_phase;
+   (void)d_x;
+   (void)d_y;
+   (*(guint *)p_data)++;
+}
+
+/* A drag that began with a tool overlay installed belongs to the tool; if
+ * the overlay goes away mid-gesture (Esc while dragging the crop rectangle)
+ * the rest of the gesture pans from where the pointer is NOW -- the first
+ * pan step used to be the whole offset accumulated since the press. An
+ * overlay installed mid-gesture never gets an UPDATE without its BEGIN. */
+static void
+test_overlay_removed_mid_drag_rebases_the_pan(void) {
+   ViewerFx fx;
+   fx_open(&fx);
+   ggaze_viewer_zoom_in(fx.p_viewer); /* so a pan can move the image */
+   GtkGesture *p_drag  = drag_gesture_of(fx.p_viewer);
+   guint       u_calls = 0;
+   ggaze_viewer_set_overlay(fx.p_viewer, NULL, overlay_drag_cb, &u_calls);
+   g_signal_emit_by_name(p_drag, "drag-begin", 10.0, 10.0);
+   g_signal_emit_by_name(p_drag, "drag-update", 100.0, 50.0);
+   g_assert_cmpuint(u_calls, ==, 2); /* BEGIN + UPDATE went to the tool */
+   gdouble d_px, d_py;
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 0.0);
+   ggaze_viewer_set_overlay(fx.p_viewer, NULL, NULL, NULL); /* Esc */
+   g_signal_emit_by_name(p_drag, "drag-update", 100.0, 50.0);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 0.0); /* not 100: re-based, no jump */
+   g_assert_cmpfloat(d_py, ==, 0.0);
+   g_signal_emit_by_name(p_drag, "drag-update", 130.0, 60.0);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 30.0); /* the delta since the hand-over */
+   g_assert_cmpfloat(d_py, ==, 10.0);
+   g_signal_emit_by_name(p_drag, "drag-end", 130.0, 60.0);
+   g_assert_cmpuint(u_calls, ==, 2); /* the END did not go to the tool */
+   /* The other way round: a pan drag stays a pan when a tool appears. */
+   g_signal_emit_by_name(p_drag, "drag-begin", 0.0, 0.0);
+   ggaze_viewer_set_overlay(fx.p_viewer, NULL, overlay_drag_cb, &u_calls);
+   g_signal_emit_by_name(p_drag, "drag-update", 5.0, 0.0);
+   g_signal_emit_by_name(p_drag, "drag-end", 5.0, 0.0);
+   g_assert_cmpuint(u_calls, ==, 2); /* no BEGIN, so no UPDATE / END */
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 35.0);
+   ggaze_viewer_set_overlay(fx.p_viewer, NULL, NULL, NULL);
+   fx_close(&fx);
+}
+
 /* Negative: with no texture there is nothing to scale, and zoom/pan must be
  * safe no-ops rather than dividing by a zero-sized image. */
 static void
@@ -352,6 +421,8 @@ main(int i_argc, char **c_argv) {
                    test_finite_pan_still_applies);
    g_test_add_func("/viewer/zoom_in_never_shrinks_a_tiny_image",
                    test_zoom_in_never_shrinks_a_tiny_image);
+   g_test_add_func("/viewer/overlay_removed_mid_drag_rebases_the_pan",
+                   test_overlay_removed_mid_drag_rebases_the_pan);
    g_test_add_func("/viewer/zoom_without_texture_is_safe",
                    test_zoom_without_texture_is_safe);
    return (g_test_run());

@@ -48,6 +48,8 @@
 #include "enhance-ui.h"
 #include "enhancer.h"
 #include "enhancer-gegl.h"
+#include "tool-ctrl.h"
+#include "transform.h"
 #endif
 
 /* The two views the stack can show, plus the empty-state page. Owning the
@@ -118,13 +120,20 @@ struct _GgazeWindow {
                         * a/s/digit/Space/0/Esc actions and a few choke-point
                         * queries (is_dirty, override_texture,
                         * nav_changed). NULL when GEGL is not built in. */
+#if GGAZE_HAVE_GEGL
+   ToolCtrl *p_tool_ctrl; /* the c / R interactive tools (tool-ctrl.h): the
+                           * overlay session over the viewer that edits
+                           * p_enhance_ctrl's transform. Created after the
+                           * viewer exists (_init_tool_state). */
+#endif
 };
 
 G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
 
 /* --- forward decls ------------------------------------------------------- */
 static void     _load_current(GgazeWindow *p_win);
-static void     _show_texture(GgazeWindow *p_win, GdkTexture *p_tex);
+static void     _show_texture(GgazeWindow *p_win, GdkTexture *p_tex,
+                              gboolean b_decoded);
 static void     _update_header(GgazeWindow *p_win);
 static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
 static void     _show_info(GgazeWindow *p_win);
@@ -194,6 +203,10 @@ static gboolean _space_released_cb(GtkEventControllerKey *p_c, guint u_keyval,
                                    guint u_kc, GdkModifierType e_state,
                                    gpointer p_data);
 static void     _init_enhance_state(GgazeWindow *p_win);
+static gboolean _tool_key_cb(GtkEventControllerKey *p_c, guint u_keyval,
+                             guint u_kc, GdkModifierType e_state,
+                             gpointer p_data);
+static void     _init_tool_state(GgazeWindow *p_win);
 #endif
 
 /* Navigation continuations handed to save_gate_maybe_save_then and run once
@@ -417,6 +430,19 @@ _get_view(GgazeWindow *p_win) {
 
 static void
 _set_view(GgazeWindow *p_win, GgazeViewMode e_view) {
+#if GGAZE_HAVE_GEGL
+   /* A crop / straighten session lives on the large view's canvas: leaving
+    * that page (grid, empty) ends it without applying anything -- like Esc,
+    * so a nudged straighten goes back to the angle it started from. That
+    * restore commits through enhance_ctrl_set_transform, which brings the
+    * large view up: a no-op while it still is, which is why the tool is
+    * abandoned BEFORE the stack switches (after it, the restore would yank
+    * the grid away again). NULL during construction, before
+    * _init_tool_state ran. */
+   if (e_view != GGAZE_VIEW_LARGE && p_win->p_tool_ctrl != NULL) {
+      tool_ctrl_abandon(p_win->p_tool_ctrl);
+   }
+#endif
    gtk_stack_set_visible_child_name(GTK_STACK(p_win->p_stack),
                                     VIEW_NAMES[e_view]);
    /* The enhance side panel is about the image on screen: it is shown only
@@ -921,6 +947,27 @@ _action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    fileops_undo(p_win->p_fileops);
 }
 
+/* Leave the grid for the large view on the highlighted cell (what `t` and,
+ * since wb2, the c / R / [ / ] keys do from the grid): sync navigator.current
+ * to the highlighted cell first so the large view opens the selected image.
+ * Since tu0 that sync goes through _grid_select_gate, and its return value is
+ * meaningful (round 2, finding c): TRUE means current really moved, in which
+ * case _nav_changed_cb has ALREADY run _load_current and repeating it here
+ * would only be a redundant second paint. FALSE means either a no-op (the
+ * highlighted cell is already current) or that a dirty enhance preview
+ * deferred the change behind the Save/Discard/Cancel prompt -- then nothing
+ * loaded it, so load it here; _show_texture keeps an unanswered preview on
+ * screen. */
+static void
+_enter_large_from_grid(GgazeWindow *p_win) {
+   gboolean b_moved =
+      p_win->p_grid != NULL && ggaze_grid_sync_current(p_win->p_grid);
+   _set_view(p_win, GGAZE_VIEW_LARGE);
+   if (!b_moved) {
+      _load_current(p_win);
+   }
+}
+
 static void
 _action_toggle_view(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -937,21 +984,7 @@ _action_toggle_view(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (_get_view(p_win) == GGAZE_VIEW_EMPTY) {
       return; /* nothing to show large */
    }
-   /* Leaving the grid: sync navigator.current to the highlighted cell so the
-    * large view opens the selected image. Since tu0 that sync goes through
-    * _grid_select_gate, and its return value is meaningful (round 2, finding
-    * c): TRUE means current really moved, in which case _nav_changed_cb has
-    * ALREADY run _load_current and repeating it here would only be a
-    * redundant second paint. FALSE means either a no-op (the highlighted cell
-    * is already current) or that a dirty enhance preview deferred the change
-    * behind the Save/Discard/Cancel prompt -- then nothing loaded it, so load
-    * it here; _show_texture keeps an unanswered preview on screen. */
-   gboolean b_moved =
-      p_win->p_grid != NULL && ggaze_grid_sync_current(p_win->p_grid);
-   _set_view(p_win, GGAZE_VIEW_LARGE);
-   if (!b_moved) {
-      _load_current(p_win);
-   }
+   _enter_large_from_grid(p_win);
 }
 
 /* Toggle a mark on the highlighted grid cell (grid view) or the current image
@@ -1125,7 +1158,9 @@ _action_zoom_reset(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
 #if GGAZE_HAVE_GEGL
    /* `0` is the panel's "Original" hotkey (docs/gegl.md): while the panel
-    * is open it drops the preview instead of toggling the zoom. */
+    * is open it drops the preview instead of toggling the zoom -- and a
+    * straighten session with it (the controller ends the tool before it
+    * resets; the crop tool claims `0` itself as its free-aspect key). */
    if (enhance_ctrl_is_open(p_win->p_enhance_ctrl)) {
       enhance_ctrl_discard(p_win->p_enhance_ctrl);
       return;
@@ -1198,11 +1233,42 @@ _action_info(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 /* Esc: one contextual step per press, in this order -- stop a running
- * slideshow; discard an active enhance preview (said out loud: it used to
- * vanish silently); leave fullscreen; clear marks; large -> grid; and in the
- * grid quit, but only on a SECOND Esc within GGAZE_ESC_QUIT_WINDOW_MS (the
- * first one says so), because `Esc Esc` from the large view is a common
- * "get me out of here" reflex that must not exit the program. */
+ * slideshow; cancel a crop/straighten tool; close the enhance panel; discard
+ * an active enhance preview (said out loud: it used to vanish silently);
+ * leave fullscreen; clear marks; large -> grid; and in the grid quit, but
+ * only on a SECOND Esc within GGAZE_ESC_QUIT_WINDOW_MS (the first one says
+ * so), because `Esc Esc` from the large view is a common "get me out of
+ * here" reflex that must not exit the program. docs/ui-and-interactions.md
+ * lists the same order. */
+#if GGAZE_HAVE_GEGL
+/* The enhance-side steps of Esc, in order: cancel a tool, close the panel,
+ * discard the preview. TRUE iff one of them was the step taken. Split out
+ * of _action_back to keep both under the 50-line limit. */
+static gboolean
+_back_enhance_step(GgazeWindow *p_win) {
+   /* A tool overlay is the most transient thing on screen, so Esc leaves it
+    * first (a real key press never gets here -- the tool's own capture-phase
+    * controller answers Esc -- but the action path covers tests and the
+    * menu). */
+   if (tool_ctrl_get_tool(p_win->p_tool_ctrl) != GGAZE_TOOL_NONE) {
+      tool_ctrl_cancel(p_win->p_tool_ctrl);
+      return (TRUE);
+   }
+   /* With the enhance panel open, Esc closes the panel and keeps the
+    * preview; the next Esc drops the preview (saved or not -- it is on
+    * screen either way). */
+   if (enhance_ctrl_close(p_win->p_enhance_ctrl)) {
+      return (TRUE);
+   }
+   if (enhance_ctrl_is_active(p_win->p_enhance_ctrl)) {
+      enhance_ctrl_discard(p_win->p_enhance_ctrl);
+      _show_status(p_win, "Enhance preview discarded");
+      return (TRUE);
+   }
+   return (FALSE);
+}
+#endif
+
 static void
 _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -1213,15 +1279,7 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       return;
    }
 #if GGAZE_HAVE_GEGL
-   /* With the enhance panel open, Esc closes the panel and keeps the
-    * preview; the next Esc drops the preview (saved or not -- it is on
-    * screen either way). */
-   if (enhance_ctrl_close(p_win->p_enhance_ctrl)) {
-      return;
-   }
-   if (enhance_ctrl_is_active(p_win->p_enhance_ctrl)) {
-      enhance_ctrl_discard(p_win->p_enhance_ctrl);
-      _show_status(p_win, "Enhance preview discarded");
+   if (_back_enhance_step(p_win)) {
       return;
    }
 #endif
@@ -1257,9 +1315,11 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * no controller (p_enhance_ctrl stays NULL) and the actions/public API below
  * are stubs. */
 #if GGAZE_HAVE_GEGL
+/* The controller's own textures (its render, the original it re-shows
+ * under Space) teach it nothing about the original: never "decoded". */
 static void
 _ec_show_texture(gpointer p_host, GdkTexture *p_tex) {
-   _show_texture(GGAZE_WINDOW(p_host), p_tex);
+   _show_texture(GGAZE_WINDOW(p_host), p_tex, FALSE);
 }
 
 static void
@@ -1306,6 +1366,25 @@ _ec_has_navigator(gpointer p_host) {
    return (GGAZE_WINDOW(p_host)->p_nav != NULL);
 }
 
+/* The tool controller is created after the enhance controller
+ * (_init_tool_state needs the viewer) and freed before it, so it may be
+ * NULL at either end of the window's life. */
+static void
+_ec_abandon_tool(gpointer p_host) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_host);
+   if (p_win->p_tool_ctrl != NULL) {
+      tool_ctrl_discarded(p_win->p_tool_ctrl);
+   }
+}
+
+static void
+_ec_original_changed(gpointer p_host) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_host);
+   if (p_win->p_tool_ctrl != NULL) {
+      tool_ctrl_original_changed(p_win->p_tool_ctrl);
+   }
+}
+
 static const EnhanceUIHostOps _ENHANCE_OPS = {
    .show_texture       = _ec_show_texture,
    .update_header      = _ec_update_header,
@@ -1316,6 +1395,8 @@ static const EnhanceUIHostOps _ENHANCE_OPS = {
    .get_cached_texture = _ec_cached_texture,
    .panel_slot         = _ec_panel_slot,
    .has_navigator      = _ec_has_navigator,
+   .abandon_tool       = _ec_abandon_tool,
+   .original_changed   = _ec_original_changed,
 };
 
 /* win.enhance (key 'a'): open the side panel beside the large view (with a
@@ -1377,6 +1458,148 @@ _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    enhance_ctrl_save_async(p_win->p_enhance_ctrl, NULL, NULL);
 }
 
+/* --- Tool controller host ops + the c / R / [ / ] actions ---------------- *
+ * The crop and straighten tools (tool-ctrl.h) reach the window for the
+ * viewer they draw on, the status line, the large view and the current
+ * file; three of those are the enhance controller's ops verbatim. */
+static GgazeViewer *
+_tc_get_viewer(gpointer p_host) {
+   return (GGAZE_VIEWER(GGAZE_WINDOW(p_host)->p_viewer));
+}
+
+static const ToolCtrlHostOps _TOOL_OPS = {
+   .get_viewer        = _tc_get_viewer,
+   .show_status       = _ec_show_status,
+   .ensure_large_view = _ec_ensure_large_view,
+   .get_current_file  = _ec_current_file,
+};
+
+/* The c / R / [ / ] keys work on the image on screen; in the grid that is
+ * the highlighted cell, so first open it large the way `t` does. FALSE (the
+ * action stops) when no folder is open or the large view could not be
+ * reached (an empty folder). */
+static gboolean
+_ready_for_tool(GgazeWindow *p_win) {
+   if (!_require_folder(p_win)) {
+      return (FALSE);
+   }
+   if (_get_view(p_win) == GGAZE_VIEW_GRID) {
+      _enter_large_from_grid(p_win);
+   }
+   return (_get_view(p_win) == GGAZE_VIEW_LARGE);
+}
+
+/* win.crop (`c`): start the crop tool, or cancel it when it is active. */
+static void
+_action_crop(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (_ready_for_tool(p_win)) {
+      tool_ctrl_toggle_crop(p_win->p_tool_ctrl);
+   }
+}
+
+/* win.straighten (`R`): start the straighten tool, or cancel it. */
+static void
+_action_straighten(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (_ready_for_tool(p_win)) {
+      tool_ctrl_toggle_straighten(p_win->p_tool_ctrl);
+   }
+}
+
+/* `]` / `[`: one quarter turn, one-shot, on the live preview (repeat for
+ * 180 / 270; the fourth is the original again). Refused while a tool is
+ * laid out over the image, since the turn would move its rectangle. */
+static void
+_rotate_quarter(GgazeWindow *p_win, gint i_dir) {
+   if (!_ready_for_tool(p_win)) {
+      return;
+   }
+   if (tool_ctrl_get_tool(p_win->p_tool_ctrl) != GGAZE_TOOL_NONE) {
+      _show_status(p_win, "Finish the current tool first (Enter applies, "
+                          "Esc cancels)");
+      return;
+   }
+   enhance_ctrl_rotate_quarter(p_win->p_enhance_ctrl, i_dir);
+}
+
+static void
+_action_rotate_cw(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _rotate_quarter(GGAZE_WINDOW(p_data), 1);
+}
+
+static void
+_action_rotate_ccw(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _rotate_quarter(GGAZE_WINDOW(p_data), -1);
+}
+
+GgazeTool
+ggaze_window_get_tool(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), GGAZE_TOOL_NONE);
+   return (tool_ctrl_get_tool(p_win->p_tool_ctrl));
+}
+
+gboolean
+ggaze_window_tool_key(GgazeWindow *p_win, guint u_keyval,
+                      GdkModifierType e_state) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (tool_ctrl_key(p_win->p_tool_ctrl, u_keyval, e_state));
+}
+
+void
+ggaze_window_tool_drag(GgazeWindow *p_win, GgazeViewerDragPhase e_phase,
+                       gdouble d_x, gdouble d_y) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   tool_ctrl_drag(p_win->p_tool_ctrl, e_phase, d_x, d_y);
+}
+
+guint
+ggaze_window_enhance_render_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (enhance_ctrl_get_render_count(p_win->p_enhance_ctrl));
+}
+
+gboolean
+ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
+                            gint *p_base_w, gint *p_base_h) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (
+      tool_ctrl_get_crop_rect(p_win->p_tool_ctrl, p_rect, p_base_w, p_base_h));
+}
+
+/* The tools' key controller (window-level, capture phase, see
+ * _init_tool_state): while a tool is active its modal keys are answered
+ * here and STOPPED, so the GLOBAL-scope shortcut table (which runs later, in
+ * the bubble phase at the root) never turns the crop tool's `h` into
+ * win.prev. A popover with keyboard focus (the m / e / ! choosers) keeps
+ * answering its own keys. Every other key propagates as usual. */
+static gboolean
+_tool_key_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
+             GdkModifierType e_state, gpointer p_data) {
+   (void)p_c;
+   (void)u_kc;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (tool_ctrl_get_tool(p_win->p_tool_ctrl) == GGAZE_TOOL_NONE) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   GtkWidget *p_focus = gtk_root_get_focus(GTK_ROOT(p_win));
+   if (p_focus != NULL &&
+       gtk_widget_get_ancestor(p_focus, GTK_TYPE_POPOVER) != NULL) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   return (tool_ctrl_key(p_win->p_tool_ctrl, u_keyval, e_state)
+              ? GDK_EVENT_STOP
+              : GDK_EVENT_PROPAGATE);
+}
+
 /* Hold-Space compare (see window.h): TRUE shows the cached original; FALSE
  * restores the cached modified texture. Delegates to the controller. */
 void
@@ -1424,6 +1647,71 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
+}
+/* The c / R / [ / ] tools are GEGL ops too: say so, like `a`. */
+static void
+_action_crop(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
+}
+static void
+_action_straighten(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
+}
+static void
+_action_rotate_cw(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
+}
+static void
+_action_rotate_ccw(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
+}
+
+GgazeTool
+ggaze_window_get_tool(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), GGAZE_TOOL_NONE);
+   return (GGAZE_TOOL_NONE);
+}
+
+gboolean
+ggaze_window_tool_key(GgazeWindow *p_win, guint u_keyval,
+                      GdkModifierType e_state) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   (void)u_keyval;
+   (void)e_state;
+   return (FALSE); /* no tool can be active without GEGL */
+}
+
+void
+ggaze_window_tool_drag(GgazeWindow *p_win, GgazeViewerDragPhase e_phase,
+                       gdouble d_x, gdouble d_y) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   (void)e_phase;
+   (void)d_x;
+   (void)d_y;
+}
+
+guint
+ggaze_window_enhance_render_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (0); /* no GEGL, no renders */
+}
+
+gboolean
+ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
+                            gint *p_base_w, gint *p_base_h) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   (void)p_rect;
+   (void)p_base_w;
+   (void)p_base_h;
+   return (FALSE); /* no tool, no rectangle */
 }
 static void
 _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
@@ -1552,9 +1840,10 @@ _sync_info_plot(GgazeWindow *p_win) {
 
 /* Hide the info overlay because the current file changed: reached from
  * _nav_changed_cb (the choke point every navigation path funnels through)
- * and from _open_now (which does not reliably emit "changed"). The card must
- * never keep showing a PREVIOUS file's data over the new one; a status line
- * shown right after re-shows the label with its own fresh timer. */
+ * and from _open_leave_previous (an open does not reliably emit "changed",
+ * see _open_build_navigator). The card must never keep showing a PREVIOUS
+ * file's data over the new one; a status line shown right after re-shows
+ * the label with its own fresh timer. */
 static void
 _dismiss_info_for_nav(GgazeWindow *p_win) {
    info_overlay_dismiss(p_win->p_info);
@@ -2134,6 +2423,10 @@ static const GActionEntry ACTIONS[] = {
    {.name = "preferences", .activate = _action_preferences},
    {.name = "enhance", .activate = _action_enhance},
    {.name = "enhance-save", .activate = _action_enhance_save},
+   {.name = "crop", .activate = _action_crop},
+   {.name = "straighten", .activate = _action_straighten},
+   {.name = "rotate-cw", .activate = _action_rotate_cw},
+   {.name = "rotate-ccw", .activate = _action_rotate_ccw},
 };
 
 /* --- drop target --------------------------------------------------------- */
@@ -2184,6 +2477,30 @@ _drop_leave_cb(GtkDropTarget *p_t, gpointer p_data) {
 
 /* --- navigator changed -> reload ----------------------------------------- */
 
+#if GGAZE_HAVE_GEGL
+/* The tools' and the enhance controller's "the current file may be another
+ * one now" choke point, shared by every path that replaces what
+ * navigator.current names: the navigator's "changed" (_nav_changed_cb) and
+ * an open (_open_rebuild), which rebuilds the navigator without that signal
+ * ever firing for the new file. Both controllers are told on every call
+ * and decide for themselves. "changed" fires for every navigator rescan,
+ * not only an actual move to a different current file -- notably,
+ * win.enhance-save writes the "-enhanced" copy into the SAME live-monitored
+ * folder, whose GFileMonitor then schedules a debounced rescan that
+ * re-emits "changed" a few hundred ms later even though navigator.current
+ * never moved. The enhance controller's nav_changed resets only on an
+ * actual identity change, so that incidental rescan does not silently
+ * discard the still-active preview (tests/test_enhance_flow.c
+ * save-twice-in-a-row); the tool controller leaves only when the file is
+ * not the one it started on. The tool goes first: the controller's reset
+ * drops the transform and a crop tool's override together. */
+static void
+_edit_state_nav_changed(GgazeWindow *p_win) {
+   tool_ctrl_nav_changed(p_win->p_tool_ctrl); /* another file: no tool */
+   enhance_ctrl_nav_changed(p_win->p_enhance_ctrl);
+}
+#endif
+
 static void
 _nav_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
    (void)p_nav;
@@ -2195,16 +2512,7 @@ _nav_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
       return;
    }
 #if GGAZE_HAVE_GEGL
-   /* "changed" fires for every navigator rescan, not only an actual move to a
-    * different current file -- notably, win.enhance-save writes the
-    * "-enhanced" copy into the SAME live-monitored folder, whose GFileMonitor
-    * then schedules a debounced rescan that re-emits "changed" a few hundred
-    * ms later even though navigator.current never moved. The enhance
-    * controller's nav_changed resets only on an actual identity change, so
-    * that incidental rescan does not silently discard the still-active
-    * preview (tests/test_enhance_flow.c save-twice-in-a-row).
-    */
-   enhance_ctrl_nav_changed(p_win->p_enhance_ctrl);
+   _edit_state_nav_changed(p_win);
 #endif
    /* This signal is the single choke point every navigation path funnels
     * through (prev/next/first/last, slideshow auto-advance, grid selection,
@@ -2243,6 +2551,12 @@ _action_enter_large(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+#if GGAZE_HAVE_GEGL
+   if (tool_ctrl_get_tool(p_win->p_tool_ctrl) != GGAZE_TOOL_NONE) {
+      tool_ctrl_apply(p_win->p_tool_ctrl); /* Enter commits the tool */
+      return;
+   }
+#endif
    if (p_win->p_nav == NULL || _get_view(p_win) != GGAZE_VIEW_GRID ||
        p_win->p_grid == NULL) {
       return;
@@ -2319,8 +2633,12 @@ _action_empty_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 
 /* --- load current into the viewer ---------------------------------------- */
 
+/* b_decoded says p_tex is the current file's own decode (a cache hit, a
+ * finished load): the one kind of texture the enhance controller learns
+ * the original from. A progressive loader's low-res partial and the
+ * controller's own textures pass FALSE. */
 static void
-_show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
+_show_texture(GgazeWindow *p_win, GdkTexture *p_tex, gboolean b_decoded) {
    /* Only update the viewer's texture here; do NOT force the stack to "large".
     * The stack is owned by the caller: file-open / toggle / grid-activate set
     * "large" themselves before loading, and directory-open sets "grid".
@@ -2334,9 +2652,20 @@ _show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
     * Point-patching _on_grid_activate was not enough: the pipeline only
     * paints synchronously on a texturecache HIT, so on a miss the async
     * finish landed after the restore and the plain original won the race;
-    * and the view toggle (`t`, `t`) never had the patch at all. */
+    * and the view toggle (`t`, `t`) never had the patch at all.
+    *
+    * The same funnel is where the controller learns the current file's
+    * original: every decode the viewer is handed goes past it here, so the
+    * identity it remembers is exactly the object on screen -- also after a
+    * same-file reload that decoded a new one (the file touched, a preset
+    * discarded), which an identity looked up once from the cache missed. */
 #if GGAZE_HAVE_GEGL
+   if (b_decoded) {
+      enhance_ctrl_texture_shown(p_win->p_enhance_ctrl, p_tex);
+   }
    p_tex = enhance_ctrl_override_texture(p_win->p_enhance_ctrl, p_tex);
+#else
+   (void)b_decoded;
 #endif
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
    /* After the override, so the card plots what is actually on screen. */
@@ -2357,7 +2686,15 @@ _load_current(GgazeWindow *p_win) {
 
 static void
 _vl_show_texture(gpointer p_host, GdkTexture *p_tex) {
-   _show_texture(GGAZE_WINDOW(p_host), p_tex);
+   _show_texture(GGAZE_WINDOW(p_host), p_tex, TRUE);
+}
+
+/* A low-res stand-in for the file still decoding: shown like any texture
+ * (an active preview still wins over it), but it is not the original and
+ * nothing may remember it as such -- the full decode replaces it. */
+static void
+_vl_show_partial(gpointer p_host, GdkTexture *p_tex) {
+   _show_texture(GGAZE_WINDOW(p_host), p_tex, FALSE);
 }
 
 static void
@@ -2372,9 +2709,46 @@ _vl_show_status(gpointer p_host, const char *c_msg) {
 
 static const ViewLoadHostOps _VIEWLOAD_OPS = {
    .show_texture  = _vl_show_texture,
+   .show_partial  = _vl_show_partial,
    .update_header = _vl_update_header,
    .show_status   = _vl_show_status,
 };
+
+#if GGAZE_HAVE_GEGL
+/* The title's preview suffix: "Auto-fix,Sharpen  \u00b7  90\u00b0 CW, crop"
+ * -- the enabled presets and the transform, each only when present, NULL
+ * when neither. Caller frees. */
+static char *
+_enhance_suffix(GgazeWindow *p_win) {
+   if (p_win->p_enhance_ctrl == NULL) {
+      return (NULL);
+   }
+   char *c_presets =
+      enhancer_describe_mask(enhance_ctrl_get_presets(p_win->p_enhance_ctrl),
+                             enhance_ctrl_get_mask(p_win->p_enhance_ctrl));
+   /* The original's size (0x0 while unknown) lets the suffix tell a crop
+    * the chain applies from one lying outside the straightened view. */
+   gint i_ow = 0;
+   gint i_oh = 0;
+   if (!enhance_ctrl_get_orig_size(p_win->p_enhance_ctrl, &i_ow, &i_oh)) {
+      i_ow = 0;
+      i_oh = 0;
+   }
+   char *c_xf = transform_describe(
+      enhance_ctrl_get_transform(p_win->p_enhance_ctrl), i_ow, i_oh);
+   char *c_out = NULL;
+   if (c_presets != NULL && c_xf != NULL) {
+      c_out = g_strdup_printf("%s  \u00b7  %s", c_presets, c_xf);
+   } else if (c_presets != NULL) {
+      c_out = g_strdup(c_presets);
+   } else if (c_xf != NULL) {
+      c_out = g_strdup(c_xf);
+   }
+   g_free(c_presets);
+   g_free(c_xf);
+   return (c_out);
+}
+#endif
 
 /* "<file> · n/total" (live images on both sides), or "<folder> · 0/N" when
  * nothing is current, plus " · N marked" when marks exist. NULL without a
@@ -2419,17 +2793,14 @@ static void
 _update_header(GgazeWindow *p_win) {
    gchar *c_title = p_win->p_nav != NULL ? _title_for_nav(p_win->p_nav) : NULL;
 #if GGAZE_HAVE_GEGL
-   /* Append the enabled enhance preset names (comma-joined) when layered. */
-   if (p_win->p_enhance_ctrl != NULL && c_title != NULL) {
-      char *c_presets =
-         enhancer_describe_mask(enhance_ctrl_get_presets(p_win->p_enhance_ctrl),
-                                enhance_ctrl_get_mask(p_win->p_enhance_ctrl));
-      if (c_presets != NULL) {
-         char *c_tmp = g_strdup_printf("%s  \u00b7  %s", c_title, c_presets);
-         g_free(c_title);
-         c_title = c_tmp;
-         g_free(c_presets);
-      }
+   /* Append what the preview does to the image: the enabled preset names
+    * (comma-joined) and the transform ("90° CW, crop"), when any. */
+   char *c_suffix = c_title != NULL ? _enhance_suffix(p_win) : NULL;
+   if (c_suffix != NULL) {
+      char *c_tmp = g_strdup_printf("%s  \u00b7  %s", c_title, c_suffix);
+      g_free(c_title);
+      c_title = c_tmp;
+      g_free(c_suffix);
    }
 #endif
    if (c_title == NULL) {
@@ -2477,6 +2848,7 @@ ggaze_window_dispose(GObject *p_obj) {
    _delete_confirm_dispose(p_win);
    save_gate_dispose(p_win->p_save_gate);
 #if GGAZE_HAVE_GEGL
+   tool_ctrl_dispose(p_win->p_tool_ctrl); /* drops the viewer overlay */
    enhance_ctrl_dispose(p_win->p_enhance_ctrl);
 #endif
    if (p_win->u_slideshow != 0) {
@@ -2523,6 +2895,7 @@ ggaze_window_finalize(GObject *p_obj) {
    g_clear_pointer(&p_win->p_viewload, viewload_delete);
    g_clear_pointer(&p_win->p_info, info_overlay_delete);
 #if GGAZE_HAVE_GEGL
+   g_clear_pointer(&p_win->p_tool_ctrl, tool_ctrl_delete);
    g_clear_pointer(&p_win->p_enhance_ctrl, enhance_ctrl_delete);
 #endif
    G_OBJECT_CLASS(ggaze_window_parent_class)->finalize(p_obj);
@@ -2594,6 +2967,19 @@ _init_enhance_state(GgazeWindow *p_win) {
    g_signal_connect(p_space_kc, "key-released", G_CALLBACK(_space_released_cb),
                     p_win);
    gtk_widget_add_controller(GTK_WIDGET(p_win), p_space_kc);
+}
+
+/* Create the crop / straighten tool controller (it needs the viewer, so this
+ * runs after _init_stack_and_viewer, unlike _init_enhance_state) and install
+ * its capture-phase key controller -- see _tool_key_cb for why the tools'
+ * modal keys must be claimed before the global shortcut table sees them. */
+static void
+_init_tool_state(GgazeWindow *p_win) {
+   p_win->p_tool_ctrl = tool_ctrl_new(p_win->p_enhance_ctrl, &_TOOL_OPS, p_win);
+   GtkEventController *p_kc = gtk_event_controller_key_new();
+   gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
+   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_tool_key_cb), p_win);
+   gtk_widget_add_controller(GTK_WIDGET(p_win), p_kc);
 }
 #endif
 
@@ -2816,6 +3202,10 @@ _build_main_menu(void) {
    _menu_add(p_edit, "win.open-external", "Open in...");
    _menu_add(p_edit, "win.run-script", "Run script...");
    _menu_add(p_edit, "win.enhance", "Enhance");
+   _menu_add(p_edit, "win.crop", "Crop");
+   _menu_add(p_edit, "win.straighten", "Straighten");
+   _menu_add(p_edit, "win.rotate-cw", "Rotate 90\u00b0 clockwise");
+   _menu_add(p_edit, "win.rotate-ccw", "Rotate 90\u00b0 counter-clockwise");
    GMenu *p_trash = g_menu_new();
    _menu_add(p_trash, "win.trash", "Trash");
    _menu_add(p_trash, "win.delete", "Delete permanently");
@@ -2940,6 +3330,9 @@ ggaze_window_init(GgazeWindow *p_win) {
    _init_engines_and_settings(p_win);
    _init_header_bar(p_win);
    _init_stack_and_viewer(p_win);
+#if GGAZE_HAVE_GEGL
+   _init_tool_state(p_win); /* after the viewer it draws on exists */
+#endif
 
    /* Actions + keybindings (decision #10/#12). */
    g_action_map_add_action_entries(G_ACTION_MAP(p_win), ACTIONS,
@@ -3011,11 +3404,22 @@ _open_resolve_target(GFile *p_arg, GFile **p_out_dir, GFile **p_out_start) {
 /* Build the new navigator for p_dir, wire it up, and point it at p_start (if
  * any). Also resets the per-folder trash/undo state, since a move or trash
  * undo recorded against the folder just left must not silently apply to the
- * new one. NOTE: navigator_set_current_file() only emits "changed" when the
- * resolved index differs from the navigator's default i_current == 0 (e.g. a
- * file that happens to sort first in its folder never triggers it) -- do not
- * rely on that signal to dismiss the info overlay; the caller handles that
- * unconditionally instead (gu0). */
+ * new one. The "changed" handler is connected only AFTER the cursor is
+ * placed: navigator_set_current_file() emits "changed" only when the
+ * resolved index differs from the navigator's default i_current == 0 (a
+ * file that happens to sort first in its folder never triggers it, and a
+ * folder open places no cursor at all), so nothing an open needs may hang
+ * on that signal. _open_now does all of it itself, unconditionally and
+ * once: the info overlay (gu0), the tools' and the enhance controller's
+ * choke point (wb2 sixth review: a tool and a saved transform used to
+ * survive into a folder whose file sorted first) and the load. Connecting
+ * before the cursor only made the index != 0 case load the file twice.
+ * That "once" is _open_now's: a multi-file open (_proceed_open_many) still
+ * calls navigator_set_current_file AFTER it, and by the rule above that
+ * call emits "changed" -- so the handler runs the choke point and the load
+ * a second time -- only when the start file resolves to an index other than 0.
+ * A start file that sorts first in its folder is loaded once; any other
+ * twice (task gd2 tracks the double pass). */
 static void
 _open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
                       GgazeSort e_sort, gboolean b_wrap, gboolean b_hide_raw) {
@@ -3024,11 +3428,11 @@ _open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
    g_clear_pointer(&p_win->p_trash, trash_delete);
    mover_clear_last(p_win->p_mover);
    undo_reset(p_win->p_undo);
-   g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(_nav_changed_cb),
-                    p_win);
    if (p_start != NULL) {
       navigator_set_current_file(p_win->p_nav, p_start);
    }
+   g_signal_connect(p_win->p_nav, "changed", G_CALLBACK(_nav_changed_cb),
+                    p_win);
 }
 
 /* Read the sort/wrap/hide-raw/hide-trashed preferences from settings
@@ -3132,6 +3536,47 @@ _report_open_target(GgazeWindow *p_win, GFile *p_arg, gboolean b_is_dir) {
    g_free(c_name);
 }
 
+/* The open is confirmed to proceed: drop any stale info overlay
+ * unconditionally before tearing down/rebuilding the navigator -- the
+ * "changed" signal is NOT a reliable trigger for an open (see
+ * _open_build_navigator), so this must not depend on whether it happens to
+ * fire (gu0 fresh-context review). Before the teardown/rebuild, so there
+ * is no window where new content is already showing but the old overlay is
+ * still up. The slideshow and a pending Esc go with the folder. */
+static void
+_open_leave_previous(GgazeWindow *p_win) {
+   _dismiss_info_for_nav(p_win);
+   _slideshow_stop(p_win, NULL);
+   p_win->i_esc_at = 0;
+   _open_reset_existing_nav(p_win);
+}
+
+/* The navigator for p_dir (cursor on p_start, if any) and the grid over it,
+ * from the current preferences. Between the two, the tools' and the enhance
+ * controller's choke point: an open replaces the current file without
+ * "changed" firing for it (_open_build_navigator), and a tool or a
+ * transform left over from the previous file used to survive into the new
+ * folder -- A's saved turn under B's title, the crop rectangle drawn over
+ * A's render, Enter applying A's turn and crop to B, `s` exporting A again.
+ * Told here, with the new navigator in place, the tool leaves and the
+ * controller resets exactly as they do for a navigation (the panel is
+ * re-pointed at the new file, not closed), and before _set_view, whose
+ * abandon would otherwise re-render the transform a crop tool was hiding
+ * onto the new file. */
+static void
+_open_rebuild(GgazeWindow *p_win, GFile *p_dir, GFile *p_start) {
+   GgazeSort e_sort;
+   gboolean  b_wrap;
+   gboolean  b_hide_raw;
+   gboolean  b_hide_trashed;
+   _open_read_prefs(p_win, &e_sort, &b_wrap, &b_hide_raw, &b_hide_trashed);
+   _open_build_navigator(p_win, p_dir, p_start, e_sort, b_wrap, b_hide_raw);
+#if GGAZE_HAVE_GEGL
+   _edit_state_nav_changed(p_win);
+#endif
+   _open_rebuild_grid(p_win, b_hide_trashed);
+}
+
 /* The actual open logic (was ggaze_window_open's whole body before tu0 added
  * the dirty-preview gate below). Kept as a separate static function so the
  * public entry point can defer it behind a Save/Discard/Cancel prompt
@@ -3150,30 +3595,10 @@ _open_now(GgazeWindow *p_win, GFile *p_arg) {
       g_clear_object(&p_start);
       return;
    }
-
-   /* Only now that the open is confirmed to proceed: drop any stale info
-    * overlay unconditionally before tearing down/rebuilding the navigator --
-    * the "changed" signal wired in _open_build_navigator is NOT a reliable
-    * trigger here (see its doc comment), so this must not depend on whether
-    * it happens to fire (gu0 fresh-context review). Firing before the
-    * teardown/rebuild below avoids a window where new content is already
-    * showing but the old overlay is still up. */
-   _dismiss_info_for_nav(p_win);
-   _slideshow_stop(p_win, NULL);
-   p_win->i_esc_at = 0;
-
-   _open_reset_existing_nav(p_win);
-
-   GgazeSort e_sort;
-   gboolean  b_wrap;
-   gboolean  b_hide_raw;
-   gboolean  b_hide_trashed;
-   _open_read_prefs(p_win, &e_sort, &b_wrap, &b_hide_raw, &b_hide_trashed);
-   _open_build_navigator(p_win, p_dir, p_start, e_sort, b_wrap, b_hide_raw);
+   _open_leave_previous(p_win);
+   _open_rebuild(p_win, p_dir, p_start);
    g_clear_object(&p_dir);
    g_clear_object(&p_start);
-
-   _open_rebuild_grid(p_win, b_hide_trashed);
 
    /* Folder arg → start in the thumbnail grid (folder-to-grid behavior,
     * docs/ui-and-interactions.md 33-47); file arg → large view on that image.
@@ -3213,7 +3638,8 @@ _open_ctx_free(gpointer p_data) {
  * "changed" signal is not a reliable choke point for this path -- see
  * _open_build_navigator's comment -- so the gate lives here, before any
  * teardown/rebuild, not inside _open_now). Proceeds immediately if nothing
- * is dirty. */
+ * is dirty; either way a tool and a preview that survived the gate (saved,
+ * or Save just wrote them) are ended by the open itself (_open_rebuild). */
 void
 ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));

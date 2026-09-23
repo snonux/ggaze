@@ -11,6 +11,13 @@
  * docs/ui-and-interactions.md "Zoom behavior" and docs/architecture.md
  * "Responsibilities / viewer".
  *
+ * It also HOSTS a tool overlay (the crop rectangle, the straighten grid):
+ * one draw callback painted after the image with the image's on-screen
+ * geometry, and one drag callback that takes over the pointer drag from
+ * panning while it is set. The viewer knows nothing about what is drawn;
+ * tool-ctrl.c does, in image pixels, and this is where those become widget
+ * pixels.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -56,6 +63,49 @@ gdouble ggaze_viewer_get_scale(GgazeViewer *p_viewer);
 void ggaze_viewer_get_pan(GgazeViewer *p_viewer, gdouble *p_x, gdouble *p_y);
 void ggaze_viewer_toggle_fit_100(GgazeViewer *p_viewer);
 void ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy);
+
+/* --- tool overlay hosting --------------------------------------------------
+ */
+
+/* Where the image is on screen: its top-left corner in widget pixels and the
+ * scale that turns image pixels into widget pixels (image * d_scale + d_x).
+ * i_img_w/i_img_h are the texture's size, so a caller can tell whether the
+ * texture on screen is the one its overlay was laid out on. */
+typedef struct {
+   gdouble d_x;
+   gdouble d_y;
+   gdouble d_scale;
+   gint    i_img_w;
+   gint    i_img_h;
+} GgazeViewerGeom;
+
+/* The current geometry; FALSE (p_out untouched) with no texture. */
+gboolean ggaze_viewer_get_geometry(GgazeViewer     *p_viewer,
+                                   GgazeViewerGeom *p_out);
+
+typedef enum {
+   GGAZE_VIEWER_DRAG_BEGIN,
+   GGAZE_VIEWER_DRAG_UPDATE,
+   GGAZE_VIEWER_DRAG_END
+} GgazeViewerDragPhase;
+
+/* Paint on top of the image. p_geom is the geometry the image was just drawn
+ * with. */
+typedef void (*GgazeViewerOverlayFn)(GtkSnapshot           *p_snap,
+                                     const GgazeViewerGeom *p_geom,
+                                     gpointer               p_data);
+
+/* A pointer drag, in ABSOLUTE widget coordinates (begin: where it started;
+ * update/end: where the pointer is now). While an overlay is installed the
+ * drag gesture feeds this instead of panning. */
+typedef void (*GgazeViewerDragFn)(GgazeViewerDragPhase e_phase, gdouble d_x,
+                                  gdouble d_y, gpointer p_data);
+
+/* Install (or, with both callbacks NULL, remove) the tool overlay. p_data is
+ * borrowed and passed to both. Queues a redraw. */
+void ggaze_viewer_set_overlay(GgazeViewer         *p_viewer,
+                              GgazeViewerOverlayFn fn_draw,
+                              GgazeViewerDragFn fn_drag, gpointer p_data);
 
 /* Configure the background colour drawn behind the image and what the scroll
  * wheel does (applied from GSettings by the window). Defaults: dark / zoom. */

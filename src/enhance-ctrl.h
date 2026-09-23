@@ -5,14 +5,19 @@
  * ggaze — Enhance/GEGL UI orchestration controller
  *
  * Owns the entire GEGL "enhance" feature's state and orchestration: the
- * preset mask, the in-flight apply/preview cancellables and generation
- * counters, the cached enhanced texture, the hold-Space compare flag, the
- * file the preview applies to, the saved-already flag, the enhance side
- * panel and every card/picture it is built of, and the Enhancer engine
- * itself. window.c forwards only the a/s/digit/Space/0/Esc actions and a
- * few choke-point queries (is_dirty, override_texture, nav_changed); every
- * other enhance concern lives here (SRP: window.c is layout + action
- * routing, this module is the enhance feature).
+ * preset mask, the geometric Transform (rotate 90 / straighten / crop,
+ * decision #35 -- the same live preview graph, so a turn and a preset
+ * compose and one Save exports both), the in-flight apply/preview
+ * cancellables and generation counters, the cached enhanced texture, the
+ * hold-Space compare flag, the file the preview applies to, the
+ * saved-already flag, the enhance side panel and every card/picture it is
+ * built of, and the Enhancer engine itself. window.c forwards only the
+ * a/s/digit/Space/0/Esc/[/] actions and a few choke-point calls
+ * (is_dirty, texture_shown, override_texture, nav_changed); the
+ * interactive crop and straighten tools (tool-ctrl.c) edit the Transform
+ * through enhance_ctrl_set_transform; every other enhance concern lives
+ * here (SRP: window.c is layout + action routing, this module is the
+ * enhance feature).
  *
  * The panel sits BESIDE the large view, inside the window's own widget tree
  * (the host hands over a slot to put it in), so the image keeps the whole
@@ -23,9 +28,28 @@
  * `a` pressed once.
  *
  * Saving: `s` exports a copy and marks the preview SAVED; a saved preview is
- * no longer dirty, so moving on does not prompt for it. Any further preset
- * change makes it unsaved again. The gate's prompt therefore only ever asks
- * about work that has not been written anywhere.
+ * no longer dirty, so moving on does not prompt for it. What was saved is
+ * remembered as the (mask, transform) pair the export wrote: any state that
+ * differs from it is unsaved, and a state that comes back to exactly it (a
+ * tool cancelled back to it, a preset toggled off and on) is saved again --
+ * the file on disk is that state, whichever way it was reached. The gate's
+ * prompt therefore only ever asks about work that has not been written
+ * anywhere.
+ *
+ * Two transforms: the COMMITTED one (enhance_ctrl_set_transform) is what
+ * `s` exports, what the title names and what dirty/active are judged on;
+ * a tool may additionally set a PREVIEW override
+ * (enhance_ctrl_set_preview_transform) that only changes what the graph
+ * renders -- the crop tool shows the base image without its crop while the
+ * rectangle is edited, and the committed crop must keep counting as work
+ * meanwhile (or `s` in the tool would find nothing to save and navigating
+ * away would skip the prompt and lose it).
+ *
+ * Rendering is coalesced: at most one apply is in flight, and a state that
+ * arrives while one runs is remembered as "render again when this lands",
+ * so holding `l` in the straighten tool costs one extra render, not one
+ * full decode per repeat. The result on screen is always the latest state
+ * (last-write-wins), reached in at most two renders.
  *
  * The controller is a plain struct (not a GtkWidget), mirroring SaveGate /
  * DeleteConfirm: it reaches the window through a host vtable (EnhanceUIHostOps)
@@ -49,7 +73,8 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
-#include "enhancer.h" /* Enhancer, EnhancerPreset, GPtrArray of presets */
+#include "enhancer.h"  /* Enhancer, EnhancerPreset, GPtrArray of presets */
+#include "transform.h" /* the rotate/straighten/crop state (decision #35) */
 
 G_BEGIN_DECLS
 
@@ -78,7 +103,10 @@ typedef struct {
    /* The navigator's current file (NULL if no folder is open or the folder
     * is empty). Safe to call in any state. */
    GFile *(*get_current_file)(gpointer p_host);
-   /* The cached texture for p_file (NULL if evicted), for hold-Space. */
+   /* The cached texture for p_file (NULL if evicted or stale). Used on a
+    * same-file rescan only, to tell a rewrite of the current file from the
+    * rescan a save's "-enhanced" copy causes (the cache's stamp answers it
+    * with no second stat). */
    GdkTexture *(*get_cached_texture)(gpointer p_host, GFile *p_file);
    /* The GtkBox beside the large view that the panel is appended to while
     * open (and removed from when closed). The window shows it only in the
@@ -89,6 +117,19 @@ typedef struct {
     * present, current NULL -- still reaches the mask-reset branch rather than
     * early-returning. */
    gboolean (*has_navigator)(gpointer p_host);
+   /* The preview is about to be discarded (Esc, `0` / the Original card, a
+    * failed apply, the gate's Discard, the slideshow): end a crop /
+    * straighten session over it first, without restoring anything -- the
+    * discard resets the transform and a tool's override together. A tool
+    * left running kept its working angle / turn and re-applied the
+    * discarded state on the next nudge or Enter. */
+   void (*abandon_tool)(gpointer p_host);
+   /* The current file's original on screen is another texture object than
+    * before (its first decode landed, or a reload after a rewrite / a
+    * discard decoded it again -- enhance_ctrl_texture_shown): a tool laid
+    * out on the previous one lays out again and redraws. Called from
+    * inside the window's texture choke point, before the viewer shows it. */
+   void (*original_changed)(gpointer p_host);
 } EnhanceUIHostOps;
 
 /* Continuation for enhance_ctrl_save_async: b_ok is TRUE on a real write. */
@@ -115,8 +156,80 @@ void             enhance_ctrl_set_user_presets(EnhanceCtrl     *p_ctrl,
 const GPtrArray *enhance_ctrl_get_presets(EnhanceCtrl *p_ctrl);
 guint8           enhance_ctrl_get_mask(EnhanceCtrl *p_ctrl);
 
+/* --- the geometric transform (rotate 90 / straighten / crop) ------------- */
+/* The current Transform (borrowed; the identity when none is active). */
+const Transform *enhance_ctrl_get_transform(EnhanceCtrl *p_ctrl);
+
+/* Commit p_xf as THE Transform (dropping any preview override) and re-apply
+ * the preview asynchronously, exactly like toggling a preset. A transform
+ * that renders the same as what is on screen (transform_equal) is stored
+ * without a re-apply, so a tool that pushes its working state on every nudge
+ * never renders twice for nothing. With an empty mask and the identity the
+ * original is restored. A crop lying entirely outside its base (the
+ * straighten shrank the base past it) is kept as it is: the chain crops
+ * nothing then, the title says "crop (outside view)", and the crop is
+ * applied again as soon as the base grows back over it. */
+void enhance_ctrl_set_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf);
+
+/* Render p_xf instead of the committed transform (NULL: back to the
+ * committed one) without touching what `s` exports or what counts as work
+ * -- the crop tool's view of the base image. Re-applies only when the
+ * rendered transform actually changes, and never switches views (a tool
+ * abandoned by a view change clears its override from the grid). */
+void enhance_ctrl_set_preview_transform(EnhanceCtrl     *p_ctrl,
+                                        const Transform *p_xf);
+
+/* `]` (i_dir > 0) / `[` (i_dir < 0): one more quarter turn, one-shot, then
+ * re-apply. An active crop turns with the image. */
+void enhance_ctrl_rotate_quarter(EnhanceCtrl *p_ctrl, gint i_dir);
+
+/* TRUE while an apply is in flight, i.e. the texture on screen predates the
+ * current mask/transform. */
+gboolean enhance_ctrl_is_pending(EnhanceCtrl *p_ctrl);
+
+/* TRUE iff p_tex -- what the viewer shows -- is exactly the texture the
+ * current state renders to: the last landed apply for the current mask and
+ * render transform (a tool's override, else the committed one), with none
+ * newer in flight; or, when that state needs no GEGL at all, the original
+ * of the current file as the viewer last showed it (learned through
+ * enhance_ctrl_texture_shown; an original not shown since the last
+ * navigation or rewrite is never current). It is FALSE for the picture
+ * that is still up while a render is pending, for the original shown under
+ * a held Space, and for another file's texture waiting for a load to land.
+ * Pure identity comparisons, no cache lookup: safe per snapshot and per
+ * pointer motion, and a `touch` on the file (which stales its cache entry)
+ * cannot make an overlay vanish. The tools draw the crop rectangle over,
+ * and measure drags on, only a texture this says yes to: a size comparison
+ * could not tell 0 from 180 degrees, +a from -a, or a preset toggled under
+ * the tool from the base it replaced. */
+gboolean enhance_ctrl_is_current_render(EnhanceCtrl *p_ctrl, GdkTexture *p_tex);
+
+/* TRUE while Space is held and the original is on screen in place of the
+ * preview (enhance_ctrl_set_hold_original). */
+gboolean enhance_ctrl_is_hold_original(EnhanceCtrl *p_ctrl);
+
+/* The size of the base image the crop rectangle refers to (the original
+ * after the current turn and straighten, crop ignored --
+ * transform_base_size), or FALSE while the original's size is not known:
+ * the viewer has not shown the file's decode yet (enhance_ctrl_texture_
+ * shown) and no apply has landed for it. A pure read, safe from a draw
+ * callback: nothing is looked up. */
+gboolean enhance_ctrl_get_base_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
+
+/* The original's upright size on the same terms (FALSE when unknown): what
+ * the straighten tool feeds transform_rebase_crop to keep a crop over the
+ * same content while the angle changes the base, and what tells it the
+ * original is known before it measures a horizon at 0 degrees. */
+gboolean enhance_ctrl_get_orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
+
+/* How many preview renders (full decode + chain) this controller has
+ * launched so far. A test seam for the render coalescing: N rapid changes
+ * must cost at most two launches (tests/test_enhance_flow.c). */
+guint enhance_ctrl_get_render_count(EnhanceCtrl *p_ctrl);
+
 /* --- state queries --- */
-/* TRUE iff a GEGL enhance preview is on screen (mask != 0), saved or not. */
+/* TRUE iff a GEGL preview is on screen (a preset enabled or a non-identity
+ * transform), saved or not. */
 gboolean enhance_ctrl_is_active(EnhanceCtrl *p_ctrl);
 
 /* TRUE iff a GEGL enhance preview is active AND has not been exported since
@@ -130,13 +243,29 @@ gboolean enhance_ctrl_is_open(EnhanceCtrl *p_ctrl);
 /* The hot-path override: returns the texture the viewer should show given the
  * natural candidate p_tex. An active, non-hold-original preview wins; else
  * p_tex is returned unchanged. Called from the window's single texture
- * choke point (_show_texture). */
+ * choke point (_show_texture). A pure query: it learns nothing. */
 GdkTexture *enhance_ctrl_override_texture(EnhanceCtrl *p_ctrl,
                                           GdkTexture  *p_tex);
 
-/* Hold-Space compare: TRUE shows the cached original (texturecache, cheap);
- * FALSE restores the cached modified texture. No-op if nothing is active or
- * the requested state is already in effect. */
+/* The window is about to show p_tex, a DECODED texture of the current file
+ * (a cache hit, a finished load -- never a progressive loader's low-res
+ * partial, and never this controller's own render or the original it
+ * re-shows under Space, which teach it nothing): remember it as the file's
+ * original, with its size. This is the one place the original's identity
+ * is learned, so it is exactly the object the viewer holds -- a same-file
+ * reload that decodes a new object (the file touched, a preset discarded)
+ * refreshes it, where an identity looked up once from the cache went stale
+ * and refused every tool action for good. Called from the window's texture
+ * choke point right before enhance_ctrl_override_texture, whatever that
+ * decides to show. When the object changed, a tool laid out on the old one
+ * is told through the host (original_changed). No lookup, no stat. */
+void enhance_ctrl_texture_shown(EnhanceCtrl *p_ctrl, GdkTexture *p_tex);
+
+/* Hold-Space compare: TRUE shows the original as the viewer last showed it
+ * (this controller's own reference -- an evicted or stale cache entry does
+ * not matter); FALSE restores the cached modified texture. No-op if nothing
+ * is active, the requested state is already in effect, or the file's decode
+ * has not been shown since a rewrite forgot it. */
 void enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold);
 
 /* --- action entry points (the GActions stay window-side; these do the work) */
@@ -167,14 +296,25 @@ void enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
 gboolean enhance_ctrl_can_save(EnhanceCtrl *p_ctrl);
 
 /* --- choke points --- */
-/* The navigator "changed" choke point: reset the preview only when the
- * current file's IDENTITY actually changed (see the comment in the .c). An
- * open panel stays open and re-previews the new file. */
+/* The navigator "changed" choke point -- and an open's, which replaces the
+ * navigator without that signal firing for the new file (window.c
+ * _open_rebuild): reset the preview only when the current file's IDENTITY
+ * actually changed (see the comment in the .c). An
+ * open panel stays open and re-previews the new file. A rescan of the SAME
+ * file re-checks the original against the texture cache: rewritten in
+ * place (`e`, `!`), possibly with another size, its size and identity are
+ * forgotten (the reload that follows shows the fresh decode, which is
+ * learned) and an active preview is rendered again from the new contents;
+ * the rescan a save's "-enhanced" copy causes finds the entry fresh and
+ * changes nothing. The render of a rewritten file may land before the
+ * reload's decode: its original size is told to the tool as a new
+ * original's is (original_changed), so a crop tool lays out again on it
+ * either way. */
 void enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl);
 
 /* Drop the current enhance preview and go back to the original (Esc, `0`,
- * slideshow auto-advance, the SaveGate's Discard). Never touches the file
- * on disk. */
+ * slideshow auto-advance, the SaveGate's Discard). Ends a running tool
+ * first (abandon_tool). Never touches the file on disk. */
 void enhance_ctrl_discard(EnhanceCtrl *p_ctrl);
 
 G_END_DECLS

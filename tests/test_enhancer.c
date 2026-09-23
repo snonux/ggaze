@@ -1,6 +1,7 @@
 /* test_enhancer.c — GEGL enhance unit test (gated on HAVE_GEGL). */
 #include "enhancer.h"
 #include "enhancer-gegl.h"
+#include "transform.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <unistd.h>
@@ -518,7 +519,7 @@ test_apply_chain(void) {
    /* Compose Auto-fix (bit 0) + Sharpen (bit 6) if those ops exist. */
    guint8      u_mask = (guint8)((1u << 0) | (1u << 6));
    GError     *p_err  = NULL;
-   GeglBuffer *p_out  = enhancer_apply_chain(buf, p, u_mask, &p_err);
+   GeglBuffer *p_out  = enhancer_apply_chain(buf, p, u_mask, NULL, &p_err);
    if (p_out != NULL) {
       g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 4);
       g_assert_cmpint(gegl_buffer_get_height(p_out), ==, 4);
@@ -526,13 +527,420 @@ test_apply_chain(void) {
    } else {
       g_clear_error(&p_err); /* ops may be unavailable; skip gracefully */
    }
-   /* An empty mask must fail (no preset enabled). */
-   p_out = enhancer_apply_chain(buf, p, 0, &p_err);
+   /* An empty mask must fail (no preset enabled) -- with no transform either;
+    * the identity transform is the same as none. */
+   p_out = enhancer_apply_chain(buf, p, 0, NULL, &p_err);
    g_assert_null(p_out);
    g_assert_nonnull(p_err);
    g_clear_error(&p_err);
+   Transform t_id;
+   transform_init(&t_id);
+   p_out = enhancer_apply_chain(buf, p, 0, &t_id, &p_err);
+   g_assert_null(p_out);
+   g_clear_error(&p_err);
    g_object_unref(buf);
    enhancer_delete(e);
+}
+
+/* --- wb2: the geometric transform on the chain -------------------------- */
+
+/* A 4x2 RGBA8 buffer whose red channel numbers the pixels row-major
+ * (0x00 0x10 0x20 0x30 / 0x40 0x50 0x60 0x70), so a turn or crop can be
+ * checked pixel by pixel. */
+static GeglBuffer *
+_numbered_4x2(void) {
+   GeglRectangle rect  = {0, 0, 4, 2};
+   GeglBuffer   *p_buf = gegl_buffer_new(&rect, babl_format("R'G'B'A u8"));
+   guint8        px[4 * 2 * 4];
+   for (int i = 0; i < 8; i++) {
+      px[i * 4]     = (guint8)(i * 0x10);
+      px[i * 4 + 1] = 0;
+      px[i * 4 + 2] = 0;
+      px[i * 4 + 3] = 0xff;
+   }
+   gegl_buffer_set(p_buf, &rect, 0, babl_format("R'G'B'A u8"), px, 4 * 4);
+   return (p_buf);
+}
+
+/* The red channel of p_buf's extent, row-major, into p_out (caller sizes
+ * it). */
+static void
+_red_channel(GeglBuffer *p_buf, guint8 *p_out) {
+   const GeglRectangle *p_r = gegl_buffer_get_extent(p_buf);
+   guint8 *px = g_malloc((gsize)p_r->width * (gsize)p_r->height * 4);
+   gegl_buffer_get(p_buf, p_r, 1.0, babl_format("R'G'B'A u8"), px,
+                   p_r->width * 4, GEGL_ABYSS_NONE);
+   for (int i = 0; i < p_r->width * p_r->height; i++) {
+      p_out[i] = px[i * 4];
+   }
+   g_free(px);
+}
+
+/* `]`: one clockwise quarter turn is an exact pixel permutation -- the old
+ * bottom row becomes the new left column, top to bottom -- and the mask may
+ * be empty (a transform alone is work). Four turns are the identity. */
+static void
+test_transform_rotate_quarter(void) {
+   Enhancer        *p_e  = enhancer_new();
+   const GPtrArray *p    = enhancer_get_presets(p_e);
+   GeglBuffer      *p_in = _numbered_4x2();
+   Transform        t;
+   transform_init(&t);
+   t.i_quarter       = 1;
+   GError     *p_err = NULL;
+   GeglBuffer *p_out = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_out);
+   g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 2);
+   g_assert_cmpint(gegl_buffer_get_height(p_out), ==, 4);
+   guint8 red[8];
+   _red_channel(p_out, red);
+   static const guint8 WANT_CW[8] = {0x40, 0x00, 0x50, 0x10,
+                                     0x60, 0x20, 0x70, 0x30};
+   g_assert_cmpmem(red, 8, WANT_CW, 8);
+   g_object_unref(p_out);
+   /* `[`: the other way round. */
+   t.i_quarter = 3;
+   p_out       = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   _red_channel(p_out, red);
+   static const guint8 WANT_CCW[8] = {0x30, 0x70, 0x20, 0x60,
+                                      0x10, 0x50, 0x00, 0x40};
+   g_assert_cmpmem(red, 8, WANT_CCW, 8);
+   g_object_unref(p_out);
+   /* 180: both dimensions kept, order reversed. */
+   t.i_quarter = 2;
+   p_out       = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 4);
+   _red_channel(p_out, red);
+   static const guint8 WANT_180[8] = {0x70, 0x60, 0x50, 0x40,
+                                      0x30, 0x20, 0x10, 0x00};
+   g_assert_cmpmem(red, 8, WANT_180, 8);
+   g_object_unref(p_out);
+   g_object_unref(p_in);
+   enhancer_delete(p_e);
+}
+
+/* `c`: the crop rectangle picks exactly its pixels, in the base image's
+ * coordinates -- after a quarter turn, in the TURNED image's coordinates.
+ * A rectangle hanging off the base is clamped, never empty. */
+static void
+test_transform_crop(void) {
+   Enhancer        *p_e  = enhancer_new();
+   const GPtrArray *p    = enhancer_get_presets(p_e);
+   GeglBuffer      *p_in = _numbered_4x2();
+   Transform        t;
+   transform_init(&t);
+   t.b_crop          = TRUE;
+   t.t_crop          = (CropRect){1, 0, 2, 2};
+   GError     *p_err = NULL;
+   GeglBuffer *p_out = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 2);
+   g_assert_cmpint(gegl_buffer_get_height(p_out), ==, 2);
+   guint8 red[8];
+   _red_channel(p_out, red);
+   static const guint8 WANT[4] = {0x10, 0x20, 0x50, 0x60};
+   g_assert_cmpmem(red, 4, WANT, 4);
+   g_object_unref(p_out);
+   /* Turned first: the crop (0,0,1,2) of the 2x4 turned image is its first
+    * column, top two pixels: 0x40 0x50. */
+   t.i_quarter = 1;
+   t.t_crop    = (CropRect){0, 0, 1, 2};
+   p_out       = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 1);
+   g_assert_cmpint(gegl_buffer_get_height(p_out), ==, 2);
+   _red_channel(p_out, red);
+   g_assert_cmpint(red[0], ==, 0x40);
+   g_assert_cmpint(red[1], ==, 0x50);
+   g_object_unref(p_out);
+   /* Hanging off the base: clamped to what exists (never an empty crop). */
+   t.i_quarter = 0;
+   t.t_crop    = (CropRect){3, 0, 100, 100};
+   p_out       = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 1);
+   g_assert_cmpint(gegl_buffer_get_height(p_out), ==, 2);
+   g_object_unref(p_out);
+   g_object_unref(p_in);
+   enhancer_delete(p_e);
+}
+
+/* `R`: a straighten's output is exactly transform_output_size -- the
+ * auto-crop inscribed rectangle by default, the padded bounding box with
+ * auto-crop off -- and it composes with a preset and a crop. */
+static void
+test_transform_straighten_sizes(void) {
+   Enhancer        *p_e  = enhancer_new();
+   const GPtrArray *p    = enhancer_get_presets(p_e);
+   GeglRectangle    rect = {0, 0, 60, 40};
+   GeglBuffer      *p_in = gegl_buffer_new(&rect, babl_format("R'G'B'A u8"));
+   Transform        t;
+   transform_init(&t);
+   t.d_degrees = 7.5;
+   gdouble d_w, d_h;
+   transform_output_size(&t, 60, 40, &d_w, &d_h);
+   g_assert_cmpfloat(d_w, <, 60);
+   g_assert_cmpfloat(d_h, <, 40);
+   GError     *p_err = NULL;
+   GeglBuffer *p_out = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gegl_buffer_get_width(p_out), ==, (gint)d_w);
+   g_assert_cmpint(gegl_buffer_get_height(p_out), ==, (gint)d_h);
+   g_object_unref(p_out);
+   t.b_autocrop = FALSE;
+   transform_output_size(&t, 60, 40, &d_w, &d_h);
+   g_assert_cmpfloat(d_w, >, 60);
+   p_out = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gegl_buffer_get_width(p_out), ==, (gint)d_w);
+   g_assert_cmpint(gegl_buffer_get_height(p_out), ==, (gint)d_h);
+   g_object_unref(p_out);
+   /* All three stages plus a colour preset, in one graph. */
+   t.b_autocrop = TRUE;
+   t.i_quarter  = 1;
+   t.b_crop     = TRUE;
+   t.t_crop     = (CropRect){2, 2, 20, 30};
+   transform_output_size(&t, 60, 40, &d_w, &d_h);
+   p_out = enhancer_apply_chain(p_in, p, 1, &t, &p_err);
+   if (p_out != NULL) { /* Auto-fix may be unavailable; the sizes are ours */
+      g_assert_cmpint(gegl_buffer_get_width(p_out), ==, (gint)d_w);
+      g_assert_cmpint(gegl_buffer_get_height(p_out), ==, (gint)d_h);
+      g_object_unref(p_out);
+   } else {
+      g_clear_error(&p_err);
+   }
+   g_object_unref(p_in);
+   enhancer_delete(p_e);
+}
+
+/* `s` with a transform: the exported file has the transformed size. */
+static void
+test_transform_export(void) {
+   Enhancer        *p_e  = enhancer_new();
+   const GPtrArray *p    = enhancer_get_presets(p_e);
+   GeglBuffer      *p_in = _numbered_4x2();
+   Transform        t;
+   transform_init(&t);
+   t.i_quarter    = 1;
+   char   *c_tmp  = g_dir_make_tmp("ggaze-xform-export-XXXXXX", NULL);
+   char   *c_path = g_build_filename(c_tmp, "turned.png", NULL);
+   GFile  *p_out  = g_file_new_for_path(c_path);
+   GError *p_err  = NULL;
+   g_assert_true(enhancer_export_chain(p_in, p, 0, &t, p_out, &p_err));
+   g_assert_no_error(p_err);
+   GdkTexture *p_tex = gdk_texture_new_from_file(p_out, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 2);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 4);
+   g_object_unref(p_tex);
+   g_remove(c_path);
+   g_rmdir(c_tmp);
+   g_free(c_path);
+   g_free(c_tmp);
+   g_object_unref(p_out);
+   g_object_unref(p_in);
+   enhancer_delete(p_e);
+}
+
+/* An opaque i_w x i_h RGBA8 buffer whose left half is red and right half
+ * blue, so a crop's position is visible in the pixels, not just its size. */
+static GeglBuffer *
+_opaque_halves(gint i_w, gint i_h) {
+   GeglRectangle rect  = {0, 0, i_w, i_h};
+   GeglBuffer   *p_buf = gegl_buffer_new(&rect, babl_format("R'G'B'A u8"));
+   guint8       *px    = g_malloc((gsize)i_w * i_h * 4);
+   for (gint y = 0; y < i_h; y++) {
+      for (gint x = 0; x < i_w; x++) {
+         guint8 *p = px + ((gsize)y * i_w + x) * 4;
+         p[0]      = x < i_w / 2 ? 0xff : 0x00;
+         p[1]      = 0x00;
+         p[2]      = x < i_w / 2 ? 0x00 : 0xff;
+         p[3]      = 0xff;
+      }
+   }
+   gegl_buffer_set(p_buf, &rect, 0, babl_format("R'G'B'A u8"), px, i_w * 4);
+   g_free(px);
+   return (p_buf);
+}
+
+/* The number of pixels in p_buf whose alpha is not 255. */
+static guint
+_count_non_opaque(GeglBuffer *p_buf) {
+   const GeglRectangle *p_r = gegl_buffer_get_extent(p_buf);
+   gsize                u_n = (gsize)p_r->width * p_r->height;
+   guint8              *px  = g_malloc(u_n * 4);
+   gegl_buffer_get(p_buf, p_r, 1.0, babl_format("R'G'B'A u8"), px,
+                   p_r->width * 4, GEGL_ABYSS_NONE);
+   guint u_bad = 0;
+   for (gsize u = 0; u < u_n; u++) {
+      if (px[u * 4 + 3] != 0xff) {
+         u_bad++;
+      }
+   }
+   g_free(px);
+   return (u_bad);
+}
+
+/* Straighten with auto-crop keeps only fully opaque pixels: the inscribed
+ * rectangle touches the rotated edges at its corners and the linear sampler
+ * blends the outermost pixel with the transparent abyss, so a crop of
+ * exactly that size (and one centred on GEGL's padded extent rather than on
+ * the rotation centre) kept corner pixels with alpha 145..240 that a JPEG
+ * export then rendered differently from the preview. Pins the inset
+ * (TRANSFORM_AUTOCROP_INSET) and the centring at several angles and sizes,
+ * both signs, and the output size still being transform_output_size. */
+static void
+test_straighten_autocrop_is_opaque(void) {
+   Enhancer        *p_e = enhancer_new();
+   const GPtrArray *p   = enhancer_get_presets(p_e);
+   static const struct {
+      gint    i_w, i_h;
+      gdouble d_deg;
+   } CASES[] = {{400, 300, 0.5},  {400, 300, 1.0},   {400, 300, 2.5},
+                {400, 300, -3.5}, {400, 300, 22.5},  {400, 300, 30.0},
+                {400, 300, 45.0}, {301, 201, 3.5},   {301, 201, 17.0},
+                {33, 47, 12.5},   {1000, 1500, 5.0}, {60, 40, 7.5}};
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      GeglBuffer *p_in = _opaque_halves(CASES[u].i_w, CASES[u].i_h);
+      Transform   t;
+      transform_init(&t);
+      t.d_degrees       = CASES[u].d_deg;
+      GError     *p_err = NULL;
+      GeglBuffer *p_out = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+      g_assert_no_error(p_err);
+      g_assert_nonnull(p_out);
+      gdouble d_w, d_h;
+      transform_output_size(&t, CASES[u].i_w, CASES[u].i_h, &d_w, &d_h);
+      g_assert_cmpint(gegl_buffer_get_width(p_out), ==, (gint)d_w);
+      g_assert_cmpint(gegl_buffer_get_height(p_out), ==, (gint)d_h);
+      if (_count_non_opaque(p_out) != 0) {
+         g_error("%dx%d at %g degrees: %u non-opaque pixels in the auto-crop",
+                 CASES[u].i_w, CASES[u].i_h, CASES[u].d_deg,
+                 _count_non_opaque(p_out));
+      }
+      g_object_unref(p_out);
+      g_object_unref(p_in);
+   }
+   enhancer_delete(p_e);
+}
+
+/* The RGBA8 pixels of a GdkTexture, row-major, caller frees. */
+static guint8 *
+_texture_pixels(GdkTexture *p_tex) {
+   gsize   u_stride = (gsize)gdk_texture_get_width(p_tex) * 4;
+   guint8 *px       = g_malloc(u_stride * gdk_texture_get_height(p_tex));
+   gdk_texture_download(p_tex, px, u_stride);
+   return (px);
+}
+
+/* `s` writes what the preview shows: the export chain is the preview chain,
+ * so a straighten + crop exported to PNG decodes to exactly the preview's
+ * pixels -- same size, same position, every pixel opaque, and the two-tone
+ * fixture's colour boundary in the same column. Exact (not within a
+ * tolerance): the 16-bit PNG round trip is lossless for the values a chain
+ * on an 8-bit source produces, and a positional slip of a single pixel
+ * would show up as a whole boundary column differing. */
+static void
+test_export_matches_preview(void) {
+   Enhancer        *p_e  = enhancer_new();
+   const GPtrArray *p    = enhancer_get_presets(p_e);
+   GeglBuffer      *p_in = _opaque_halves(240, 160);
+   Transform        t;
+   transform_init(&t);
+   t.d_degrees       = -4.5;
+   t.b_crop          = TRUE;
+   t.t_crop          = (CropRect){20, 10, 150, 100};
+   GError     *p_err = NULL;
+   GeglBuffer *p_buf = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   GdkTexture *p_preview = enhancer_buffer_to_texture(p_buf, &p_err);
+   g_assert_no_error(p_err);
+   g_object_unref(p_buf);
+   char  *c_tmp  = g_dir_make_tmp("ggaze-xform-match-XXXXXX", NULL);
+   char  *c_path = g_build_filename(c_tmp, "out.png", NULL);
+   GFile *p_out  = g_file_new_for_path(c_path);
+   g_assert_true(enhancer_export_chain(p_in, p, 0, &t, p_out, &p_err));
+   g_assert_no_error(p_err);
+   GdkTexture *p_export = gdk_texture_new_from_file(p_out, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gdk_texture_get_width(p_export), ==,
+                   gdk_texture_get_width(p_preview));
+   g_assert_cmpint(gdk_texture_get_height(p_export), ==,
+                   gdk_texture_get_height(p_preview));
+   g_assert_cmpint(gdk_texture_get_width(p_preview), ==, 150);
+   g_assert_cmpint(gdk_texture_get_height(p_preview), ==, 100);
+   gsize   u_n  = 150 * 100 * 4;
+   guint8 *px_p = _texture_pixels(p_preview);
+   guint8 *px_e = _texture_pixels(p_export);
+   g_assert_cmpmem(px_p, u_n, px_e, u_n);
+   for (gsize u = 3; u < u_n; u += 4) {
+      g_assert_cmpint(px_p[u], ==, 0xff); /* opaque, so a JPEG matches too */
+   }
+   g_free(px_p);
+   g_free(px_e);
+   g_object_unref(p_export);
+   g_object_unref(p_preview);
+   g_object_unref(p_out);
+   g_remove(c_path);
+   g_rmdir(c_tmp);
+   g_free(c_path);
+   g_free(c_tmp);
+   g_object_unref(p_in);
+   enhancer_delete(p_e);
+}
+
+/* The crop is applied in UPRIGHT coordinates: rot6.jpg is stored 8x4 with
+ * Orientation 6 and loads as 4x8, so the lower half {0,4,4,4} exists only
+ * upright (on the stored 8x4 it would be entirely outside and skipped). The
+ * loader's orientation pass, not the transform, is what makes the crop mean
+ * what the user drew on the upright preview. */
+static void
+test_transform_crop_on_oriented_jpeg(void) {
+   const gchar *c_fx = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_fx);
+   char  *c_path = g_build_filename(c_fx, "rot6.jpg", NULL);
+   GFile *p_file = g_file_new_for_path(c_path);
+   g_free(c_path);
+   GError     *p_err = NULL;
+   GeglBuffer *p_in  = enhancer_load(p_file, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gegl_buffer_get_width(p_in), ==, 4);
+   g_assert_cmpint(gegl_buffer_get_height(p_in), ==, 8);
+   Enhancer        *p_e = enhancer_new();
+   const GPtrArray *p   = enhancer_get_presets(p_e);
+   Transform        t;
+   transform_init(&t);
+   t.b_crop          = TRUE;
+   t.t_crop          = (CropRect){0, 4, 4, 4};
+   GeglBuffer *p_out = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 4);
+   g_assert_cmpint(gegl_buffer_get_height(p_out), ==, 4);
+   /* And the pixels are the upright image's bottom half, not the stored
+    * image's: compare against the source buffer's rows 4..7. */
+   guint8        px_want[4 * 4 * 4], px_got[4 * 4 * 4];
+   GeglRectangle t_lower = {0, 4, 4, 4};
+   gegl_buffer_get(p_in, &t_lower, 1.0, babl_format("R'G'B'A u8"), px_want,
+                   4 * 4, GEGL_ABYSS_NONE);
+   gegl_buffer_get(p_out, gegl_buffer_get_extent(p_out), 1.0,
+                   babl_format("R'G'B'A u8"), px_got, 4 * 4, GEGL_ABYSS_NONE);
+   g_assert_cmpmem(px_got, sizeof(px_got), px_want, sizeof(px_want));
+   g_object_unref(p_out);
+   /* A quarter turn on top: the crop is in the TURNED image's coordinates
+    * (8 wide x 4 tall after `]`), so {0,0,8,2} is its top half. */
+   t.i_quarter = 1;
+   t.t_crop    = (CropRect){0, 0, 8, 2};
+   p_out       = enhancer_apply_chain(p_in, p, 0, &t, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpint(gegl_buffer_get_width(p_out), ==, 8);
+   g_assert_cmpint(gegl_buffer_get_height(p_out), ==, 2);
+   g_object_unref(p_out);
+   g_object_unref(p_in);
+   g_object_unref(p_file);
+   enhancer_delete(p_e);
 }
 
 typedef struct {
@@ -725,6 +1133,18 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer/export_reject_unsupported",
                    test_export_reject_unsupported);
    g_test_add_func("/enhancer/apply_chain", test_apply_chain);
+   g_test_add_func("/enhancer/transform_rotate_quarter",
+                   test_transform_rotate_quarter);
+   g_test_add_func("/enhancer/transform_crop", test_transform_crop);
+   g_test_add_func("/enhancer/transform_straighten_sizes",
+                   test_transform_straighten_sizes);
+   g_test_add_func("/enhancer/transform_export", test_transform_export);
+   g_test_add_func("/enhancer/straighten_autocrop_is_opaque",
+                   test_straighten_autocrop_is_opaque);
+   g_test_add_func("/enhancer/export_matches_preview",
+                   test_export_matches_preview);
+   g_test_add_func("/enhancer/transform_crop_on_oriented_jpeg",
+                   test_transform_crop_on_oriented_jpeg);
    g_test_add_func("/enhancer/preview_thumbnails", test_preview_thumbnails);
    g_test_add_func("/enhancer/preview_orientation", test_preview_orientation);
    g_test_add_func("/enhancer/user_graph_presets", test_user_graph_presets);

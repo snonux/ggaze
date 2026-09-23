@@ -130,6 +130,58 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_s, GDK_CONTROL_MASK, "win.enhance-save", "Save enhanced copy",
     "Enhance"},
    {GDK_KEY_space, 0, NULL, "Hold to compare with the original", "Enhance"},
+   /* Tools: crop / straighten / rotate 90 (GEGL; docs/ui-and-interactions.md
+    * "Crop, straighten & rotate tools"). The four actions are real
+    * bindings; the rows with a NULL action below are help-only, like
+    * hold-Space: a tool's keys are MODAL -- answered by the tool's own
+    * capture-phase controller while it is active and free otherwise (the
+    * crop tool's `h` is win.prev the moment it ends) -- so they cannot be
+    * bound here, but they belong in the one key legend all the same. */
+   {GDK_KEY_c, 0, "win.crop", "Crop tool (Enter applies, Esc cancels)",
+    "Tools"},
+   {GDK_KEY_R, GDK_SHIFT_MASK, "win.straighten",
+    "Straighten tool (Enter applies, Esc cancels)", "Tools"},
+   {GDK_KEY_bracketright, 0, "win.rotate-cw",
+    "Rotate 90\u00b0 clockwise (repeat for 180 / 270)", "Tools"},
+   {GDK_KEY_bracketleft, 0, "win.rotate-ccw",
+    "Rotate 90\u00b0 counter-clockwise", "Tools"},
+   {GDK_KEY_h, 0, NULL, "Crop: move the rectangle", "Tools"},
+   {GDK_KEY_l, 0, NULL, "Crop: move the rectangle", "Tools"},
+   {GDK_KEY_j, 0, NULL, "Crop: move the rectangle", "Tools"},
+   {GDK_KEY_k, 0, NULL, "Crop: move the rectangle", "Tools"},
+   {GDK_KEY_H, GDK_SHIFT_MASK, NULL,
+    "Crop: resize (move the right / bottom edge)", "Tools"},
+   {GDK_KEY_L, GDK_SHIFT_MASK, NULL,
+    "Crop: resize (move the right / bottom edge)", "Tools"},
+   {GDK_KEY_J, GDK_SHIFT_MASK, NULL,
+    "Crop: resize (move the right / bottom edge)", "Tools"},
+   {GDK_KEY_K, GDK_SHIFT_MASK, NULL,
+    "Crop: resize (move the right / bottom edge)", "Tools"},
+   {GDK_KEY_1, 0, NULL, "Crop: aspect 1:1 / 3:2 / 4:3 / 16:9, 0 free", "Tools"},
+   {GDK_KEY_2, 0, NULL, "Crop: aspect 1:1 / 3:2 / 4:3 / 16:9, 0 free", "Tools"},
+   {GDK_KEY_3, 0, NULL, "Crop: aspect 1:1 / 3:2 / 4:3 / 16:9, 0 free", "Tools"},
+   {GDK_KEY_4, 0, NULL, "Crop: aspect 1:1 / 3:2 / 4:3 / 16:9, 0 free", "Tools"},
+   {GDK_KEY_0, 0, NULL, "Crop: aspect 1:1 / 3:2 / 4:3 / 16:9, 0 free", "Tools"},
+   {GDK_KEY_h, 0, NULL,
+    "Straighten: nudge \u00bd\u00b0 (h / - counter-clockwise, l / + "
+    "clockwise)",
+    "Tools"},
+   {GDK_KEY_minus, 0, NULL,
+    "Straighten: nudge \u00bd\u00b0 (h / - counter-clockwise, l / + "
+    "clockwise)",
+    "Tools"},
+   {GDK_KEY_l, 0, NULL,
+    "Straighten: nudge \u00bd\u00b0 (h / - counter-clockwise, l / + "
+    "clockwise)",
+    "Tools"},
+   {GDK_KEY_plus, 0, NULL,
+    "Straighten: nudge \u00bd\u00b0 (h / - counter-clockwise, l / + "
+    "clockwise)",
+    "Tools"},
+   {GDK_KEY_A, GDK_SHIFT_MASK, NULL,
+    "Straighten: toggle auto-crop of the rotated corners", "Tools"},
+   {GDK_KEY_Return, 0, NULL, "Apply the tool", "Tools"},
+   {GDK_KEY_Escape, 0, NULL, "Cancel the tool", "Tools"},
    /* Zoom */
    {GDK_KEY_plus, 0, "win.zoom-in", "Zoom in (large) / bigger thumbnails",
     "Zoom"},
