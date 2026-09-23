@@ -25,6 +25,15 @@
  * Needs a display (a real GgazeWindow with a realized, allocated viewer),
  * hence the `integration` suite.
  *
+ * The /viewer/animation_* subtests (yb2) play tests/fixtures/anim.gif
+ * through the real pipeline and assert what the viewer contract promises:
+ * the frames advance on their own while the widget is mapped, the first
+ * frame stays THE texture (what the cache, the histogram and hold-Space
+ * compare against), zoom / pan / the overlay geometry are the canvas's,
+ * a still never animates, an unmapped viewer (the grid page) plays
+ * nothing and resumes on remap, and a 0 ms delay plays at the clamp
+ * instead of spinning the main loop.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -32,6 +41,8 @@
 #include "window.h"
 
 #include "ggaze-config.h"
+#include "loader/animation.h"
+#include "loader/loader.h"
 #include "viewer.h"
 
 #include <math.h>
@@ -382,6 +393,227 @@ test_overlay_removed_mid_drag_rebases_the_pan(void) {
    fx_close(&fx);
 }
 
+/* --- animation (yb2) ----------------------------------------------------- */
+
+/* A folder holding one copy of a committed fixture, opened in a presented
+ * window; waits for the texture and a real allocation like fx_open(). */
+static void
+fx_open_fixture(ViewerFx *p_fx, const char *c_fixture) {
+   GError *p_err = NULL;
+   p_fx->c_dir   = g_dir_make_tmp("ggaze-viewer-anim-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   const gchar *c_fx  = g_getenv("GGAZE_FIXTURES_DIR");
+   char        *c_src = g_build_filename(c_fx, c_fixture, NULL);
+   p_fx->c_img        = g_build_filename(p_fx->c_dir, c_fixture, NULL);
+   GFile *p_src       = g_file_new_for_path(c_src);
+   GFile *p_dst       = g_file_new_for_path(p_fx->c_img);
+   g_assert_true(g_file_copy(p_src, p_dst, G_FILE_COPY_OVERWRITE, NULL, NULL,
+                             NULL, &p_err));
+   g_assert_no_error(p_err);
+   g_object_unref(p_src);
+   g_free(c_src);
+
+   GgazeWindow *p_win = GGAZE_WINDOW(g_object_new(GGAZE_TYPE_WINDOW, NULL));
+   gtk_window_set_default_size(GTK_WINDOW(p_win), 600, 400);
+   gtk_window_present(GTK_WINDOW(p_win));
+   ggaze_window_open(p_win, p_dst);
+   p_fx->p_win    = p_win;
+   p_fx->p_viewer = viewer_of(p_win);
+   for (guint u = 0;
+        u < 3000 && (ggaze_viewer_get_texture(p_fx->p_viewer) == NULL ||
+                     gtk_widget_get_width(GTK_WIDGET(p_fx->p_viewer)) == 0);
+        u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_nonnull(ggaze_viewer_get_texture(p_fx->p_viewer));
+   g_assert_cmpint(gtk_widget_get_width(GTK_WIDGET(p_fx->p_viewer)), >, 0);
+   g_object_unref(p_dst);
+}
+
+/* The green channel of p_tex's top-left pixel. The animated fixtures'
+ * first frame is solid (0, 255, 0); every later frame is far below 200
+ * (tests/fixtures/gen.py ANIM_FRAME_RGB). gdk_texture_download() writes
+ * the whole texture as premultiplied BGRA; the fixtures are opaque. */
+static guint8
+green_of(GdkTexture *p_tex) {
+   gsize   u_stride = 4u * (gsize)gdk_texture_get_width(p_tex);
+   guint8 *p_px = g_malloc0(u_stride * (gsize)gdk_texture_get_height(p_tex));
+   gdk_texture_download(p_tex, p_px, u_stride);
+   guint8 u_g = p_px[1];
+   g_free(p_px);
+   return (u_g);
+}
+
+/* Pump until the frame on screen is not the first one (or 3 s). TRUE when
+ * it happened. */
+static gboolean
+wait_past_first_frame(GgazeViewer *p_v) {
+   for (guint u = 0; u < 3000; u++) {
+      GdkTexture *p_f = ggaze_viewer_get_frame(p_v);
+      if (p_f != NULL && p_f != ggaze_viewer_get_texture(p_v) &&
+          green_of(p_f) < 200) {
+         return (TRUE);
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   return (FALSE);
+}
+
+/* The core promise: the frames advance by themselves, and the texture the
+ * rest of the app sees stays the first frame, canvas-sized, throughout. */
+static void
+test_animation_plays_and_keeps_first_frame_texture(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "anim.gif");
+   GdkTexture *p_tex = ggaze_viewer_get_texture(fx.p_viewer);
+   g_assert_nonnull(animation_lookup(p_tex));
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 8);
+   g_assert_cmpuint(green_of(p_tex), >, 240);
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   g_assert_true(wait_past_first_frame(fx.p_viewer));
+   g_assert_true(ggaze_viewer_get_texture(fx.p_viewer) == p_tex);
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   /* And it keeps going: another frame after this one. */
+   GdkTexture *p_now =
+      (GdkTexture *)g_object_ref(ggaze_viewer_get_frame(fx.p_viewer));
+   for (guint u = 0; u < 3000 && ggaze_viewer_get_frame(fx.p_viewer) == p_now;
+        u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(ggaze_viewer_get_frame(fx.p_viewer) != p_now);
+   g_object_unref(p_now);
+   fx_close(&fx);
+}
+
+/* Zoom and pan act on the canvas (the first frame's size) and never stop
+ * the playback; the overlay hook sees the canvas geometry too. */
+static void
+overlay_draw_cb(GtkSnapshot *p_snap, const GgazeViewerGeom *p_geom,
+                gpointer p_data) {
+   (void)p_snap;
+   g_assert_cmpint(p_geom->i_img_w, ==, 8);
+   g_assert_cmpint(p_geom->i_img_h, ==, 6);
+   (*(guint *)p_data)++;
+}
+
+static void
+test_animation_survives_zoom_pan_and_overlay(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "anim.gif");
+   gdouble d_fit   = ggaze_viewer_get_scale(fx.p_viewer);
+   guint   u_draws = 0;
+   ggaze_viewer_set_overlay(fx.p_viewer, overlay_draw_cb, NULL, &u_draws);
+   ggaze_viewer_zoom_in(fx.p_viewer);
+   ggaze_viewer_pan(fx.p_viewer, -10.0, -5.0);
+   g_assert_true(wait_past_first_frame(fx.p_viewer));
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), >=, d_fit);
+   GgazeViewerGeom st_geom;
+   g_assert_true(ggaze_viewer_get_geometry(fx.p_viewer, &st_geom));
+   g_assert_cmpint(st_geom.i_img_w, ==, 8);
+   g_assert_cmpint(st_geom.i_img_h, ==, 6);
+   drain_main(150); /* a couple of frames drawn with the overlay up */
+   g_assert_cmpuint(u_draws, >=, 1);
+   ggaze_viewer_set_overlay(fx.p_viewer, NULL, NULL, NULL);
+   fx_close(&fx);
+}
+
+/* Static images are unchanged: nothing attached, nothing scheduled, and
+ * what is drawn IS the texture. */
+static void
+test_still_image_does_not_animate(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "plain.jpg");
+   g_assert_null(animation_lookup(ggaze_viewer_get_texture(fx.p_viewer)));
+   g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
+   drain_main(100);
+   g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
+   g_assert_true(ggaze_viewer_get_frame(fx.p_viewer) ==
+                 ggaze_viewer_get_texture(fx.p_viewer));
+   fx_close(&fx);
+}
+
+/* Pump until the viewer's mapped state is b_mapped (or 3 s): the window's
+ * stack crossfades its pages, so the large page stays mapped for the
+ * length of the transition after the grid was selected. */
+static void
+wait_mapped(GgazeViewer *p_v, gboolean b_mapped) {
+   for (guint u = 0;
+        u < 3000 && gtk_widget_get_mapped(GTK_WIDGET(p_v)) != b_mapped; u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(gtk_widget_get_mapped(GTK_WIDGET(p_v)) == b_mapped);
+}
+
+/* Frames are only produced while the viewer can be seen: the grid page
+ * over it stops the playback, and coming back restarts it. */
+static void
+test_animation_pauses_while_unmapped(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "anim.gif");
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   GtkStack *p_stack = ggaze_window_get_stack(fx.p_win);
+   gtk_stack_set_visible_child_name(p_stack, "grid");
+   wait_mapped(fx.p_viewer, FALSE);
+   g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
+   drain_main(50);
+   g_assert_false(ggaze_viewer_is_animating(fx.p_viewer));
+   gtk_stack_set_visible_child_name(p_stack, "large");
+   wait_mapped(fx.p_viewer, TRUE);
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   g_assert_true(wait_past_first_frame(fx.p_viewer));
+   fx_close(&fx);
+}
+
+/* A 0 ms frame delay plays at GGAZE_ANIM_MIN_DELAY_MS, not as fast as the
+ * main loop can spin: the frames still advance, and the loop stays
+ * responsive enough that a 100-iteration drain takes about its 100 ms. */
+static void
+test_zero_delay_plays_at_the_clamp(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "zerodelay.gif");
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   g_assert_true(wait_past_first_frame(fx.p_viewer));
+   gint64 i_start = g_get_monotonic_time();
+   drain_main(100);
+   g_assert_cmpint(g_get_monotonic_time() - i_start, <, 1000000);
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   fx_close(&fx);
+}
+
+/* Without a window nothing is mapped, so a set_texture with an animation
+ * attached schedules nothing and draws the first frame; clearing and
+ * disposing with an animation attached is safe. */
+static void
+test_unmapped_viewer_holds_first_frame(void) {
+   const gchar *c_fx   = g_getenv("GGAZE_FIXTURES_DIR");
+   char        *c_path = g_build_filename(c_fx, "anim.gif", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GError      *p_err  = NULL;
+   GdkTexture  *p_tex  = loader_load(p_file, NULL, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(animation_lookup(p_tex));
+
+   GtkWidget *p_v = ggaze_viewer_new();
+   g_object_ref_sink(p_v);
+   ggaze_viewer_set_texture(GGAZE_VIEWER(p_v), p_tex);
+   drain_main(60);
+   g_assert_false(ggaze_viewer_is_animating(GGAZE_VIEWER(p_v)));
+   g_assert_true(ggaze_viewer_get_frame(GGAZE_VIEWER(p_v)) == p_tex);
+   ggaze_viewer_set_texture(GGAZE_VIEWER(p_v), NULL);
+   g_assert_null(ggaze_viewer_get_frame(GGAZE_VIEWER(p_v)));
+   ggaze_viewer_set_texture(GGAZE_VIEWER(p_v), p_tex);
+   g_object_unref(p_v); /* disposed with the animation attached */
+
+   g_object_unref(p_tex);
+   g_object_unref(p_file);
+   g_free(c_path);
+}
+
 /* Negative: with no texture there is nothing to scale, and zoom/pan must be
  * safe no-ops rather than dividing by a zero-sized image. */
 static void
@@ -425,5 +657,17 @@ main(int i_argc, char **c_argv) {
                    test_overlay_removed_mid_drag_rebases_the_pan);
    g_test_add_func("/viewer/zoom_without_texture_is_safe",
                    test_zoom_without_texture_is_safe);
+   g_test_add_func("/viewer/animation_plays_and_keeps_first_frame_texture",
+                   test_animation_plays_and_keeps_first_frame_texture);
+   g_test_add_func("/viewer/animation_survives_zoom_pan_and_overlay",
+                   test_animation_survives_zoom_pan_and_overlay);
+   g_test_add_func("/viewer/still_image_does_not_animate",
+                   test_still_image_does_not_animate);
+   g_test_add_func("/viewer/animation_pauses_while_unmapped",
+                   test_animation_pauses_while_unmapped);
+   g_test_add_func("/viewer/zero_delay_plays_at_the_clamp",
+                   test_zero_delay_plays_at_the_clamp);
+   g_test_add_func("/viewer/unmapped_viewer_holds_first_frame",
+                   test_unmapped_viewer_holds_first_frame);
    return (g_test_run());
 }

@@ -55,6 +55,7 @@
 #include <unistd.h>
 
 #include "ggaze-config.h"
+#include "loader/animation.h"
 #include "loader/detect.h"
 #include "mem_file.h"
 #include "open_counter.h"
@@ -1480,6 +1481,209 @@ test_peek_dimensions_unknown_cases(void) {
    g_free(c_path);
 }
 
+/* --- animated GIF / WebP (yb2) ------------------------------------------- */
+
+/* The gdk-pixbuf animation API is deprecated since 2.44 (for glycin's);
+ * src/loader/pixbuf-util.c says why ggaze keeps using it. */
+G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+
+/* The top-left pixel of p_tex as straight RGB. gdk_texture_download()
+ * writes the WHOLE texture as premultiplied BGRA; the fixtures are
+ * opaque, so B G R _ is it. */
+static void
+texture_rgb0(GdkTexture *p_tex, guint8 *p_r, guint8 *p_g, guint8 *p_b) {
+   gsize   u_stride = 4u * (gsize)gdk_texture_get_width(p_tex);
+   guint8 *p_px = g_malloc0(u_stride * (gsize)gdk_texture_get_height(p_tex));
+   gdk_texture_download(p_tex, p_px, u_stride);
+   *p_b = p_px[0];
+   *p_g = p_px[1];
+   *p_r = p_px[2];
+   g_free(p_px);
+}
+
+/* The first frame of the animated fixtures is solid (0, 255, 0)
+ * (tests/fixtures/gen.py ANIM_FRAME_RGB[0]); every other frame's green is
+ * far below that. */
+static void
+assert_is_first_frame(GdkTexture *p_tex) {
+   guint8 u_r, u_g, u_b;
+   texture_rgb0(p_tex, &u_r, &u_g, &u_b);
+   g_assert_cmpuint(u_g, >, 240);
+   g_assert_cmpuint(u_r, <, 16);
+}
+
+/* A texture with the animation attached, whose frames really advance:
+ * the fixture's animation stepped 150 ms is no longer on its first
+ * frame. What the LOADER returns is the first frame, canvas-sized. */
+static void
+assert_fixture_animates(const char *c_name) {
+   GdkTexture *p_tex = load_fixture(c_name);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 8);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 6);
+   assert_is_first_frame(p_tex);
+   GdkPixbufAnimation *p_anim = animation_lookup(p_tex);
+   g_assert_nonnull(p_anim);
+   g_assert_false(gdk_pixbuf_animation_is_static_image(p_anim));
+
+   gint64   i_now = g_get_real_time();
+   GTimeVal st_t  = {i_now / G_USEC_PER_SEC, i_now % G_USEC_PER_SEC};
+   GdkPixbufAnimationIter *p_it = gdk_pixbuf_animation_get_iter(p_anim, &st_t);
+   g_assert_cmpint(
+      animation_frame_delay_ms(gdk_pixbuf_animation_iter_get_delay_time(p_it)),
+      >=, GGAZE_ANIM_MIN_DELAY_MS);
+   GdkTexture *p_f0 =
+      pixbuf_util_to_texture(gdk_pixbuf_animation_iter_get_pixbuf(p_it));
+   assert_is_first_frame(p_f0);
+   g_object_unref(p_f0);
+   /* Step until the frame changes (the delay is 100 ms; a 0 ms fixture
+    * reports whatever the decoder makes of that, so step by its delay). */
+   gboolean b_changed = FALSE;
+   for (guint u = 0; u < 20 && !b_changed; u++) {
+      gint i_delay = animation_frame_delay_ms(
+         gdk_pixbuf_animation_iter_get_delay_time(p_it));
+      g_time_val_add(&st_t, (glong)MAX(i_delay, 1) * 1000L + 5000L);
+      b_changed = gdk_pixbuf_animation_iter_advance(p_it, &st_t);
+   }
+   g_assert_true(b_changed);
+   GdkTexture *p_f1 =
+      pixbuf_util_to_texture(gdk_pixbuf_animation_iter_get_pixbuf(p_it));
+   guint8 u_r, u_g, u_b;
+   texture_rgb0(p_f1, &u_r, &u_g, &u_b);
+   g_assert_cmpuint(u_g, <, 230); /* not frame 0 any more */
+   g_object_unref(p_f1);
+   g_object_unref(p_it);
+   g_object_unref(p_tex);
+}
+
+static void
+test_animated_gif_attaches_animation(void) {
+   if (_pixbuf_module_usable("gif")) {
+      assert_fixture_animates("anim.gif");
+   }
+}
+
+/* Frame delays of 0 ms are clamped by the viewer (animation.h); the loader
+ * must still attach the animation rather than treat it as broken. */
+static void
+test_zero_delay_gif_attaches_animation(void) {
+   if (_pixbuf_module_usable("gif")) {
+      assert_fixture_animates("zerodelay.gif");
+   }
+}
+
+/* WebP is an optional module (skipped when absent, like everywhere in this
+ * suite); one that is present but decodes no frames -- an older
+ * webp-pixbuf-loader -- yields the still with nothing attached, which is
+ * the documented fallback, reported here as a skip rather than a failure
+ * because it is a property of the machine's gdk-pixbuf, not of ggaze. */
+static void
+test_animated_webp_attaches_animation(void) {
+   if (!_pixbuf_module_usable("webp")) {
+      return;
+   }
+   GdkTexture *p_tex = load_fixture("anim.webp");
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 8);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 6);
+   gboolean b_frames = (animation_lookup(p_tex) != NULL);
+   g_object_unref(p_tex);
+   if (!b_frames) {
+      g_test_skip("the webp gdk-pixbuf module here decodes no frames; the "
+                  "still is shown (documented fallback)");
+      return;
+   }
+   assert_fixture_animates("anim.webp");
+}
+
+/* A single-frame GIF is a still: nothing attached, the same texture the
+ * still path always made. */
+static void
+test_single_frame_gif_has_no_animation(void) {
+   if (!_pixbuf_module_usable("gif")) {
+      return;
+   }
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = load_bytes(TINY_GIF, sizeof(TINY_GIF), &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_tex);
+   g_assert_null(animation_lookup(p_tex));
+   g_object_unref(p_tex);
+}
+
+/* The decode gate still refuses a truncated animation exactly as it
+ * refuses any truncated file: a GIF/WebP shorter than its signature's
+ * minimum is INVALID_DATA before any decoder runs; one cut mid-frame
+ * (past the minimum) is left to the decoder, which must answer within
+ * the budget -- with the first frame or an error, never a hang. */
+static void
+test_truncated_animation_is_gated(void) {
+   const char *c_names[2] = {"anim.gif", "anim.webp"};
+   for (gsize u = 0; u < G_N_ELEMENTS(c_names); u++) {
+      const gchar *c_dir  = g_getenv("GGAZE_FIXTURES_DIR");
+      gchar       *c_path = g_build_filename(c_dir, c_names[u], NULL);
+      gchar       *c_buf  = NULL;
+      gsize        u_len  = 0;
+      g_assert_true(g_file_get_contents(c_path, &c_buf, &u_len, NULL));
+      g_free(c_path);
+      assert_unsupported((const guint8 *)c_buf, 12); /* under the minimum */
+      gint64      i_start = g_get_monotonic_time();
+      GError     *p_err   = NULL;
+      GdkTexture *p_tex = load_bytes((const guint8 *)c_buf, u_len / 2, &p_err);
+      g_assert_cmpfloat((g_get_monotonic_time() - i_start) / 1e6, <, 5.0);
+      if (p_tex != NULL) {
+         g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 8);
+         g_object_unref(p_tex);
+      } else {
+         g_assert_nonnull(p_err);
+      }
+      g_clear_error(&p_err);
+      g_free(c_buf);
+   }
+}
+
+/* The grid's thumbnail of an animation is its first frame (the scaled
+ * decode never sees the animation), at the canvas's aspect: the at-scale
+ * path fits a small picture UP to the requested box, so 8x6 comes back as
+ * 64x48. */
+static void
+test_scaled_animation_is_first_frame(void) {
+   if (!_pixbuf_module_usable("gif")) {
+      return;
+   }
+   const gchar *c_dir  = g_getenv("GGAZE_FIXTURES_DIR");
+   gchar       *c_path = g_build_filename(c_dir, "anim.gif", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GError      *p_err  = NULL;
+   GdkPixbuf   *p_pix  = loader_load_pixbuf_scaled(p_file, 64, NULL, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_nonnull(p_pix);
+   g_assert_cmpint(gdk_pixbuf_get_width(p_pix), ==, 64);
+   g_assert_cmpint(gdk_pixbuf_get_height(p_pix), ==, 48);
+   const guchar *p_px = gdk_pixbuf_get_pixels(p_pix);
+   g_assert_cmpuint(p_px[1], >, 240); /* G of (0, 255, 0) */
+   g_assert_cmpuint(p_px[0], <, 16);  /* R */
+   g_object_unref(p_pix);
+   g_object_unref(p_file);
+   g_free(c_path);
+}
+
+G_GNUC_END_IGNORE_DEPRECATIONS
+
+static void
+_add_animation_tests(void) {
+   g_test_add_func("/loader/pixbuf/animated_gif_attaches_animation",
+                   test_animated_gif_attaches_animation);
+   g_test_add_func("/loader/pixbuf/zero_delay_gif_attaches_animation",
+                   test_zero_delay_gif_attaches_animation);
+   g_test_add_func("/loader/pixbuf/animated_webp_attaches_animation",
+                   test_animated_webp_attaches_animation);
+   g_test_add_func("/loader/pixbuf/single_frame_gif_has_no_animation",
+                   test_single_frame_gif_has_no_animation);
+   g_test_add_func("/loader/pixbuf/truncated_animation_is_gated",
+                   test_truncated_animation_is_gated);
+   g_test_add_func("/loader/pixbuf/scaled_animation_is_first_frame",
+                   test_scaled_animation_is_first_frame);
+}
+
 /* Registration is split by theme so no function approaches the 50-line
  * mark (c-best-practices). */
 static void
@@ -1562,5 +1766,6 @@ main(int i_argc, char **c_argv) {
    _add_gate_tests();
    _add_peek_tests();
    _add_stream_tests();
+   _add_animation_tests();
    return (g_test_run());
 }
