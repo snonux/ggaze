@@ -23,9 +23,10 @@ G_BEGIN_DECLS
  * wording per state is info_format()'s; only an embedded profile carries a
  * name. */
 typedef enum {
-   GGAZE_ICC_NONE = 0,  /* no embedded profile: sRGB is assumed */
-   GGAZE_ICC_EMBEDDED,  /* a profile is embedded; c_colorspace names it */
-   GGAZE_ICC_UNREADABLE /* a profile is there but broken (or not one) */
+   GGAZE_ICC_NONE = 0,   /* no embedded profile: sRGB is assumed */
+   GGAZE_ICC_EMBEDDED,   /* a profile is embedded; c_colorspace names it */
+   GGAZE_ICC_UNREADABLE, /* a profile is there but broken (or not one) */
+   GGAZE_ICC_UNINSPECTED /* a format icc.c does not search (not PNG/JPEG) */
 } GgazeIccState;
 
 typedef struct {

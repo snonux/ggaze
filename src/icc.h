@@ -19,8 +19,8 @@
  * which tag the buffer's babl space from these same bytes (enhancer.c,
  * decision #45); without GEGL nothing is applied and the card says so.
  * Formats other than PNG and JPEG are not searched: JXL / AVIF / HEIF /
- * WebP files report no profile, which is exactly what the viewer assumes
- * of them (sRGB).
+ * WebP files report no profile, and icc_container_searched() lets the
+ * info card say "not read" for them instead of claiming sRGB.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -46,6 +46,14 @@ G_BEGIN_DECLS
  * GIO errors are I/O failures (NOT_FOUND, ...). The bytes are NOT
  * validated as a profile: see icc_is_profile(). */
 GBytes *icc_read_embedded(GFile *p_file, GError **p_err);
+
+/* TRUE iff p_file starts with a signature icc_read_embedded() searches (a
+ * JPEG SOI or the PNG signature), so a caller can tell "no profile in this
+ * PNG / JPEG" from "a format this module does not look into" -- the info
+ * card must not call a WebP / AVIF / HEIF / JXL sRGB just because it was
+ * not searched. FALSE for any other format, a shorter file, or a read
+ * failure. */
+gboolean icc_container_searched(GFile *p_file);
 
 /* The same walk over bytes already in memory (a whole file or its head;
  * the walk stops at the pixel data and never needs more). */

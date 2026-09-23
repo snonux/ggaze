@@ -167,7 +167,10 @@ info_exif_orientation(const char *c_path) {
  * (INVALID_DATA), or bytes that are not a profile at all, are reported as
  * unreadable rather than passed off as sRGB, so the card never claims a
  * colour space the file does not deliver; an I/O failure (the file vanished
- * mid-gather) reads as "none", like every other field here. */
+ * mid-gather) reads as "none", like every other field here. A format
+ * icc.c does not search (WebP, AVIF, HEIF, JXL) is "not inspected", not
+ * "none": it may well carry a profile, and the card must not call it sRGB
+ * on the strength of a search that never happened. */
 static void
 _fill_colorspace(GgazeInfo *p_info, GFile *p_file) {
    GError *p_err = NULL;
@@ -177,6 +180,9 @@ _fill_colorspace(GgazeInfo *p_info, GFile *p_file) {
          g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA)
             ? GGAZE_ICC_UNREADABLE
             : GGAZE_ICC_NONE;
+      if (p_err == NULL && !icc_container_searched(p_file)) {
+         p_info->e_icc = GGAZE_ICC_UNINSPECTED;
+      }
       g_clear_error(&p_err);
       return;
    }
@@ -245,6 +251,10 @@ _append_colorspace(GString *p_str, const GgazeInfo *p_info) {
       break;
    case GGAZE_ICC_UNREADABLE:
       g_string_append(p_str, "Color space: embedded ICC profile unreadable "
+                             "(shown as sRGB)\n");
+      break;
+   case GGAZE_ICC_UNINSPECTED:
+      g_string_append(p_str, "Color space: not read for this format "
                              "(shown as sRGB)\n");
       break;
    default:

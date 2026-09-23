@@ -25,6 +25,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "ggaze-config.h"
 #include "loader/detect.h"
 
 static GgazeInfo *
@@ -481,6 +482,13 @@ test_colorspace_embedded_profile(void) {
    g_assert_nonnull(g_strstr_len(
       c_fmt, -1, "Color space: ggaze swapped RGB (embedded ICC; "));
    g_assert_nonnull(g_strstr_len(c_fmt, -1, "6\u00d73"));
+   /* The note is the build's honest answer: a GEGL-less build (the minimal
+    * lane) manages nothing and must say so. */
+#if GGAZE_HAVE_GEGL
+   g_assert_nonnull(g_strstr_len(c_fmt, -1, "managed on enhance/export"));
+#else
+   g_assert_nonnull(g_strstr_len(c_fmt, -1, "not managed in this build"));
+#endif
    g_free(c_fmt);
    info_delete(p_png);
 
@@ -500,6 +508,21 @@ test_colorspace_assumed_srgb_without_profile(void) {
    g_assert_null(p_info->c_colorspace);
    char *c_fmt = info_format(p_info);
    g_assert_nonnull(g_strstr_len(c_fmt, -1, "Color space: sRGB (assumed"));
+   g_free(c_fmt);
+   info_delete(p_info);
+}
+
+/* A format icc.c does not search (tiny.avif) is "not read", never
+ * "sRGB (assumed)": the card must not vouch for a search it did not do. */
+static void
+test_colorspace_uninspected_format(void) {
+   GgazeInfo *p_info = info_from_fixture("tiny.avif");
+   g_assert_cmpint(p_info->e_icc, ==, GGAZE_ICC_UNINSPECTED);
+   g_assert_null(p_info->c_colorspace);
+   char *c_fmt = info_format(p_info);
+   g_assert_nonnull(
+      g_strstr_len(c_fmt, -1, "Color space: not read for this format"));
+   g_assert_null(g_strstr_len(c_fmt, -1, "sRGB (assumed"));
    g_free(c_fmt);
    info_delete(p_info);
 }
@@ -557,6 +580,8 @@ main(int i_argc, char **c_argv) {
                    test_colorspace_embedded_profile);
    g_test_add_func("/info/colorspace_assumed_srgb_without_profile",
                    test_colorspace_assumed_srgb_without_profile);
+   g_test_add_func("/info/colorspace_uninspected_format",
+                   test_colorspace_uninspected_format);
    g_test_add_func("/info/colorspace_unreadable_profile",
                    test_colorspace_unreadable_profile);
    g_test_add_func("/info/exif_orientation_alone", test_exif_orientation_alone);

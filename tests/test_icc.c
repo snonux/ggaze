@@ -102,6 +102,37 @@ test_missing_file_is_an_io_error(void) {
    g_object_unref(p_file);
 }
 
+/* icc_container_searched(): the PNG / JPEG signatures only. A format the
+ * walk never looks into (AVIF), a file too short for a signature and a
+ * missing file are all "not searched". */
+static void
+test_container_searched(void) {
+   const char *C_YES[] = {"swapped.png", "plain.jpg", "small.png"};
+   for (gsize u = 0; u < G_N_ELEMENTS(C_YES); u++) {
+      GFile *p_file = fixture(C_YES[u]);
+      g_assert_true(icc_container_searched(p_file));
+      g_object_unref(p_file);
+   }
+   GFile *p_avif = fixture("tiny.avif");
+   g_assert_false(icc_container_searched(p_avif));
+   g_object_unref(p_avif);
+
+   char *c_dir   = g_dir_make_tmp("ggaze-icc-XXXXXX", NULL);
+   char *c_short = g_build_filename(c_dir, "short.png", NULL);
+   g_assert_true(g_file_set_contents(c_short, "\x89PNG", 4, NULL));
+   GFile *p_short = g_file_new_for_path(c_short);
+   g_assert_false(icc_container_searched(p_short));
+   g_object_unref(p_short);
+   g_remove(c_short);
+   g_rmdir(c_dir);
+   g_free(c_short);
+   g_free(c_dir);
+
+   GFile *p_gone = g_file_new_for_path("/nonexistent/ggaze/x.png");
+   g_assert_false(icc_container_searched(p_gone));
+   g_object_unref(p_gone);
+}
+
 /* --- hand-built JPEG marker streams -------------------------------------- */
 
 /* Append one APP2 ICC_PROFILE segment (sequence u_seq of u_count) carrying
@@ -405,8 +436,8 @@ test_description_ascii_and_broken_tables(void) {
                "Foo");
 
    /* Count past the tag, an empty count, invalid UTF-8, an unknown type,
-    * a tag entry pointing past the data, an oversized tag table, a
-    * declared profile size beyond the bytes, no 'acsp'. */
+    * a tag entry pointing past the data (the header-level breakage is
+    * test_description_broken_headers'). */
    put_be32(c_tag + 8, 60);
    assert_desc(profile_with_desc(c_tag, sizeof(c_tag), 144, sizeof(c_tag)),
                NULL);
@@ -424,33 +455,35 @@ test_description_ascii_and_broken_tables(void) {
    assert_desc(profile_with_desc(c_tag, sizeof(c_tag), 144, 4000), NULL);
    assert_desc(profile_with_desc(c_tag, sizeof(c_tag), 4000, 4), NULL);
    assert_desc(profile_with_desc(c_tag, sizeof(c_tag), 144, 4), NULL);
+}
 
-   GBytes *p_many = profile_with_desc(c_tag, sizeof(c_tag), 144, 18);
-   guint8 *p_m    = g_memdup2(g_bytes_get_data(p_many, NULL), 144 + 18);
-   put_be32(p_m + 128, 1000);
-   g_bytes_unref(p_many);
-   assert_desc(g_bytes_new_take(p_m, 144 + 18), NULL);
+/* The valid 18-byte ASCII 'desc' profile with u_len bytes of p_patch
+ * written at offset u_at: one broken header or tag-table field per call. */
+static GBytes *
+patched_profile(gsize u_at, const void *p_patch, gsize u_len) {
+   guint8 c_tag[12 + 6];
+   memcpy(c_tag, "desc\0\0\0\0", 8);
+   put_be32(c_tag + 8, 6);
+   memcpy(c_tag + 12, "  Foo\0", 6);
+   GBytes *p_ok = profile_with_desc(c_tag, sizeof(c_tag), 144, 18);
+   guint8 *p_b  = g_memdup2(g_bytes_get_data(p_ok, NULL), 144 + 18);
+   g_bytes_unref(p_ok);
+   memcpy(p_b + u_at, p_patch, u_len);
+   return (g_bytes_new_take(p_b, 144 + 18));
+}
 
-   GBytes *p_size = profile_with_desc(c_tag, sizeof(c_tag), 144, 18);
-   guint8 *p_s    = g_memdup2(g_bytes_get_data(p_size, NULL), 144 + 18);
-   put_be32(p_s, 5000);
-   g_bytes_unref(p_size);
-   GBytes *p_big = g_bytes_new_take(p_s, 144 + 18);
+/* An oversized tag table, a declared profile size beyond the bytes, no
+ * 'acsp', and a tag table naming no 'desc' at all. */
+static void
+test_description_broken_headers(void) {
+   const guint8 C_COUNT[4] = {0, 0, 0x03, 0xE8}; /* 1000 tags */
+   assert_desc(patched_profile(128, C_COUNT, 4), NULL);
+   const guint8 C_SIZE[4] = {0, 0, 0x13, 0x88}; /* 5000 bytes */
+   GBytes      *p_big     = patched_profile(0, C_SIZE, 4);
    g_assert_false(icc_is_profile(p_big));
    assert_desc(p_big, NULL);
-
-   GBytes *p_sig = profile_with_desc(c_tag, sizeof(c_tag), 144, 18);
-   guint8 *p_g   = g_memdup2(g_bytes_get_data(p_sig, NULL), 144 + 18);
-   memcpy(p_g + 36, "nope", 4);
-   g_bytes_unref(p_sig);
-   assert_desc(g_bytes_new_take(p_g, 144 + 18), NULL);
-
-   /* A profile with a tag table naming no 'desc' at all. */
-   GBytes *p_no = profile_with_desc(c_tag, sizeof(c_tag), 144, 18);
-   guint8 *p_n  = g_memdup2(g_bytes_get_data(p_no, NULL), 144 + 18);
-   memcpy(p_n + 132, "cprt", 4);
-   g_bytes_unref(p_no);
-   assert_desc(g_bytes_new_take(p_n, 144 + 18), NULL);
+   assert_desc(patched_profile(36, "nope", 4), NULL);
+   assert_desc(patched_profile(132, "cprt", 4), NULL);
 }
 
 int
@@ -474,8 +507,11 @@ main(int argc, char **argv) {
                    test_png_iccp_that_does_not_inflate_is_invalid_data);
    g_test_add_func("/icc/png_without_iccp_and_foreign_bytes_have_no_profile",
                    test_png_without_iccp_and_foreign_bytes_have_no_profile);
+   g_test_add_func("/icc/container_searched", test_container_searched);
    g_test_add_func("/icc/description_mluc_prefers_english",
                    test_description_mluc_prefers_english);
+   g_test_add_func("/icc/description_broken_headers",
+                   test_description_broken_headers);
    g_test_add_func("/icc/description_ascii_and_broken_tables",
                    test_description_ascii_and_broken_tables);
    return (g_test_run());

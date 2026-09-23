@@ -16,42 +16,16 @@
 #include <glib.h>
 #include <string.h>
 
+#include "streamread.h"
+
 /* --- bounded stream reads -------------------------------------------------
  *
- * Three outcomes, because the walkers treat them differently: EOF before
- * the pixel data simply means "no profile found" (a truncated file is the
- * decoder's problem, not this module's), while an I/O error is reported.
- * Every function below takes a non-NULL p_err (the public entry points
- * substitute a local one), so a walker can test *p_err directly. */
-typedef enum {
-   RD_OK,
-   RD_EOF,
-   RD_ERR
-} ReadStatus;
-
-static ReadStatus
-_read_exact(GInputStream *p_in, guint8 *p_buf, gsize u_len, GError **p_err) {
-   gsize u_got = 0;
-   if (!g_input_stream_read_all(p_in, p_buf, u_len, &u_got, NULL, p_err)) {
-      return (RD_ERR);
-   }
-   return (u_got == u_len ? RD_OK : RD_EOF);
-}
-
-static ReadStatus
-_skip(GInputStream *p_in, gsize u_len, GError **p_err) {
-   while (u_len > 0) {
-      gssize i_n = g_input_stream_skip(p_in, u_len, NULL, p_err);
-      if (i_n < 0) {
-         return (RD_ERR);
-      }
-      if (i_n == 0) {
-         return (RD_EOF);
-      }
-      u_len -= (gsize)i_n;
-   }
-   return (RD_OK);
-}
+ * streamread.c's three outcomes, because the walkers treat them
+ * differently: EOF before the pixel data simply means "no profile found"
+ * (a truncated file is the decoder's problem, not this module's), while an
+ * I/O error is reported. Every function below takes a non-NULL p_err (the
+ * public entry points substitute a local one), so a walker can test *p_err
+ * directly. */
 
 /* A declared payload of u_len bytes as a new GBytes. The cap is checked
  * first so a lying length allocates nothing; a payload the file cannot
@@ -72,10 +46,10 @@ _read_payload(GInputStream *p_in, gsize u_len, GError **p_err) {
                   "icc: cannot allocate %" G_GSIZE_FORMAT " bytes", u_len);
       return (NULL);
    }
-   ReadStatus e_rd = _read_exact(p_in, p_buf, u_len, p_err);
-   if (e_rd != RD_OK) {
+   StreamReadStatus e_rd = streamread_exact(p_in, p_buf, u_len, p_err);
+   if (e_rd != STREAMREAD_OK) {
       g_free(p_buf);
-      if (e_rd == RD_EOF) {
+      if (e_rd == STREAMREAD_EOF) {
          g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                      "icc: embedded profile segment is truncated");
       }
@@ -154,7 +128,8 @@ static GBytes *
 _png_walk(GInputStream *p_in, GError **p_err) {
    for (;;) {
       guint8 c_hdr[8];
-      if (_read_exact(p_in, c_hdr, sizeof(c_hdr), p_err) != RD_OK) {
+      if (streamread_exact(p_in, c_hdr, sizeof(c_hdr), p_err) !=
+          STREAMREAD_OK) {
          return (NULL);
       }
       gsize u_len = _be32(c_hdr);
@@ -171,7 +146,8 @@ _png_walk(GInputStream *p_in, GError **p_err) {
          g_bytes_unref(p_chunk);
          return (p_icc);
       }
-      if (_skip(p_in, u_len + 4, p_err) != RD_OK) { /* data + CRC */
+      if (streamread_skip(p_in, u_len + 4, p_err) !=
+          STREAMREAD_OK) { /* data + CRC */
          return (NULL);
       }
    }
@@ -255,22 +231,22 @@ _jpeg_join_parts(IccParts *p_parts, GError **p_err) {
 
 /* The next marker code: an 0xFF prefix (0xFF fill bytes may repeat) then
  * the code. A byte that is not 0xFF where a marker must start is a broken
- * marker stream (RD_ERR with INVALID_DATA). */
-static ReadStatus
+ * marker stream (STREAMREAD_ERROR with INVALID_DATA). */
+static StreamReadStatus
 _jpeg_next_marker(GInputStream *p_in, guint8 *p_code, GError **p_err) {
-   guint8     u_byte;
-   ReadStatus e_rd = _read_exact(p_in, &u_byte, 1, p_err);
-   if (e_rd != RD_OK) {
+   guint8           u_byte;
+   StreamReadStatus e_rd = streamread_exact(p_in, &u_byte, 1, p_err);
+   if (e_rd != STREAMREAD_OK) {
       return (e_rd);
    }
    if (u_byte != 0xFF) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                   "icc: JPEG marker expected, found 0x%02x", u_byte);
-      return (RD_ERR);
+      return (STREAMREAD_ERROR);
    }
    do {
-      e_rd = _read_exact(p_in, &u_byte, 1, p_err);
-   } while (e_rd == RD_OK && u_byte == 0xFF);
+      e_rd = streamread_exact(p_in, &u_byte, 1, p_err);
+   } while (e_rd == STREAMREAD_OK && u_byte == 0xFF);
    *p_code = u_byte;
    return (e_rd);
 }
@@ -282,11 +258,11 @@ _jpeg_is_standalone(guint8 u_code) {
 }
 
 /* A segment's payload length (its 2-byte length field minus itself). */
-static ReadStatus
+static StreamReadStatus
 _jpeg_read_length(GInputStream *p_in, gsize *pu_payload, GError **p_err) {
-   guint8     c_len[2];
-   ReadStatus e_rd = _read_exact(p_in, c_len, 2, p_err);
-   if (e_rd != RD_OK) {
+   guint8           c_len[2];
+   StreamReadStatus e_rd = streamread_exact(p_in, c_len, 2, p_err);
+   if (e_rd != STREAMREAD_OK) {
       return (e_rd);
    }
    gsize u_len = ((gsize)c_len[0] << 8) | c_len[1];
@@ -294,10 +270,10 @@ _jpeg_read_length(GInputStream *p_in, gsize *pu_payload, GError **p_err) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                   "icc: JPEG segment length %" G_GSIZE_FORMAT " is invalid",
                   u_len);
-      return (RD_ERR);
+      return (STREAMREAD_ERROR);
    }
    *pu_payload = u_len - 2;
-   return (RD_OK);
+   return (STREAMREAD_OK);
 }
 
 /* Read an APP2 payload and slot it when it is an ICC_PROFILE segment; any
@@ -324,19 +300,19 @@ _jpeg_walk(GInputStream *p_in, GError **p_err) {
    IccParts t_parts = {g_ptr_array_new_with_free_func(_bytes_free), 0};
    for (;;) {
       guint8 u_code = 0;
-      if (_jpeg_next_marker(p_in, &u_code, p_err) != RD_OK || u_code == 0xDA ||
-          u_code == 0xD9) {
+      if (_jpeg_next_marker(p_in, &u_code, p_err) != STREAMREAD_OK ||
+          u_code == 0xDA || u_code == 0xD9) {
          break;
       }
       if (_jpeg_is_standalone(u_code)) {
          continue;
       }
       gsize u_payload = 0;
-      if (_jpeg_read_length(p_in, &u_payload, p_err) != RD_OK) {
+      if (_jpeg_read_length(p_in, &u_payload, p_err) != STREAMREAD_OK) {
          break;
       }
       if (u_code != 0xE2) {
-         if (_skip(p_in, u_payload, p_err) != RD_OK) {
+         if (streamread_skip(p_in, u_payload, p_err) != STREAMREAD_OK) {
             break;
          }
          continue;
@@ -358,13 +334,13 @@ _jpeg_walk(GInputStream *p_in, GError **p_err) {
 static GBytes *
 _walk_stream(GInputStream *p_in, GError **p_err) {
    guint8 c_head[8];
-   if (_read_exact(p_in, c_head, 2, p_err) != RD_OK) {
+   if (streamread_exact(p_in, c_head, 2, p_err) != STREAMREAD_OK) {
       return (NULL);
    }
    if (c_head[0] == 0xFF && c_head[1] == 0xD8) {
       return (_jpeg_walk(p_in, p_err));
    }
-   if (_read_exact(p_in, c_head + 2, 6, p_err) != RD_OK) {
+   if (streamread_exact(p_in, c_head + 2, 6, p_err) != STREAMREAD_OK) {
       return (NULL);
    }
    if (memcmp(c_head, "\x89PNG\r\n\x1a\n", 8) == 0) {
@@ -388,6 +364,25 @@ icc_read_embedded(GFile *p_file, GError **p_err) {
       g_propagate_error(p_err, p_local);
    }
    return (p_icc);
+}
+
+gboolean
+icc_container_searched(GFile *p_file) {
+   g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
+   GFileInputStream *p_in = g_file_read(p_file, NULL, NULL);
+   if (p_in == NULL) {
+      return (FALSE);
+   }
+   /* The same signatures _walk_stream() dispatches on; a read failure or
+    * a file shorter than a signature is simply "not searched". */
+   guint8 c_head[8];
+   gsize  u_got = 0;
+   g_input_stream_read_all(G_INPUT_STREAM(p_in), c_head, sizeof(c_head), &u_got,
+                           NULL, NULL);
+   g_input_stream_close(G_INPUT_STREAM(p_in), NULL, NULL);
+   g_object_unref(p_in);
+   return ((u_got >= 2 && c_head[0] == 0xFF && c_head[1] == 0xD8) ||
+           (u_got == 8 && memcmp(c_head, "\x89PNG\r\n\x1a\n", 8) == 0));
 }
 
 GBytes *
