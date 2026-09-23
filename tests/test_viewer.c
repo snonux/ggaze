@@ -42,7 +42,10 @@
  * with the same pixels after frames played, a still never animates (nor
  * does one set after an animation), an unmapped viewer (the grid page)
  * plays nothing and resumes on remap, a tool's hold keeps the first frame
- * up, and a 0 ms delay plays at the clamp instead of spinning.
+ * up, a 10 ms delay plays at the 20 ms clamp instead of spinning, a file
+ * that plays once (GIF without a loop extension, WebP ANIM count 1) ends
+ * on its last frame, and a slow animation keeps the frame clock ticking
+ * only near its frame changes (ggaze_viewer_get_tick_count).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -74,8 +77,8 @@
 #define PLAIN_JPG_W 6
 #define PLAIN_JPG_H 3
 
-/* tests/fixtures/anim.gif and zerodelay.gif: the canvas (and so the first
- * frame's size) of the animated fixtures (tests/fixtures/gen.py). */
+/* The canvas (and so the first frame's size) of every animated fixture
+ * (tests/fixtures/gen.py). */
 #define ANIM_W 8
 #define ANIM_H 6
 
@@ -594,18 +597,20 @@ test_animation_pauses_while_unmapped(void) {
    fx_close(&fx);
 }
 
-/* A 0 ms frame delay plays at GGAZE_ANIM_MIN_DELAY_MS, not as fast as the
- * frame clock ticks: over a one-second window the frame on screen changes
- * at most W / 20 ms + 2 times -- the dues are at least the clamp apart,
- * plus one for the fencepost and one for a first change whose due fell
- * up to a tick before the window opened. Anything spinning (a change per
- * tick is ~60 in that second, per main-loop turn hundreds) fails; the
- * frames must also keep changing (at least one change), or "no spin"
- * would be satisfied by not playing at all. */
+/* A 10 ms frame delay (fastdelay.gif; glycin hands it over as 10 ms,
+ * gdk-pixbuf 2.42 raises it to 20 itself) plays at GGAZE_ANIM_MIN_DELAY_MS,
+ * not as fast as the frame clock ticks: over a one-second window the
+ * frame on screen changes at most W / 20 ms + 2 times -- the dues are at
+ * least the clamp apart, plus one for the fencepost and one for a first
+ * change whose due fell up to a tick before the window opened. Anything
+ * spinning (a change per tick is ~60 in that second, per main-loop turn
+ * hundreds) fails; the frames must also keep changing (at least one
+ * change), or "no spin" would be satisfied by not playing at all. (A
+ * 0 ms delay is no test of the clamp: the decoders make it 100 ms.) */
 static void
-test_zero_delay_plays_at_the_clamp(void) {
+test_fast_delay_plays_at_the_clamp(void) {
    ViewerFx fx;
-   fx_open_fixture(&fx, "zerodelay.gif", ANIM_W, ANIM_H);
+   fx_open_fixture(&fx, "fastdelay.gif", ANIM_W, ANIM_H);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
    g_assert_true(wait_past_first_frame(fx.p_viewer));
    guint       u_changes = 0;
@@ -624,6 +629,86 @@ test_zero_delay_plays_at_the_clamp(void) {
    g_assert_cmpuint(u_changes, >=, 1);
    g_assert_cmpuint(u_changes, <=,
                     (guint)(i_window_ms / GGAZE_ANIM_MIN_DELAY_MS) + 2u);
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   fx_close(&fx);
+}
+
+/* Pump until nothing is scheduled any more (or 3 s). TRUE when it
+ * happened. */
+static gboolean
+wait_animation_ends(GgazeViewer *p_v) {
+   for (guint u = 0; u < 3000 && ggaze_viewer_is_animating(p_v); u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   return (!ggaze_viewer_is_animating(p_v));
+}
+
+/* A file that plays once -- c_fixture: four 100 ms frames -- ends on its
+ * LAST frame (green 75, tests/fixtures/gen.py) after ~400 ms and stays
+ * there with nothing scheduled, the texture still the first frame
+ * (review finding 1 of yb2: a GIF without a loop extension used to loop
+ * for ever). A remap would play it once more (viewer.c). */
+static void
+assert_plays_once(ViewerFx *p_fx) {
+   GdkTexture *p_tex = ggaze_viewer_get_texture(p_fx->p_viewer);
+   g_assert_cmpuint(animation_get_plays(animation_lookup(p_tex)), ==, 1);
+   g_assert_true(wait_animation_ends(p_fx->p_viewer));
+   GdkTexture *p_last = ggaze_viewer_get_frame(p_fx->p_viewer);
+   g_assert_true(p_last == animation_get_frame(animation_lookup(p_tex), 3));
+   g_assert_cmpuint(ABS((gint)green_of(p_last) - 75), <=, 2);
+   ggtest_drain_main(300); /* three more frame periods: nothing moves */
+   g_assert_false(ggaze_viewer_is_animating(p_fx->p_viewer));
+   g_assert_true(ggaze_viewer_get_frame(p_fx->p_viewer) == p_last);
+   g_assert_true(ggaze_viewer_get_texture(p_fx->p_viewer) == p_tex);
+}
+
+static void
+test_play_once_gif_holds_last_frame(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "once.gif", ANIM_W, ANIM_H);
+   assert_plays_once(&fx);
+   fx_close(&fx);
+}
+
+/* The same through a WebP's ANIM count of 1, where the machine's webp
+ * module decodes frames (optional, like everywhere in the suites). */
+static void
+test_play_once_webp_holds_last_frame(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "once.webp", ANIM_W, ANIM_H);
+   if (animation_lookup(ggaze_viewer_get_texture(fx.p_viewer)) == NULL) {
+      g_test_skip("no frame-capable webp gdk-pixbuf module here");
+   } else {
+      assert_plays_once(&fx);
+   }
+   fx_close(&fx);
+}
+
+/* Between the frames of a slow animation (slow.gif: 500 ms) the tick
+ * callback is off the frame clock (review finding 4 of yb2: a tick
+ * callback makes GDK draw every vblank). Over a window of W ms at most
+ * W / 500 + 2 frames fall due, and each keeps the tick for at most the
+ * GGAZE_ANIM_TICK_LEAD_MS of 40 ms before it plus the due tick: a handful
+ * of ticks per frame even on a 120 Hz clock, so the bound below is eight
+ * per frame -- where a tick on every vblank of a 60 Hz clock would be
+ * about 60 per second. At least one frame must change in the window, so
+ * "few ticks" cannot be satisfied by not playing. */
+static void
+test_slow_animation_ticks_only_near_frames(void) {
+   ViewerFx fx;
+   fx_open_fixture(&fx, "slow.gif", ANIM_W, ANIM_H);
+   g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
+   guint       u_ticks0 = ggaze_viewer_get_tick_count(fx.p_viewer);
+   GdkTexture *p_first  = ggaze_viewer_get_frame(fx.p_viewer);
+   gint64      i_start  = g_get_monotonic_time();
+   ggtest_drain_main(1200);
+   gint64 i_window_ms = (g_get_monotonic_time() - i_start) / 1000;
+   guint  u_ticks     = ggaze_viewer_get_tick_count(fx.p_viewer) - u_ticks0;
+   g_test_message("%u ticks in %" G_GINT64_FORMAT " ms", u_ticks, i_window_ms);
+   g_assert_true(ggaze_viewer_get_frame(fx.p_viewer) != p_first);
+   g_assert_cmpuint(u_ticks, >=, 1);
+   g_assert_cmpuint(u_ticks, <=, ((guint)(i_window_ms / 500) + 2u) * 8u);
    g_assert_true(ggaze_viewer_is_animating(fx.p_viewer));
    fx_close(&fx);
 }
@@ -719,6 +804,34 @@ test_zoom_without_texture_is_safe(void) {
    g_object_unref(p_v);
 }
 
+/* The yb2 animation subtests, registered apart so main() stays short
+ * (c-best-practices). */
+static void
+_add_animation_tests(void) {
+   g_test_add_func("/viewer/animation_plays_and_keeps_first_frame_texture",
+                   test_animation_plays_and_keeps_first_frame_texture);
+   g_test_add_func("/viewer/animation_survives_zoom_pan_and_overlay",
+                   test_animation_survives_zoom_pan_and_overlay);
+   g_test_add_func("/viewer/still_image_does_not_animate",
+                   test_still_image_does_not_animate);
+   g_test_add_func("/viewer/animation_pauses_while_unmapped",
+                   test_animation_pauses_while_unmapped);
+   g_test_add_func("/viewer/fast_delay_plays_at_the_clamp",
+                   test_fast_delay_plays_at_the_clamp);
+   g_test_add_func("/viewer/play_once_gif_holds_last_frame",
+                   test_play_once_gif_holds_last_frame);
+   g_test_add_func("/viewer/play_once_webp_holds_last_frame",
+                   test_play_once_webp_holds_last_frame);
+   g_test_add_func("/viewer/slow_animation_ticks_only_near_frames",
+                   test_slow_animation_ticks_only_near_frames);
+   g_test_add_func("/viewer/still_after_animation_stops_playback",
+                   test_still_after_animation_stops_playback);
+   g_test_add_func("/viewer/hold_first_frame_pauses_and_resumes",
+                   test_hold_first_frame_pauses_and_resumes);
+   g_test_add_func("/viewer/unmapped_viewer_holds_first_frame",
+                   test_unmapped_viewer_holds_first_frame);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -748,21 +861,6 @@ main(int i_argc, char **c_argv) {
                    test_overlay_removed_mid_drag_rebases_the_pan);
    g_test_add_func("/viewer/zoom_without_texture_is_safe",
                    test_zoom_without_texture_is_safe);
-   g_test_add_func("/viewer/animation_plays_and_keeps_first_frame_texture",
-                   test_animation_plays_and_keeps_first_frame_texture);
-   g_test_add_func("/viewer/animation_survives_zoom_pan_and_overlay",
-                   test_animation_survives_zoom_pan_and_overlay);
-   g_test_add_func("/viewer/still_image_does_not_animate",
-                   test_still_image_does_not_animate);
-   g_test_add_func("/viewer/animation_pauses_while_unmapped",
-                   test_animation_pauses_while_unmapped);
-   g_test_add_func("/viewer/zero_delay_plays_at_the_clamp",
-                   test_zero_delay_plays_at_the_clamp);
-   g_test_add_func("/viewer/still_after_animation_stops_playback",
-                   test_still_after_animation_stops_playback);
-   g_test_add_func("/viewer/hold_first_frame_pauses_and_resumes",
-                   test_hold_first_frame_pauses_and_resumes);
-   g_test_add_func("/viewer/unmapped_viewer_holds_first_frame",
-                   test_unmapped_viewer_holds_first_frame);
+   _add_animation_tests();
    return (g_test_run());
 }

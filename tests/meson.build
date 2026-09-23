@@ -169,6 +169,21 @@ test_animation = executable(
 test('animation', test_animation, suite : 'unit', env : fixtures_env,
    protocol : 'tap')
 
+# animation_playback (yb2 review): the playback schedule -- anchor, due
+# times, average rate, stall resync, the file's play count, hold-for-ever
+# frames -- over a fake clock. Plain C; GDK only to make stand-in frame
+# textures, no display.
+test_animation_playback = executable(
+   'test_animation_playback',
+   ['test_animation_playback.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [gtk4_dep, glib_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('animation_playback', test_animation_playback, suite : 'unit',
+   protocol : 'tap')
+
 test_loader_pixbuf = executable(
    'test_loader_pixbuf',
    ['test_loader_pixbuf.c', ggaze_conf_h],

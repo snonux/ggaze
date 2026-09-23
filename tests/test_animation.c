@@ -6,15 +6,20 @@
  * hand-built containers (a local colour table, an extension cut short, a
  * VP8X flag with no frames, a chunk size past the end) and over EVERY
  * prefix of the animated fixtures (a truncated file must never crash the
- * walk and must count monotonically); the pixel budget at its boundary;
- * the playback budget at each of its boundaries (pixels, frame count,
- * canvas); the frame-delay clamp; the frame store and the texture <->
- * animation channel, including that the frames die with their first
+ * walk and must count monotonically); the loop count (NETSCAPE2.0 /
+ * ANIMEXTS1.0 in a GIF, the ANIM chunk in a WebP, the play-once default,
+ * cut and foreign extensions); the playback budget at each of its
+ * boundaries (pixels, frame count, canvas) and a real file one frame over
+ * the frame cap; the frame-delay clamp; the frame store and the texture
+ * <-> animation channel, including that the frames die with their first
  * frame. pixbuf_util's animation decode and its frame walk
  * (pixbuf_util_animation_to_texture: every frame its own texture, the
  * first one intact after the rest were taken, the count, a cancel, a
- * static decode, clamped zero delays) are covered here too, since this
- * suite is where their callers' expectations are pinned.
+ * static decode, 0 ms delays arriving as 100 ms, 10 ms ones clamped to
+ * 20, the play count carried, a sub-2 ms first frame) are covered here
+ * too, since this suite is where their callers' expectations are pinned.
+ * The playback schedule has a suite of its own
+ * (test_animation_playback.c).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -333,6 +338,122 @@ test_probe_webp_bad_sizes(void) {
    g_byte_array_unref(p_w);
 }
 
+/* --- probe: loop count --------------------------------------------------- */
+
+/* The play count of a fixture: anim.gif / slow.gif carry NETSCAPE2.0 with
+ * a count of 0 (for ever), once.gif none at all (plays once, the GIF89a
+ * default), anim.webp an ANIM count of 0, once.webp of 1. */
+static void
+assert_fixture_plays(const char *c_name, guint u_plays) {
+   gsize          u_len = 0;
+   guint8        *p_buf = read_fixture(c_name, &u_len);
+   GgazeAnimProbe st_p;
+   g_assert_true(animation_probe(p_buf, u_len, &st_p));
+   g_assert_cmpuint(st_p.u_plays, ==, u_plays);
+   g_free(p_buf);
+}
+
+static void
+test_probe_fixture_plays(void) {
+   assert_fixture_plays("anim.gif", 0);
+   assert_fixture_plays("slow.gif", 0);
+   assert_fixture_plays("once.gif", 1);
+   assert_fixture_plays("anim.webp", 0);
+   assert_fixture_plays("once.webp", 1);
+}
+
+/* An application extension: 0x21 0xFF, the 11-byte identifier c_id, a
+ * 3-byte sub-block 0x01 + little-endian u_count, the terminator. */
+static void
+gif_append_app_ext(GByteArray *p_gif, const char *c_id, guint u_count) {
+   const guint8 u_head[3] = {0x21, 0xFF, 11};
+   const guint8 u_tail[5] = {3, 0x01, (guint8)(u_count & 0xFF),
+                             (guint8)(u_count >> 8), 0};
+   g_byte_array_append(p_gif, u_head, sizeof(u_head));
+   g_byte_array_append(p_gif, (const guint8 *)c_id, 11);
+   g_byte_array_append(p_gif, u_tail, sizeof(u_tail));
+}
+
+/* Two frames after whatever extensions the caller added. */
+static guint
+gif_plays(GByteArray *p_gif) {
+   gif_append_frame(p_gif, FALSE);
+   gif_append_frame(p_gif, FALSE);
+   GgazeAnimProbe st_p;
+   g_assert_true(animation_probe(p_gif->data, p_gif->len, &st_p));
+   g_assert_cmpuint(st_p.u_frames, ==, 2);
+   g_byte_array_unref(p_gif);
+   return (st_p.u_plays);
+}
+
+/* A NETSCAPE2.0 (or ANIMEXTS1.0) count of N is N repetitions after the
+ * first play, so N + 1 plays; 0 is for ever. Only the first loop
+ * extension counts; any other application extension (XMP here) is
+ * skipped, and a loop extension cut short is not read (plays once). */
+static void
+test_probe_gif_loop_count(void) {
+   GByteArray *p_gif = gif_header();
+   gif_append_app_ext(p_gif, "NETSCAPE2.0", 2);
+   g_assert_cmpuint(gif_plays(p_gif), ==, 3);
+   p_gif = gif_header();
+   gif_append_app_ext(p_gif, "ANIMEXTS1.0", 0);
+   g_assert_cmpuint(gif_plays(p_gif), ==, 0);
+   p_gif = gif_header();
+   gif_append_app_ext(p_gif, "NETSCAPE2.0", 65535);
+   g_assert_cmpuint(gif_plays(p_gif), ==, 65536);
+   p_gif = gif_header();
+   gif_append_app_ext(p_gif, "NETSCAPE2.0", 1);
+   gif_append_app_ext(p_gif, "NETSCAPE2.0", 0); /* ignored */
+   g_assert_cmpuint(gif_plays(p_gif), ==, 2);
+   p_gif = gif_header();
+   gif_append_app_ext(p_gif, "XMP DataXMP", 0);
+   g_assert_cmpuint(gif_plays(p_gif), ==, 1);
+
+   p_gif = gif_header();
+   gif_append_app_ext(p_gif, "NETSCAPE2.0", 0);
+   g_byte_array_set_size(p_gif, p_gif->len - 3); /* cut in the count */
+   GgazeAnimProbe st_p;
+   g_assert_false(animation_probe(p_gif->data, p_gif->len, &st_p));
+   g_assert_cmpuint(st_p.u_plays, ==, 1);
+   g_byte_array_unref(p_gif);
+}
+
+/* The WebP ANIM chunk's count is plays in all as is (0 for ever); an ANIM
+ * chunk cut inside its payload ends the walk unread. */
+static void
+test_probe_webp_loop_count(void) {
+   const guint8 u_anim[14] = {'A', 'N', 'I', 'M', 6, 0, 0, 0, 0, 0, 0, 0, 3, 0};
+   GByteArray  *p_w        = webp_container(0x02, 0);
+   g_byte_array_append(p_w, u_anim, sizeof(u_anim));
+   const guint8 u_anmf[16] = {'A', 'N', 'M', 'F', 0, 0, 0, 0,
+                              'A', 'N', 'M', 'F', 0, 0, 0, 0};
+   g_byte_array_append(p_w, u_anmf, sizeof(u_anmf));
+   GgazeAnimProbe st_p;
+   g_assert_true(animation_probe(p_w->data, p_w->len, &st_p));
+   g_assert_cmpuint(st_p.u_plays, ==, 3);
+   g_assert_cmpuint(st_p.u_frames, ==, 2);
+   g_byte_array_unref(p_w);
+
+   p_w = webp_container(0x02, 0);
+   g_byte_array_append(p_w, u_anim, 12); /* 2 bytes short */
+   g_assert_false(animation_probe(p_w->data, p_w->len, &st_p));
+   g_assert_cmpuint(st_p.u_plays, ==, 0);
+   g_byte_array_unref(p_w);
+}
+
+/* One frame over GGAZE_ANIM_MAX_FRAMES, probed in full and refused by the
+ * budget: the file the loader shows as a still (test_loader_pixbuf). */
+static void
+test_probe_manyframes_over_budget(void) {
+   gsize          u_len = 0;
+   guint8        *p_buf = read_fixture("manyframes.gif", &u_len);
+   GgazeAnimProbe st_p;
+   g_assert_true(animation_probe(p_buf, u_len, &st_p));
+   g_assert_cmpuint(st_p.u_frames, ==, GGAZE_ANIM_MAX_FRAMES + 1);
+   g_assert_false(animation_within_budget(&st_p));
+   g_free(p_buf);
+}
+
 /* --- budget, delay ------------------------------------------------------- */
 
 static void
@@ -387,12 +508,15 @@ test_within_budget_frame_cap(void) {
    st_p = (GgazeAnimProbe){200000, 1, 1, 0};
    g_assert_false(animation_within_budget(&st_p));
    /* At the cap the pixel budget still applies: 1000 frames of 33554
-    * pixels are under 32 Mi pixels, of 33555 over. */
-   st_p = (GgazeAnimProbe){GGAZE_ANIM_MAX_FRAMES, 33554, 1, 0};
+    * pixels (16777 x 2) are under 32 Mi pixels, of 33555 (11185 x 3)
+    * over -- both canvases well inside the side and canvas caps. */
    g_assert_cmpuint((guint64)GGAZE_ANIM_MAX_FRAMES * 33554, <=,
                     GGAZE_ANIM_MAX_PIXELS);
+   g_assert_cmpuint((guint64)GGAZE_ANIM_MAX_FRAMES * 33555, >,
+                    GGAZE_ANIM_MAX_PIXELS);
+   st_p = (GgazeAnimProbe){GGAZE_ANIM_MAX_FRAMES, 16777, 2, 0};
    g_assert_true(animation_within_budget(&st_p));
-   st_p = (GgazeAnimProbe){GGAZE_ANIM_MAX_FRAMES, 33555, 1, 0};
+   st_p = (GgazeAnimProbe){GGAZE_ANIM_MAX_FRAMES, 11185, 3, 0};
    g_assert_false(animation_within_budget(&st_p));
 }
 
@@ -566,7 +690,7 @@ test_to_texture_takes_every_frame(void) {
    static const guint8 u_green[4] = {255, 195, 135, 75};
    GdkPixbufAnimation *p_pa       = decode_fixture_animation("anim.gif");
    GError             *p_err      = NULL;
-   GdkTexture *p_tex = to_texture(p_pa, 4, NULL, &p_err);
+   GdkTexture         *p_tex      = to_texture(p_pa, 4, NULL, &p_err);
    g_assert_no_error(p_err);
    g_object_unref(p_pa);
    const GgazeAnimation *p_anim = animation_lookup(p_tex);
@@ -589,8 +713,8 @@ test_to_texture_takes_every_frame(void) {
  * a still (nothing attached): there is nothing to play. */
 static void
 test_to_texture_frame_count(void) {
-   GdkPixbufAnimation *p_pa = decode_fixture_animation("anim.gif");
-   GdkTexture *p_tex = to_texture(p_pa, 2, NULL, NULL);
+   GdkPixbufAnimation *p_pa  = decode_fixture_animation("anim.gif");
+   GdkTexture         *p_tex = to_texture(p_pa, 2, NULL, NULL);
    g_assert_cmpuint(animation_get_n_frames(animation_lookup(p_tex)), ==, 2);
    g_object_unref(p_tex);
    p_tex = to_texture(p_pa, 1, NULL, NULL);
@@ -609,8 +733,7 @@ test_to_texture_cancelled(void) {
    GCancellable       *p_cancel = g_cancellable_new();
    g_cancellable_cancel(p_cancel);
    GError     *p_err = NULL;
-   GdkTexture *p_tex =
-      to_texture(p_pa, 4, p_cancel, &p_err);
+   GdkTexture *p_tex = to_texture(p_pa, 4, p_cancel, &p_err);
    g_assert_null(p_tex);
    g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED);
    g_clear_error(&p_err);
@@ -623,7 +746,7 @@ test_to_texture_cancelled(void) {
  * four frames at 100 ms: both decoders (gdk-pixbuf 2.42's io-gif.c and
  * the glycin bridge of 2.44, measured) turn a 0 ms GIF delay into 100 ms
  * before ggaze sees it, so it never reaches ggaze's own clamp (which
- * /animation/playback/clamped_fast_frames covers). */
+ * /animation/to_texture_fast_delay_clamped covers). */
 static void
 test_to_texture_static_and_zero_delay(void) {
    GError             *p_err = NULL;
@@ -651,13 +774,100 @@ test_to_texture_static_and_zero_delay(void) {
    g_object_unref(p_pa);
 }
 
+/* The clamp on a delay that really reaches it: fastdelay.gif's frames
+ * are 10 ms. Glycin hands 10 over as is (measured on Fedora 44), so the
+ * 20 ms stored is ggaze's own clamp at work; gdk-pixbuf 2.42's GIF loader
+ * raises it to 20 itself, so there the result is the same. The raw
+ * figure is logged so a run shows which of the two happened. */
+static void
+test_to_texture_fast_delay_clamped(void) {
+   GdkPixbufAnimation     *p_pa = decode_fixture_animation("fastdelay.gif");
+   GTimeVal                st_t = {1000, 0};
+   GdkPixbufAnimationIter *p_it = gdk_pixbuf_animation_get_iter(p_pa, &st_t);
+   gint i_raw = gdk_pixbuf_animation_iter_get_delay_time(p_it);
+   g_object_unref(p_it);
+   g_test_message("decoder reports %d ms for a 10 ms GIF delay", i_raw);
+   g_assert_cmpint(i_raw, <=, GGAZE_ANIM_MIN_DELAY_MS);
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = to_texture(p_pa, 4, NULL, &p_err);
+   g_assert_no_error(p_err);
+   const GgazeAnimation *p_anim = animation_lookup(p_tex);
+   g_assert_nonnull(p_anim);
+   g_assert_cmpuint(animation_get_n_frames(p_anim), ==, 4);
+   for (guint u = 0; u < 4; u++) {
+      g_assert_cmpint(animation_get_delay_ms(p_anim, u), ==,
+                      GGAZE_ANIM_MIN_DELAY_MS);
+   }
+   g_object_unref(p_tex);
+   g_object_unref(p_pa);
+}
+
+/* The probe's play count rides on the animation the walk attaches: the
+ * iterators cannot be asked (glycin's loops for ever whatever the file
+ * says), so the container's figure is what the viewer obeys. */
+static void
+test_to_texture_carries_plays(void) {
+   GdkPixbufAnimation *p_pa = decode_fixture_animation("once.gif");
+   GgazeAnimProbe      st_p = {4, 8, 6, 1};
+   GdkTexture         *p_tex =
+      pixbuf_util_animation_to_texture(p_pa, &st_p, NULL, NULL);
+   g_assert_cmpuint(animation_get_plays(animation_lookup(p_tex)), ==, 1);
+   g_object_unref(p_tex);
+   st_p.u_plays = 0;
+   p_tex        = pixbuf_util_animation_to_texture(p_pa, &st_p, NULL, NULL);
+   g_assert_cmpuint(animation_get_plays(animation_lookup(p_tex)), ==, 0);
+   g_object_unref(p_tex);
+   g_object_unref(p_pa);
+}
+
+/* A GdkPixbufSimpleAnim of four solid frames at f_fps, not looping; frame
+ * u is green 255 - 60 u (gdk_pixbuf_fill takes 0xRRGGBBAA), as in the
+ * fixtures. */
+static GdkPixbufAnimation *
+simple_anim(gfloat f_fps) {
+   GdkPixbufSimpleAnim *p_sa = gdk_pixbuf_simple_anim_new(8, 6, f_fps);
+   for (guint u = 0; u < 4; u++) {
+      GdkPixbuf *p_pix = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 8, 6);
+      gdk_pixbuf_fill(p_pix, ((guint32)(255 - 60 * u) << 16) | 0xFF);
+      gdk_pixbuf_simple_anim_add_frame(p_sa, p_pix);
+      g_object_unref(p_pix);
+   }
+   return (GDK_PIXBUF_ANIMATION(p_sa));
+}
+
+/* A first frame under 2 ms (_iter_counts_down's i_first < 2: 1 ms at
+ * 1000 fps) cannot tell a counting-down iterator from a whole-delay one
+ * and is taken as whole-delay without probing the iterator. What is
+ * pinned is what that promises: the first frame is frame 0, intact, an
+ * animation is attached, and every delay is either the clamp or -1 (the
+ * non-looping SimpleAnim ends on its last frame) -- never 1 ms, never a
+ * count-down figure. Which of the 1 ms frames are sampled is the known
+ * limit documented at _append_frames (pixbuf-util.c). */
+static void
+test_to_texture_sub_2ms_first_frame(void) {
+   GdkPixbufAnimation *p_pa  = simple_anim(1000.0f);
+   GError             *p_err = NULL;
+   GdkTexture         *p_tex = to_texture(p_pa, 4, NULL, &p_err);
+   g_assert_no_error(p_err);
+   g_assert_cmpuint(green_of(p_tex), ==, 255); /* frame 0 */
+   const GgazeAnimation *p_anim = animation_lookup(p_tex);
+   g_assert_nonnull(p_anim);
+   guint u_n = animation_get_n_frames(p_anim);
+   g_assert_cmpuint(u_n, >=, 2);
+   for (guint u = 0; u < u_n; u++) {
+      gint i_d = animation_get_delay_ms(p_anim, u);
+      g_assert_true(i_d == GGAZE_ANIM_MIN_DELAY_MS || i_d == -1);
+   }
+   g_object_unref(p_tex);
+   g_object_unref(p_pa);
+}
+
 G_GNUC_END_IGNORE_DEPRECATIONS
 
-int
-main(int i_argc, char **c_argv) {
-   g_test_init(&i_argc, &c_argv, NULL);
-   g_log_set_always_fatal(G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL);
-
+/* The probe subtests, registered apart so main() stays short
+ * (c-best-practices). */
+static void
+_add_probe_tests(void) {
    g_test_add_func("/animation/probe/anim_gif", test_probe_anim_gif);
    g_test_add_func("/animation/probe/zerodelay_gif", test_probe_zerodelay_gif);
    g_test_add_func("/animation/probe/anim_webp", test_probe_anim_webp);
@@ -679,6 +889,21 @@ main(int i_argc, char **c_argv) {
                    test_probe_webp_flag_and_frames);
    g_test_add_func("/animation/probe/webp_bad_sizes",
                    test_probe_webp_bad_sizes);
+   g_test_add_func("/animation/probe/fixture_plays", test_probe_fixture_plays);
+   g_test_add_func("/animation/probe/gif_loop_count",
+                   test_probe_gif_loop_count);
+   g_test_add_func("/animation/probe/webp_loop_count",
+                   test_probe_webp_loop_count);
+   g_test_add_func("/animation/probe/manyframes_over_budget",
+                   test_probe_manyframes_over_budget);
+}
+
+int
+main(int i_argc, char **c_argv) {
+   g_test_init(&i_argc, &c_argv, NULL);
+   g_log_set_always_fatal(G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL);
+
+   _add_probe_tests();
    g_test_add_func("/animation/within_budget", test_within_budget);
    g_test_add_func("/animation/within_budget_frame_cap",
                    test_within_budget_frame_cap);
@@ -697,5 +922,11 @@ main(int i_argc, char **c_argv) {
                    test_to_texture_cancelled);
    g_test_add_func("/animation/to_texture_static_and_zero_delay",
                    test_to_texture_static_and_zero_delay);
+   g_test_add_func("/animation/to_texture_fast_delay_clamped",
+                   test_to_texture_fast_delay_clamped);
+   g_test_add_func("/animation/to_texture_carries_plays",
+                   test_to_texture_carries_plays);
+   g_test_add_func("/animation/to_texture_sub_2ms_first_frame",
+                   test_to_texture_sub_2ms_first_frame);
    return (g_test_run());
 }

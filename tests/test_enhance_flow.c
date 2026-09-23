@@ -3148,7 +3148,11 @@ test_crop_esc_and_toggle_cancel(void) {
  * -- for as long as the tool is up, and Esc lets the animation play on.
  * The identity transform needs no render, so the original (the animated
  * texture) stays on screen under the tool, which is exactly the case the
- * hold exists for. Presented: an unmapped viewer plays nothing anyway. */
+ * hold exists for. Leaving by APPLYING releases the hold too (second
+ * review, finding 5): Enter on the untouched rectangle commits "no crop",
+ * which renders nothing, so the animated original stays up and must play
+ * on rather than stay frozen on frame 1. Presented: an unmapped viewer
+ * plays nothing anyway. */
 static void
 test_crop_tool_holds_animation_first_frame(void) {
    GError *p_err = NULL;
@@ -3178,6 +3182,14 @@ test_crop_tool_holds_animation_first_frame(void) {
 
    tool_key(p_win, GDK_KEY_Escape);
    g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_true(ggaze_viewer_is_animating(p_v));
+
+   fire(p_win, "win.crop");
+   g_assert_false(ggaze_viewer_is_animating(p_v));
+   tool_key(p_win, GDK_KEY_Return); /* the whole image: no crop */
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
+   ggtest_drain_main(100);
+   g_assert_true(viewer_texture(p_win) == p_orig);
    g_assert_true(ggaze_viewer_is_animating(p_v));
    gtk_window_destroy(GTK_WINDOW(p_win));
    ggtest_drain_main(300);
