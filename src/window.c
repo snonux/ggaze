@@ -3339,8 +3339,11 @@ _open_resolve_target(GFile *p_arg, GFile **p_out_dir, GFile **p_out_start) {
  * survive into a folder whose file sorted first) and the load. Connecting
  * before the cursor only made the index != 0 case load the file twice.
  * That "once" is _open_now's: a multi-file open (_proceed_open_many) still
- * calls navigator_set_current_file AFTER it, and that "changed" runs the
- * choke point and the load a second time (task gd2). */
+ * calls navigator_set_current_file AFTER it, and by the rule above that
+ * call emits "changed" -- so the handler runs the choke point and the load
+ * a second time -- only when the start file does not resolve to index 0.
+ * A start file that sorts first in its folder is loaded once; any other
+ * twice (task gd2 tracks the double pass). */
 static void
 _open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
                       GgazeSort e_sort, gboolean b_wrap, gboolean b_hide_raw) {

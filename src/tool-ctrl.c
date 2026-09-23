@@ -33,7 +33,8 @@ static const char *_CROP_HINT =
 static const char *_RENDERING =
    "Preview still rendering — try again in a moment";
 static const char *_NO_PICTURE =
-   "No picture on screen — the image did not load; Esc leaves the tool";
+   "No picture on screen yet — wait for the image, or press Esc to leave "
+   "the tool";
 static const char *_FINISH_FIRST =
    "Finish the current tool first (Enter applies, Esc cancels)";
 static const char *_RELEASE_SPACE =
@@ -110,13 +111,17 @@ _shown_is_current(ToolCtrl *p_tc) {
 }
 
 /* Say why the tool cannot work on the picture right now. With no texture
- * on screen at all no render is coming: the reload after a rewrite failed
- * (viewload clears the canvas and reports "Cannot show ..."), or the
- * file's first decode has not landed -- either way the base is unknown
- * and "still rendering, try again" was a promise nothing kept, repeated
- * on every key until the user guessed Esc. Name the state and the way out
- * instead. With a picture up, a render IS pending (or the base's decode
- * is), and waiting is the right advice. */
+ * on screen at all the base is unknown, for one of two reasons the
+ * controller cannot tell apart without a new host op: the reload after a
+ * rewrite failed (viewload clears the canvas and reports "Cannot show
+ * ...") and no render is coming, or the file's first decode is still in
+ * flight and one is. So the message must be true of both: it names the
+ * state, allows for the picture that may still land, and names Esc as
+ * the way out -- "still rendering, try again" was, after a failed reload,
+ * a promise nothing kept, repeated on every key until the user guessed
+ * Esc; "the image did not load" would be a lie during a first decode.
+ * With a picture up, a render IS pending (or the base's decode is), and
+ * waiting is the right advice. */
 static void
 _say_not_ready(ToolCtrl *p_tc) {
    GgazeViewer *p_v = _viewer(p_tc);

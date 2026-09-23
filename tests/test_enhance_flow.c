@@ -4964,7 +4964,10 @@ add_tool_review5_tests(void) {
  * crop tool every key and Enter then answered "Preview still rendering --
  * try again in a moment" for as long as the user kept trying, though no
  * render was coming. Now they say there is no picture on screen and name
- * the way out, the tool stays until asked to leave, and Esc leaves it. */
+ * Esc as the way out, the tool stays until asked to leave, and Esc leaves
+ * it. The wording is "yet ... wait for the image, or press Esc" rather
+ * than "did not load": the controller cannot tell a failed reload from a
+ * first decode still in flight, so the message has to hold for both. */
 static void
 test_failed_reload_under_the_crop_tool_says_so(void) {
    ToolFx fx;
@@ -4976,11 +4979,14 @@ test_failed_reload_under_the_crop_tool_says_so(void) {
    g_assert_null(viewer_texture(fx.p_win));
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    tool_key(fx.p_win, GDK_KEY_h);
-   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "No picture"));
+   g_assert_true(
+      g_str_has_prefix(status_text(fx.p_win), "No picture on screen"));
    tool_key(fx.p_win, GDK_KEY_1);
-   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "No picture"));
+   g_assert_true(
+      g_str_has_prefix(status_text(fx.p_win), "No picture on screen"));
    tool_key(fx.p_win, GDK_KEY_Return);
-   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "No picture"));
+   g_assert_true(
+      g_str_has_prefix(status_text(fx.p_win), "No picture on screen"));
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    tool_key(fx.p_win, GDK_KEY_Escape);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
