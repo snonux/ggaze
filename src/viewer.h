@@ -30,11 +30,11 @@
  * the cache, the histogram and hold-Space compare against; only
  * ggaze_viewer_get_frame() says what is on screen right now.
  *
- * Touch (task zb2): a pinch zooms around its midpoint, a horizontal swipe
- * asks for the next / previous image ("navigate", the signal the wheel's
- * navigate mode uses) and a two-finger tap asks for the info card
- * ("toggle-info"). The viewer only reports intent; the window gates the
- * navigation and owns the info action. See "touch gestures" below.
+ * Touch (task zb2): a pinch zooms around its midpoint and pans with it, a
+ * horizontal swipe asks for the next / previous image ("navigate", the
+ * signal the wheel's navigate mode uses) and a two-finger tap asks for the
+ * info card ("toggle-info"). The viewer only reports intent; the window gates
+ * the navigation and owns the info action. See "touch gestures" below.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -136,7 +136,15 @@ gboolean ggaze_viewer_get_geometry(GgazeViewer     *p_viewer,
 typedef enum {
    GGAZE_VIEWER_DRAG_BEGIN,
    GGAZE_VIEWER_DRAG_UPDATE,
-   GGAZE_VIEWER_DRAG_END
+   GGAZE_VIEWER_DRAG_END,
+   /* The drag was taken away rather than finished: a second finger landed
+    * and made it a pinch (zb2). Not a gesture the user completed, so a
+    * tool must not act on it as it would on END -- the straighten tool
+    * drops its line (an END would level by whatever jitter the finger
+    * made); the crop tool lets go and keeps the rectangle as the last
+    * UPDATE left it (what the user saw while dragging). Its coordinates
+    * are the last ones the drag reported. */
+   GGAZE_VIEWER_DRAG_CANCEL
 } GgazeViewerDragPhase;
 
 /* Paint on top of the image. p_geom is the geometry the image was just drawn
@@ -146,7 +154,9 @@ typedef void (*GgazeViewerOverlayFn)(GtkSnapshot           *p_snap,
                                      gpointer               p_data);
 
 /* A pointer drag, in ABSOLUTE widget coordinates (begin: where it started;
- * update/end: where the pointer is now). While an overlay is installed the
+ * update/end/cancel: where the pointer is now). A BEGIN is followed by at
+ * most one END or CANCEL, never both (neither when the overlay is removed
+ * mid-drag). While an overlay is installed the
  * drag gesture feeds this instead of panning. */
 typedef void (*GgazeViewerDragFn)(GgazeViewerDragPhase e_phase, gdouble d_x,
                                   gdouble d_y, gpointer p_data);
@@ -166,26 +176,41 @@ void ggaze_viewer_set_scroll_behavior(GgazeViewer        *p_viewer,
 /* --- touch gestures (zb2) ---------------------------------------------------
  *
  * The bodies of the viewer's GtkGestureZoom and GtkGestureSwipe handlers,
- * which do nothing but read the gesture's points / velocity and call these.
- * Public so tests can drive a gesture with chosen points (GTK4 cannot
- * synthesise touch events); nothing in the app calls them. The rules and
+ * which do nothing but read the gesture's points / velocity / event type
+ * and call these. Public so tests can drive a gesture with chosen points
+ * (GTK4 cannot synthesise touch events); nothing else in the app calls
+ * them. The rules and
  * thresholds are gesture-math.h's.
  *
- * Pinch: begin with the midpoint of the two touches, update with
- * GtkGestureZoom's scale (finger distance now / at the start) and the
- * current midpoint, end when a finger lifts. The view zooms to (zoom at
- * begin) x scale around the midpoint, through the same clamp and
- * non-finite guard as wheel zoom; begin also ends a one-finger drag in
- * progress (a tool gets its END where the finger was). A begin-end that
- * was short and still (gesture_math_is_two_finger_tap) and not a touchpad
- * pinch is a two-finger tap instead: the view goes back to what it was
- * before the begin and "toggle-info" is emitted; end returns TRUE then.
- * update / end without a begin do nothing. */
-void     ggaze_viewer_pinch_begin(GgazeViewer *p_viewer, gdouble d_cx,
-                                  gdouble d_cy);
-void     ggaze_viewer_pinch_update(GgazeViewer *p_viewer, gdouble d_scale,
-                                   gdouble d_cx, gdouble d_cy);
+ * Pinch: begin with the midpoint of the two touches and whether it is a
+ * touchpad pinch, update with GtkGestureZoom's scale (finger distance now
+ * / at the start) and the current midpoint, end when a finger lifts. The
+ * view zooms to (zoom at begin) x scale and moves with the midpoint: the
+ * image pixel under the fingers stays under them, so two fingers moved at
+ * a constant distance pan. Zoom goes through the same clamp and
+ * non-finite guard as wheel zoom; an update with a non-finite midpoint
+ * changes nothing.
+ * Begin also takes away a one-finger drag in progress (a tool gets a
+ * CANCEL where the finger was). A touch that was short and still
+ * (gesture_math_is_two_finger_tap) and not a touchpad pinch is a
+ * two-finger tap instead -- when a one-finger drag came first, its time
+ * and movement count, from that drag's start: the view goes back to what
+ * it was before the first finger went down and "toggle-info" is emitted;
+ * end returns TRUE then. update / end without a begin do nothing, and a
+ * set_texture or an unmap in between ends the pinch (no tap, no zoom). */
+void ggaze_viewer_pinch_begin(GgazeViewer *p_viewer, gdouble d_cx, gdouble d_cy,
+                              gboolean b_touchpad);
+void ggaze_viewer_pinch_update(GgazeViewer *p_viewer, gdouble d_scale,
+                               gdouble d_cx, gdouble d_cy);
 gboolean ggaze_viewer_pinch_end(GgazeViewer *p_viewer);
+
+/* Swipe path: where the one finger went down (b_down) and where it is now,
+ * in widget px. The GtkGestureSwipe "begin" / "update" handlers call this
+ * with the gesture's point; its "swipe" handler then judges the path with
+ * ggaze_viewer_swipe below -- unless a pinch began since the finger went
+ * down (the finger was half of it). */
+void ggaze_viewer_swipe_track(GgazeViewer *p_viewer, gboolean b_down,
+                              gdouble d_x, gdouble d_y);
 
 /* Swipe: a finished one-finger touch drag that moved (d_dx, d_dy) px and
  * ended at (d_vx, d_vy) px/s. Emits "navigate" (+1 for a leftward flick =

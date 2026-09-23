@@ -1975,10 +1975,13 @@ _on_folder_pref_changed(GSettings *p_gs, const char *c_key, gpointer p_data) {
 }
 
 /* Scroll-wheel navigate (GGAZE_SCROLL_NAVIGATE) and a touch swipe (zb2):
- * advance the navigator, prompting Save/Discard/Cancel first if an unsaved
- * (GEGL) enhance preview is active, same as the h/l/g/G actions
- * (_action_prev/next/first/last). The viewer already refuses a swipe while
- * a crop / straighten tool is up (viewer.h ggaze_viewer_swipe). */
+ * exactly what l / h do (_action_next/prev) -- stop a running slideshow,
+ * then advance the navigator, prompting Save/Discard/Cancel first if an
+ * unsaved (GEGL) enhance preview is active. The slideshow stop is new with
+ * zb2 for the wheel too: a wheel notch in navigate mode used to turn the
+ * page under a running slideshow and leave it running. The viewer already
+ * refuses a swipe while a crop / straighten tool is up (viewer.h
+ * ggaze_viewer_swipe). */
 static void
 _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data) {
    (void)p_v;
@@ -1986,6 +1989,7 @@ _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data) {
    if (p_win->p_nav == NULL) {
       return;
    }
+   _stop_slideshow_for_nav(p_win);
    if (i_dir >= 0) {
       save_gate_maybe_save_then(p_win->p_save_gate, _proceed_next, p_win, NULL);
    } else {

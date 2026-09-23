@@ -3873,6 +3873,84 @@ test_swipe_refused_while_tool_active(void) {
    tool_fx_close(&fx);
 }
 
+/* The viewer's drag gesture (borrowed: the widget owns it), for driving
+ * the real drag handlers the tool's overlay callback sits behind. */
+static GtkEventController *
+viewer_drag_gesture(GgazeViewer *p_v) {
+   GListModel *p_ctrls = gtk_widget_observe_controllers(GTK_WIDGET(p_v));
+   GtkEventController *p_found = NULL;
+   for (guint i = 0; i < g_list_model_get_n_items(p_ctrls); i++) {
+      GtkEventController *p_c = g_list_model_get_item(p_ctrls, i);
+      if (GTK_IS_GESTURE_DRAG(p_c) && p_found == NULL) {
+         p_found = p_c;
+      }
+      g_object_unref(p_c);
+   }
+   g_object_unref(p_ctrls);
+   g_assert_nonnull(p_found);
+   return (p_found);
+}
+
+/* A second finger landing while the first draws a horizon in the straighten
+ * tool (`R`) makes a pinch, and the line is dropped: the viewer sends a
+ * CANCEL, not an END (viewer.h), so the first finger's (1, 1) px jitter --
+ * a 45 degree line -- levels nothing: no render, no angle in the title,
+ * and the tool stays up. The rest of that drag reaches the tool neither. */
+static void
+test_pinch_in_straighten_levels_nothing(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.straighten");
+   GgazeViewer    *p_v = large_viewer(fx.p_win);
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   GtkEventController *p_drag   = viewer_drag_gesture(p_v);
+   guint               u_before = ggaze_window_enhance_render_count(fx.p_win);
+   gdouble             d_x0     = g.d_x + 50 * g.d_scale;
+   gdouble             d_y0     = g.d_y + 100 * g.d_scale;
+   g_signal_emit_by_name(p_drag, "drag-begin", d_x0, d_y0);
+   g_signal_emit_by_name(p_drag, "drag-update", 1.0, 1.0);
+   ggaze_viewer_pinch_begin(p_v, d_x0 + 60.0, d_y0, FALSE);
+   ggaze_viewer_pinch_update(p_v, 1.3, d_x0 + 60.0, d_y0);
+   g_signal_emit_by_name(p_drag, "drag-update", 100.0, 40.0);
+   g_signal_emit_by_name(p_drag, "drag-end", 100.0, 40.0);
+   ggaze_viewer_pinch_end(p_v);
+   ggtest_drain_main(300);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, u_before);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   tool_fx_close(&fx);
+}
+
+/* The crop tool on the same CANCEL lets go and keeps the rectangle as the
+ * drag left it before the pinch (what the user watched land); what the
+ * finger reports after the pinch began moves nothing. Here: the corner
+ * dragged from (400,300) to (300,200) before the pinch, further after it;
+ * Enter crops 300x200. */
+static void
+test_pinch_in_crop_keeps_the_dragged_rect(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop");
+   GgazeViewer    *p_v = large_viewer(fx.p_win);
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   GtkEventController *p_drag = viewer_drag_gesture(p_v);
+   gdouble             d_s    = g.d_scale;
+   g_signal_emit_by_name(p_drag, "drag-begin", g.d_x + TOOL_W * d_s,
+                         g.d_y + TOOL_H * d_s);
+   g_signal_emit_by_name(p_drag, "drag-update", -100 * d_s, -100 * d_s);
+   ggaze_viewer_pinch_begin(p_v, g.d_x + 200 * d_s, g.d_y + 150 * d_s, FALSE);
+   g_signal_emit_by_name(p_drag, "drag-update", -250 * d_s, -150 * d_s);
+   g_signal_emit_by_name(p_drag, "drag-end", -250 * d_s, -150 * d_s);
+   ggaze_viewer_pinch_end(p_v);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_texture_size(fx.p_win, 300, 200);
+   tool_fx_close(&fx);
+}
+
 /* A discard while a tool is up ends the tool BEFORE the transform is reset
  * -- the Original card and `0` with the panel open both go through it --
  * so the straighten session's working angle cannot come back: afterwards
@@ -5008,6 +5086,11 @@ add_tool_review_tests(void) {
                    test_swipe_away_from_dirty_preview_prompts);
    g_test_add_func("/enhance_flow/swipe_refused_while_tool_active",
                    test_swipe_refused_while_tool_active);
+   /* zb2 review: a pinch takes a tool drag away with a CANCEL. */
+   g_test_add_func("/enhance_flow/pinch_in_straighten_levels_nothing",
+                   test_pinch_in_straighten_levels_nothing);
+   g_test_add_func("/enhance_flow/pinch_in_crop_keeps_the_dragged_rect",
+                   test_pinch_in_crop_keeps_the_dragged_rect);
 }
 
 /* wb2 second review round: a discard ends the tool first, the crop tool

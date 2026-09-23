@@ -634,13 +634,19 @@ _crop_editable(ToolCtrl *p_tc, gboolean b_say) {
  * (a gesture whose END was refused too, or one GTK cancelled without an
  * END), and the first UPDATE accepted after the render landed re-derived
  * the rectangle from that stale start -- a jump to a corner resize nobody
- * made. */
+ * made. A CANCEL (a pinch took the drag over, viewer.h) lets go and keeps
+ * the rectangle as the last UPDATE left it: that is what the user saw
+ * under the finger, and snapping it back would undo a drag they watched
+ * land. It re-derives nothing, since its point is the last UPDATE's. */
 static void
 _crop_drag(ToolCtrl *p_tc, const GgazeViewerGeom *p_g,
            GgazeViewerDragPhase e_phase, gdouble d_ix, gdouble d_iy) {
    CropRectHit e_hit = p_tc->e_hit; /* the grab an UPDATE / END continues */
    if (e_phase != GGAZE_VIEWER_DRAG_UPDATE) {
       p_tc->e_hit = CROPRECT_HIT_NONE;
+   }
+   if (e_phase == GGAZE_VIEWER_DRAG_CANCEL) {
+      return;
    }
    if (!_crop_editable(p_tc, e_phase == GGAZE_VIEWER_DRAG_BEGIN)) {
       return;
@@ -768,10 +774,20 @@ _horizon_measurable(ToolCtrl *p_tc) {
  * stale end -- has no line to level by and is ignored, the way _crop_drag
  * ignores a drag that began outside the rectangle (it used to apply
  * whatever the start coordinates last held: a lone END at (300, 200)
- * levelled by 35 degrees). */
+ * levelled by 35 degrees). A CANCEL (a second finger turned the drag into
+ * a pinch, viewer.h) drops the line without levelling: the line was never
+ * finished, and a finger that jittered by (1, 1) px before the pinch
+ * would otherwise level the image by 45 degrees. */
 static void
 _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
                  gdouble d_iy) {
+   if (e_phase == GGAZE_VIEWER_DRAG_CANCEL) {
+      if (p_tc->b_line) {
+         p_tc->b_line = FALSE;
+         _redraw(p_tc);
+      }
+      return;
+   }
    if (e_phase == GGAZE_VIEWER_DRAG_BEGIN) {
       p_tc->b_line    = TRUE;
       p_tc->d_drag_x0 = d_ix;

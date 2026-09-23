@@ -11,21 +11,31 @@
  *     with the gesture's own points -- this is where the chosen midpoints
  *     and velocities go;
  *   - by emitting the gestures' own signals on the controllers the viewer
- *     installed (as test_viewer.c does for the drag gesture), which pins
- *     that the controllers exist, are wired, and fall back safely when the
- *     gesture reports no points.
+ *     installed (as test_viewer.c does for the drag gesture), which runs
+ *     the real handlers: GtkGestureZoom "begin" / "scale-changed" /
+ *     "cancel" / "end" (no points: the widget centre is the midpoint) and
+ *     GtkGestureSwipe "begin" / "swipe", the latter over a path laid down
+ *     with ggaze_viewer_swipe_track (what the swipe's "begin" / "update"
+ *     handlers call with the finger's point).
  *
  * What is asserted: a pinch zooms about its midpoint (the image pixel under
- * it stays put) with the wheel's clamp and NaN / Inf / zero-scale guards; a
- * pinch ends a one-finger tool drag with an END where the finger was, and a
- * pan drag where it got to, and swallows the rest of either; a leftward
- * swipe shows the next image and a rightward one the previous, while a
- * vertical, tiny or zero-velocity
- * swipe, a swipe over a zoomed-in picture and a swipe with a tool overlay
- * installed navigate nowhere; a two-finger tap toggles the info card and
- * leaves the view as it was, a long or moving one does not. The dirty-gate
- * and real-tool halves (a swipe away from an enhance preview prompts, a
- * crop tool refuses a swipe) need GEGL and live in test_enhance_flow.c.
+ * it stays put) and pans with it when the midpoint moves -- also at a
+ * constant finger distance -- with the wheel's clamp and NaN / Inf /
+ * zero-scale guards; a pinch takes a one-finger tool drag away with a
+ * CANCEL where the finger was, stops a pan drag where it got to, and
+ * swallows the rest of either; a leftward swipe shows the next image and a
+ * rightward one the previous, while a vertical, tiny or zero-velocity
+ * swipe, a swipe over a zoomed-in picture, a swipe with a tool overlay
+ * installed and a swipe a pinch spoiled navigate nowhere; a swipe or a
+ * navigate-mode wheel notch stops a running slideshow, as l / h do; a
+ * two-finger tap toggles the info card and leaves the view as it was
+ * before its first finger went down, a long or moving one, a touchpad
+ * pinch and one cut short by a new texture or an unmap do not. The
+ * dirty-gate and real-tool halves (a swipe away from an enhance preview
+ * prompts, a crop tool refuses a swipe, a pinch in the straighten tool
+ * levels nothing) need GEGL and live in test_enhance_flow.c. Not reachable
+ * here: the drag gesture's DENIED claim at pinch begin, which needs a real
+ * touch sequence (docs/IMPLEMENTATION.md, touch gestures).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -150,7 +160,7 @@ test_pinch_zooms_about_the_midpoint(void) {
    gdouble d_fit = ggaze_viewer_get_scale(fx.p_viewer);
    gdouble d_ix0, d_iy0, d_ix1, d_iy1;
    image_point_at(fx.p_viewer, 150.0, 120.0, &d_ix0, &d_iy0);
-   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 120.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 120.0, FALSE);
    ggaze_viewer_pinch_update(fx.p_viewer, 1.5, 150.0, 120.0);
    ggaze_viewer_pinch_update(fx.p_viewer, 2.0, 150.0, 120.0);
    g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.0 * d_fit), <,
@@ -158,16 +168,41 @@ test_pinch_zooms_about_the_midpoint(void) {
    image_point_at(fx.p_viewer, 150.0, 120.0, &d_ix1, &d_iy1);
    g_assert_cmpfloat(fabs(d_ix1 - d_ix0), <, 1e-6);
    g_assert_cmpfloat(fabs(d_iy1 - d_iy0), <, 1e-6);
-   /* Midpoint moved: zoom about where it is now. */
-   image_point_at(fx.p_viewer, 400.0, 200.0, &d_ix0, &d_iy0);
-   ggaze_viewer_pinch_update(fx.p_viewer, 2.5, 400.0, 200.0);
-   image_point_at(fx.p_viewer, 400.0, 200.0, &d_ix1, &d_iy1);
+   /* Midpoint moved while zooming: the pixel that was under the fingers
+    * follows them to where they are now (no pan clamp at this scale). */
+   ggaze_viewer_pinch_update(fx.p_viewer, 2.5, 100.0, 100.0);
+   image_point_at(fx.p_viewer, 100.0, 100.0, &d_ix1, &d_iy1);
    g_assert_cmpfloat(fabs(d_ix1 - d_ix0), <, 1e-6);
    g_assert_cmpfloat(fabs(d_iy1 - d_iy0), <, 1e-6);
    /* A real pinch, not a tap: no info card toggle, the zoom stays. */
    g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
    g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.5 * d_fit), <,
                      1e-9);
+   fx_close(&fx);
+}
+
+/* Two fingers moved together at a constant distance (scale 1) drag the
+ * picture by the midpoint's movement, as common viewers do; a non-finite
+ * midpoint moves nothing. */
+static void
+test_pinch_pans_with_the_midpoint(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   ggaze_viewer_toggle_fit_100(fx.p_viewer); /* 1200x800: room to pan */
+   gdouble d_px, d_py;
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.0, 350.0, 230.0);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.0, 330.0, 240.0);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(fabs(d_px - 30.0), <, 1e-9);
+   g_assert_cmpfloat(fabs(d_py - 40.0), <, 1e-9);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, 1.0);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.0, NAN, 240.0);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(fabs(d_px - 30.0), <, 1e-9);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer)); /* it moved */
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(fabs(d_px - 30.0), <, 1e-9);
    fx_close(&fx);
 }
 
@@ -182,7 +217,7 @@ test_pinch_clamps_and_guards(void) {
    ggaze_viewer_pinch_update(fx.p_viewer, 2.0, 10.0, 10.0); /* no begin */
    g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, d_fit);
    g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
-   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
    ggaze_viewer_pinch_update(fx.p_viewer, 1e9, 300.0, 200.0);
    g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, GGAZE_ZOOM_MAX);
    ggaze_viewer_pinch_update(fx.p_viewer, 1e-9, 300.0, 200.0);
@@ -209,47 +244,103 @@ has_handler(gpointer p_obj, const char *c_signal) {
    return (g_signal_has_handler_pending(p_obj, u_id, 0, FALSE));
 }
 
-/* The controllers are there and wired. The pinch's signals are emitted
- * inside a pinch opened through the seam -- GtkGestureZoom's own "begin"
- * class handler reads the gesture's last event and cannot be emitted
- * without real touches -- so "scale-changed" zooms about the begin
- * midpoint (the gesture reports no points), "end" closes the pinch (a
- * later "scale-changed" does nothing), and "cancel" makes a tap-shaped
- * touch no tap. */
+static gboolean
+info_visible(gpointer p_data) {
+   return (gtk_widget_get_visible(ggaze_window_get_info_label(p_data)));
+}
+
+static gboolean
+info_hidden(gpointer p_data) {
+   return (!info_visible(p_data));
+}
+
+/* The real GtkGestureZoom handlers, driven by the gesture's own signals.
+ * With no touches the gesture reports no points, so "begin" pinches about
+ * the widget centre: "scale-changed" zooms about it (the image pixel there
+ * stays), "end" closes the pinch -- no tap, it zoomed -- and a later
+ * "scale-changed" does nothing. A quick "begin" + "end" is a tap through
+ * the handlers and toggles the info card; a "cancel" in between makes it
+ * none. */
 static void
-test_gesture_controllers_are_wired(void) {
+test_zoom_controller_drives_the_pinch(void) {
    GestureFx fx;
    fx_open(&fx);
-   gdouble             d_fit = ggaze_viewer_get_scale(fx.p_viewer);
+   gdouble d_fit = ggaze_viewer_get_scale(fx.p_viewer);
+   gdouble d_mx  = gtk_widget_get_width(GTK_WIDGET(fx.p_viewer)) / 2.0;
+   gdouble d_my  = gtk_widget_get_height(GTK_WIDGET(fx.p_viewer)) / 2.0;
    GtkEventController *p_zoom =
       controller_of(fx.p_viewer, GTK_TYPE_GESTURE_ZOOM);
    g_assert_true(has_handler(p_zoom, "begin"));
-   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0);
+   gdouble d_ix0, d_iy0, d_ix1, d_iy1;
+   image_point_at(fx.p_viewer, d_mx, d_my, &d_ix0, &d_iy0);
+   g_signal_emit_by_name(p_zoom, "begin", NULL);
    g_signal_emit_by_name(p_zoom, "scale-changed", 2.0);
    g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.0 * d_fit), <,
                      1e-9);
+   image_point_at(fx.p_viewer, d_mx, d_my, &d_ix1, &d_iy1);
+   g_assert_cmpfloat(fabs(d_ix1 - d_ix0), <, 1e-6);
+   g_assert_cmpfloat(fabs(d_iy1 - d_iy0), <, 1e-6);
    g_signal_emit_by_name(p_zoom, "end", NULL);
    g_signal_emit_by_name(p_zoom, "scale-changed", 3.0);
    g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.0 * d_fit), <,
                      1e-9);
-   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0);
+   ggtest_drain_main(100);
+   g_assert_false(info_visible(fx.p_win));
+   /* A tap through the handlers: on, and the zoom stays what it was. */
+   g_signal_emit_by_name(p_zoom, "begin", NULL);
+   g_signal_emit_by_name(p_zoom, "end", NULL);
+   g_assert_true(ggtest_wait_until(info_visible, fx.p_win, WAIT_US));
+   g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.0 * d_fit), <,
+                     1e-9);
+   /* Cancelled: no tap, the card stays on. */
+   g_signal_emit_by_name(p_zoom, "begin", NULL);
    g_signal_emit_by_name(p_zoom, "cancel", NULL);
    g_signal_emit_by_name(p_zoom, "end", NULL);
    ggtest_drain_main(200);
-   g_assert_false(
-      gtk_widget_get_visible(ggaze_window_get_info_label(fx.p_win)));
-   /* The swipe gesture: touch-only, so a mouse drag can never turn a page;
-    * a "swipe" whose "begin" found no point has no path and is refused. */
+   g_assert_true(info_visible(fx.p_win));
+   fx_close(&fx);
+}
+
+/* The real GtkGestureSwipe "swipe" handler judges the path laid down by
+ * ggaze_viewer_swipe_track (what its "begin" / "update" handlers call with
+ * the finger's point): a leftward flick shows the next image. A swipe a
+ * pinch began during is refused -- and the very same swipe unspoiled
+ * navigates, so this fails whichever way the spoiled check is broken. The
+ * gesture is touch-only, so a mouse drag can never turn a page, and a
+ * "begin" that found no point leaves no path, which is refused. */
+static void
+test_swipe_controller_navigates_unless_spoiled(void) {
+   GestureFx fx;
+   fx_open(&fx);
    GtkEventController *p_swipe =
       controller_of(fx.p_viewer, GTK_TYPE_GESTURE_SWIPE);
    g_assert_true(
       gtk_gesture_single_get_touch_only(GTK_GESTURE_SINGLE(p_swipe)));
    g_assert_true(has_handler(p_swipe, "update"));
-   g_signal_emit_by_name(p_swipe, "begin", NULL);
+   g_signal_emit_by_name(p_swipe, "begin", NULL); /* no point: NaN path */
    g_signal_emit_by_name(p_swipe, "swipe", -2000.0, 0.0);
    ggtest_drain_main(100);
    g_assert_nonnull(
       g_strstr_len(gtk_window_get_title(GTK_WINDOW(fx.p_win)), -1, "a.png"));
+   /* Spoiled: a pinch (a moving one, so no tap) began under the finger. */
+   ggaze_viewer_swipe_track(fx.p_viewer, TRUE, 400.0, 200.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 0.9, 300.0 + 3 * GESTURE_TAP_MAX_MOVE,
+                             200.0);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   ggaze_viewer_swipe_track(fx.p_viewer, FALSE, 150.0, 205.0);
+   g_signal_emit_by_name(p_swipe, "swipe", -900.0, 0.0);
+   ggtest_drain_main(200);
+   g_assert_nonnull(
+      g_strstr_len(gtk_window_get_title(GTK_WINDOW(fx.p_win)), -1, "a.png"));
+   /* The same swipe with no pinch: next. The pinch left the picture
+    * narrower than the widget, so this is no pan. */
+   ggaze_viewer_swipe_track(fx.p_viewer, TRUE, 400.0, 200.0);
+   ggaze_viewer_swipe_track(fx.p_viewer, FALSE, 150.0, 205.0);
+   g_signal_emit_by_name(p_swipe, "swipe", -900.0, 0.0);
+   GGTEST_WAIT_FOR_TEXTURE(fx.p_win, B_W, B_H);
+   g_assert_nonnull(
+      g_strstr_len(gtk_window_get_title(GTK_WINDOW(fx.p_win)), -1, "b.png"));
    fx_close(&fx);
 }
 
@@ -270,7 +361,8 @@ log_drag_cb(GgazeViewerDragPhase e_phase, gdouble d_x, gdouble d_y,
 }
 
 /* A second finger landing during a one-finger tool drag makes a pinch: the
- * tool gets its END where the finger was, and the rest of that drag --
+ * tool gets a CANCEL (not an END: the drag was taken away, not finished --
+ * viewer.h) where the finger was, and the rest of that drag --
  * updates and the gesture's own end -- reaches neither the tool nor the
  * pan. */
 static void
@@ -284,9 +376,9 @@ test_pinch_ends_a_tool_drag(void) {
    g_signal_emit_by_name(p_drag, "drag-begin", 100.0, 100.0);
    g_signal_emit_by_name(p_drag, "drag-update", 20.0, 0.0);
    g_assert_cmpuint(t_log.u_calls, ==, 2);
-   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 100.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 100.0, FALSE);
    g_assert_cmpuint(t_log.u_calls, ==, 3);
-   g_assert_cmpint(t_log.e_last, ==, GGAZE_VIEWER_DRAG_END);
+   g_assert_cmpint(t_log.e_last, ==, GGAZE_VIEWER_DRAG_CANCEL);
    g_assert_cmpfloat(t_log.d_last_x, ==, 120.0);
    g_signal_emit_by_name(p_drag, "drag-update", 80.0, 0.0);
    g_signal_emit_by_name(p_drag, "drag-end", 80.0, 0.0);
@@ -301,7 +393,7 @@ test_pinch_ends_a_tool_drag(void) {
    g_signal_emit_by_name(p_drag, "drag-update", 20.0, 0.0);
    ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
    g_assert_cmpfloat(d_px, ==, 20.0);
-   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 100.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 100.0, FALSE);
    g_signal_emit_by_name(p_drag, "drag-update", 80.0, 0.0);
    g_signal_emit_by_name(p_drag, "drag-end", 80.0, 0.0);
    ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
@@ -312,16 +404,6 @@ test_pinch_ends_a_tool_drag(void) {
 
 /* --- two-finger tap ------------------------------------------------------ */
 
-static gboolean
-info_visible(gpointer p_data) {
-   return (gtk_widget_get_visible(ggaze_window_get_info_label(p_data)));
-}
-
-static gboolean
-info_hidden(gpointer p_data) {
-   return (!info_visible(p_data));
-}
-
 /* A short, still two-finger touch toggles the info card (win.info, as `i`
  * does) -- on, then off -- and leaves a fitted view fitted even though the
  * fingers wobbled the scale a little. */
@@ -331,12 +413,12 @@ test_two_finger_tap_toggles_info(void) {
    fx_open(&fx);
    gdouble d_fit = ggaze_viewer_get_scale(fx.p_viewer);
    g_assert_false(info_visible(fx.p_win));
-   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
    ggaze_viewer_pinch_update(fx.p_viewer, 1.05, 303.0, 201.0);
    g_assert_true(ggaze_viewer_pinch_end(fx.p_viewer));
    g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, d_fit);
    g_assert_true(ggtest_wait_until(info_visible, fx.p_win, WAIT_US));
-   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
    g_assert_true(ggaze_viewer_pinch_end(fx.p_viewer));
    g_assert_true(ggtest_wait_until(info_hidden, fx.p_win, WAIT_US));
    fx_close(&fx);
@@ -347,18 +429,112 @@ static void
 test_long_or_moving_two_finger_touch_is_no_tap(void) {
    GestureFx fx;
    fx_open(&fx);
-   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
    ggaze_viewer_pinch_update(fx.p_viewer, 1.0, 300.0 + 3 * GESTURE_TAP_MAX_MOVE,
                              200.0);
    g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
-   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
    ggaze_viewer_pinch_update(fx.p_viewer, 1.5, 300.0, 200.0);
    g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
-   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
    g_usleep(GESTURE_TAP_MAX_US + 50 * G_TIME_SPAN_MILLISECOND);
    g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
    ggtest_drain_main(200);
    g_assert_false(info_visible(fx.p_win));
+   fx_close(&fx);
+}
+
+/* A tap is measured from its FIRST finger: the view goes back to what it
+ * was before that finger's drag began -- not to the few px it panned
+ * before the second finger landed -- and a first finger that wandered
+ * far before the second landed makes no tap. */
+static void
+test_tap_restores_the_view_before_the_first_finger(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   ggaze_viewer_toggle_fit_100(fx.p_viewer); /* room to pan */
+   GtkEventController *p_drag =
+      controller_of(fx.p_viewer, GTK_TYPE_GESTURE_DRAG);
+   gdouble d_px, d_py;
+   g_signal_emit_by_name(p_drag, "drag-begin", 100.0, 100.0);
+   g_signal_emit_by_name(p_drag, "drag-update", 3.0, 2.0); /* jitter */
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 3.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 100.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.02, 151.0, 101.0);
+   g_assert_true(ggaze_viewer_pinch_end(fx.p_viewer));
+   g_signal_emit_by_name(p_drag, "drag-end", 3.0, 2.0);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 0.0);
+   g_assert_cmpfloat(d_py, ==, 0.0);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, 1.0);
+   g_assert_true(ggtest_wait_until(info_visible, fx.p_win, WAIT_US));
+   /* The first finger panned far first: a pan and a pinch, no tap. */
+   g_signal_emit_by_name(p_drag, "drag-begin", 100.0, 100.0);
+   g_signal_emit_by_name(p_drag, "drag-update", 3 * GESTURE_TAP_MAX_MOVE, 0.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 100.0, FALSE);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   g_signal_emit_by_name(p_drag, "drag-end", 3 * GESTURE_TAP_MAX_MOVE, 0.0);
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(d_px, ==, 3 * GESTURE_TAP_MAX_MOVE);
+   ggtest_drain_main(200);
+   g_assert_true(info_visible(fx.p_win)); /* not toggled off */
+   fx_close(&fx);
+}
+
+/* A touchpad pinch (the handler passes b_touchpad from the event type)
+ * zooms but is never a tap, however short and still: resting two fingers
+ * on a touchpad must not toggle the card. */
+static void
+test_touchpad_pinch_is_never_a_tap(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, TRUE);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, TRUE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.5, 300.0, 200.0);
+   gdouble d_zoomed = ggaze_viewer_get_scale(fx.p_viewer);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, d_zoomed);
+   ggtest_drain_main(200);
+   g_assert_false(info_visible(fx.p_win));
+   fx_close(&fx);
+}
+
+/* A new texture (the next file, a preview render) ends a pinch in progress:
+ * the rest of it neither zooms nor taps, so a restore can never put the
+ * old picture's zoom and pan on the new one. An unmap does the same. */
+static void
+test_new_texture_or_unmap_ends_the_pinch(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   ggaze_viewer_toggle_fit_100(fx.p_viewer);
+   ggaze_viewer_pan(fx.p_viewer, 40.0, 0.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   /* A plain B_W x B_H memory texture: the viewer only needs its size. */
+   GBytes *p_px =
+      g_bytes_new_take(g_malloc0((gsize)B_W * B_H * 4), (gsize)B_W * B_H * 4);
+   GdkTexture *p_tex = gdk_memory_texture_new(B_W, B_H, GDK_MEMORY_R8G8B8A8,
+                                              p_px, (gsize)B_W * 4);
+   g_bytes_unref(p_px);
+   ggaze_viewer_set_texture(fx.p_viewer, p_tex);
+   gdouble d_fit = ggaze_viewer_get_scale(fx.p_viewer);
+   ggaze_viewer_pinch_update(fx.p_viewer, 2.0, 300.0, 200.0);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, d_fit);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   gdouble d_px, d_py;
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, d_fit);
+   g_assert_cmpfloat(d_px, ==, 0.0);
+   /* Unmapped mid-pinch: the pinch is over when it comes back. */
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   gtk_widget_set_visible(GTK_WIDGET(fx.p_viewer), FALSE);
+   g_assert_false(gtk_widget_get_mapped(GTK_WIDGET(fx.p_viewer)));
+   gtk_widget_set_visible(GTK_WIDGET(fx.p_viewer), TRUE);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   ggtest_drain_main(200);
+   g_assert_false(info_visible(fx.p_win));
+   g_object_unref(p_tex);
    fx_close(&fx);
 }
 
@@ -420,6 +596,45 @@ test_swipe_refusals(void) {
    fx_close(&fx);
 }
 
+static gboolean
+status_has(GgazeWindow *p_win, const char *c_prefix) {
+   const char *c_text =
+      gtk_label_get_text(GTK_LABEL(ggaze_window_get_info_label(p_win)));
+   return (g_str_has_prefix(c_text, c_prefix));
+}
+
+/* A swipe is exactly `l` / `h`: it stops a running slideshow before it
+ * navigates. So does a wheel notch in the wheel's navigate mode (a
+ * behaviour change with zb2: it used to navigate under a running
+ * slideshow and leave it running), driven through the real scroll
+ * handler. */
+static void
+test_swipe_and_wheel_stop_the_slideshow(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   gtk_widget_activate_action(GTK_WIDGET(fx.p_win), "win.slideshow", NULL);
+   g_assert_true(status_has(fx.p_win, "Slideshow started"));
+   g_assert_cmpint(ggaze_viewer_swipe(fx.p_viewer, -200.0, 0.0, -900.0, 0.0),
+                   ==, 1);
+   g_assert_true(status_has(fx.p_win, "Slideshow stopped"));
+   GGTEST_WAIT_FOR_TEXTURE(fx.p_win, B_W, B_H);
+   /* Stopped for real: the toggle starts it again rather than stopping. */
+   gtk_widget_activate_action(GTK_WIDGET(fx.p_win), "win.slideshow", NULL);
+   g_assert_true(status_has(fx.p_win, "Slideshow started"));
+   ggaze_viewer_set_scroll_behavior(fx.p_viewer, GGAZE_SCROLL_NAVIGATE);
+   GtkEventController *p_scroll =
+      controller_of(fx.p_viewer, GTK_TYPE_EVENT_CONTROLLER_SCROLL);
+   gboolean b_handled = FALSE;
+   g_signal_emit_by_name(p_scroll, "scroll", 0.0, -1.0, &b_handled);
+   g_assert_true(b_handled);
+   g_assert_true(status_has(fx.p_win, "Slideshow stopped"));
+   GGTEST_WAIT_FOR_TEXTURE(fx.p_win, A_W, A_H);
+   gtk_widget_activate_action(GTK_WIDGET(fx.p_win), "win.slideshow", NULL);
+   g_assert_true(status_has(fx.p_win, "Slideshow started"));
+   gtk_widget_activate_action(GTK_WIDGET(fx.p_win), "win.slideshow", NULL);
+   fx_close(&fx);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -434,15 +649,27 @@ main(int i_argc, char **c_argv) {
                    test_pinch_zooms_about_the_midpoint);
    g_test_add_func("/gestures/pinch_clamps_and_guards",
                    test_pinch_clamps_and_guards);
-   g_test_add_func("/gestures/controllers_are_wired",
-                   test_gesture_controllers_are_wired);
+   g_test_add_func("/gestures/pinch_pans_with_the_midpoint",
+                   test_pinch_pans_with_the_midpoint);
+   g_test_add_func("/gestures/zoom_controller_drives_the_pinch",
+                   test_zoom_controller_drives_the_pinch);
+   g_test_add_func("/gestures/swipe_controller_navigates_unless_spoiled",
+                   test_swipe_controller_navigates_unless_spoiled);
    g_test_add_func("/gestures/pinch_ends_a_tool_drag",
                    test_pinch_ends_a_tool_drag);
    g_test_add_func("/gestures/two_finger_tap_toggles_info",
                    test_two_finger_tap_toggles_info);
    g_test_add_func("/gestures/long_or_moving_two_finger_touch_is_no_tap",
                    test_long_or_moving_two_finger_touch_is_no_tap);
+   g_test_add_func("/gestures/tap_restores_the_view_before_the_first_finger",
+                   test_tap_restores_the_view_before_the_first_finger);
+   g_test_add_func("/gestures/touchpad_pinch_is_never_a_tap",
+                   test_touchpad_pinch_is_never_a_tap);
+   g_test_add_func("/gestures/new_texture_or_unmap_ends_the_pinch",
+                   test_new_texture_or_unmap_ends_the_pinch);
    g_test_add_func("/gestures/swipe_navigates", test_swipe_navigates);
+   g_test_add_func("/gestures/swipe_and_wheel_stop_the_slideshow",
+                   test_swipe_and_wheel_stop_the_slideshow);
    g_test_add_func("/gestures/swipe_refusals", test_swipe_refusals);
    return (g_test_run());
 }
