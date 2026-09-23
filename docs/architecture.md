@@ -44,6 +44,7 @@ ggaze
 │       ├── avif.c        # libavif
 │       └── heif.c        # libheif
 ├── croprect.{c,h}        # crop rectangle rules (move/resize/aspect/hit/drag/turn), plain C
+├── gesture-math.{c,h}    # zoom about a point + pinch / swipe / two-finger-tap rules, plain C
 ├── transform.{c,h}       # rotate 90 / straighten / crop state + the sizes everyone agrees on, plain C
 ├── tool-ctrl.{c,h}       # the modal c / R tool session over the viewer (GEGL only)
 ├── navigator.{c,h}       # directory listing, sort, filter, prev/next, wrap, marks, monitor; "changed" carries flags
@@ -100,7 +101,12 @@ ggaze
   holds the last frame, restarts from the first frame on every
   `set_texture`, remap and hold release, and holds the first frame while
   a crop / straighten tool is up. Every other accessor, and every other
-  module, keeps seeing the first frame.
+  module, keeps seeing the first frame. **Touch gestures** (zb2, decision
+  #48): a `GtkGestureZoom` pinch zooms about its midpoint through the same
+  zoom rule as the wheel and keys (`gesture-math`, plain C), a touch-only
+  `GtkGestureSwipe` emits `navigate` (the window gates it like `h`/`l`),
+  and a two-finger tap emits `toggle-info` (the window activates
+  `win.info`) — intents only, no window action names in the viewer.
 - **gridview** — the *thumbnail* view. A `GtkGridView` (or `GtkFlowBox`)
   backed by a `GListModel` of the navigator's files, each cell rendered from
   the `thumbnail` cache. Thumbnail size is adjustable (`+`/`-`); cells reflow

@@ -140,8 +140,8 @@ when adding an optional backend — gate code with `GGAZE_HAVE_*` from
 - Plain-C modules (`navigator`, `loader`, `detect`, `animation`,
   `thumbnail`, `trash`, `mover`, `opener`, `runner`, `enhancer`, `info`,
   `histogram`, `texturecache`, `clipboard`, `viewload`, `pathutil`,
-  `settings-pair`, `undo`, `croprect`, `transform`) own no GtkWidget and
-  are unit-tested standalone.
+  `settings-pair`, `undo`, `croprect`, `transform`, `gesture-math`) own
+  no GtkWidget and are unit-tested standalone.
 - An animated GIF/WebP is **one texture per file** like any still: the
   loader returns its first frame with the other frames attached as
   textures of their own (`loader/animation.h`, decoded and COPIED on the
@@ -167,7 +167,7 @@ src/viewload.{c,h}    large-view load pipeline: texture LRU, one active load, pr
 src/info-overlay.{c,h} EXIF card + histogram + status line over the stack (async gather)
 src/histogram.{c,h}   RGB/luminance binner over a texture (plain C, subsampled)
 src/histogram-view.{c,h} GgazeHistogramView : GtkWidget (snapshot-drawn plot on the card)
-src/viewer.{c,h}      GgazeViewer : GtkWidget (large canvas, zoom/pan, tool overlay hook)
+src/viewer.{c,h}      GgazeViewer : GtkWidget (large canvas, zoom/pan, touch gestures, tool overlay hook)
 src/gridview.{c,h}    GgazeGrid (thumbnail overview; intent signals, no window action names)
 src/shortcuts.{c,h}   the ONE key table: bindings, ? help, header tooltips, menu labels
 src/popup_list.{c,h}  shared hotkey list popover (e / ! / m)
@@ -188,6 +188,7 @@ src/enhancer-gegl.h   the GEGL buffer/texture/export operations (sync + async)
 src/enhance-ctrl.{c,h} optional enhance feature controller (mask, previews, side panel, saved flag, async save)
 src/enhance-ui.{c,h}  optional pure enhance side-panel widget construction
 src/croprect.{c,h}    crop rectangle rules (move/resize/aspect/hit/drag/quarter turn), plain C
+src/gesture-math.{c,h} zoom about a point (wheel/keys/pinch) + swipe / two-finger-tap rules, plain C
 src/transform.{c,h}   rotate 90 / straighten / crop state + the sizes the tools and the chain share
 src/tool-ctrl.{c,h}   optional modal crop (c) / straighten (R) session: viewer overlay, keys, drags
 src/clipboard.{c,h}   image/png (displayed texture) or file-URI content providers

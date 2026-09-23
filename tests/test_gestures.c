@@ -17,9 +17,10 @@
  *
  * What is asserted: a pinch zooms about its midpoint (the image pixel under
  * it stays put) with the wheel's clamp and NaN / Inf / zero-scale guards; a
- * pinch ends a one-finger tool drag with an END where the finger was and
- * swallows the rest of that drag; a leftward swipe shows the next image and
- * a rightward one the previous, while a vertical, tiny or zero-velocity
+ * pinch ends a one-finger tool drag with an END where the finger was, and a
+ * pan drag where it got to, and swallows the rest of either; a leftward
+ * swipe shows the next image and a rightward one the previous, while a
+ * vertical, tiny or zero-velocity
  * swipe, a swipe over a zoomed-in picture and a swipe with a tool overlay
  * installed navigate nowhere; a two-finger tap toggles the info card and
  * leaves the view as it was, a long or moving one does not. The dirty-gate

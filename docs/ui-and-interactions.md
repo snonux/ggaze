@@ -167,8 +167,29 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
 - **Double-click** — toggle fit ↔ 100%.
 - **Middle-click** — toggle mark on a grid cell (grid view) / toggle
   fullscreen (large view).
-- **Touch pinch** — zoom; **swipe** — next/prev; **two-finger tap** — info
-  (planned; not yet implemented).
+- **Touch** (large view; zb2, decision #48). None of these touches the
+  mouse, the wheel or the `scroll-behavior` setting, and all work the same
+  in fullscreen:
+  - **Pinch** — zoom around the pinch midpoint (a touchpad pinch too),
+    through the same zoom rule, 2 %–6400 % clamp and NaN guard as the wheel
+    (`src/gesture-math.c`, see "Zoom behavior"). The zoom is absolute from
+    where the pinch began. A pinch that starts while one finger is already
+    dragging ends that drag where the finger is (a crop rectangle keeps what
+    was dragged so far; a pan stops) — the second finger never drags it.
+  - **Swipe** — one finger, flicked horizontally: leftward = next image,
+    rightward = previous. It must travel ≥ 80 px, end at ≥ 300 px/s in the
+    same direction, and stay mostly horizontal (|dy| ≤ ½|dx|); a slower,
+    shorter, vertical or reversing drag is not a swipe. It is exactly `l` /
+    `h`: a dirty enhance preview raises the Save/Discard/Cancel prompt
+    first. It is **refused** while the picture is zoomed wider than the
+    window (the same finger is panning it — zoom out or `0` first) and
+    while a crop / straighten tool is up (the tool owns every drag, and a
+    navigation would abandon it). Touch only: a mouse drag still only pans.
+  - **Two-finger tap** — toggle the info card (`i`). Both fingers down and
+    the first one up within 250 ms, the midpoint moving ≤ 20 px and the
+    finger distance changing ≤ 10 %; whatever tiny zoom the fingers caused
+    is undone, so a fitted view stays fitted. A touchpad pinch is never a
+    tap.
 
 ## Zoom behavior
 
@@ -180,7 +201,9 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
   than to a bogus point. Do not "simplify" that fallback away by ignoring
   `gdk_event_get_position()`'s return value: it writes NaN to its
   out-parameters on failure, and a NaN reaching the pan state makes the image
-  vanish for good (hx0). `viewer.c` guards both the scroll centre and the pan.
+  vanish for good (hx0). `viewer.c` guards both the scroll centre and the pan,
+  and the zoom rule itself (`gesture_math_zoom_about`, shared by the wheel,
+  the keys and a pinch) refuses any non-finite input.
 - Panning clamps so the image can't drift off-screen.
 - Zoom is limited to 2 %–6400 % (`GGAZE_ZOOM_MIN`/`MAX`), except that the upper
   limit rises to the fit-to-window ratio when that is already larger — a small
