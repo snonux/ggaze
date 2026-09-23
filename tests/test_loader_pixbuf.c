@@ -443,6 +443,20 @@ test_tiny_images_load(void) {
    }
 }
 
+/* inotify_init1()/inotify_add_watch() fail for reasons that have nothing
+ * to do with the loader -- fs.inotify.max_user_instances exhausted by a
+ * desktop full of file watchers is the usual one -- so both harnesses
+ * below report such a failure with its errno text, where a bare
+ * "assertion failed: (fd >= 0)" reads like a wrong open count. */
+static void
+_assert_inotify_ok(int i_ret, const char *c_call) {
+   if (i_ret < 0) {
+      g_error("%s failed: %s (fs.inotify.max_user_instances or "
+              "max_user_watches exhausted?)",
+              c_call, g_strerror(errno));
+   }
+}
+
 /* --- FIFO harness ------------------------------------------------------- */
 
 /* A helper thread that serves a FIFO to the loader under test, one writer
@@ -605,9 +619,10 @@ _fifo_start(FifoWriter *p_w) {
    p_w->c_fifo = g_build_filename(p_w->c_tmpdir, "image.fifo", NULL);
    g_assert_cmpint(mkfifo(p_w->c_fifo, 0600), ==, 0);
    p_w->i_inotify = inotify_init1(IN_CLOEXEC);
-   g_assert_cmpint(p_w->i_inotify, >=, 0);
-   g_assert_cmpint(
-      inotify_add_watch(p_w->i_inotify, p_w->c_fifo, IN_CLOSE_NOWRITE), >=, 0);
+   _assert_inotify_ok(p_w->i_inotify, "inotify_init1");
+   _assert_inotify_ok(
+      inotify_add_watch(p_w->i_inotify, p_w->c_fifo, IN_CLOSE_NOWRITE),
+      "inotify_add_watch");
    /* Should a reader ever close early, the writer must see EPIPE, not
     * take the whole test binary down with SIGPIPE. */
    signal(SIGPIPE, SIG_IGN);
@@ -652,13 +667,13 @@ test_fifo_two_chunk_read(void) {
    if (!_pixbuf_module_usable("gif")) {
       return;
    }
-   FifoWriter w = {
+   FifoWriter s_writer = {
       .p_img = TINY_GIF, .u_len = sizeof(TINY_GIF), .u_first_chunk = 10};
-   g_assert_cmpuint(w.u_len, <=, GGAZE_DETECT_SNIFF_LEN);
-   g_assert_cmpuint(w.u_len, >, w.u_first_chunk);
-   _fifo_start(&w);
+   g_assert_cmpuint(s_writer.u_len, <=, GGAZE_DETECT_SNIFF_LEN);
+   g_assert_cmpuint(s_writer.u_len, >, s_writer.u_first_chunk);
+   _fifo_start(&s_writer);
 
-   GFile      *p_file = g_file_new_for_path(w.c_fifo);
+   GFile      *p_file = g_file_new_for_path(s_writer.c_fifo);
    GError     *p_err  = NULL;
    GdkTexture *p_tex  = loader_load(p_file, NULL, &p_err);
    /* The loader's verdict first: on a regression it names the cause
@@ -668,7 +683,7 @@ test_fifo_two_chunk_read(void) {
    g_assert_nonnull(p_tex);
    g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 1);
    g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 1);
-   g_assert_cmpuint(_fifo_finish(&w), ==, 2);
+   g_assert_cmpuint(_fifo_finish(&s_writer), ==, 2);
    g_object_unref(p_tex);
    g_object_unref(p_file);
 }
@@ -710,14 +725,15 @@ static void
 test_fifo_two_chunk_jpeg_peek(void) {
    guint8 jpg[GGAZE_SOF_JPEG_LEN];
    _build_sof_jpeg(jpg, 65500, 65500);
-   FifoWriter w = {.p_img = jpg, .u_len = sizeof(jpg), .u_first_chunk = 10};
-   g_assert_cmpuint(w.u_len, <, GGAZE_DETECT_SNIFF_LEN);
-   _fifo_start(&w);
+   FifoWriter s_writer = {
+      .p_img = jpg, .u_len = sizeof(jpg), .u_first_chunk = 10};
+   g_assert_cmpuint(s_writer.u_len, <, GGAZE_DETECT_SNIFF_LEN);
+   _fifo_start(&s_writer);
 
-   GFile   *p_file = g_file_new_for_path(w.c_fifo);
+   GFile   *p_file = g_file_new_for_path(s_writer.c_fifo);
    int      i_w = -1, i_h = -1;
    gboolean b_ok    = loader_peek_dimensions(p_file, &i_w, &i_h);
-   guint    u_opens = _fifo_finish(&w);
+   guint    u_opens = _fifo_finish(&s_writer);
    g_assert_false(b_ok);
    g_assert_cmpuint(u_opens, ==, 2);
    g_object_unref(p_file);
@@ -751,10 +767,10 @@ static void
 _open_counter_start(OpenCounter *p_c, const guint8 *p_buf, gsize u_len) {
    p_c->c_path    = write_tmp(p_buf, u_len);
    p_c->i_inotify = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-   g_assert_cmpint(p_c->i_inotify, >=, 0);
-   g_assert_cmpint(inotify_add_watch(p_c->i_inotify, p_c->c_path,
-                                     IN_OPEN | IN_CLOSE_NOWRITE),
-                   >=, 0);
+   _assert_inotify_ok(p_c->i_inotify, "inotify_init1");
+   _assert_inotify_ok(inotify_add_watch(p_c->i_inotify, p_c->c_path,
+                                        IN_OPEN | IN_CLOSE_NOWRITE),
+                      "inotify_add_watch");
 }
 
 /* Drain the queue (non-blocking: EAGAIN is "empty", anything else a
@@ -768,13 +784,13 @@ _open_counter_finish(OpenCounter *p_c) {
    guint                u_opens = 0;
    gboolean             b_open  = FALSE; /* an OPEN awaits its CLOSE */
    for (;;) {
-      ssize_t n = read(p_c->i_inotify, evs, sizeof(evs));
-      if (n < 0) {
+      ssize_t i_n = read(p_c->i_inotify, evs, sizeof(evs));
+      if (i_n < 0) {
          g_assert_cmpint(errno, ==, EAGAIN);
          break;
       }
-      g_assert_cmpint(n % (ssize_t)sizeof(evs[0]), ==, 0);
-      for (ssize_t i = 0; i < n / (ssize_t)sizeof(evs[0]); i++) {
+      g_assert_cmpint(i_n % (ssize_t)sizeof(evs[0]), ==, 0);
+      for (ssize_t i = 0; i < i_n / (ssize_t)sizeof(evs[0]); i++) {
          gboolean b_is_open = (evs[i].mask & IN_OPEN) != 0;
          g_assert_cmpint(b_is_open, !=, b_open);
          b_open = b_is_open;
@@ -793,14 +809,14 @@ _open_counter_finish(OpenCounter *p_c) {
  * the budget. */
 static gboolean
 _peek_counting_opens(const guint8 *p_jpg, gsize u_len, guint *p_opens) {
-   OpenCounter c;
-   _open_counter_start(&c, p_jpg, u_len);
-   GFile   *p_file = g_file_new_for_path(c.c_path);
+   OpenCounter s_counter;
+   _open_counter_start(&s_counter, p_jpg, u_len);
+   GFile   *p_file = g_file_new_for_path(s_counter.c_path);
    int      i_w = -1, i_h = -1;
    gint64   i_start = g_get_monotonic_time();
    gboolean b_ok    = loader_peek_dimensions(p_file, &i_w, &i_h);
    gdouble  d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
-   *p_opens         = _open_counter_finish(&c);
+   *p_opens         = _open_counter_finish(&s_counter);
    g_object_unref(p_file);
    g_assert_cmpfloat(d_secs, <, 5.0);
    return (b_ok);
@@ -861,7 +877,10 @@ test_sofless_jpeg_peek_defers_to_pixbuf(void) {
  * (FALSE, fast) like the thumbnail path does for the same file, instead of
  * handing the file to gdk-pixbuf to find the SOF for it. The declared size
  * behind the filler is a perfectly acceptable 6x3, so a fall-through would
- * show up as TRUE here. */
+ * show up as TRUE here -- but only if gdk-pixbuf's header parse got past
+ * the filler, which is a decoder's choice; the open count is not: exactly
+ * two (sniff + SOF peek), so gdk-pixbuf was never asked, whatever it
+ * would have said. */
 static void
 test_padded_past_prefix_jpeg_peek_refused(void) {
    const guint16 u_seglen   = 0xFFFD; /* max marker segment length */
@@ -879,17 +898,9 @@ test_padded_past_prefix_jpeg_peek_refused(void) {
    g_byte_array_append(p_buf, tail + 2, sizeof(tail) - 2); /* skip its SOI */
    g_assert_cmpuint(p_buf->len, >, GGAZE_JPEG_PEEK_LEN);
 
-   gchar   *c_path = write_tmp(p_buf->data, p_buf->len);
-   GFile   *p_file = g_file_new_for_path(c_path);
-   int      i_w = -1, i_h = -1;
-   gint64   i_start = g_get_monotonic_time();
-   gboolean b_ok    = loader_peek_dimensions(p_file, &i_w, &i_h);
-   gdouble  d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
-   g_assert_false(b_ok);
-   g_assert_cmpfloat(d_secs, <, 5.0);
-   g_object_unref(p_file);
-   unlink(c_path);
-   g_free(c_path);
+   guint u_opens = 0;
+   g_assert_false(_peek_counting_opens(p_buf->data, p_buf->len, &u_opens));
+   g_assert_cmpuint(u_opens, ==, 2);
    g_byte_array_unref(p_buf);
 }
 
@@ -964,6 +975,173 @@ test_backend_regates_loaded_bytes(void) {
       g_error_free(p_err);
       g_object_unref(p_file);
    }
+}
+
+/* The re-gate is exact only if it refuses a JXL in EVERY build. Without
+ * libjxl the not-built-in rule does; with libjxl loader_sniff_bytes()
+ * admits a JXL (the jxl backend decodes complete ones), so the fallback
+ * must also refuse what a specific backend claims -- or a garbage JXL
+ * swapped in between the dispatcher's sniff and the backend's read reaches
+ * the GdkPixbufLoader and, on a glycin desktop, hangs it (measured:
+ * forever). pixbuf_backend.load is called DIRECTLY with JXLs long enough
+ * to clear the length gate -- garbage, and the smallest real codestream
+ * and container, so the refusal is shown to be the gate's and not a
+ * decoder's verdict -- and must fail with the dispatch rule's error
+ * (libjxl) or the not-built-in one (no libjxl), within the budget. Before
+ * the dispatch rule the garbage vector hung this test in the full build. */
+static void
+test_fallback_refuses_jxl_in_every_build(void) {
+   guint8 garbage[60] = {0xFF, 0x0A};
+   const struct {
+      const char   *c_name;
+      const guint8 *p_buf;
+      gsize         u_len;
+   } vecs[] = {
+      {"garbage 60-byte codestream", garbage, sizeof(garbage)},
+      {"smallest real codestream", TINY_JXL_CODESTREAM,
+       sizeof(TINY_JXL_CODESTREAM)},
+      {"smallest real container", TINY_JXL_CONTAINER,
+       sizeof(TINY_JXL_CONTAINER)},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(vecs); u++) {
+      g_test_message("%s", vecs[u].c_name);
+      GFile      *p_file  = ggtest_mem_file_new(vecs[u].p_buf, vecs[u].u_len);
+      gint64      i_start = g_get_monotonic_time();
+      GError     *p_err   = NULL;
+      GdkTexture *p_tex   = pixbuf_backend.load(p_file, NULL, &p_err);
+      gdouble     d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
+      g_assert_null(p_tex);
+      g_assert_cmpfloat(d_secs, <, 5.0);
+#if GGAZE_HAVE_JXL
+      g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED);
+      g_assert_nonnull(strstr(p_err->message, "own backend"));
+      g_assert_nonnull(strstr(p_err->message, "JXL"));
+#else
+      g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+      g_assert_nonnull(strstr(p_err->message, "not built in"));
+#endif
+      g_error_free(p_err);
+      g_object_unref(p_file);
+   }
+}
+
+/* loader_sniff_bytes_for_fallback() on its own: the plain gate first (a
+ * truncated JXL is INVALID_DATA, as before), then the dispatch rule --
+ * bytes a specific backend of THIS build claims are refused with FAILED
+ * naming the format, bytes only gdk-pixbuf decodes pass. JPEG is the
+ * build-dependent probe: refused with the jpeg backend, accepted without
+ * it (there the fallback IS the JPEG decoder). PNG passes in every build. */
+static void
+test_fallback_gate_follows_dispatch(void) {
+   const guint8 jxl4[] = {0xFF, 0x0A, 0x10, 0x00};
+   GError      *p_err  = NULL;
+   g_assert_false(loader_sniff_bytes_for_fallback(jxl4, sizeof(jxl4), &p_err));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+   g_clear_error(&p_err);
+
+   g_assert_true(
+      loader_sniff_bytes_for_fallback(TINY_PNG, sizeof(TINY_PNG), &p_err));
+   g_assert_no_error(p_err);
+
+   gboolean b_jpeg =
+      loader_sniff_bytes_for_fallback(TINY_JPEG, sizeof(TINY_JPEG), &p_err);
+#if GGAZE_HAVE_JPEG
+   g_assert_false(b_jpeg);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED);
+   g_assert_nonnull(strstr(p_err->message, "JPEG"));
+   g_clear_error(&p_err);
+#else
+   g_assert_true(b_jpeg);
+   g_assert_no_error(p_err);
+#endif
+}
+
+/* loader_sniff_bytes() promises p_err on every FALSE (loader.h), the
+ * caller-bug case included: a NULL buffer with a length is refused with
+ * G_IO_ERROR_INVALID_ARGUMENT, not a silent FALSE -- and not a critical
+ * either, which under g_test's fatal-criticals would have aborted here. A
+ * NULL buffer with NO length is simply the empty file (INVALID_DATA). */
+static void
+test_sniff_bytes_null_buffer_is_invalid_argument(void) {
+   GError *p_err = NULL;
+   g_assert_false(loader_sniff_bytes(NULL, 4, NULL, &p_err));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+   g_clear_error(&p_err);
+   g_assert_false(loader_sniff_bytes(NULL, 0, NULL, &p_err));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+   g_clear_error(&p_err);
+   /* p_err may be NULL: still FALSE, still no critical. */
+   g_assert_false(loader_sniff_bytes(NULL, 4, NULL, NULL));
+}
+
+/* The loader's own "the read itself failed" exits, which no disk in a
+ * test reaches: the memory-served GFile fails every read on the Nth open.
+ * Open one is the dispatcher's sniff (loader.c _read_header(): the error
+ * is propagated as -1 and nothing is dispatched -- one open in total);
+ * open three, on the re-armed file, is the next load's second open, the
+ * pixbuf backend's g_file_load_contents() (its own error exit; the sniff
+ * before it passed). Both surface the helper's error message unchanged,
+ * so nothing in between wrapped or swallowed it. */
+static void
+test_read_failure_is_reported(void) {
+   GFile *p_file = ggtest_mem_file_new(TINY_GIF, sizeof(TINY_GIF));
+   ggtest_mem_file_fail_read(p_file, 1);
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = loader_load(p_file, NULL, &p_err);
+   g_assert_null(p_tex);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED);
+   g_assert_cmpstr(p_err->message, ==, GGTEST_MEM_FILE_READ_ERROR);
+   g_assert_cmpuint(ggtest_mem_file_opens(p_file), ==, 1);
+   g_clear_error(&p_err);
+
+   ggtest_mem_file_fail_read(p_file, 3);
+   p_tex = loader_load(p_file, NULL, &p_err);
+   g_assert_null(p_tex);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED);
+   g_assert_cmpstr(p_err->message, ==, GGTEST_MEM_FILE_READ_ERROR);
+   g_assert_cmpuint(ggtest_mem_file_opens(p_file), ==, 3);
+   g_clear_error(&p_err);
+   g_object_unref(p_file);
+}
+
+/* loader_load_pixbuf_scaled() decodes by PATH (gdk_pixbuf_new_from_file_
+ * at_scale), so a GFile without one is refused -- after the sniff, which
+ * the memory-served file passes, so it is this exit and not the gate's
+ * that answers (one open: the sniff), with a G_IO_ERROR_FAILED that names
+ * the reason. */
+static void
+test_scaled_refuses_non_local_file(void) {
+   GFile     *p_file = ggtest_mem_file_new(TINY_PNG, sizeof(TINY_PNG));
+   GError    *p_err  = NULL;
+   GdkPixbuf *p_pix  = loader_load_pixbuf_scaled(p_file, 128, NULL, &p_err);
+   g_assert_null(p_pix);
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED);
+   g_assert_nonnull(strstr(p_err->message, "non-local"));
+   g_assert_cmpuint(ggtest_mem_file_opens(p_file), ==, 1);
+   g_error_free(p_err);
+   g_object_unref(p_file);
+}
+
+/* pixbuf_util_decode_bytes()'s write-failure exit. A GdkPixbufLoader
+ * matches a module once it holds enough header (its 4 KiB sniff buffer);
+ * fed MORE than that with no recognisable signature, the write itself
+ * fails (GDK_PIXBUF_ERROR_UNKNOWN_TYPE), where a shorter unrecognised
+ * buffer fails only at close (test_one_byte_file goes that way). That exit
+ * must still close the loader (gdk-pixbuf warns about an unclosed one at
+ * finalize, fatal under g_test) and report the write's error. Bytes with
+ * no signature are not constrained by the gate, so the verdict really is
+ * gdk-pixbuf's. */
+static void
+test_decode_bytes_fails_at_write_on_unrecognised(void) {
+   const gsize u_len = 5000;
+   guint8     *p_buf = g_malloc(u_len);
+   memset(p_buf, 'x', u_len);
+   GError    *p_err = NULL;
+   GdkPixbuf *p_pix = pixbuf_util_decode_bytes(p_buf, u_len, &p_err);
+   g_assert_null(p_pix);
+   g_assert_error(p_err, GDK_PIXBUF_ERROR, GDK_PIXBUF_ERROR_UNKNOWN_TYPE);
+   g_error_free(p_err);
+   g_free(p_buf);
 }
 
 /* loader_load_async()/loader_load_finish(): the GTask wrapper the window
@@ -1227,23 +1405,50 @@ test_peek_dimensions_unknown_cases(void) {
    g_free(c_path);
 }
 
-int
-main(int i_argc, char **c_argv) {
-   g_test_init(&i_argc, &c_argv, NULL);
+/* Registration is split by theme so no function approaches the 50-line
+ * mark (c-best-practices). */
+static void
+_add_fixture_tests(void) {
    g_test_add_func("/loader/pixbuf/plain_jpeg", test_plain_jpeg);
    g_test_add_func("/loader/pixbuf/rotated_exif", test_rotated_exif_jpeg);
    g_test_add_func("/loader/pixbuf/png", test_png);
+   g_test_add_func("/loader/pixbuf/rgba_png", test_rgba_png);
    g_test_add_func("/loader/pixbuf/missing_file", test_missing_file_errors);
+   g_test_add_func("/loader/pixbuf/corrupt_jpeg", test_corrupt_jpeg);
+   g_test_add_func("/loader/pixbuf/oversized_jpeg", test_oversized_jpeg);
+   g_test_add_func("/loader/pixbuf/load_async", test_load_async);
+   g_test_add_func("/loader/pixbuf/cancelled_before_decode",
+                   test_cancelled_before_decode);
+   g_test_add_func("/loader/pixbuf/pixbuf_util", test_pixbuf_util);
+   g_test_add_func("/loader/pixbuf/decode_bytes_fails_at_write_on_unrecognised",
+                   test_decode_bytes_fails_at_write_on_unrecognised);
+}
+
+static void
+_add_gate_tests(void) {
    g_test_add_func("/loader/pixbuf/unsupported_jxl", test_unsupported_jxl);
    g_test_add_func("/loader/pixbuf/unsupported_avif", test_unsupported_avif);
    g_test_add_func("/loader/pixbuf/unsupported_heif", test_unsupported_heif);
-   g_test_add_func("/loader/pixbuf/corrupt_jpeg", test_corrupt_jpeg);
    g_test_add_func("/loader/pixbuf/truncated_signatures",
                    test_truncated_signatures);
    g_test_add_func("/loader/pixbuf/one_byte_file", test_one_byte_file);
+   g_test_add_func("/loader/pixbuf/empty_file_sets_error",
+                   test_empty_file_sets_error);
    g_test_add_func("/loader/pixbuf/garbage_jxl_fails_fast",
                    test_garbage_jxl_fails_fast);
    g_test_add_func("/loader/pixbuf/tiny_images_load", test_tiny_images_load);
+   g_test_add_func("/loader/pixbuf/truncated_thumbnail_and_peek",
+                   test_truncated_thumbnail_and_peek);
+   g_test_add_func("/loader/pixbuf/thumbnail_and_peek_still_work",
+                   test_thumbnail_and_peek_still_work);
+   g_test_add_func("/loader/pixbuf/sniff_bytes_null_buffer_is_invalid_argument",
+                   test_sniff_bytes_null_buffer_is_invalid_argument);
+   g_test_add_func("/loader/pixbuf/fallback_gate_follows_dispatch",
+                   test_fallback_gate_follows_dispatch);
+}
+
+static void
+_add_peek_tests(void) {
    g_test_add_func("/loader/pixbuf/fifo_two_chunk_read",
                    test_fifo_two_chunk_read);
    g_test_add_func("/loader/pixbuf/fifo_two_chunk_jpeg_peek",
@@ -1256,23 +1461,31 @@ main(int i_argc, char **c_argv) {
                    test_sofless_jpeg_peek_defers_to_pixbuf);
    g_test_add_func("/loader/pixbuf/padded_past_prefix_jpeg_peek_refused",
                    test_padded_past_prefix_jpeg_peek_refused);
+   g_test_add_func("/loader/pixbuf/peek_dimensions_unknown_cases",
+                   test_peek_dimensions_unknown_cases);
+}
+
+/* The pixbuf backend on a GFile served from memory (mem_file.h). */
+static void
+_add_stream_tests(void) {
    g_test_add_func("/loader/pixbuf/cancel_between_read_and_decode",
                    test_cancel_between_read_and_decode);
    g_test_add_func("/loader/pixbuf/backend_regates_loaded_bytes",
                    test_backend_regates_loaded_bytes);
-   g_test_add_func("/loader/pixbuf/load_async", test_load_async);
-   g_test_add_func("/loader/pixbuf/truncated_thumbnail_and_peek",
-                   test_truncated_thumbnail_and_peek);
-   g_test_add_func("/loader/pixbuf/thumbnail_and_peek_still_work",
-                   test_thumbnail_and_peek_still_work);
-   g_test_add_func("/loader/pixbuf/peek_dimensions_unknown_cases",
-                   test_peek_dimensions_unknown_cases);
-   g_test_add_func("/loader/pixbuf/oversized_jpeg", test_oversized_jpeg);
-   g_test_add_func("/loader/pixbuf/rgba_png", test_rgba_png);
-   g_test_add_func("/loader/pixbuf/empty_file_sets_error",
-                   test_empty_file_sets_error);
-   g_test_add_func("/loader/pixbuf/cancelled_before_decode",
-                   test_cancelled_before_decode);
-   g_test_add_func("/loader/pixbuf/pixbuf_util", test_pixbuf_util);
+   g_test_add_func("/loader/pixbuf/fallback_refuses_jxl_in_every_build",
+                   test_fallback_refuses_jxl_in_every_build);
+   g_test_add_func("/loader/pixbuf/read_failure_is_reported",
+                   test_read_failure_is_reported);
+   g_test_add_func("/loader/pixbuf/scaled_refuses_non_local_file",
+                   test_scaled_refuses_non_local_file);
+}
+
+int
+main(int i_argc, char **c_argv) {
+   g_test_init(&i_argc, &c_argv, NULL);
+   _add_fixture_tests();
+   _add_gate_tests();
+   _add_peek_tests();
+   _add_stream_tests();
    return (g_test_run());
 }

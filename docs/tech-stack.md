@@ -81,9 +81,21 @@ The order is what keeps the truncated-file contract build-independent.
 `loader_sniff_bytes()`, a function of bytes; the entry points run it on the
 first 64 bytes of one open. Where the gated bytes are the decoded bytes the
 guarantee is exact: `loader_load()`'s pixbuf backend loads the whole file
-once and runs `loader_sniff_bytes()` on *that* buffer before the
-`GdkPixbufLoader` sees it, and the thumbnail cache read does the same with
-its entry (below). Where a gdk-pixbuf call must take a **path** --
+once and gates *that* buffer before the `GdkPixbufLoader` sees it -- with
+`loader_sniff_bytes_for_fallback()`, which is the gate plus the dispatch
+rule: bytes that a format-specific backend of the build claims are refused
+(`G_IO_ERROR_FAILED`, naming the format), since the fallback can only be
+holding them because the file changed between the dispatcher's sniff and
+the backend's read. The dispatch rule is what makes the JXL refusal
+build-independent rather than a property of the minimal build: with
+libjxl the plain gate *admits* a JXL (the jxl backend decodes complete
+ones), so a garbage JXL swapped in after the sniff would otherwise reach
+the `GdkPixbufLoader` and hang glycin-jxl; with the rule it is refused in
+every build (`tests/test_loader_pixbuf.c` calls `pixbuf_backend.load`
+directly with garbage and with the smallest real JXLs and asserts the
+refusal under both `GGAZE_HAVE_JXL` values). The thumbnail cache read
+gates its entry the same way and decodes a PNG only (below). Where a
+gdk-pixbuf call must take a **path** --
 `gdk_pixbuf_new_from_file_at_scale()` in `loader_load_pixbuf_scaled()` and
 `gdk_pixbuf_get_file_info()` in `loader_peek_dimensions()` -- the sniff is
 one open and the decode another, and a file replaced in between (a rename
@@ -156,10 +168,15 @@ and could pass the oversized case with the wrong count. The FIFO harness
 is kept for what it is sound for -- proving the two `read_all()` header
 reads (sniff and SOF peek) cope with a file delivered in two chunks.
 
-**The thumbnail cache read is gated too, on the bytes it decodes.**
-`~/.cache/thumbnails` is shared with every TMS-compliant app, so an entry
-under ggaze's name is as untrusted as a source file: `thumbnail.c` loads
-the entry into memory once (`g_file_load_contents`), runs
+**The thumbnail cache read is gated too, on the bytes it decodes, and
+bounded.** `~/.cache/thumbnails` is shared with every TMS-compliant app,
+so an entry under ggaze's name is as untrusted as a source file:
+`thumbnail.c` reads the entry into memory once -- chunk by chunk, abandoned
+the moment it would exceed `GGAZE_THUMB_ENTRY_MAX_BYTES` (16 MiB, sixteen
+times the raw RGBA of a 512 px square; `thumbnail.h`), so a planted
+multi-GB entry costs one chunk past the cap and never a whole-file load
+into the pool worker (an entry padded to exactly the cap is still served,
+one byte more is regenerated: `test_oversize_entry_regenerated`) -- runs
 `loader_sniff_bytes()` on that buffer, and decodes it through a
 `GdkPixbufLoader` (`pixbuf_util_decode_bytes()`, the same routine the
 pixbuf backend uses) only when the sniff says PNG -- a TMS entry is a PNG

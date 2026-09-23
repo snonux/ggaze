@@ -94,10 +94,14 @@ ggaze
   backend-claimed format through that backend, and only the rest through
   `gdk_pixbuf_get_file_info`. `loader_sniff_bytes` is the gate on bytes
   already in memory: the pixbuf backend re-runs it on the buffer it
-  decodes, and the thumbnail cache read loads its entry once, gates those
-  bytes and decodes a PNG entry only (through a `GdkPixbufLoader`, never by
-  path) -- so wherever the gated bytes are the decoded bytes the guarantee
-  is exact, and only the two path-taking gdk-pixbuf calls (the at-scale
+  decodes as `loader_sniff_bytes_for_fallback` (the gate plus the dispatch
+  rule -- whatever a specific backend of the build claims is refused, which
+  is what keeps a JXL out of gdk-pixbuf in a libjxl build too), and the
+  thumbnail cache read reads its entry once, bounded at
+  `GGAZE_THUMB_ENTRY_MAX_BYTES`, gates those bytes and decodes a PNG entry
+  only (through a `GdkPixbufLoader`, never by path) -- so wherever the
+  gated bytes are the decoded bytes the guarantee is exact, and only the
+  two path-taking gdk-pixbuf calls (the at-scale
   thumbnail decode, the header-only size peek) remain best-effort against
   a file swapped between the sniff's open and theirs. Side effect: a
   missing or unreadable file fails the thumbnail path as a `G_IO_ERROR`

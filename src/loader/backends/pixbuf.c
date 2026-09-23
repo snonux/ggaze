@@ -17,7 +17,11 @@
  * peeks a JPEG's declared dimensions with detect_jpeg_peek_dims() (no
  * decoder invoked) and rejects an oversized one up front, mirroring jpeg.c's
  * _jpeg_reject_if_oversized() for its own GdkPixbuf call site. With `jpeg`
- * on, jpeg.c claims every JPEG first and this guard is not reached.
+ * on this guard is unreachable -- jpeg.c claims every JPEG at dispatch, and
+ * one that arrives here anyway (the file changed after the sniff) is
+ * refused by the fallback gate below before the guard runs -- so the full
+ * build's coverage of it is honestly zero; the minimal lane (jpeg off) is
+ * where it is exercised.
  *
  * What this backend cannot guard against on its own (task tb2): on a glycin
  * desktop (Fedora >= 41) gdk-pixbuf forwards formats it has no module for
@@ -29,13 +33,19 @@
  * its signature's minimum before this backend is reached and, without the
  * jxl feature, refuses every JXL outright (G_IO_ERROR_NOT_SUPPORTED). The
  * dispatcher's sniff is one open and this backend's read another, though,
- * so _pixbuf_load() runs the same gate (loader_sniff_bytes()) again on the
- * buffer it is about to decode: a file swapped in between the two opens is
- * gated all the same, and the GdkPixbufLoader never sees a JXL in any
- * build -- exactly, not best-effort -- so the residual glycin-jxl defect
- * costs a "not built in" message rather than a hung worker. The
- * GCancellable is honoured at the two points it can be: the read and the
- * moment before the (uninterruptible) decode.
+ * so _pixbuf_load() runs the gate again on the buffer it is about to
+ * decode -- as loader_sniff_bytes_for_fallback(), which adds the dispatch
+ * rule: bytes a specific backend of this build claims are refused too,
+ * since they can only be here because the file changed between the two
+ * opens. That second rule is what makes the JXL guarantee exact rather
+ * than build-dependent: without libjxl the not-built-in rule refuses a
+ * JXL, with libjxl the plain gate would ADMIT one (the jxl backend decodes
+ * complete ones) and a garbage JXL swapped in after the sniff would reach
+ * the GdkPixbufLoader and hang glycin-jxl; the dispatch rule refuses it
+ * there. So the GdkPixbufLoader never sees a JXL in any build, and the
+ * residual glycin-jxl defect costs an error message rather than a hung
+ * worker. The GCancellable is honoured at the two points it can be: the
+ * read and the moment before the (uninterruptible) decode.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -80,12 +90,14 @@ _pixbuf_can_load(const guint8 *p_head, gsize u_len) {
 
 /* Everything that must be true of p_buf/u_len before a GdkPixbufLoader
  * may see it: the dispatcher's gate again (empty, truncated, JXL without
- * libjxl -- on THESE bytes, so the check and the decode cannot be split
- * by a swap of the file between two opens; see the top-of-file comment),
- * then the declared-size guard for a JPEG. TRUE to decode. */
+ * libjxl) plus the dispatch rule (nothing a specific backend of this build
+ * claims -- with libjxl that is what keeps a JXL out) -- on THESE bytes,
+ * so the check and the decode cannot be split by a swap of the file
+ * between two opens (top-of-file comment) -- then the declared-size guard
+ * for a JPEG. TRUE to decode. */
 static gboolean
 _pixbuf_bytes_decodable(const guint8 *p_buf, gsize u_len, GError **p_err) {
-   if (!loader_sniff_bytes(p_buf, u_len, NULL, p_err)) {
+   if (!loader_sniff_bytes_for_fallback(p_buf, u_len, p_err)) {
       return (FALSE);
    }
    return (_pixbuf_reject_if_oversized_jpeg(p_buf, u_len, p_err));

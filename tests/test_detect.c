@@ -265,6 +265,38 @@ test_jpeg_peek_dims_from_path_missing(void) {
       ==, GGAZE_JPEG_PEEK_NOT_JPEG);
 }
 
+/* The path twin's own guards, which no real JPEG reaches: a NULL path is
+ * NOT_JPEG before any I/O; an empty file opens fine and reads nothing
+ * (u_read == 0); and a read that FAILS after a successful open is
+ * NOT_JPEG too, so the real decoder gets to produce its own error. Linux
+ * has one file whose read reliably fails after a good open: /proc/self/mem
+ * at offset 0 is unmapped (mmap_min_addr) and read() returns EIO, no disk
+ * fault needed. That case is asserted where the file can be opened and
+ * skipped with a message where it cannot (a hardened kernel); like the
+ * app, the suite is Linux-only. The out-parameters stay untouched. */
+static void
+test_jpeg_peek_dims_from_path_null_empty_and_failed_read(void) {
+   guint32 u_w = 0xdeadbeef, u_h = 0xdeadbeef;
+   g_assert_cmpint(detect_jpeg_peek_dims_from_path(NULL, &u_w, &u_h), ==,
+                   GGAZE_JPEG_PEEK_NOT_JPEG);
+
+   gchar *c_empty = _write_tmp((const guint8 *)"", 0);
+   g_assert_cmpint(detect_jpeg_peek_dims_from_path(c_empty, &u_w, &u_h), ==,
+                   GGAZE_JPEG_PEEK_NOT_JPEG);
+   unlink(c_empty);
+   g_free(c_empty);
+
+   if (access("/proc/self/mem", R_OK) != 0) {
+      g_test_message("no readable /proc/self/mem; failed-read case skipped");
+   } else {
+      g_assert_cmpint(
+         detect_jpeg_peek_dims_from_path("/proc/self/mem", &u_w, &u_h), ==,
+         GGAZE_JPEG_PEEK_NOT_JPEG);
+   }
+   g_assert_cmpuint(u_w, ==, 0xdeadbeef);
+   g_assert_cmpuint(u_h, ==, 0xdeadbeef);
+}
+
 /* mu0 review round 3: the CRITICAL bypass. A JPEG marker segment can legally
  * declare a length up to 65533 bytes; prefixing the real (huge-patched) SOF0
  * with one maximal-length filler APP0 segment pushes the SOF past
@@ -603,6 +635,9 @@ _add_jpeg_peek_tests(void) {
                    test_jpeg_peek_dims_from_path_oversized);
    g_test_add_func("/detect/jpeg_peek_dims_from_path/missing",
                    test_jpeg_peek_dims_from_path_missing);
+   g_test_add_func(
+      "/detect/jpeg_peek_dims_from_path/null_empty_and_failed_read",
+      test_jpeg_peek_dims_from_path_null_empty_and_failed_read);
    g_test_add_func(
       "/detect/jpeg_peek_dims_from_path/padded_past_prefix_inconclusive",
       test_jpeg_peek_dims_from_path_padded_past_prefix_inconclusive);

@@ -10,8 +10,9 @@
  * pool is a GTask worker that cannot be cancelled once glycin has the file.
  * The _entry_ variants plant the same bytes as a CACHE entry: the shared
  * ~/.cache/thumbnails is written by every TMS app, so the cache read needs
- * the gate as much as the source decode does, and only a PNG may be decoded
- * from it at all.
+ * the gate as much as the source decode does, only a PNG may be decoded
+ * from it at all, and its size is bounded (test_oversize_entry_regenerated
+ * pins GGAZE_THUMB_ENTRY_MAX_BYTES from both sides).
  *
  * Persistence (ix0) is covered by the _marker_ tests below. The older
  * "second get should hit the cache" assertion could not see the ix0 bug at
@@ -27,6 +28,7 @@
 
 #include "thumbnail.h"
 
+#include <fcntl.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gdk/gdk.h>
 #include <gio/gio.h>
@@ -823,6 +825,74 @@ test_non_png_entry_regenerated(void) {
    _assert_entry_regenerated_fast(TINY_GIF, sizeof(TINY_GIF));
 }
 
+/* Extend the file at c_path to u_total bytes with a hole (ftruncate(2):
+ * the new tail reads as zeros and occupies no disk), so a 16 MiB decoy
+ * costs the test nothing. */
+static void
+_extend_sparse(const char *c_path, gsize u_total) {
+   int i_fd = open(c_path, O_WRONLY);
+   g_assert_cmpint(i_fd, >=, 0);
+   g_assert_cmpint(ftruncate(i_fd, (off_t)u_total), ==, 0);
+   close(i_fd);
+}
+
+/* One thumbnail request against a cache entry that is the marker PNG
+ * padded with trailing zeros -- sparse, via _extend_sparse(), so the test
+ * costs no disk -- to u_total bytes. Returns the texture within the budget; the
+ * caller decides whether marker or regenerated is the right answer.
+ * gdk-pixbuf's PNG loader ignores bytes after IEND, so the padding by
+ * itself never spoils the marker: only the size cap can. */
+static GdkTexture *
+_thumb_of_padded_marker_entry(GFile *p_file, const char *c_ent, gsize u_total) {
+   char *c_uri = g_file_get_uri(p_file);
+   _write_marker(c_ent, _mtime_of(p_file), c_uri);
+   g_free(c_uri);
+   _extend_sparse(c_ent, u_total);
+   gint64      i_start = g_get_monotonic_time();
+   GdkTexture *p_tex   = _get_thumb_fresh(p_file, 128);
+   gdouble     d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
+   g_assert_cmpfloat(d_secs, <, 5.0);
+   g_assert_nonnull(p_tex);
+   return (p_tex);
+}
+
+/* A cache entry's SIZE is bounded before it is decoded (thumbnail.h,
+ * GGAZE_THUMB_ENTRY_MAX_BYTES): a foreign writer can leave anything under
+ * ggaze's entry name, and pre-fix _read_png_entry() pulled the whole entry
+ * into the pool worker with g_file_load_contents(), so a planted multi-GB
+ * file was a multi-GB allocation. The pair pins the bound from both sides:
+ * the marker padded to EXACTLY the cap is still served (marker dimensions
+ * come back, so the bytes were read from disk and the padding did not
+ * spoil the decode -- the refusal below is the cap's, not the padding's),
+ * and the same entry one byte longer is never read to its end: it is
+ * regenerated, fast, and rewritten at its true size. */
+static void
+test_oversize_entry_regenerated(void) {
+   char  *c_tmp  = _copy_fixture_to_tmp("plain.jpg");
+   GFile *p_file = g_file_new_for_path(c_tmp);
+   char  *c_ent  = thumbnail_cache_path(p_file, 128);
+
+   GdkTexture *p_tex =
+      _thumb_of_padded_marker_entry(p_file, c_ent, GGAZE_THUMB_ENTRY_MAX_BYTES);
+   g_assert_true(_is_marker(p_tex));
+   g_object_unref(p_tex);
+
+   p_tex = _thumb_of_padded_marker_entry(p_file, c_ent,
+                                         GGAZE_THUMB_ENTRY_MAX_BYTES + 1);
+   g_assert_false(_is_marker(p_tex));
+   g_assert_cmpint(gdk_texture_get_width(p_tex), <=, 128);
+   g_object_unref(p_tex);
+   struct stat st;
+   g_assert_cmpint(stat(c_ent, &st), ==, 0);
+   g_assert_cmpuint((guint64)st.st_size, <, GGAZE_THUMB_ENTRY_MAX_BYTES);
+   g_assert_cmpint(_cached_mtime(c_ent), ==, _mtime_of(p_file));
+
+   g_free(c_ent);
+   g_object_unref(p_file);
+   unlink(c_tmp);
+   g_free(c_tmp);
+}
+
 /* Registration is split by theme so no function approaches the 50-line
  * mark (c-best-practices). */
 static void
@@ -862,6 +932,8 @@ _add_gate_tests(void) {
                    test_garbage_jxl_entry_regenerated);
    g_test_add_func("/thumbnail/non_png_entry_regenerated",
                    test_non_png_entry_regenerated);
+   g_test_add_func("/thumbnail/oversize_entry_regenerated",
+                   test_oversize_entry_regenerated);
 }
 
 /* Delete every file in the bucket directory p_dir. */

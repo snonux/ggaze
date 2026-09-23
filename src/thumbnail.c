@@ -15,9 +15,10 @@
  * Decoding goes through loader_load_pixbuf_scaled(), so the thumbnail of a
  * JXL/AVIF/HEIF file comes from the same backend the large view uses and the
  * oversized-JPEG guard is the loader's, not a copy. The cache READ is
- * guarded too: an entry is loaded into memory once, and those bytes reach a
+ * guarded too: an entry is read into memory once, bounded at
+ * GGAZE_THUMB_ENTRY_MAX_BYTES (thumbnail.h), and those bytes reach a
  * GdkPixbufLoader only after loader_sniff_bytes() says they are a PNG (see
- * _read_png_entry()).
+ * _read_entry_bounded() and _read_png_entry()).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -36,6 +37,11 @@
 #define GGAZE_TMS_NORMAL 128
 #define GGAZE_TMS_LARGE 256
 #define GGAZE_TMS_XLARGE 512
+
+/* One read() of a cache entry (_read_entry_bounded()): large enough that a
+ * real entry (tens of KB) arrives in one or two reads, small enough that
+ * overshooting the cap costs one chunk, not a whole-file load. */
+#define GGAZE_THUMB_READ_CHUNK (64u * 1024u)
 
 struct Thumbnail {
    GThreadPool *p_pool; /* bounded decode pool, keeps the laptop off 100% */
@@ -112,36 +118,76 @@ _thumb_option(GdkPixbuf *p_pix, const char *c_key) {
    return (c_val);
 }
 
+/* The bytes of the cache entry at c_path (caller g_frees; *p_len set), or
+ * NULL when it is missing, unreadable, empty or larger than
+ * GGAZE_THUMB_ENTRY_MAX_BYTES. The entry is untrusted (thumbnail.h), so
+ * its size is bounded by the read itself rather than by a stat beforehand
+ * -- a stat is a second look at a file that can change in between, the
+ * read is the one look that counts: chunk by chunk, abandoned the moment
+ * the next chunk would take the total over the cap, so the memory and I/O
+ * a decoy costs are one chunk past the cap and never the file's length.
+ * A short read is not an error on a regular file (the loop just
+ * continues), so the only "unreadable" is a read that fails. */
+static guint8 *
+_read_entry_bounded(const char *c_path, gsize *p_len) {
+   GFile            *p_entry = g_file_new_for_path(c_path);
+   GFileInputStream *p_in    = g_file_read(p_entry, NULL, NULL);
+   g_object_unref(p_entry);
+   if (p_in == NULL) {
+      return (NULL);
+   }
+   GByteArray *p_buf   = g_byte_array_new();
+   guint8     *p_chunk = g_malloc(GGAZE_THUMB_READ_CHUNK);
+   gboolean    b_ok    = TRUE;
+   for (;;) {
+      gssize i_n = g_input_stream_read(G_INPUT_STREAM(p_in), p_chunk,
+                                       GGAZE_THUMB_READ_CHUNK, NULL, NULL);
+      if (i_n <= 0) {
+         b_ok = (i_n == 0);
+         break;
+      }
+      if ((gsize)p_buf->len + (gsize)i_n > GGAZE_THUMB_ENTRY_MAX_BYTES) {
+         b_ok = FALSE; /* over the cap: junk, regenerate */
+         break;
+      }
+      g_byte_array_append(p_buf, p_chunk, (guint)i_n);
+   }
+   g_free(p_chunk);
+   g_object_unref(p_in);
+   b_ok   = b_ok && p_buf->len > 0;
+   *p_len = p_buf->len;
+   /* g_byte_array_free() hands the segment over when told not to free
+    * it; the failure branch frees it and returns NULL. */
+   return (g_byte_array_free(p_buf, !b_ok));
+}
+
 /* The cache entry at c_path as a GdkPixbuf, or NULL when it is missing,
- * unreadable, not a PNG or undecodable -- every one of which means
- * "regenerate". The entry is read into memory ONCE and both the gate and
- * the decode run on that buffer: gdk-pixbuf never gets the path, so there
- * is no second open for a foreign writer to race, and no gdk-pixbuf
- * sniff of its own to disagree with ours. The gate is the loader's
- * (loader_sniff_bytes(): empty, truncated, JXL without libjxl) plus "is a
- * PNG": the length gate alone would not do -- a JXL longer than its
- * minimum but garbage still hangs glycin-jxl forever (task tb2), and this
- * pool worker cannot be cancelled once a GdkPixbufLoader has the bytes.
- * The tEXt options _load_cached() verifies survive the loader path (they
- * are read from the PNG chunks, not from the file name). */
+ * unreadable, oversize, not a PNG or undecodable -- every one of which
+ * means "regenerate". The entry is read into memory ONCE (bounded, see
+ * _read_entry_bounded()) and both the gate and the decode run on that
+ * buffer: gdk-pixbuf never gets the path, so there is no second open for
+ * a foreign writer to race, and no gdk-pixbuf sniff of its own to
+ * disagree with ours. The gate is the loader's (loader_sniff_bytes():
+ * empty, truncated, JXL without libjxl) plus "is a PNG": the length gate
+ * alone would not do -- a JXL longer than its minimum but garbage still
+ * hangs glycin-jxl forever (task tb2), and this pool worker cannot be
+ * cancelled once a GdkPixbufLoader has the bytes. The tEXt options
+ * _load_cached() verifies survive the loader path (they are read from the
+ * PNG chunks, not from the file name). */
 static GdkPixbuf *
 _read_png_entry(const char *c_path) {
-   GFile   *p_entry = g_file_new_for_path(c_path);
-   gchar   *c_buf   = NULL;
-   gsize    u_len   = 0;
-   gboolean b_read =
-      g_file_load_contents(p_entry, NULL, &c_buf, &u_len, NULL, NULL);
-   g_object_unref(p_entry);
-   if (!b_read) {
+   gsize   u_len = 0;
+   guint8 *p_buf = _read_entry_bounded(c_path, &u_len);
+   if (p_buf == NULL) {
       return (NULL);
    }
    GgazeFormat e_format = GGAZE_FMT_UNKNOWN;
    GdkPixbuf  *p_pix    = NULL;
-   if (loader_sniff_bytes((const guint8 *)c_buf, u_len, &e_format, NULL) &&
+   if (loader_sniff_bytes(p_buf, u_len, &e_format, NULL) &&
        e_format == GGAZE_FMT_PNG) {
-      p_pix = pixbuf_util_decode_bytes((const guchar *)c_buf, u_len, NULL);
+      p_pix = pixbuf_util_decode_bytes(p_buf, u_len, NULL);
    }
-   g_free(c_buf);
+   g_free(p_buf);
    return (p_pix);
 }
 

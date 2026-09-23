@@ -3,9 +3,10 @@
  *
  * Two small GObject types: GgtestMemStream, a GFileInputStream over a
  * GBytes whose read_fn copies out of the buffer and may cancel a
- * GCancellable at EOF; and GgtestMemFile, a GFile whose read_fn hands out
- * one of those per open and counts the opens. Only the GFile vfuncs the
- * loader (and GIO on its behalf) actually calls are implemented.
+ * GCancellable at EOF or fail outright; and GgtestMemFile, a GFile whose
+ * read_fn hands out one of those per open, arms the Nth one as asked and
+ * counts the opens. Only the GFile vfuncs the loader (and GIO on its
+ * behalf) actually calls are implemented.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -22,6 +23,7 @@ typedef struct {
    GBytes          *p_bytes;
    gsize            u_pos;
    GCancellable    *p_cancel_at_eof; /* NULL: a plain EOF */
+   gboolean         b_fail_reads;    /* every read fails, no bytes */
 } GgtestMemStream;
 
 typedef struct {
@@ -31,20 +33,25 @@ typedef struct {
 GType ggtest_mem_stream_get_type(void);
 G_DEFINE_TYPE(GgtestMemStream, ggtest_mem_stream, G_TYPE_FILE_INPUT_STREAM)
 
-/* Serve the next min(u_count, remaining) bytes. At EOF, cancel first and
- * report 0 second: GInputStream checked the cancellable BEFORE calling
- * this, so the caller's read succeeds with EOF and only a check of its
- * own after the read can notice the cancel -- which is the branch the
- * helper exists to reach. */
+/* Serve the next min(u_count, remaining) bytes -- or, on a stream armed to
+ * fail, no bytes and a GError, the way a disk error surfaces through GIO.
+ * At EOF, cancel first and report 0 second: GInputStream checked the
+ * cancellable BEFORE calling this, so the caller's read succeeds with EOF
+ * and only a check of its own after the read can notice the cancel --
+ * which is the branch the helper exists to reach. */
 static gssize
 _mem_stream_read(GInputStream *p_stream, void *p_buf, gsize u_count,
                  GCancellable *p_cancel, GError **p_err) {
    (void)p_cancel;
-   (void)p_err;
-   GgtestMemStream *p_s    = (GgtestMemStream *)p_stream;
-   gsize            u_size = 0;
-   const guint8    *p_data = g_bytes_get_data(p_s->p_bytes, &u_size);
-   gsize            u_left = u_size - p_s->u_pos;
+   GgtestMemStream *p_s = (GgtestMemStream *)p_stream;
+   if (p_s->b_fail_reads) {
+      g_set_error_literal(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                          GGTEST_MEM_FILE_READ_ERROR);
+      return (-1);
+   }
+   gsize         u_size = 0;
+   const guint8 *p_data = g_bytes_get_data(p_s->p_bytes, &u_size);
+   gsize         u_left = u_size - p_s->u_pos;
    if (u_left == 0) {
       if (p_s->p_cancel_at_eof != NULL) {
          g_cancellable_cancel(p_s->p_cancel_at_eof);
@@ -84,6 +91,7 @@ typedef struct {
    GBytes       *p_bytes;
    GCancellable *p_cancel;     /* owned; what the armed stream cancels */
    guint         u_cancel_nth; /* which open's EOF cancels; 0: none */
+   guint         u_fail_nth;   /* which open's reads fail; 0: none */
    guint         u_opens;
 } GgtestMemFile;
 
@@ -105,7 +113,8 @@ _mem_file_new_from_bytes(GBytes *p_bytes) {
    return (G_FILE(p_f));
 }
 
-/* One stream per open, the u_cancel_nth-th one armed. */
+/* One stream per open, the u_cancel_nth-th one armed to cancel and the
+ * u_fail_nth-th one armed to fail. */
 static GFileInputStream *
 _mem_file_read(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    (void)p_cancel;
@@ -117,6 +126,8 @@ _mem_file_read(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    if (p_f->u_cancel_nth != 0 && p_f->u_opens == p_f->u_cancel_nth) {
       p_s->p_cancel_at_eof = g_object_ref(p_f->p_cancel);
    }
+   p_s->b_fail_reads =
+      (p_f->u_fail_nth != 0 && p_f->u_opens == p_f->u_fail_nth);
    return (G_FILE_INPUT_STREAM(p_s));
 }
 
@@ -209,6 +220,13 @@ ggtest_mem_file_cancel_at_eof(GFile *p_file, GCancellable *p_cancel,
    g_clear_object(&p_f->p_cancel);
    p_f->p_cancel     = (p_cancel != NULL) ? g_object_ref(p_cancel) : NULL;
    p_f->u_cancel_nth = u_nth;
+}
+
+void
+ggtest_mem_file_fail_read(GFile *p_file, guint u_nth) {
+   g_assert_true(
+      G_TYPE_CHECK_INSTANCE_TYPE(p_file, ggtest_mem_file_get_type()));
+   ((GgtestMemFile *)p_file)->u_fail_nth = u_nth;
 }
 
 guint

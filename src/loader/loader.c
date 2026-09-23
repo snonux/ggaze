@@ -41,10 +41,18 @@
  * How exact "never" is depends on whether the gated bytes are the decoded
  * bytes. The gate on bytes is loader_sniff_bytes(); _sniff_header() is the
  * same gate on one open's first 64 bytes. loader_load() is exact: the
- * pixbuf backend loads the whole file once and runs loader_sniff_bytes()
- * on THAT buffer before decoding it, and the thumbnail cache read
- * (thumbnail.c) does the same with its entry, so a file swapped between
- * two opens cannot slip an ungated byte into a GdkPixbufLoader. The two
+ * pixbuf backend loads the whole file once and runs the gate on THAT
+ * buffer before decoding it -- as loader_sniff_bytes_for_fallback(), which
+ * adds the dispatch rule: whatever a specific backend of this build claims
+ * is refused, because the fallback only ever sees such bytes when the file
+ * changed between the two opens. That addition is what keeps the JXL
+ * refusal build-independent: with libjxl the plain gate admits a JXL (the
+ * jxl backend decodes complete ones), so a garbage JXL swapped in after
+ * the sniff would otherwise reach the GdkPixbufLoader and hang glycin-jxl
+ * -- refused now by rule 3 without libjxl and by the dispatch rule with it.
+ * The thumbnail cache read (thumbnail.c) gates its entry the same way and
+ * decodes a PNG only, so a file swapped between two opens cannot slip an
+ * ungated byte into a GdkPixbufLoader anywhere. The two
  * calls that must hand gdk-pixbuf a PATH -- gdk_pixbuf_new_from_file_at_
  * scale() in loader_load_pixbuf_scaled() and gdk_pixbuf_get_file_info() in
  * loader_peek_dimensions() -- are best-effort by construction: the sniff
@@ -182,11 +190,22 @@ _refuse_unbuilt_format(const guint8 *p_head, gsize u_len, GError **p_err) {
  * shorter than its signature's minimum, and a format the build cannot
  * decode. Only the first GGAZE_DETECT_SNIFF_LEN bytes matter: every rule
  * in detect's minimum table is <= that, so a longer buffer is gated
- * exactly like its own sniff-length prefix would be. */
+ * exactly like its own sniff-length prefix would be. A NULL buffer with a
+ * length is a caller bug, but it is reported through p_err like every
+ * other FALSE (G_IO_ERROR_INVALID_ARGUMENT) rather than through a
+ * g_return_val_if_fail(): the header promises p_err on every FALSE, and
+ * the async wrapper's "NULL error leaves the GTask incomplete" hazard is
+ * exactly what a silent FALSE would reintroduce. */
 gboolean
 loader_sniff_bytes(const guint8 *p_bytes, gsize u_len, GgazeFormat *p_format,
                    GError **p_err) {
-   g_return_val_if_fail(p_bytes != NULL || u_len == 0, FALSE);
+   if (G_UNLIKELY(p_bytes == NULL && u_len > 0)) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                  "no bytes to sniff (NULL buffer, %" G_GSIZE_FORMAT
+                  " bytes claimed)",
+                  u_len);
+      return (FALSE);
+   }
    gsize u_head = MIN(u_len, (gsize)GGAZE_DETECT_SNIFF_LEN);
    if (u_head == 0) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
@@ -202,6 +221,38 @@ loader_sniff_bytes(const guint8 *p_bytes, gsize u_len, GgazeFormat *p_format,
    if (p_format != NULL) {
       *p_format = detect_format(p_bytes, u_head);
    }
+   return (TRUE);
+}
+
+/* The gate plus the dispatch rule, for the pixbuf backend (loader.h): the
+ * bytes must be ones _dispatch() would have handed to the fallback, i.e.
+ * ones no specific backend claims. Whatever a backend claims here is a
+ * file that changed between the dispatcher's sniff and the backend's read
+ * -- refuse it and let the caller's reload dispatch it properly; decoding
+ * it through gdk-pixbuf would bypass the backend's own guards and, for a
+ * garbage JXL in a libjxl build, hang glycin-jxl. In the minimal build
+ * _backend_for() can only name the fallback, so the rule is compiled out
+ * there (GGAZE_HAVE_ANY_BACKEND, top-of-file comment) and this IS the
+ * plain gate. */
+gboolean
+loader_sniff_bytes_for_fallback(const guint8 *p_bytes, gsize u_len,
+                                GError **p_err) {
+   GgazeFormat e_format = GGAZE_FMT_UNKNOWN;
+   if (!loader_sniff_bytes(p_bytes, u_len, &e_format, p_err)) {
+      return (FALSE);
+   }
+#if GGAZE_HAVE_ANY_BACKEND
+   gsize u_head = MIN(u_len, (gsize)GGAZE_DETECT_SNIFF_LEN);
+   if (_backend_for(p_bytes, u_head) != &pixbuf_backend) {
+      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
+                  "%s is decoded by its own backend, not the GdkPixbuf "
+                  "fallback (the file changed between sniff and read; reload)",
+                  detect_format_name(e_format));
+      return (FALSE);
+   }
+#else
+   (void)e_format;
+#endif
    return (TRUE);
 }
 
