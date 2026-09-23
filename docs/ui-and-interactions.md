@@ -133,7 +133,7 @@ drift from the live bindings.
 | `Space`        | hold to compare original vs modified (large, enhance) |
 | `f` / `F11`    | toggle fullscreen |
 | `s`            | save enhanced copy (GEGL); no auto-save |
-| `S` / `F5`     | start / stop slideshow (large view; any navigation key stops it) |
+| `S` / `F5`     | start / stop slideshow (large view; any navigation key, a swipe and a navigate-mode wheel notch stop it) |
 | `i`            | toggle info overlay |
 | `d` / `Delete` | move to `.Trash` (status line offers `u`), then next; undoable |
 | `D` / `Shift+Delete` | delete permanently (no trash), then next; no undo |
@@ -162,7 +162,10 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
 ## Mouse / touch
 
 - **Scroll** — `zoom` (default), `pan-when-zoomed`, or `navigate` next/prev
-  — `scroll-behavior` setting.
+  — `scroll-behavior` setting. In `navigate` a notch is exactly `l` / `h`:
+  it stops a running slideshow and goes through the Save/Discard/Cancel
+  prompt (the slideshow stop is new with zb2; before it a notch turned the
+  page under a running slideshow and left it running).
 - **Click-drag** — pan when zoomed in.
 - **Double-click** — toggle fit ↔ 100%.
 - **Middle-click** — toggle mark on a grid cell (grid view) / toggle
@@ -170,12 +173,20 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
 - **Touch** (large view; zb2, decision #48). None of these touches the
   mouse, the wheel or the `scroll-behavior` setting, and all work the same
   in fullscreen:
-  - **Pinch** — zoom around the pinch midpoint (a touchpad pinch too),
-    through the same zoom rule, 2 %–6400 % clamp and NaN guard as the wheel
+  - **Pinch** — zoom around the pinch midpoint (a touchpad pinch too —
+    on **Wayland only**: X11 does not deliver touchpad pinch events to
+    GTK 4, so under X11 only a touchscreen pinches), through the same zoom
+    rule, 2 %–6400 % clamp and NaN guard as the wheel
     (`src/gesture-math.c`, see "Zoom behavior"). The zoom is absolute from
-    where the pinch began. A pinch that starts while one finger is already
-    dragging ends that drag where the finger is (a crop rectangle keeps what
-    was dragged so far; a pan stops) — the second finger never drags it.
+    where the pinch began, and the picture **moves with the midpoint**:
+    the image pixel under the fingers stays under them, so two fingers
+    moved together at a constant distance drag the picture, as common
+    viewers do. A pinch that starts while one finger is already dragging
+    takes that drag away where the finger is — a pan stops; a crop tool
+    lets go and keeps the rectangle as far as it was dragged; a straighten
+    tool drops its horizon line **without levelling** (the line was never
+    finished — ending it would level by whatever the finger jittered) —
+    and the second finger never drags it.
   - **Swipe** — one finger, flicked horizontally: leftward = next image,
     rightward = previous. It must travel ≥ 80 px, end at ≥ 300 px/s in the
     same direction, and stay mostly horizontal (|dy| ≤ ½|dx|); a slower,
@@ -188,8 +199,12 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
   - **Two-finger tap** — toggle the info card (`i`). Both fingers down and
     the first one up within 250 ms, the midpoint moving ≤ 20 px and the
     finger distance changing ≤ 10 %; whatever tiny zoom the fingers caused
-    is undone, so a fitted view stays fitted. A touchpad pinch is never a
-    tap.
+    is undone, and so is any pan the first finger made before the second
+    landed (the view goes back to what it was before the *first* finger
+    went down, and the 250 ms and 20 px count from that finger), so a
+    fitted view stays fitted. A touchpad pinch is never a tap. A new
+    picture on screen mid-pinch (the slideshow, a preview render) ends the
+    pinch: the rest of it neither zooms nor taps.
 
 ## Zoom behavior
 

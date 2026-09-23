@@ -102,7 +102,8 @@ ggaze
   `set_texture`, remap and hold release, and holds the first frame while
   a crop / straighten tool is up. Every other accessor, and every other
   module, keeps seeing the first frame. **Touch gestures** (zb2, decision
-  #48): a `GtkGestureZoom` pinch zooms about its midpoint through the same
+  #48): a `GtkGestureZoom` pinch zooms about its midpoint (and pans with
+  it) through the same
   zoom rule as the wheel and keys (`gesture-math`, plain C), a touch-only
   `GtkGestureSwipe` emits `navigate` (the window gates it like `h`/`l`),
   and a two-finger tap emits `toggle-info` (the window activates
