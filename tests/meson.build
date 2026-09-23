@@ -22,6 +22,17 @@
 #   GGAZE_SAMPLE_DIR    local ./sample-images (not git-tracked; tests skip
 #                       cleanly when absent so CI stays green)
 #   GIO_USE_VFS=local   avoid gvfs daemon-VFS internal leaks under ASan
+#
+# One opt-out, never set by this file:
+#   GGAZE_TEST_ALLOW_MISSING_PIXBUF_LOADERS=1
+#                       test_loader_pixbuf FAILS when a gdk-pixbuf module
+#                       gdk-pixbuf2 itself ships (png, gif, jpeg) is missing:
+#                       on CI's fedora:40 and on any desktop that is a broken
+#                       test machine, not an optional feature, and a silent
+#                       skip once hid a dead FIFO test for weeks. On a box
+#                       deliberately stripped of those modules, set this to
+#                       skip the affected decodes instead. Optional modules
+#                       (webp, tiff, ico, jxl) are always skipped when absent.
 
 fixtures_env = environment()
 fixtures_env.set('GIO_USE_VFS', 'local')
@@ -59,11 +70,17 @@ gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 
 # Shared test helpers (AGENTS.md: "Shared helpers go in tests/helpers/").
 # Grid-cell activation and alert-dialog driving are used by more than one
-# suite, so they live here instead of being copy-pasted per binary.
+# suite, so they live here instead of being copy-pasted per binary;
+# mem_file.c (a GFile served from memory, for cancelling INSIDE a read) is
+# the loader suites' stream-path driver; open_counter.c (an inotify count
+# of the opens of one file) is how test_loader_pixbuf proves gdk-pixbuf was
+# not consulted and test_thumbnail that a pre-cancelled request opened
+# nothing.
 test_helpers_inc = include_directories('helpers')
 test_helpers_lib = static_library(
    'ggaze_test_helpers',
-   ['helpers/gtk_helpers.c', ggaze_conf_h],
+   ['helpers/gtk_helpers.c', 'helpers/mem_file.c', 'helpers/open_counter.c',
+    ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
    install : false,
@@ -93,22 +110,40 @@ test('app', test_app,
    depends : ggaze_exe,
 )
 
+# test_detect, test_loader_pixbuf and test_thumbnail share
+# tests/helpers/tiny_images.h (the smallest real 1x1 file per format, as
+# inline bytes) via test_helpers_inc; test_loader_pixbuf and
+# test_thumbnail also link the helpers library (mem_file.c, open_counter.c).
+#
+# The unit binaries that g_test_skip() one of their cases (test_detect's
+# /proc/self/mem failed read, test_enhancer's and test_thumbnail's
+# as-root cases) are registered with protocol : 'tap': with the default
+# exitcode protocol a skipped case is invisible -- the binary exits 0 and
+# meson prints a plain OK -- while over TAP (GLib's default output since
+# 2.62) meson parses the per-case "ok N ... # SKIP" lines: the result
+# line reports the passed count only ("35 subtests passed" where 36 are
+# registered -- a skipped case is neither passed nor failed, so it shows
+# up nowhere in that line), the testlog names the skipped case with its
+# reason, and the whole test reads SKIP when every case skips. That the
+# summary line carries no skipped count is how meson's TAP reporting
+# works, not something ours could change.
 test_detect = executable(
    'test_detect',
    ['test_detect.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : [glib_dep],
    link_with : ggaze_lib,
    install : false,
 )
-test('detect', test_detect, suite : 'unit', env : fixtures_env)
+test('detect', test_detect, suite : 'unit', env : fixtures_env,
+   protocol : 'tap')
 
 test_loader_pixbuf = executable(
    'test_loader_pixbuf',
    ['test_loader_pixbuf.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
-   link_with : ggaze_lib,
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
 test('loader_pixbuf', test_loader_pixbuf, suite : 'unit', env : fixtures_env)
@@ -197,12 +232,13 @@ test('trash', test_trash, suite : 'unit', env : fixtures_env)
 test_thumbnail = executable(
    'test_thumbnail',
    ['test_thumbnail.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
-   link_with : ggaze_lib,
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
-test('thumbnail', test_thumbnail, suite : 'unit', env : fixtures_env)
+test('thumbnail', test_thumbnail, suite : 'unit', env : fixtures_env,
+   protocol : 'tap')
 
 test_info = executable(
    'test_info',
@@ -273,7 +309,8 @@ if gegl_dep.found()
    enhancer_env.set('LSAN_OPTIONS',
       'suppressions=' + join_paths(meson.project_source_root(), 'tests',
                                   'lsan_suppressions.txt'))
-   test('enhancer', test_enhancer, suite : 'unit', env : enhancer_env)
+   test('enhancer', test_enhancer, suite : 'unit', env : enhancer_env,
+      protocol : 'tap')
 endif
 
 test_texturecache = executable(

@@ -2,7 +2,11 @@
  * ggaze — format detection unit test
  *
  * Feeds magic-byte buffers to detect_format() and asserts the result. No I/O,
- * no display. Covers every format plus edge cases (empty, too-short, garbage).
+ * no display. Covers every format plus edge cases (empty, too-short, garbage),
+ * the JPEG header peek, the shared dimension cap, and the per-signature
+ * minimum file length behind detect_reject_truncated() (task tb2): pinned
+ * per rule, and proven not to over-tighten against the smallest real 1x1
+ * file of every format (tests/helpers/tiny_images.h).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -12,7 +16,10 @@
 
 #include <gio/gio.h>
 #include <glib.h>
+#include <string.h>
 #include <unistd.h>
+
+#include "tiny_images.h"
 
 /* Locate the baseline SOF0 marker (0xFF 0xC0) in a JPEG byte buffer and
  * overwrite its declared height/width with 65500 (0xFFDC), mirroring
@@ -258,6 +265,45 @@ test_jpeg_peek_dims_from_path_missing(void) {
       ==, GGAZE_JPEG_PEEK_NOT_JPEG);
 }
 
+/* The path twin's own guards, which no real JPEG reaches: a NULL path is
+ * NOT_JPEG before any I/O, and an empty file opens fine and reads nothing
+ * (u_read == 0). The out-parameters stay untouched. */
+static void
+test_jpeg_peek_dims_from_path_null_and_empty(void) {
+   guint32 u_w = 0xdeadbeef, u_h = 0xdeadbeef;
+   g_assert_cmpint(detect_jpeg_peek_dims_from_path(NULL, &u_w, &u_h), ==,
+                   GGAZE_JPEG_PEEK_NOT_JPEG);
+
+   gchar *c_empty = _write_tmp((const guint8 *)"", 0);
+   g_assert_cmpint(detect_jpeg_peek_dims_from_path(c_empty, &u_w, &u_h), ==,
+                   GGAZE_JPEG_PEEK_NOT_JPEG);
+   unlink(c_empty);
+   g_free(c_empty);
+   g_assert_cmpuint(u_w, ==, 0xdeadbeef);
+   g_assert_cmpuint(u_h, ==, 0xdeadbeef);
+}
+
+/* A read that FAILS after a successful open is NOT_JPEG too, so the real
+ * decoder gets to produce its own error. Linux has one file whose read
+ * reliably fails after a good open: /proc/self/mem at offset 0 is unmapped
+ * (mmap_min_addr) and read() returns EIO, no disk fault needed. Its own
+ * test, so that where it cannot be opened (a hardened kernel) the run
+ * shows a SKIP rather than a pass that quietly did less; like the app,
+ * the suite is Linux-only. The out-parameters stay untouched. */
+static void
+test_jpeg_peek_dims_from_path_failed_read(void) {
+   guint32 u_w = 0xdeadbeef, u_h = 0xdeadbeef;
+   if (access("/proc/self/mem", R_OK) != 0) {
+      g_test_skip("no readable /proc/self/mem: failed-read case not run");
+      return;
+   }
+   g_assert_cmpint(
+      detect_jpeg_peek_dims_from_path("/proc/self/mem", &u_w, &u_h), ==,
+      GGAZE_JPEG_PEEK_NOT_JPEG);
+   g_assert_cmpuint(u_w, ==, 0xdeadbeef);
+   g_assert_cmpuint(u_h, ==, 0xdeadbeef);
+}
+
 /* mu0 review round 3: the CRITICAL bypass. A JPEG marker segment can legally
  * declare a length up to 65533 bytes; prefixing the real (huge-patched) SOF0
  * with one maximal-length filler APP0 segment pushes the SOF past
@@ -332,6 +378,195 @@ test_jpeg_dims_within_bounds_null_err_ok(void) {
    g_assert_false(detect_jpeg_dims_within_bounds(65500, 65500, NULL));
 }
 
+/* detect_min_file_len() / detect_reject_truncated() (task tb2): one
+ * truncated vector per RULE in detect.c's table -- both TIFF byte orders,
+ * both JXL spellings and all five ISO BMFF brands, not just one per
+ * format -- each shorter than its format's minimum and each longer than the
+ * bare signature (so the bound really is stricter than the sniff), with
+ * the minimum PINNED to the value detect.c documents, so a silent change to
+ * the table fails here. The vectors are the same ones
+ * tests/test_loader_pixbuf.c pushes through the loader. */
+typedef struct {
+   const char *c_name;
+   guint8      buf[12];
+   gsize       u_len;
+   GgazeFormat e_format;
+   gsize       u_min; /* the documented smallest complete file */
+} TruncatedVec;
+
+static const TruncatedVec TRUNCATED[] = {
+   {"jxl codestream", {0xFF, 0x0A, 0x10, 0x00}, 4, GGAZE_FMT_JXL, 8},
+   {"jxl container",
+    {0, 0, 0, 0x0C, 'J', 'X', 'L', ' ', 0x0D, 0x0A, 0x87, 0x0A},
+    12,
+    GGAZE_FMT_JXL,
+    44},
+   {"avif",
+    {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'a', 'v', 'i', 'f'},
+    12,
+    GGAZE_FMT_AVIF,
+    36},
+   {"avis",
+    {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'a', 'v', 'i', 's'},
+    12,
+    GGAZE_FMT_AVIF,
+    36},
+   {"heic",
+    {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'c'},
+    12,
+    GGAZE_FMT_HEIF,
+    36},
+   {"heix",
+    {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'x'},
+    12,
+    GGAZE_FMT_HEIF,
+    36},
+   {"mif1",
+    {0, 0, 0, 0x1C, 'f', 't', 'y', 'p', 'm', 'i', 'f', '1'},
+    12,
+    GGAZE_FMT_HEIF,
+    36},
+   {"webp",
+    {'R', 'I', 'F', 'F', 0x10, 0, 0, 0, 'W', 'E', 'B', 'P'},
+    12,
+    GGAZE_FMT_WEBP,
+    20},
+   {"png", {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, 8, GGAZE_FMT_PNG, 33},
+   {"gif", {'G', 'I', 'F', '8', '9', 'a'}, 6, GGAZE_FMT_GIF, 13},
+   {"tiff le", {'I', 'I', 0x2A, 0x00}, 4, GGAZE_FMT_TIFF, 22},
+   {"tiff be", {'M', 'M', 0x00, 0x2A}, 4, GGAZE_FMT_TIFF, 22},
+   {"ico", {0x00, 0x00, 0x01, 0x00}, 4, GGAZE_FMT_ICO, 22},
+   {"jpeg", {0xFF, 0xD8, 0xFF}, 3, GGAZE_FMT_JPEG, 25},
+};
+
+static void
+test_min_file_len_per_signature(void) {
+   for (gsize u = 0; u < G_N_ELEMENTS(TRUNCATED); u++) {
+      const TruncatedVec *p_v = &TRUNCATED[u];
+      g_test_message("%s", p_v->c_name);
+      g_assert_cmpint(detect_format(p_v->buf, p_v->u_len), ==, p_v->e_format);
+      gsize u_min = detect_min_file_len(p_v->buf, p_v->u_len);
+      g_assert_cmpuint(u_min, ==, p_v->u_min);
+      g_assert_cmpuint(u_min, >, p_v->u_len);
+      /* The loader sniffs GGAZE_DETECT_SNIFF_LEN bytes; a minimum beyond
+       * that could never be checked against the sniff buffer. */
+      g_assert_cmpuint(u_min, <=, GGAZE_DETECT_SNIFF_LEN);
+      GError *p_err = NULL;
+      g_assert_false(detect_reject_truncated(p_v->buf, p_v->u_len, &p_err));
+      g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+      g_assert_nonnull(
+         strstr(p_err->message, detect_format_name(p_v->e_format)));
+      g_error_free(p_err);
+      /* A NULL error out-pointer is allowed. */
+      g_assert_false(detect_reject_truncated(p_v->buf, p_v->u_len, NULL));
+   }
+}
+
+/* The two JXL spellings carry different minimums (a container wraps the
+ * codestream in boxes), which is why the minimum is per signature and not
+ * per GgazeFormat. */
+static void
+test_min_file_len_jxl_container_exceeds_codestream(void) {
+   g_assert_cmpuint(detect_min_file_len(TRUNCATED[1].buf, TRUNCATED[1].u_len),
+                    >,
+                    detect_min_file_len(TRUNCATED[0].buf, TRUNCATED[0].u_len));
+}
+
+/* Exactly the minimum, or more, passes; the file is then the decoder's to
+ * judge. Padding with zeros past a JXL signature is enough to pass the gate
+ * (it is a length gate, not a validator). */
+static void
+test_reject_truncated_passes_at_minimum(void) {
+   guint8 buf[GGAZE_DETECT_SNIFF_LEN] = {0xFF, 0x0A};
+   gsize  u_min                       = detect_min_file_len(buf, sizeof(buf));
+   g_assert_cmpuint(u_min, >, 2);
+   GError *p_err = NULL;
+   g_assert_true(detect_reject_truncated(buf, u_min, &p_err));
+   g_assert_no_error(p_err);
+   g_assert_true(detect_reject_truncated(buf, sizeof(buf), &p_err));
+   g_assert_no_error(p_err);
+   g_assert_false(detect_reject_truncated(buf, u_min - 1, &p_err));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+   g_error_free(p_err);
+}
+
+/* No signature, no constraint: empty, 1-byte and garbage input yield a
+ * 0 minimum and pass the gate (the decoder produces the definitive error). */
+static void
+test_min_file_len_unknown_is_zero(void) {
+   const guint8 one[]     = {0xFF};
+   const guint8 garbage[] = {'h', 'e', 'l', 'l', 'o'};
+   g_assert_cmpuint(detect_min_file_len(NULL, 0), ==, 0);
+   g_assert_cmpuint(detect_min_file_len(one, 1), ==, 0);
+   g_assert_cmpuint(detect_min_file_len(garbage, G_N_ELEMENTS(garbage)), ==, 0);
+   GError *p_err = NULL;
+   g_assert_true(detect_reject_truncated(one, 1, &p_err));
+   g_assert_true(
+      detect_reject_truncated(garbage, G_N_ELEMENTS(garbage), &p_err));
+   g_assert_no_error(p_err);
+}
+
+/* The gate must not over-tighten: the smallest real 1x1 file of every
+ * format (tests/helpers/tiny_images.h, 36 to 159 bytes) sniffs as its
+ * format and passes through the same sniff-buffer view the loader takes.
+ * A minimum that crept above one of these sizes would turn away a valid
+ * file, which is the one failure mode a length gate must never have. */
+static void
+test_reject_truncated_accepts_tiny_images(void) {
+   for (gsize u = 0; u < G_N_ELEMENTS(TINY_IMAGES); u++) {
+      const TinyImage *p_t = &TINY_IMAGES[u];
+      g_test_message("%s (%" G_GSIZE_FORMAT " bytes)", p_t->c_name, p_t->u_len);
+      g_assert_cmpint(detect_format(p_t->p_bytes, p_t->u_len), ==,
+                      p_t->e_format);
+      gsize u_sniff = MIN(p_t->u_len, (gsize)GGAZE_DETECT_SNIFF_LEN);
+      g_assert_cmpuint(detect_min_file_len(p_t->p_bytes, u_sniff), <=,
+                       p_t->u_len);
+      GError *p_err = NULL;
+      g_assert_true(detect_reject_truncated(p_t->p_bytes, u_sniff, &p_err));
+      g_assert_no_error(p_err);
+   }
+}
+
+/* The committed fixtures are real files and must pass the gate through the
+ * same sniff-buffer view the loader takes (first GGAZE_DETECT_SNIFF_LEN
+ * bytes, or the whole file when shorter) -- including the three formats
+ * whose decoders are optional, since the gate runs in every build. */
+static void
+test_reject_truncated_accepts_fixtures(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   const char *c_names[] = {"plain.jpg", "rot6.jpg",  "small.png", "rgba.png",
+                            "tiny.jxl",  "tiny.avif", "tiny.heic"};
+   for (gsize u = 0; u < G_N_ELEMENTS(c_names); u++) {
+      gchar  *c_path = g_build_filename(c_dir, c_names[u], NULL);
+      guint8 *p_buf  = NULL;
+      gsize   u_len  = 0;
+      g_assert_true(
+         g_file_get_contents(c_path, (gchar **)&p_buf, &u_len, NULL));
+      GError *p_err = NULL;
+      g_assert_true(detect_reject_truncated(
+         p_buf, MIN(u_len, (gsize)GGAZE_DETECT_SNIFF_LEN), &p_err));
+      g_assert_no_error(p_err);
+      g_free(p_buf);
+      g_free(c_path);
+   }
+}
+
+static void
+test_format_name(void) {
+   g_assert_cmpstr(detect_format_name(GGAZE_FMT_JPEG), ==, "JPEG");
+   g_assert_cmpstr(detect_format_name(GGAZE_FMT_PNG), ==, "PNG");
+   g_assert_cmpstr(detect_format_name(GGAZE_FMT_GIF), ==, "GIF");
+   g_assert_cmpstr(detect_format_name(GGAZE_FMT_WEBP), ==, "WebP");
+   g_assert_cmpstr(detect_format_name(GGAZE_FMT_TIFF), ==, "TIFF");
+   g_assert_cmpstr(detect_format_name(GGAZE_FMT_ICO), ==, "ICO");
+   g_assert_cmpstr(detect_format_name(GGAZE_FMT_JXL), ==, "JXL");
+   g_assert_cmpstr(detect_format_name(GGAZE_FMT_AVIF), ==, "AVIF");
+   g_assert_cmpstr(detect_format_name(GGAZE_FMT_HEIF), ==, "HEIF");
+   g_assert_cmpstr(detect_format_name(GGAZE_FMT_UNKNOWN), ==, "unknown");
+   g_assert_cmpstr(detect_format_name((GgazeFormat)999), ==, "unknown");
+}
+
 /* detect_dims_within_bounds(): the single cap every backend applies. */
 static void
 test_dims_within_bounds(void) {
@@ -351,9 +586,10 @@ test_dims_within_bounds(void) {
    g_assert_true(detect_dims_within_bounds("t", 10000, 10000, NULL, NULL));
 }
 
-int
-main(int i_argc, char **c_argv) {
-   g_test_init(&i_argc, &c_argv, NULL);
+/* Registration is split by theme so no function approaches the 50-line
+ * mark (c-best-practices). */
+static void
+_add_format_tests(void) {
    g_test_add_func("/detect/jpeg", test_jpeg);
    g_test_add_func("/detect/dims_within_bounds", test_dims_within_bounds);
    g_test_add_func("/detect/png", test_png);
@@ -368,6 +604,27 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/detect/heif", test_heif);
    g_test_add_func("/detect/unknown_garbage", test_unknown_garbage);
    g_test_add_func("/detect/empty_and_short", test_empty_and_short);
+   g_test_add_func("/detect/format_name", test_format_name);
+}
+
+static void
+_add_min_len_tests(void) {
+   g_test_add_func("/detect/min_file_len/per_signature",
+                   test_min_file_len_per_signature);
+   g_test_add_func("/detect/min_file_len/jxl_container_exceeds_codestream",
+                   test_min_file_len_jxl_container_exceeds_codestream);
+   g_test_add_func("/detect/min_file_len/unknown_is_zero",
+                   test_min_file_len_unknown_is_zero);
+   g_test_add_func("/detect/reject_truncated/passes_at_minimum",
+                   test_reject_truncated_passes_at_minimum);
+   g_test_add_func("/detect/reject_truncated/accepts_tiny_images",
+                   test_reject_truncated_accepts_tiny_images);
+   g_test_add_func("/detect/reject_truncated/accepts_fixtures",
+                   test_reject_truncated_accepts_fixtures);
+}
+
+static void
+_add_jpeg_peek_tests(void) {
    g_test_add_func("/detect/jpeg_peek_dims/plain", test_jpeg_peek_dims_plain);
    g_test_add_func("/detect/jpeg_peek_dims/rotated_uses_raw_dims",
                    test_jpeg_peek_dims_rotated_uses_raw_dims);
@@ -385,6 +642,10 @@ main(int i_argc, char **c_argv) {
                    test_jpeg_peek_dims_from_path_oversized);
    g_test_add_func("/detect/jpeg_peek_dims_from_path/missing",
                    test_jpeg_peek_dims_from_path_missing);
+   g_test_add_func("/detect/jpeg_peek_dims_from_path/null_and_empty",
+                   test_jpeg_peek_dims_from_path_null_and_empty);
+   g_test_add_func("/detect/jpeg_peek_dims_from_path/failed_read",
+                   test_jpeg_peek_dims_from_path_failed_read);
    g_test_add_func(
       "/detect/jpeg_peek_dims_from_path/padded_past_prefix_inconclusive",
       test_jpeg_peek_dims_from_path_padded_past_prefix_inconclusive);
@@ -394,5 +655,13 @@ main(int i_argc, char **c_argv) {
                    test_jpeg_dims_within_bounds_oversized_sets_error);
    g_test_add_func("/detect/jpeg_dims_within_bounds/null_err_ok",
                    test_jpeg_dims_within_bounds_null_err_ok);
+}
+
+int
+main(int i_argc, char **c_argv) {
+   g_test_init(&i_argc, &c_argv, NULL);
+   _add_format_tests();
+   _add_min_len_tests();
+   _add_jpeg_peek_tests();
    return (g_test_run());
 }

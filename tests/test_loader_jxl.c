@@ -185,6 +185,41 @@ test_jxl_cancelled(void) {
    g_free(c_path);
 }
 
+/* loader_peek_dimensions() must size a JXL through THIS backend, never
+ * through gdk_pixbuf_get_file_info(): on a glycin desktop that call hangs
+ * forever on a garbage JXL and spawns a sandboxed loader even for a valid
+ * one. Pre-fix the dispatcher asked gdk-pixbuf first and only fell back to
+ * the backend, so the info worker hung on garbage even with libjxl built
+ * in. Real fixture -> 4x3 (upright; the backend decodes); 8- and 60-byte
+ * garbage that clears the length gate -> FALSE within the budget. */
+static void
+test_jxl_peek_dimensions(void) {
+   const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   gchar *c_path = g_build_filename(c_dir, "tiny.jxl", NULL);
+   GFile *p_file = g_file_new_for_path(c_path);
+   int    i_w = 0, i_h = 0;
+   g_assert_true(loader_peek_dimensions(p_file, &i_w, &i_h));
+   g_assert_cmpint(i_w, ==, 4);
+   g_assert_cmpint(i_h, ==, 3);
+   g_object_unref(p_file);
+   g_free(c_path);
+
+   const gsize u_lens[] = {8, 60};
+   for (gsize u = 0; u < G_N_ELEMENTS(u_lens); u++) {
+      guint8 garbage[60] = {0xFF, 0x0A};
+      gchar *c_tmp       = _write_tmp(garbage, u_lens[u]);
+      p_file             = g_file_new_for_path(c_tmp);
+      gint64 i_start     = g_get_monotonic_time();
+      g_assert_false(loader_peek_dimensions(p_file, &i_w, &i_h));
+      gdouble d_secs = (g_get_monotonic_time() - i_start) / 1e6;
+      g_assert_cmpfloat(d_secs, <, 5.0);
+      g_object_unref(p_file);
+      unlink(c_tmp);
+      g_free(c_tmp);
+   }
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -192,5 +227,6 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/loader/jxl/corrupt", test_jxl_corrupt);
    g_test_add_func("/loader/jxl/oversized", test_jxl_oversized);
    g_test_add_func("/loader/jxl/cancelled", test_jxl_cancelled);
+   g_test_add_func("/loader/jxl/peek_dimensions", test_jxl_peek_dimensions);
    return (g_test_run());
 }

@@ -14,7 +14,11 @@
  *
  * Decoding goes through loader_load_pixbuf_scaled(), so the thumbnail of a
  * JXL/AVIF/HEIF file comes from the same backend the large view uses and the
- * oversized-JPEG guard is the loader's, not a copy.
+ * oversized-JPEG guard is the loader's, not a copy. The cache READ is
+ * guarded too: an entry is read into memory once, bounded at
+ * GGAZE_THUMB_ENTRY_MAX_BYTES (thumbnail.h), and those bytes reach a
+ * GdkPixbufLoader only after loader_sniff_bytes() says they are a PNG (see
+ * _read_entry_bounded() and _read_png_entry()).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -33,6 +37,11 @@
 #define GGAZE_TMS_NORMAL 128
 #define GGAZE_TMS_LARGE 256
 #define GGAZE_TMS_XLARGE 512
+
+/* One read() of a cache entry (_read_entry_bounded()): large enough that a
+ * real entry (tens of KB) arrives in one or two reads, small enough that
+ * overshooting the cap costs one chunk, not a whole-file load. */
+#define GGAZE_THUMB_READ_CHUNK (64u * 1024u)
 
 struct Thumbnail {
    GThreadPool *p_pool; /* bounded decode pool, keeps the laptop off 100% */
@@ -109,6 +118,86 @@ _thumb_option(GdkPixbuf *p_pix, const char *c_key) {
    return (c_val);
 }
 
+/* The bytes of the cache entry at c_path (caller g_frees; *p_len set), or
+ * NULL when it is missing, unreadable, empty or larger than
+ * GGAZE_THUMB_ENTRY_MAX_BYTES. The entry is untrusted (thumbnail.h), so
+ * its size is bounded by the read itself rather than by a stat beforehand
+ * -- a stat is a second look at a file that can change in between, the
+ * read is the one look that counts: chunk by chunk, abandoned the moment
+ * the next chunk would take the total over the cap, so the memory and I/O
+ * a decoy costs are one chunk past the cap and never the file's length.
+ * A short read is not an error on a regular file (the loop just
+ * continues), so the only "unreadable" is a read that fails. The task's
+ * p_cancel goes into the open and every read, so a detached grid stops
+ * paying for an entry chunk by chunk instead of at the next
+ * _thumb_bail_if_cancelled(); a cancelled read is just "unreadable" here
+ * and _thumb_run() reports the cancellation itself. What no cancellable
+ * bounds is a FIFO or a character device planted under the entry name:
+ * GIO's open(2) of it blocks before any read -- pre-existing and
+ * accepted, as for every path the loader opens. */
+static guint8 *
+_read_entry_bounded(const char *c_path, GCancellable *p_cancel, gsize *p_len) {
+   GFile            *p_entry = g_file_new_for_path(c_path);
+   GFileInputStream *p_in    = g_file_read(p_entry, p_cancel, NULL);
+   g_object_unref(p_entry);
+   if (p_in == NULL) {
+      return (NULL);
+   }
+   GByteArray *p_buf   = g_byte_array_new();
+   guint8     *p_chunk = g_malloc(GGAZE_THUMB_READ_CHUNK);
+   gboolean    b_ok    = TRUE;
+   for (;;) {
+      gssize i_n = g_input_stream_read(G_INPUT_STREAM(p_in), p_chunk,
+                                       GGAZE_THUMB_READ_CHUNK, p_cancel, NULL);
+      if (i_n <= 0) {
+         b_ok = (i_n == 0);
+         break;
+      }
+      if ((gsize)p_buf->len + (gsize)i_n > GGAZE_THUMB_ENTRY_MAX_BYTES) {
+         b_ok = FALSE; /* over the cap: junk, regenerate */
+         break;
+      }
+      g_byte_array_append(p_buf, p_chunk, (guint)i_n);
+   }
+   g_free(p_chunk);
+   g_object_unref(p_in);
+   b_ok   = b_ok && p_buf->len > 0;
+   *p_len = p_buf->len;
+   /* g_byte_array_free() hands the segment over when told not to free
+    * it; the failure branch frees it and returns NULL. */
+   return (g_byte_array_free(p_buf, !b_ok));
+}
+
+/* The cache entry at c_path as a GdkPixbuf, or NULL when it is missing,
+ * unreadable, oversize, not a PNG or undecodable -- every one of which
+ * means "regenerate". The entry is read into memory ONCE (bounded, see
+ * _read_entry_bounded()) and both the gate and the decode run on that
+ * buffer: gdk-pixbuf never gets the path, so there is no second open for
+ * a foreign writer to race, and no gdk-pixbuf sniff of its own to
+ * disagree with ours. The gate is the loader's (loader_sniff_bytes():
+ * empty, truncated, JXL without libjxl) plus "is a PNG": the length gate
+ * alone would not do -- a JXL longer than its minimum but garbage still
+ * hangs glycin-jxl forever (task tb2), and this pool worker cannot be
+ * cancelled once a GdkPixbufLoader has the bytes. The tEXt options
+ * _load_cached() verifies survive the loader path (they are read from the
+ * PNG chunks, not from the file name). */
+static GdkPixbuf *
+_read_png_entry(const char *c_path, GCancellable *p_cancel) {
+   gsize   u_len = 0;
+   guint8 *p_buf = _read_entry_bounded(c_path, p_cancel, &u_len);
+   if (p_buf == NULL) {
+      return (NULL);
+   }
+   GgazeFormat e_format = GGAZE_FMT_UNKNOWN;
+   GdkPixbuf  *p_pix    = NULL;
+   if (loader_sniff_bytes(p_buf, u_len, &e_format, NULL) &&
+       e_format == GGAZE_FMT_PNG) {
+      p_pix = pixbuf_util_decode_bytes(p_buf, u_len, NULL);
+   }
+   g_free(p_buf);
+   return (p_pix);
+}
+
 /* Load a cached PNG into a texture, but only if the entry really describes the
  * current state of p_file:
  *   - Thumb::MTime must equal i_mtime -- the spec's staleness check, so an
@@ -122,13 +211,17 @@ _thumb_option(GdkPixbuf *p_pix, const char *c_key) {
  *
  * Any failure -- missing file, corrupt or unreadable PNG, mismatch -- returns
  * NULL, which makes the caller regenerate. A cache must never be able to turn
- * a displayable image into an error. */
+ * a displayable image into an error.
+ *
+ * Only a PNG is decoded at all: a TMS entry is a PNG by spec, so anything
+ * else under our name is someone's junk (a foreign writer, a torn write, a
+ * mislabelled file), to be regenerated rather than decoded -- see
+ * _read_png_entry() for why the check is on the loaded bytes. */
 static GdkTexture *
-_load_cached(GFile *p_file, const char *c_path, gint64 i_mtime) {
-   GError    *p_err = NULL;
-   GdkPixbuf *p_pix = gdk_pixbuf_new_from_file(c_path, &p_err);
+_load_cached(GFile *p_file, const char *c_path, gint64 i_mtime,
+             GCancellable *p_cancel) {
+   GdkPixbuf *p_pix = _read_png_entry(c_path, p_cancel);
    if (p_pix == NULL) {
-      g_clear_error(&p_err);
       return (NULL);
    }
    const char *c_m       = _thumb_option(p_pix, "Thumb::MTime");
@@ -204,7 +297,13 @@ _thumb_task_free(gpointer p_void) {
 /* Return TRUE (having completed p_task with G_IO_ERROR_CANCELLED) if the
  * request was cancelled. Checked twice in _thumb_run: once before any I/O so a
  * detached grid releases the GTask -- and the picture ref it carries --
- * promptly, and again right before the expensive decode. */
+ * promptly, and again right before the expensive decode. Neither check is
+ * the only guard: every GIO call the worker makes takes the task's
+ * cancellable and refuses a cancelled one before touching the file
+ * (g_file_query_info(), g_file_read()), so the pre-I/O contract the test
+ * pins (nothing opened, no directory created) holds through GIO as well;
+ * the bails are what keep the worker from making those calls at all and
+ * the one place this module states the rule. */
 static gboolean
 _thumb_bail_if_cancelled(GTask *p_task, GCancellable *p_cancel) {
    if (!g_cancellable_is_cancelled(p_cancel)) {
@@ -213,6 +312,18 @@ _thumb_bail_if_cancelled(GTask *p_task, GCancellable *p_cancel) {
    g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
                            "thumbnail request cancelled");
    return (TRUE);
+}
+
+/* Ensure the cache entry's directory exists, 0700 as the TMS requires.
+ * Best-effort: if it cannot be created (read-only $XDG_CACHE_HOME, a file
+ * in the way, quota) the lookup just misses and _generate() still returns
+ * a texture -- an unusable cache degrades ggaze to "slow", never to
+ * "broken". */
+static void
+_ensure_cache_dir(const char *c_cache_path) {
+   char *c_dir = g_path_get_dirname(c_cache_path);
+   g_mkdir_with_parents(c_dir, 0700);
+   g_free(c_dir);
 }
 
 static void
@@ -225,10 +336,13 @@ _thumb_run(GTask *p_task) {
       return;
    }
 
-   /* File mtime + size (for verify + Thumb::Size). */
+   /* File mtime + size (for verify + Thumb::Size). The stat takes the
+    * task's cancellable like every other call here: a request cancelled
+    * between the bail above and this line is refused by GIO instead of
+    * going on to create the bucket directory for nothing. */
    GFileInfo *p_info =
       g_file_query_info(p_tt->p_file, "standard::size,time::modified",
-                        G_FILE_QUERY_INFO_NONE, NULL, &p_err);
+                        G_FILE_QUERY_INFO_NONE, p_cancel, &p_err);
    if (p_info == NULL) {
       g_task_return_error(p_task, p_err);
       return;
@@ -238,15 +352,10 @@ _thumb_run(GTask *p_task) {
    gint64 i_size = (gint64)g_file_info_get_size(p_info);
    g_object_unref(p_info);
 
-   /* Ensure the cache dir exists, 0700 as the TMS requires. Best-effort: if it
-    * cannot be created (read-only $XDG_CACHE_HOME, a file in the way, quota)
-    * the lookup below just misses and _generate() still returns a texture --
-    * an unusable cache degrades ggaze to "slow", never to "broken". */
-   char *c_dir = g_path_get_dirname(p_tt->c_cache_path);
-   g_mkdir_with_parents(c_dir, 0700);
-   g_free(c_dir);
+   _ensure_cache_dir(p_tt->c_cache_path);
 
-   GdkTexture *p_tex = _load_cached(p_tt->p_file, p_tt->c_cache_path, i_mtime);
+   GdkTexture *p_tex =
+      _load_cached(p_tt->p_file, p_tt->c_cache_path, i_mtime, p_cancel);
    if (p_tex == NULL) {
       /* The decode is the expensive step; re-check cancellation first so a
        * detached grid doesn't pay for gdk_pixbuf_new_from_file_at_scale plus

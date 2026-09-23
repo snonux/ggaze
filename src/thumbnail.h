@@ -26,6 +26,19 @@ G_BEGIN_DECLS
 
 typedef struct Thumbnail Thumbnail;
 
+/* The most bytes a cache ENTRY may have before it is treated as junk and
+ * regenerated instead of read (task tb2). ~/.cache/thumbnails is written
+ * by every TMS app, so an entry under ggaze's name is untrusted input like
+ * a source file, and this is its size bound: the read stops the moment it
+ * would exceed the cap, so a planted multi-GB entry (sparse or not) costs
+ * one chunk of I/O, never a whole-file load into the pool worker. 16 MiB
+ * is sixteen times the raw RGBA of the largest bucket (512 px square is
+ * 1 MiB uncompressed) -- room for a foreign writer's uncompressed or
+ * metadata-heavy PNG, none for a decoy. Public so the test can pin it
+ * (an entry padded to exactly the cap is still served; one byte more is
+ * regenerated). */
+#define GGAZE_THUMB_ENTRY_MAX_BYTES (16u * 1024u * 1024u)
+
 Thumbnail *thumbnail_new(void);
 void       thumbnail_delete(Thumbnail *p_t);
 

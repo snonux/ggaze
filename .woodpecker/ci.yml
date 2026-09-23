@@ -1,11 +1,14 @@
 # ggaze CI — Woodpecker (codeberg-native).
 #
 # Three lanes (see docs/IMPLEMENTATION.md Phase 0):
-#   minimal  all optional backends disabled; plain GdkPixbuf viewer.
+#   minimal  all optional backends disabled (jpeg included: only then is
+#            GGAZE_HAVE_ANY_BACKEND 0 and the loader's #else branches
+#            compiled at all); plain GdkPixbuf viewer.
 #   gegl     gegl=enabled (+ jxl/avif/heif auto) — keeps the optional path
 #            from bit-rotting.
-#   asan     minimal build under AddressSanitizer + UBSan (also drives the
-#            per-feature leak-check tasks).
+#   asan     the same minimal build (jpeg disabled too) under
+#            AddressSanitizer + UBSan (also drives the per-feature
+#            leak-check tasks).
 #
 # The coverage gate runs in the minimal lane and is "warn" until M10, after
 # which it is flipped to fail (see docs/IMPLEMENTATION.md Cross-cutting).
@@ -13,7 +16,7 @@
 matrix:
   include:
     - LANE: minimal
-      MESON_OPTS: "-Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled"
+      MESON_OPTS: "-Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled -Djpeg=disabled"
       RUN_COVERAGE: "yes"
       ENV: ""
     - LANE: gegl
@@ -21,7 +24,7 @@ matrix:
       RUN_COVERAGE: "no"
       ENV: ""
     - LANE: asan
-      MESON_OPTS: "-Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled -Db_sanitize=address,undefined"
+      MESON_OPTS: "-Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled -Djpeg=disabled -Db_sanitize=address,undefined"
       RUN_COVERAGE: "no"
       ENV: "G_DEBUG=gc-friendly ASAN_OPTIONS=detect_leaks=1:abort_on_error=1"
 

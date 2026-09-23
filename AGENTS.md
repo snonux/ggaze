@@ -81,6 +81,15 @@ a popover on a never-presented toplevel maps on X11 but not on Wayland, and
 X11 seat grabs are display-global (see `tests/meson.build`, "suites that need
 exclusive use of the display's seat grab").
 
+`test_loader_pixbuf` **fails** (does not skip) when a gdk-pixbuf module that
+gdk-pixbuf2 itself ships -- `png`, `gif`, `jpeg` -- is missing: on CI's
+`fedora:40` and on any desktop that is a broken test machine, not an
+optional feature, and a silent skip once hid a dead test for weeks. On a box
+deliberately stripped of those modules, set
+`GGAZE_TEST_ALLOW_MISSING_PIXBUF_LOADERS=1` to skip the affected decodes
+instead. Optional modules (`webp`, `tiff`, `ico`, `jxl`) are always skipped
+when absent.
+
 Shared helpers go in `tests/helpers/`; fixtures in `tests/fixtures/` (grow per
 milestone). Integration suites land with the milestone that first makes a flow
 possible — see `docs/IMPLEMENTATION.md` "Planned integration suites".
@@ -113,10 +122,13 @@ the CI-portable baseline; `./sample-images/` is a local supplement.
 ## Optional features are OFF in the minimal CI lane
 
 `gegl`, `jxl`, `avif`, `heif`, `jpeg` are meson `feature`s (default `auto`). The
-**minimal** CI lane forces all disabled and must stay green; the **gegl** lane
-forces `gegl=enabled`. Never break the minimal build when adding an optional
-backend — gate code with `GGAZE_HAVE_*` from `ggaze-config.h` and toast
-"GEGL not built in" gracefully.
+**minimal** CI lane forces all disabled (`jpeg` too, explicitly: with every
+backend off `GGAZE_HAVE_ANY_BACKEND` is 0 and the `#else` branches of the
+loader's `#if GGAZE_HAVE_ANY_BACKEND` blocks are compiled and tested only
+there, so a lane that left `jpeg=auto` would never build them) and must stay
+green; the **gegl** lane forces `gegl=enabled`. Never break the minimal build
+when adding an optional backend — gate code with `GGAZE_HAVE_*` from
+`ggaze-config.h` and toast "GEGL not built in" gracefully.
 
 ## Architecture invariants (do not violate)
 

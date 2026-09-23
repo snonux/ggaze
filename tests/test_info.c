@@ -7,7 +7,9 @@
  *
  * Also covers hardening against malformed/crafted input: oversized JPEG
  * headers (mu0) and a malformed EXIF Orientation entry with a mismatched
- * format/undersized data buffer (lu0) -- both must fail safe, never crash.
+ * format/undersized data buffer (lu0) -- both must fail safe, never crash --
+ * and the truncated / empty / garbage-JXL files the loader's decode gate
+ * (tb2) must turn away before gdk-pixbuf's glycin loaders can hang on them.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -358,6 +360,112 @@ test_padded_past_prefix_oversized_jpeg(void) {
    g_free(c_tmp);
 }
 
+/* info_new() on a temp file holding p_buf/u_len must come back promptly
+ * with the dimensions left at their zero default ("Size unknown"), never
+ * stall: info gathering is the third public entry point in front of the
+ * loader's decode gate (task tb2), and the one a user hits by pressing `i`
+ * on whatever file the grid landed on. */
+static void
+_info_dims_unknown_fast(const guint8 *p_buf, gsize u_len) {
+   gchar  *c_tmp = NULL;
+   GError *p_sub = NULL;
+   gint    i_fd  = g_file_open_tmp("ggaze-info-gate-XXXXXX", &c_tmp, &p_sub);
+   g_assert_no_error(p_sub);
+   g_assert_cmpint(i_fd, >=, 0);
+   g_assert_cmpint((glong)write(i_fd, p_buf, u_len), ==, (glong)u_len);
+   close(i_fd);
+
+   GFile     *p_file  = g_file_new_for_path(c_tmp);
+   gint64     i_start = g_get_monotonic_time();
+   GgazeInfo *p_info  = info_new(p_file);
+   gdouble    d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
+   g_assert_nonnull(p_info);
+   g_assert_cmpint(p_info->i_width, ==, 0);
+   g_assert_cmpint(p_info->i_height, ==, 0);
+   g_assert_cmpfloat(d_secs, <, 5.0);
+
+   info_delete(p_info);
+   g_object_unref(p_file);
+   unlink(c_tmp);
+   g_free(c_tmp);
+}
+
+/* A 4-byte JXL signature: pre-fix loader_peek_dimensions() handed the path
+ * to gdk_pixbuf_get_file_info(), which on a glycin desktop never returned. */
+static void
+test_truncated_jxl_fails_fast(void) {
+   const guint8 h[] = {0xFF, 0x0A, 0x10, 0x00};
+   _info_dims_unknown_fast(h, G_N_ELEMENTS(h));
+}
+
+static void
+test_empty_file_fails_fast(void) {
+   _info_dims_unknown_fast((const guint8 *)"", 0);
+}
+
+/* A JXL long enough to clear the length gate but garbage: refused up front
+ * without libjxl, failed promptly by libjxl with it -- and in neither
+ * build handed to gdk_pixbuf_get_file_info(), which used to run FIRST. */
+static void
+test_garbage_jxl_fails_fast(void) {
+   guint8 h[60] = {0xFF, 0x0A};
+   _info_dims_unknown_fast(h, sizeof(h));
+}
+
+/* Overwrite the baseline SOF0's declared height with 0: legal JPEG (a DNL
+ * marker would supply the height later) that detect_jpeg_dims_within_bounds()
+ * deliberately does not treat as oversized. */
+static void
+_patch_sof_height_zero(guint8 *p_buf, gsize u_len) {
+   for (gsize u = 0; u + 8 < u_len; u++) {
+      if (p_buf[u] == 0xff && p_buf[u + 1] == 0xc0) {
+         p_buf[u + 5] = 0;
+         p_buf[u + 6] = 0;
+         return;
+      }
+   }
+   g_assert_not_reached();
+}
+
+/* A DNL-deferred height of 0 must leave the card at "Size unknown", not
+ * report 6x0: loader_peek_dimensions() used to return TRUE with a zero
+ * height straight from the SOF peek. Fast, because the decoder-free peek
+ * defers only to gdk-pixbuf's header parse, never to a decode. */
+static void
+test_dnl_zero_height_jpeg_size_unknown(void) {
+   const char *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   g_assert_nonnull(c_dir);
+   char  *c_src = g_build_filename(c_dir, "plain.jpg", NULL);
+   gchar *p_buf = NULL;
+   gsize  u_len = 0;
+   g_assert_true(g_file_get_contents(c_src, &p_buf, &u_len, NULL));
+   g_free(c_src);
+   _patch_sof_height_zero((guint8 *)p_buf, u_len);
+
+   gchar  *c_tmp = NULL;
+   GError *p_sub = NULL;
+   gint    i_fd  = g_file_open_tmp("ggaze-info-dnl-XXXXXX", &c_tmp, &p_sub);
+   g_assert_no_error(p_sub);
+   g_assert_cmpint(i_fd, >=, 0);
+   g_assert_cmpint((glong)write(i_fd, p_buf, u_len), ==, (glong)u_len);
+   close(i_fd);
+   g_free(p_buf);
+
+   GFile     *p_file  = g_file_new_for_path(c_tmp);
+   gint64     i_start = g_get_monotonic_time();
+   GgazeInfo *p_info  = info_new(p_file);
+   gdouble    d_secs  = (g_get_monotonic_time() - i_start) / 1e6;
+   g_assert_nonnull(p_info);
+   g_assert_cmpint(p_info->i_width, ==, 0);
+   g_assert_cmpint(p_info->i_height, ==, 0);
+   g_assert_cmpfloat(d_secs, <, 5.0);
+
+   info_delete(p_info);
+   g_object_unref(p_file);
+   unlink(c_tmp);
+   g_free(c_tmp);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -373,5 +481,11 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/info/oversized_jpeg", test_oversized_jpeg);
    g_test_add_func("/info/padded_past_prefix_oversized_jpeg",
                    test_padded_past_prefix_oversized_jpeg);
+   g_test_add_func("/info/truncated_jxl_fails_fast",
+                   test_truncated_jxl_fails_fast);
+   g_test_add_func("/info/empty_file_fails_fast", test_empty_file_fails_fast);
+   g_test_add_func("/info/garbage_jxl_fails_fast", test_garbage_jxl_fails_fast);
+   g_test_add_func("/info/dnl_zero_height_jpeg_size_unknown",
+                   test_dnl_zero_height_jpeg_size_unknown);
    return (g_test_run());
 }

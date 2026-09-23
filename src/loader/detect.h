@@ -35,6 +35,38 @@ typedef enum {
  * unrecognized. */
 GgazeFormat detect_format(const guint8 *p_head, gsize u_len);
 
+/* Short display name of e_format ("JPEG", "JXL", ...; "unknown" for
+ * GGAZE_FMT_UNKNOWN), for error messages and toasts. Never NULL. */
+const char *detect_format_name(GgazeFormat e_format);
+
+/* How many bytes the loader sniffs from the start of a file before it picks
+ * a backend. Every minimum returned by detect_min_file_len() is <= this, so a
+ * sniff buffer that is shorter than the minimum proves the FILE is shorter
+ * than the minimum (detect_reject_truncated() relies on that). */
+#define GGAZE_DETECT_SNIFF_LEN 64
+
+/* The smallest byte count a file starting with p_head can have and still
+ * carry the complete mandatory header structure of its sniffed format:
+ * signature plus the fixed-size boxes/chunks/segments every valid file of
+ * that format must contain (a JXL container needs its ftyp and codestream
+ * boxes, a PNG its IHDR chunk, ...). Deliberately an under-estimate --
+ * entropy data, optional chunks and trailers are never counted -- so a
+ * shorter file can never be valid, while a longer one may still be garbage
+ * the real decoder has to reject. 0 (no constraint) for an unrecognised or
+ * empty header. Exists because gdk-pixbuf on a glycin desktop hands such a
+ * truncated file to a sandboxed loader subprocess that, for JXL, waits
+ * forever for the bytes that never come (task tb2); rejecting the file up
+ * front is the only bound the caller can put on that. */
+gsize detect_min_file_len(const guint8 *p_head, gsize u_len);
+
+/* Apply detect_min_file_len() to a sniff buffer: p_head/u_len must be either
+ * the whole file or its first GGAZE_DETECT_SNIFF_LEN bytes. Returns TRUE
+ * when the file is at least as long as its format's minimum (or its format
+ * is unknown); FALSE with a recoverable G_IO_ERROR_INVALID_DATA naming the
+ * format and both lengths otherwise (p_err may be NULL). */
+gboolean detect_reject_truncated(const guint8 *p_head, gsize u_len,
+                                 GError **p_err);
+
 /* Per-dimension / total-pixel caps applied to EVERY decoder's declared or
  * reported dimensions before any allocation sized off them (JPEG header
  * peek, libjpeg output, libjxl basic info, libavif/libheif decoded planes).

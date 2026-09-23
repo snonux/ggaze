@@ -21,6 +21,15 @@
  * declared header before decoding, without duplicating the bound comparison
  * or error message (mu0).
  *
+ * The same idea closes a second stall (task tb2): every magic-number rule
+ * carries the smallest complete file its format allows, and
+ * detect_reject_truncated() lets the loader refuse a file shorter than that
+ * before any decoder sees it. On a glycin desktop (Fedora >= 41) gdk-pixbuf
+ * forwards unknown-to-it formats to sandboxed loader subprocesses, and the
+ * JXL one was measured to wait forever on a truncated codestream, with no
+ * cancellable or timeout the caller could apply; the minimum-length gate is
+ * the one bound available from this side.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -30,13 +39,51 @@
 #include <gio/gio.h>
 #include <string.h>
 
+/* Smallest complete file per signature (see detect_min_file_len() in
+ * detect.h for the contract: signature plus the fixed-size mandatory header
+ * structure, never entropy data, optional parts or trailers, so these are
+ * under-estimates a valid file can never fall below). Each must stay <=
+ * GGAZE_DETECT_SNIFF_LEN; test_detect.c asserts that. */
+enum {
+   /* SOI (2) + smallest frame header (marker 2, length 2, precision 1,
+    * height 2, width 2, Nf 1, one component 3 = 13) + smallest scan header
+    * (marker 2, length 2, Ns 1, one component 2, Ss/Se/AhAl 3 = 10). EOI
+    * is not counted: a camera-truncated file lacking it still decodes. */
+   MIN_LEN_JPEG = 25,
+   /* 8-byte signature + IHDR chunk (length 4, type 4, data 13, CRC 4). */
+   MIN_LEN_PNG = 33,
+   /* 6-byte header + 7-byte logical screen descriptor. */
+   MIN_LEN_GIF = 13,
+   /* 12-byte RIFF/WEBP header + the first chunk's 8-byte header. */
+   MIN_LEN_WEBP = 20,
+   /* 8-byte header + 2-byte entry count + one 12-byte IFD entry. */
+   MIN_LEN_TIFF = 22,
+   /* 6-byte ICONDIR + one 16-byte ICONDIRENTRY. */
+   MIN_LEN_ICO = 22,
+   /* 2-byte signature + the bit-packed SizeHeader / ImageMetadata / frame
+    * header / TOC (never under 4 bytes together) + at least 2 bytes of
+    * group data. The smallest valid codestream known (jxl art) is 12
+    * bytes; 8 leaves margin below it. */
+   MIN_LEN_JXL_CODESTREAM = 8,
+   /* 12-byte signature box + 16-byte ftyp box (size, type, major brand,
+    * minor version; the mandatory "jxl " compatible brand would add 4) +
+    * 8-byte jxlc box header + MIN_LEN_JXL_CODESTREAM of codestream. */
+   MIN_LEN_JXL_CONTAINER = 44,
+   /* 16-byte ftyp box + 12-byte meta FullBox header + 8-byte mdat box
+    * header; the mandatory meta children (hdlr, pitm, iloc, iinf, iprp)
+    * add far more in any real file. Shared by AVIF and HEIF. */
+   MIN_LEN_BMFF = 36,
+};
+
 /* One magic-number rule: u_len bytes of p_magic at p_offset identify
- * e_format. Rules are tried in order; the first match wins. */
+ * e_format, whose smallest complete file is u_min_len bytes. Rules are
+ * tried in order; the first match wins. */
 typedef struct {
    GgazeFormat   e_format;
    gsize         u_offset;
    gsize         u_len;
    const guint8 *p_magic;
+   gsize         u_min_len;
 } MagicRule;
 
 static const guint8 MAGIC_JPEG[] = {0xFF, 0xD8, 0xFF};
@@ -60,14 +107,16 @@ static const guint8 MAGIC_MIF1[]    = {'m', 'i', 'f', '1'};
 /* Single-magic formats (WebP and the ISO BMFF brands need two checks and are
  * handled after this table). */
 static const MagicRule MAGIC_RULES[] = {
-   {GGAZE_FMT_JPEG, 0, sizeof(MAGIC_JPEG), MAGIC_JPEG},
-   {GGAZE_FMT_PNG, 0, sizeof(MAGIC_PNG), MAGIC_PNG},
-   {GGAZE_FMT_GIF, 0, sizeof(MAGIC_GIF), MAGIC_GIF},
-   {GGAZE_FMT_TIFF, 0, sizeof(MAGIC_TIFF_LE), MAGIC_TIFF_LE},
-   {GGAZE_FMT_TIFF, 0, sizeof(MAGIC_TIFF_BE), MAGIC_TIFF_BE},
-   {GGAZE_FMT_ICO, 0, sizeof(MAGIC_ICO), MAGIC_ICO},
-   {GGAZE_FMT_JXL, 0, sizeof(MAGIC_JXL_CS), MAGIC_JXL_CS},
-   {GGAZE_FMT_JXL, 0, sizeof(MAGIC_JXL_BOX), MAGIC_JXL_BOX},
+   {GGAZE_FMT_JPEG, 0, sizeof(MAGIC_JPEG), MAGIC_JPEG, MIN_LEN_JPEG},
+   {GGAZE_FMT_PNG, 0, sizeof(MAGIC_PNG), MAGIC_PNG, MIN_LEN_PNG},
+   {GGAZE_FMT_GIF, 0, sizeof(MAGIC_GIF), MAGIC_GIF, MIN_LEN_GIF},
+   {GGAZE_FMT_TIFF, 0, sizeof(MAGIC_TIFF_LE), MAGIC_TIFF_LE, MIN_LEN_TIFF},
+   {GGAZE_FMT_TIFF, 0, sizeof(MAGIC_TIFF_BE), MAGIC_TIFF_BE, MIN_LEN_TIFF},
+   {GGAZE_FMT_ICO, 0, sizeof(MAGIC_ICO), MAGIC_ICO, MIN_LEN_ICO},
+   {GGAZE_FMT_JXL, 0, sizeof(MAGIC_JXL_CS), MAGIC_JXL_CS,
+    MIN_LEN_JXL_CODESTREAM},
+   {GGAZE_FMT_JXL, 0, sizeof(MAGIC_JXL_BOX), MAGIC_JXL_BOX,
+    MIN_LEN_JXL_CONTAINER},
 };
 
 static gboolean
@@ -95,23 +144,92 @@ _detect_bmff(const guint8 *p_head, gsize u_len) {
    return (GGAZE_FMT_UNKNOWN);
 }
 
-GgazeFormat
-detect_format(const guint8 *p_head, gsize u_len) {
+/* The one sniff behind detect_format() and detect_min_file_len(): returns
+ * the format and stores the matched signature's minimum complete-file
+ * length in *p_min_len (0 when unrecognised). Kept together so a signature
+ * can never gain a format without a minimum, or vice versa. */
+static GgazeFormat
+_sniff(const guint8 *p_head, gsize u_len, gsize *p_min_len) {
+   *p_min_len = 0;
    if (p_head == NULL || u_len == 0) {
       return (GGAZE_FMT_UNKNOWN);
    }
    for (gsize u = 0; u < G_N_ELEMENTS(MAGIC_RULES); u++) {
       const MagicRule *p_r = &MAGIC_RULES[u];
       if (_has_magic(p_head, u_len, p_r->u_offset, p_r->p_magic, p_r->u_len)) {
+         *p_min_len = p_r->u_min_len;
          return (p_r->e_format);
       }
    }
    /* WebP: RIFF .... WEBP */
    if (_has_magic(p_head, u_len, 0, MAGIC_RIFF, 4) &&
        _has_magic(p_head, u_len, 8, MAGIC_WEBP, 4)) {
+      *p_min_len = MIN_LEN_WEBP;
       return (GGAZE_FMT_WEBP);
    }
-   return (_detect_bmff(p_head, u_len));
+   GgazeFormat e_bmff = _detect_bmff(p_head, u_len);
+   if (e_bmff != GGAZE_FMT_UNKNOWN) {
+      *p_min_len = MIN_LEN_BMFF;
+   }
+   return (e_bmff);
+}
+
+GgazeFormat
+detect_format(const guint8 *p_head, gsize u_len) {
+   gsize u_min_len;
+   return (_sniff(p_head, u_len, &u_min_len));
+}
+
+const char *
+detect_format_name(GgazeFormat e_format) {
+   switch (e_format) {
+   case GGAZE_FMT_JPEG:
+      return ("JPEG");
+   case GGAZE_FMT_PNG:
+      return ("PNG");
+   case GGAZE_FMT_GIF:
+      return ("GIF");
+   case GGAZE_FMT_WEBP:
+      return ("WebP");
+   case GGAZE_FMT_TIFF:
+      return ("TIFF");
+   case GGAZE_FMT_ICO:
+      return ("ICO");
+   case GGAZE_FMT_JXL:
+      return ("JXL");
+   case GGAZE_FMT_AVIF:
+      return ("AVIF");
+   case GGAZE_FMT_HEIF:
+      return ("HEIF");
+   case GGAZE_FMT_UNKNOWN:
+   default:
+      return ("unknown");
+   }
+}
+
+gsize
+detect_min_file_len(const guint8 *p_head, gsize u_len) {
+   gsize u_min_len;
+   (void)_sniff(p_head, u_len, &u_min_len);
+   return (u_min_len);
+}
+
+gboolean
+detect_reject_truncated(const guint8 *p_head, gsize u_len, GError **p_err) {
+   gsize       u_min_len;
+   GgazeFormat e_format = _sniff(p_head, u_len, &u_min_len);
+   /* u_len is the whole file or GGAZE_DETECT_SNIFF_LEN bytes of it, and
+    * every minimum is <= GGAZE_DETECT_SNIFF_LEN, so u_len < u_min_len can
+    * only mean the file itself is too short. */
+   if (u_len >= u_min_len) {
+      return (TRUE);
+   }
+   g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+               "truncated %s file: %" G_GSIZE_FORMAT
+               " bytes, the smallest complete %s file is %" G_GSIZE_FORMAT,
+               detect_format_name(e_format), u_len,
+               detect_format_name(e_format), u_min_len);
+   return (FALSE);
 }
 
 /* JPEG marker codes relevant to the SOF scan below. SOF0-SOF15 span
@@ -269,18 +387,26 @@ detect_jpeg_peek_dims_from_path(const char *c_path, guint32 *p_w,
                                           * produce its own error */
    }
    guint8 buf[GGAZE_JPEG_PEEK_LEN];
-   gssize n =
-      g_input_stream_read(G_INPUT_STREAM(p_in), buf, sizeof(buf), NULL, NULL);
+   gsize  u_read = 0;
+   /* g_input_stream_read_all(), not a single read: a single read may return
+    * fewer bytes than the file holds on a FIFO, a pipe or a GVFS stream
+    * (loader.c's _read_header() has the same note), and a short single read
+    * would then be mistaken for the whole file below. With read_all only
+    * EOF can end the read early, which is what makes "u_read < sizeof(buf)"
+    * mean "the whole file was seen". A failed read is NOT_JPEG like an
+    * unreadable file: the real decoder produces its own error. */
+   gboolean b_ok = g_input_stream_read_all(G_INPUT_STREAM(p_in), buf,
+                                           sizeof(buf), &u_read, NULL, NULL);
    g_object_unref(p_in);
-   if (n <= 0) {
+   if (!b_ok || u_read == 0) {
       return (GGAZE_JPEG_PEEK_NOT_JPEG);
    }
-   /* b_capped: TRUE iff we filled the whole read buffer, meaning the file may
+   /* b_capped: TRUE iff the whole buffer filled, meaning the file may
     * continue past it and a "no SOF found" verdict would be inconclusive,
-    * not definitive. A short read (n < sizeof(buf)) hit real EOF, so the
-    * whole file was seen. */
-   gboolean b_capped = ((gsize)n == sizeof(buf));
-   return (_jpeg_peek_scan(buf, (gsize)n, b_capped, p_w, p_h));
+    * not definitive. Anything less hit EOF (see above), so the whole file
+    * was seen. */
+   gboolean b_capped = (u_read == sizeof(buf));
+   return (_jpeg_peek_scan(buf, u_read, b_capped, p_w, p_h));
 }
 
 gboolean
