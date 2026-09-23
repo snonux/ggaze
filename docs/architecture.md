@@ -65,7 +65,13 @@ ggaze
   handler is connected and the choke point, the load and the enhance panel's
   preview batch run once (the multi-file open used to open the folder and
   then place the cursor, which re-ran all of it for any start file not
-  sorted first — gd2).
+  sorted first — gd2). Because the first entry now goes through the same
+  `_open_resolve_target` / `_report_open_target` as a single-file open, it
+  decides the folder the same way: a folder first opens that folder itself
+  (the old path opened its parent), and a missing, non-image or hidden-RAW
+  first entry opens its folder on the first-sorted image with the status
+  line saying why (the old path reported the folder, never the entry, so
+  it stayed silent). The remaining entries only ask for the grid.
 - **window** — owns the two view modes (**grid** and **large**) in a
   `GtkStack`, the header bar, and the info overlay. Routes actions to
   navigator/loader/viewer/gridview; manages fullscreen state. Keeps the

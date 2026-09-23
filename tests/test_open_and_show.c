@@ -10,12 +10,19 @@
  * or the directory is absent — so CI (which only has tests/fixtures/) stays
  * green. Needs a display (integration suite; CI runs under xvfb).
  *
+ * The "gd2" section covers ggaze_window_open_files: one pass for a start
+ * file that is not first-sorted, and the edge cases of a first entry that
+ * decides the folder -- a folder itself, a missing path, a non-image, a
+ * RAW sidecar the hide-raw preference prunes. All of it runs in the minimal
+ * lane too (no GEGL involved).
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
-#include "window.h"
+#include "temp_dir.h"
 #include "viewer.h"
+#include "window.h"
 
 #include <gdk/gdk.h>
 #include <gio/gio.h>
@@ -52,17 +59,25 @@ drain_main(guint u_ms) {
    }
 }
 
-static void
-assert_shown_large_with_dims(GgazeWindow *p_win, int i_w, int i_h) {
-   GtkWidget *p_child = GTK_WIDGET(ggaze_window_get_stack(p_win));
-   g_assert_true(GTK_IS_STACK(p_child));
-   GtkWidget *p_large =
-      gtk_stack_get_child_by_name(GTK_STACK(p_child), "large");
+/* The large view's viewer (the "large" stack child), whichever child is
+ * showing: an open lands its load there even when the grid is up. */
+static GgazeViewer *
+large_viewer(GgazeWindow *p_win) {
+   GtkStack  *p_stack = ggaze_window_get_stack(p_win);
+   GtkWidget *p_large = gtk_stack_get_child_by_name(p_stack, "large");
    g_assert_true(GGAZE_IS_VIEWER(p_large));
-   /* Loads are async; pump until the viewer shows i_w x i_h. */
-   GdkTexture *p_tex = NULL;
+   return (GGAZE_VIEWER(p_large));
+}
+
+/* Loads are async: pump until the large view holds an i_w x i_h texture and
+ * assert it does. Which fixture landed is told by its dimensions (plain.jpg
+ * 6x3, rot6.jpg 4x8 upright, small.png 1x1). */
+static void
+wait_for_large_dims(GgazeWindow *p_win, int i_w, int i_h) {
+   GgazeViewer *p_viewer = large_viewer(p_win);
+   GdkTexture  *p_tex    = NULL;
    for (guint u = 0; u < 3000; u++) {
-      p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_large));
+      p_tex = ggaze_viewer_get_texture(p_viewer);
       if (p_tex != NULL && gdk_texture_get_width(p_tex) == i_w &&
           gdk_texture_get_height(p_tex) == i_h) {
          break;
@@ -70,11 +85,16 @@ assert_shown_large_with_dims(GgazeWindow *p_win, int i_w, int i_h) {
       g_main_context_iteration(g_main_context_default(), FALSE);
       g_usleep(1000);
    }
-   g_assert_cmpstr(gtk_stack_get_visible_child_name(GTK_STACK(p_child)), ==,
-                   "large");
    g_assert_nonnull(p_tex);
    g_assert_cmpint(gdk_texture_get_width(p_tex), ==, i_w);
    g_assert_cmpint(gdk_texture_get_height(p_tex), ==, i_h);
+}
+
+static void
+assert_shown_large_with_dims(GgazeWindow *p_win, int i_w, int i_h) {
+   wait_for_large_dims(p_win, i_w, i_h);
+   GtkStack *p_stack = ggaze_window_get_stack(p_win);
+   g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "large");
 }
 
 static void
@@ -190,18 +210,51 @@ make_three_fixture_dir(void) {
    return (c_dir);
 }
 
+/* A small non-image (or a fake RAW) next to the fixtures. */
 static void
-remove_dir_with_files(const gchar *c_dir) {
-   GDir *p_dir = g_dir_open(c_dir, 0, NULL);
-   g_assert_nonnull(p_dir);
-   const gchar *c_name;
-   while ((c_name = g_dir_read_name(p_dir)) != NULL) {
-      gchar *c_path = g_build_filename(c_dir, c_name, NULL);
-      g_unlink(c_path);
-      g_free(c_path);
-   }
-   g_dir_close(p_dir);
-   g_rmdir(c_dir);
+write_text_file(const gchar *c_dir, const gchar *c_name) {
+   GError *p_err  = NULL;
+   gchar  *c_path = g_build_filename(c_dir, c_name, NULL);
+   g_assert_true(g_file_set_contents(c_path, "x", 1, &p_err));
+   g_assert_no_error(p_err);
+   g_free(c_path);
+}
+
+static const gchar *
+status_text(GgazeWindow *p_win) {
+   return (gtk_label_get_text(GTK_LABEL(ggaze_window_get_info_label(p_win))));
+}
+
+/* Open {c_dir/c_first, c_dir/rot6.jpg} as a multi-file open and check the
+ * shape every edge case shares: the gate ran synchronously (nothing was
+ * dirty), so exactly one load was asked for by the time the call returns,
+ * and the two-entry open lands in the grid. */
+static GgazeWindow *
+open_pair_in_grid(const gchar *c_dir, const gchar *c_first) {
+   GgazeWindow *p_win = new_window();
+   GFile       *pp_files[2];
+   pp_files[0] = g_file_new_build_filename(c_dir, c_first, NULL);
+   pp_files[1] = g_file_new_build_filename(c_dir, "rot6.jpg", NULL);
+   g_assert_cmpuint(ggaze_window_load_count(p_win), ==, 0);
+   ggaze_window_open_files(p_win, pp_files, 2);
+   g_assert_cmpuint(ggaze_window_load_count(p_win), ==, 1);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "grid");
+   g_object_unref(pp_files[0]);
+   g_object_unref(pp_files[1]);
+   return (p_win);
+}
+
+/* After the load landed: the navigator lists the three-fixture folder with
+ * its FIRST-sorted file current -- the header says so ("plain.jpg · 1/3":
+ * position 1 of 3 listed, so the folder is the fixtures' and the RAW/text
+ * extra was not counted) and the large view holds plain.jpg's 6x3. */
+static void
+assert_on_first_of_three(GgazeWindow *p_win) {
+   wait_for_large_dims(p_win, 6, 3);
+   g_assert_cmpstr(gtk_window_get_title(GTK_WINDOW(p_win)), ==,
+                   "plain.jpg  \u00b7  1/3");
 }
 
 static void
@@ -221,19 +274,7 @@ test_open_many_starts_on_the_given_file_once(void) {
    g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
    /* The large view is loaded behind the grid (so `t` is instant): pump
     * until rot6.jpg's upright 4x8 decode is what it holds. */
-   GtkWidget  *p_large = gtk_stack_get_child_by_name(p_stack, "large");
-   GdkTexture *p_tex   = NULL;
-   for (guint u = 0; u < 3000; u++) {
-      p_tex = ggaze_viewer_get_texture(GGAZE_VIEWER(p_large));
-      if (p_tex != NULL && gdk_texture_get_width(p_tex) == 4) {
-         break;
-      }
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_nonnull(p_tex);
-   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, 4);
-   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, 8);
+   wait_for_large_dims(p_win, 4, 8);
    /* Nothing touched the folder (thumbnails go to the XDG cache), so no
     * rescan re-entered the load path either: still one. */
    drain_main(200);
@@ -243,8 +284,115 @@ test_open_many_starts_on_the_given_file_once(void) {
    }
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(500);
-   remove_dir_with_files(c_dir);
-   g_free(c_dir);
+   ggtest_cleanup_temp_dir(c_dir);
+}
+
+/* --- gd2 review: the first entry decides the folder -----------------------
+ *
+ * The old two-step open (folder first, cursor afterwards) resolved the
+ * first entry's PARENT and reported nothing about the entry itself. Now the
+ * entry goes through _open_resolve_target / _report_open_target like a
+ * single-file open, so: a folder first opens THAT folder; a missing, non-
+ * image or hidden-RAW first entry opens its folder on the first-sorted
+ * image and says why on the status line. The second entry (rot6.jpg, never
+ * first-sorted) only asks for the grid -- it must not become current. */
+
+static void
+test_open_many_first_entry_is_a_folder(void) {
+   gchar       *c_dir = make_three_fixture_dir();
+   GgazeWindow *p_win = new_window();
+   GFile       *pp_files[2];
+   pp_files[0] = g_file_new_for_path(c_dir);
+   pp_files[1] = g_file_new_build_filename(c_dir, "rot6.jpg", NULL);
+   ggaze_window_open_files(p_win, pp_files, 2);
+   g_assert_cmpuint(ggaze_window_load_count(p_win), ==, 1);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "grid");
+   /* The folder itself, not its parent ($TMPDIR): its first image is what
+    * loads, and a folder arg asked for nothing more specific, so the
+    * status line stays down. */
+   assert_on_first_of_three(p_win);
+   g_assert_false(gtk_widget_get_visible(ggaze_window_get_info_label(p_win)));
+   g_object_unref(pp_files[0]);
+   g_object_unref(pp_files[1]);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(500);
+   ggtest_cleanup_temp_dir(c_dir);
+}
+
+static void
+test_open_many_first_entry_is_an_empty_folder(void) {
+   GError *p_err = NULL;
+   gchar  *c_dir = g_dir_make_tmp("ggaze-open-empty-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   GgazeWindow *p_win = new_window();
+   GFile       *pp_files[2];
+   pp_files[0] = g_file_new_for_path(c_dir);
+   pp_files[1] = g_file_new_build_filename(c_dir, "none.jpg", NULL);
+   ggaze_window_open_files(p_win, pp_files, 2);
+   /* The one pass still asks for the current file (the seam counts asks,
+    * not decodes); with nothing listed it clears the large view and the
+    * window shows its empty state for the folder instead of the grid. */
+   g_assert_cmpuint(ggaze_window_load_count(p_win), ==, 1);
+   drain_main(100);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "empty");
+   g_assert_null(ggaze_viewer_get_texture(large_viewer(p_win)));
+   g_object_unref(pp_files[0]);
+   g_object_unref(pp_files[1]);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(500);
+   ggtest_cleanup_temp_dir(c_dir);
+}
+
+static void
+test_open_many_first_entry_missing(void) {
+   gchar       *c_dir = make_three_fixture_dir();
+   GgazeWindow *p_win = open_pair_in_grid(c_dir, "missing.jpg");
+   /* Reported at once (the gate ran synchronously), before the load lands. */
+   g_assert_cmpstr(status_text(p_win), ==,
+                   "missing.jpg not found \u2014 opened its folder");
+   g_assert_true(gtk_widget_get_visible(ggaze_window_get_info_label(p_win)));
+   assert_on_first_of_three(p_win);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(500);
+   ggtest_cleanup_temp_dir(c_dir);
+}
+
+static void
+test_open_many_first_entry_not_an_image(void) {
+   gchar *c_dir = make_three_fixture_dir();
+   write_text_file(c_dir, "notes.txt");
+   GgazeWindow *p_win = open_pair_in_grid(c_dir, "notes.txt");
+   g_assert_cmpstr(
+      status_text(p_win), ==,
+      "notes.txt is not an image in this folder \u2014 opened the folder");
+   assert_on_first_of_three(p_win); /* 1/3: the text file is not listed */
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(500);
+   ggtest_cleanup_temp_dir(c_dir);
+}
+
+/* A RAW next to a JPEG of the same stem is an image, and one the folder
+ * holds -- the hide-raw preference (schema default: on) merely prunes it
+ * from the listing. "is not an image in this folder" was wrong for it and
+ * sent the user looking for a broken file; the status line now names the
+ * preference. A RAW WITHOUT a twin is listed and needs no message, which
+ * is why the check is "hide-raw on + RAW name + not current". */
+static void
+test_open_many_first_entry_hidden_raw_sidecar(void) {
+   gchar *c_dir = make_three_fixture_dir();
+   write_text_file(c_dir, "plain.cr2"); /* sidecar of plain.jpg */
+   GgazeWindow *p_win = open_pair_in_grid(c_dir, "plain.cr2");
+   g_assert_cmpstr(status_text(p_win), ==,
+                   "plain.cr2 is a RAW sidecar hidden by Preferences "
+                   "\u2014 opened the folder");
+   assert_on_first_of_three(p_win); /* 1/3: the sidecar was pruned */
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(500);
+   ggtest_cleanup_temp_dir(c_dir);
 }
 
 int
@@ -268,5 +416,15 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/open/sample_image", test_open_sample_image);
    g_test_add_func("/open/many_starts_on_the_given_file_once",
                    test_open_many_starts_on_the_given_file_once);
+   g_test_add_func("/open/many_first_entry_is_a_folder",
+                   test_open_many_first_entry_is_a_folder);
+   g_test_add_func("/open/many_first_entry_is_an_empty_folder",
+                   test_open_many_first_entry_is_an_empty_folder);
+   g_test_add_func("/open/many_first_entry_missing",
+                   test_open_many_first_entry_missing);
+   g_test_add_func("/open/many_first_entry_not_an_image",
+                   test_open_many_first_entry_not_an_image);
+   g_test_add_func("/open/many_first_entry_hidden_raw_sidecar",
+                   test_open_many_first_entry_hidden_raw_sidecar);
    return (g_test_run());
 }

@@ -85,6 +85,12 @@ _is_raw_ext(const char *c_ext) {
    return (_str_in_set(c_ext, RAW_EXTS));
 }
 
+gboolean
+navigator_is_raw_name(const char *c_name) {
+   g_return_val_if_fail(c_name != NULL, FALSE);
+   return (_is_raw_ext(_ext_of(c_name)));
+}
+
 static gboolean
 _is_image_file(const char *c_name, const char *c_ct) {
    if (c_ct != NULL && g_str_has_prefix(c_ct, "image/")) {

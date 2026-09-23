@@ -75,12 +75,14 @@ gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 # the loader suites' stream-path driver; open_counter.c (an inotify count
 # of the opens of one file) is how test_loader_pixbuf proves gdk-pixbuf was
 # not consulted and test_thumbnail that a pre-cancelled request opened
-# nothing.
+# nothing; temp_dir.c (recursive temp-folder teardown that ASSERTS the
+# rmdir) is how the suites working on fixture copies prove they left
+# nothing behind (gd2 review).
 test_helpers_inc = include_directories('helpers')
 test_helpers_lib = static_library(
    'ggaze_test_helpers',
    ['helpers/gtk_helpers.c', 'helpers/mem_file.c', 'helpers/open_counter.c',
-    ggaze_conf_h],
+    'helpers/temp_dir.c', ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
    install : false,
@@ -622,9 +624,9 @@ test('info_overlay', test_info_overlay, suite : 'integration',
 test_open_and_show = executable(
    'test_open_and_show',
    ['test_open_and_show.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
-   link_with : ggaze_lib,
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
 test('open_and_show', test_open_and_show,

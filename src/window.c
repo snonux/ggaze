@@ -3527,30 +3527,48 @@ _open_rebuild_grid(GgazeWindow *p_win, gboolean b_hide_trashed) {
                        "grid");
 }
 
+/* Why the requested file p_arg (basename c_name) is not what the navigator
+ * ended up on, as a status line to own, or NULL when it is exactly the
+ * current file. Three cases, told apart because each asks for a different
+ * fix from the user: the path does not exist (a typo); it exists but the
+ * listing skipped it as a RAW sidecar of a JPEG twin (the hide-raw
+ * preference -- calling that "not an image" sent people looking for a
+ * broken file); or it is a file of this folder that is not an image at all. */
+static char *
+_open_target_mismatch(GgazeWindow *p_win, GFile *p_arg, const char *c_name) {
+   if (!g_file_query_exists(p_arg, NULL)) {
+      return (g_strdup_printf("%s not found \u2014 opened its folder", c_name));
+   }
+   GFile *p_cur = navigator_get_current(p_win->p_nav);
+   if (p_cur != NULL && g_file_equal(p_cur, p_arg)) {
+      return (NULL);
+   }
+   if (navigator_get_hide_raw(p_win->p_nav) && navigator_is_raw_name(c_name)) {
+      /* A RAW with no JPEG twin is listed even with the preference on, so a
+       * RAW that exists and is not current can only be a pruned sidecar. */
+      return (g_strdup_printf("%s is a RAW sidecar hidden by Preferences "
+                              "\u2014 opened the folder",
+                              c_name));
+   }
+   return (g_strdup_printf(
+      "%s is not an image in this folder \u2014 opened the folder", c_name));
+}
+
 /* After the folder is open: say when the requested file was not what the
- * user thinks it is -- a path that does not exist, or a file that is not an
- * image of this folder -- instead of silently showing the folder's first
- * image under a title that never mentions the mistake. */
+ * user thinks it is (_open_target_mismatch) instead of silently showing the
+ * folder's first image under a title that never mentions the mistake. A
+ * folder arg asked for nothing more specific, so there is nothing to
+ * report for it. */
 static void
 _report_open_target(GgazeWindow *p_win, GFile *p_arg, gboolean b_is_dir) {
    if (b_is_dir || p_win->p_nav == NULL) {
       return;
    }
    char *c_name = g_file_get_basename(p_arg);
-   if (!g_file_query_exists(p_arg, NULL)) {
-      char *c_msg =
-         g_strdup_printf("%s not found \u2014 opened its folder", c_name);
+   char *c_msg  = _open_target_mismatch(p_win, p_arg, c_name);
+   if (c_msg != NULL) {
       _show_status(p_win, c_msg);
       g_free(c_msg);
-   } else {
-      GFile *p_cur = navigator_get_current(p_win->p_nav);
-      if (p_cur == NULL || !g_file_equal(p_cur, p_arg)) {
-         char *c_msg = g_strdup_printf(
-            "%s is not an image in this folder \u2014 opened the folder",
-            c_name);
-         _show_status(p_win, c_msg);
-         g_free(c_msg);
-      }
    }
    g_free(c_name);
 }
@@ -3688,8 +3706,13 @@ ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
 /* Several files: open the FIRST one's folder in the grid with it current
  * (decision #27) -- one gated pass with the start file, exactly like a
  * single-file open but landing in the grid (see _open_now). One file: the
- * usual large-view open. A first entry that is itself a folder opens that
- * folder in the grid, as ggaze_window_open would. */
+ * usual large-view open. The first entry decides everything and the rest
+ * only ask for the grid: a first entry that is itself a folder opens THAT
+ * folder (not its parent), as ggaze_window_open would; a first entry that
+ * is missing, not an image, or a hidden RAW sidecar opens its folder on the
+ * first-sorted image with _report_open_target's status line saying so
+ * (it used to be silent, because the old two-step open reported the
+ * folder, never the file). */
 void
 ggaze_window_open_files(GgazeWindow *p_win, GFile **pp_files, gint i_n_files) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));

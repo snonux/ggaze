@@ -96,7 +96,7 @@ that cost a full investigation to learn, so they are written down here:
 
 | Suite | Lands at | Verifies |
 |-------|----------|----------|
-| `test_open_and_show.c` | M1 | CLI file arg → window → viewer has a non-null `GdkTexture` of the right size + upright orientation. gd2: a multi-file open whose first file is not first-sorted lands in the grid with that file loaded exactly once (`ggaze_window_load_count`), the cursor placed before the `changed` handler exists. |
+| `test_open_and_show.c` | M1 | CLI file arg → window → viewer has a non-null `GdkTexture` of the right size + upright orientation. gd2: a multi-file open whose first file is not first-sorted lands in the grid with that file loaded exactly once (`ggaze_window_load_count`), the cursor placed before the `changed` handler exists; review round: the first entry decides the folder — a folder first opens that folder (its first image, no status line), an empty folder shows the empty state after one ask, and a missing / non-image / hidden-RAW-sidecar first entry opens its folder on the first-sorted image (title `plain.jpg · 1/3`) with the status line saying why (the RAW wording names the preference, `navigator_is_raw_name`). Temp folders come down through `tests/helpers/temp_dir.h`, which asserts the rmdir. |
 | `test_walk_folder.c` | M2 | Folder arg → navigator listing; `h`/`l` action changes current; `GFileMonitor` add/delete propagates to navigator; wrap at ends. |
 | `test_responsive_nav.c` | M3 | Rapid `next` ×10: only the last `GdkTexture` is shown (last-write-wins invariant), UI thread not blocked (measured via a main-loop timer). |
 | `test_progressive_jpeg.c` | M6 | A progressive JPEG fires the partial-texture callback at increasing resolution before the final. |

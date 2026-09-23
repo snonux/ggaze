@@ -41,7 +41,11 @@ void ggaze_window_open(GgazeWindow *p_win, GFile *p_arg);
 
 /* Open several files at once (CLI arguments, a multi-file drop): one file
  * behaves like ggaze_window_open; several open the FIRST file's folder in
- * the grid with that file current (decision #27). */
+ * the grid with that file current (decision #27). The first entry decides
+ * the folder exactly as a single-file open would -- a folder first opens
+ * that folder, a missing / non-image / hidden-RAW first entry opens its
+ * folder with the status line saying so -- and the remaining entries only
+ * ask for the grid. */
 void ggaze_window_open_files(GgazeWindow *p_win, GFile **pp_files,
                              gint i_n_files);
 
