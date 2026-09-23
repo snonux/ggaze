@@ -123,6 +123,18 @@ struct EnhanceCtrl {
                                     * crop overlay vanish; an entry learned
                                     * once and never refreshed refused every
                                     * Enter after a same-file reload) */
+   GdkTexture *p_managed_orig;     /* the ORIGINAL through the render's own
+                                    * colour-managed decode (decision #45:
+                                    * a profiled PNG / JPEG), from the first
+                                    * render of p_enhance_file that asked for
+                                    * it (owned ref; NULL = the decode is not
+                                    * managed, or not rendered yet). What
+                                    * hold-Space shows in place of p_orig_tex,
+                                    * whose unmanaged decode would make the
+                                    * compare show a colour shift no preset
+                                    * caused. Dropped with p_orig_tex
+                                    * (_forget_original: another file, or
+                                    * this one rewritten) */
    GCancellable *p_enhance_cancel; /* in-flight enhance-apply GTask */
    GCancellable *p_save_cancel;    /* in-flight export (`s`); cancelled on
                                     * dispose so a closing window never gets
@@ -247,6 +259,7 @@ enhance_ctrl_delete(EnhanceCtrl *p_ctrl) {
    g_clear_object(&p_ctrl->p_preview_cancel);
    g_clear_object(&p_ctrl->p_enhance_tex);
    g_clear_object(&p_ctrl->p_orig_tex);
+   g_clear_object(&p_ctrl->p_managed_orig);
    g_clear_object(&p_ctrl->p_enhance_file);
    g_clear_pointer(&p_ctrl->p_enhancer, enhancer_delete);
    g_free(p_ctrl->c_saved_name);
@@ -266,6 +279,7 @@ enhance_ctrl_dispose(EnhanceCtrl *p_ctrl) {
    g_clear_object(&p_ctrl->p_save_cancel);
    g_clear_object(&p_ctrl->p_enhance_tex);
    g_clear_object(&p_ctrl->p_orig_tex);
+   g_clear_object(&p_ctrl->p_managed_orig);
    g_clear_object(&p_ctrl->p_enhance_file);
    /* The enhancer engine is released here (in dispose, after the widgets),
     * mirroring the old window.c order: _destroy closes the UI, then the
@@ -394,15 +408,20 @@ enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold) {
    }
    p_ctrl->b_hold_original = b_hold;
    if (b_hold) {
-      /* The original as the viewer last showed it (p_orig_tex): this
-       * controller holds its own reference, so neither an LRU eviction
-       * nor a `touch` on the file (which stales the cache entry) can turn
-       * Space into a no-op. It is NULL only while the file's decode has
-       * not landed yet (a rewrite's rescan forgot it, the reload is in
-       * flight): a silent no-op then rather than a synchronous re-decode
-       * on the main thread. */
-      if (p_ctrl->p_orig_tex != NULL) {
-         _show_texture(p_ctrl, p_ctrl->p_orig_tex);
+      /* A colour-managed file compares against its managed original (the
+       * render's own decode, p_managed_orig), so only the presets differ.
+       * Otherwise the original as the viewer last showed it (p_orig_tex):
+       * this controller holds its own reference, so neither an LRU
+       * eviction nor a `touch` on the file (which stales the cache entry)
+       * can turn Space into a no-op. It is NULL only while the file's
+       * decode has not landed yet (a rewrite's rescan forgot it, the
+       * reload is in flight): a silent no-op then rather than a
+       * synchronous re-decode on the main thread. */
+      GdkTexture *p_orig = p_ctrl->p_managed_orig != NULL
+                              ? p_ctrl->p_managed_orig
+                              : p_ctrl->p_orig_tex;
+      if (p_orig != NULL) {
+         _show_texture(p_ctrl, p_orig);
       }
    } else if (p_ctrl->p_enhance_tex != NULL) {
       _show_texture(p_ctrl, p_ctrl->p_enhance_tex);
@@ -572,12 +591,15 @@ _sync_panel(EnhanceCtrl *p_ctrl) {
  * even across a dispose), the generation the request was launched at (for
  * the last-write-wins check in _apply_done_cb), and whether the completion
  * should tell the user how to compare/save (the panel was closed when the
- * preset was applied, and this file has not had the hint yet). */
+ * preset was applied, and this file has not had the hint yet); the
+ * completion parks the managed original it received here until
+ * _apply_landed takes it. */
 typedef struct {
    gpointer     p_host; /* ref'd window */
    EnhanceCtrl *p_ctrl; /* borrowed, valid while p_host is alive */
    guint        u_gen;
    gboolean     b_hint;
+   GdkTexture  *p_managed_orig; /* owned, from the finish; NULL = none */
 } _Req;
 
 static void
@@ -586,6 +608,7 @@ _req_free(_Req *p_req) {
       return;
    }
    g_object_unref(p_req->p_host);
+   g_clear_object(&p_req->p_managed_orig);
    g_free(p_req);
 }
 
@@ -606,6 +629,9 @@ static void
 _apply_landed(EnhanceCtrl *p_ctrl, const _Req *p_req, GdkTexture *p_tex,
               gint i_w, gint i_h) {
    g_set_object(&p_ctrl->p_enhance_tex, p_tex);
+   if (p_req->p_managed_orig != NULL) {
+      g_set_object(&p_ctrl->p_managed_orig, p_req->p_managed_orig);
+   }
    _show_texture(p_ctrl, p_tex);
    _update_header(p_ctrl);
    if (_note_orig_size(p_ctrl, i_w, i_h)) {
@@ -633,7 +659,8 @@ _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    GError      *p_err  = NULL;
    gint         i_w    = 0;
    gint         i_h    = 0;
-   GdkTexture  *p_tex  = enhancer_apply_chain_finish(p_res, &i_w, &i_h, &p_err);
+   GdkTexture  *p_tex  = enhancer_apply_chain_finish(
+      p_res, &i_w, &i_h, &p_req->p_managed_orig, &p_err);
    if (_disposed(p_ctrl) || p_req->u_gen != p_ctrl->u_enhance_gen) {
       g_clear_object(&p_tex);
       g_clear_error(&p_err);
@@ -679,8 +706,12 @@ _drop_inflight(EnhanceCtrl *p_ctrl) {
  * with the RENDER transform (a tool's override, else the committed one). */
 static void
 _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
+   if (p_ctrl->p_enhance_file == NULL ||
+       !g_file_equal(p_ctrl->p_enhance_file, p_file)) {
+      g_clear_object(&p_ctrl->p_managed_orig); /* another file's */
+   }
    g_set_object(&p_ctrl->p_enhance_file, p_file);
-   _Req *p_req          = g_new(_Req, 1);
+   _Req *p_req          = g_new0(_Req, 1);
    p_req->p_host        = g_object_ref(p_ctrl->p_host);
    p_req->p_ctrl        = p_ctrl;
    p_req->u_gen         = p_ctrl->u_enhance_gen;
@@ -691,6 +722,7 @@ _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
    p_ctrl->u_render_count++;
    enhancer_apply_chain_async(p_file, p_presets, p_ctrl->u_enhance_mask,
                               _render_transform(p_ctrl),
+                              p_ctrl->p_managed_orig == NULL,
                               p_ctrl->p_enhance_cancel, _apply_done_cb, p_req);
 }
 
@@ -838,6 +870,7 @@ enhance_ctrl_set_preview_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf) {
 static void
 _forget_original(EnhanceCtrl *p_ctrl) {
    g_clear_object(&p_ctrl->p_orig_tex);
+   g_clear_object(&p_ctrl->p_managed_orig);
    p_ctrl->i_orig_w = 0;
    p_ctrl->i_orig_h = 0;
 }

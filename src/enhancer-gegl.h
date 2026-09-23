@@ -52,9 +52,10 @@ GeglBuffer *enhancer_apply_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
  * G_IO_ERROR_NOT_SUPPORTED. Success is verified by a real stat of the output
  * (not pre-existence). Colour (decision #45): the PNG and JPEG savers embed
  * the buffer's colour space as its ICC profile -- for a source with an
- * embedded profile, that profile byte for byte; WebP cannot carry one, so
- * a non-sRGB buffer is converted to sRGB before that saver. An sRGB buffer
- * exports exactly as before. Returns TRUE on success. */
+ * embedded profile, that profile byte for byte; WebP cannot carry one, and
+ * its saver reads the pixels as sRGB (babl converts a buffer in another
+ * space on the way out). An sRGB buffer exports exactly as before. Returns
+ * TRUE on success. */
 gboolean enhancer_export(GeglBuffer *p_in, const EnhancerPreset *p_preset,
                          GFile *p_out, GError **p_err);
 
@@ -76,15 +77,18 @@ void     enhancer_export_chain_async(GFile *p_src, const GPtrArray *p_presets,
 gboolean enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err);
 
 /* Load a file into an upright (EXIF Orientation applied) RGBA8 GeglBuffer
- * whose babl format carries the image's colour space (decision #45): a PNG
- * or JPEG with an embedded ICC profile decodes through GEGL's ICC-aware
- * gegl:png-load / gegl:jpg-load, which tag the buffer with the profile's
- * space (sRGB when babl cannot use it), behind the loader's own decode gate
- * (empty / truncated / oversized refusals, G_IO_ERROR_INVALID_DATA) and
- * with the orientation applied here; every other file (untagged PNG / JPEG
- * included) goes through ggaze's orientation-aware loader and is tagged
- * sRGB, exactly as before. Returns a new
- * buffer (caller unrefs) or NULL with p_err set. */
+ * whose babl format carries the image's colour space (decision #45). A
+ * local PNG or JPEG whose embedded ICC profile babl parses to a space
+ * other than sRGB decodes through GEGL's ICC-aware gegl:png-load /
+ * gegl:jpg-load, which tag the buffer with that space -- but only when
+ * the loader's decode gate and loader/intact.h vouch for the file, and the
+ * decode comes out at the header's size. Every other file -- untagged,
+ * sRGB-profiled, non-local, or one the managed path does not vouch for
+ * (truncated, corrupt image data) -- goes through ggaze's orientation-
+ * aware loader and is tagged sRGB, exactly as before xb2: the managed
+ * path never refuses a file the loader reads, and never loads one it
+ * refuses. Returns a new buffer (caller unrefs) or NULL with p_err set
+ * (the loader's error). */
 GeglBuffer *enhancer_load(GFile *p_file, GError **p_err);
 
 /* Convert a GeglBuffer to a GdkTexture for preview: sRGB RGBA8 bytes, so a
@@ -103,9 +107,12 @@ GdkTexture *enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err);
  * be interrupted mid-flight, cancellation only skips work that has not
  * started yet -- a caller that needs last-write-wins semantics (e.g. a newer
  * apply superseding this one) must still check that on its own before using
- * the finished result. */
+ * the finished result. b_want_original asks for the managed original as
+ * well (see the finish), which costs one more sRGB conversion of the full
+ * decode, so a caller that already holds it passes FALSE. */
 void enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
                                 guint8 u_mask, const Transform *p_xf,
+                                gboolean            b_want_original,
                                 GCancellable       *p_cancel,
                                 GAsyncReadyCallback p_cb, gpointer p_data);
 
@@ -114,9 +121,17 @@ void enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
  * receive the ORIGINAL image's upright size, the number the transform's base
  * size is computed from (transform_base_size); the controller records it so
  * the crop tool and a later quarter turn know the image they work on without
- * a second decode. */
+ * a second decode. *pp_original (nullable) receives, when the call asked
+ * for it (b_want_original) and the decode was colour-managed (not sRGB),
+ * the ORIGINAL through the same managed pipeline as the render -- the
+ * identity chain, untransformed, converted to sRGB for display -- and NULL
+ * otherwise (caller unrefs). The plain view shows an unmanaged decode, so
+ * a before/after compare against it would show a colour shift no preset
+ * caused; the controller shows this one under hold-Space instead. */
 GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, gint *p_orig_w,
-                                        gint *p_orig_h, GError **p_err);
+                                        gint        *p_orig_h,
+                                        GdkTexture **pp_original,
+                                        GError     **p_err);
 
 /* Generate the max-512px original followed by up to eight independent preset
  * previews. The returned array owns its GdkTexture entries; index 0 is the
@@ -129,6 +144,12 @@ void       enhancer_preview_thumbnails_async(GFile              *p_file,
                                              gpointer            p_data);
 GPtrArray *enhancer_preview_thumbnails_finish(GAsyncResult *p_res,
                                               GError      **p_err);
+
+/* Test seam: treat the GEGL op c_op (e.g. "gegl:png-load") as not
+ * installed, so a unit test reaches the fallbacks a GEGL without it takes;
+ * NULL restores the real answer. Not thread-safe: set it only while no
+ * enhancer work is in flight. */
+void enhancer_test_set_missing_op(const char *c_op);
 
 G_END_DECLS
 

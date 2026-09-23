@@ -5107,7 +5107,8 @@ add_tool_review6_tests(void) {
  * primaries swapped. The enhance preview on screen must be BLUE (the chain
  * is colour-managed end to end: GEGL's ICC-aware loader tags the buffer,
  * babl converts for the texture), and the `s` export must carry the
- * source's profile byte for byte. Nothing here says what the plain view
+ * source's profile byte for byte, and hold-Space must compare against the
+ * managed original, blue too. Nothing here says what the plain view
  * shows: that depends on whether the host's gdk-pixbuf loaders apply
  * profiles (a glycin desktop does, fedora:40's native loaders do not) and
  * is, by decision #45, not ggaze's to manage. */
@@ -5127,6 +5128,25 @@ assert_texture_is_blue_6x3(GdkTexture *p_tex) {
    g_assert_cmpuint(c_px[0], <=, 15);
    g_bytes_unref(p_bytes);
    gdk_texture_downloader_free(p_dl);
+}
+
+/* Hold-Space on a managed preview compares against the MANAGED original
+ * (the render's own decode, blue here), not the viewer's plain decode
+ * p_orig, whose colours the host's loader decided -- so the compare shows
+ * only what the preset did; release brings p_prev back. */
+static void
+assert_hold_shows_the_managed_original(GgazeWindow *p_win, GdkTexture *p_orig,
+                                       GdkTexture *p_prev) {
+   ggaze_window_set_hold_original(p_win, TRUE);
+   GdkTexture *p_held = ref_viewer_texture(p_win);
+   g_assert_true(p_held != p_orig);
+   g_assert_true(p_held != p_prev);
+   assert_texture_is_blue_6x3(p_held);
+   g_object_unref(p_held);
+   ggaze_window_set_hold_original(p_win, FALSE);
+   GdkTexture *p_back = ref_viewer_texture(p_win);
+   g_assert_true(p_back == p_prev);
+   g_object_unref(p_back);
 }
 
 /* c_out embeds p_src's ICC profile byte for byte. */
@@ -5163,6 +5183,7 @@ test_icc_preview_is_managed_and_export_keeps_profile(void) {
    GdkTexture *p_prev = ref_viewer_texture(p_win);
    g_assert_true(p_prev != p_orig);
    assert_texture_is_blue_6x3(p_prev);
+   assert_hold_shows_the_managed_original(p_win, p_orig, p_prev);
    g_object_unref(p_prev);
 
    char *c_out = g_build_filename(c_dir, "swapped-enhanced.png", NULL);

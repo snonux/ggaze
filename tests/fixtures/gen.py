@@ -19,9 +19,26 @@ the stdlib is needed and the files stay tiny (~700 bytes each):
   srgb-icc.png 6x3 PNG, pixels (255, 0, 0), an embedded profile that IS
                sRGB (primaries + parametric curve): must behave like an
                untagged file (regression guard for "sRGB stays as today").
+  srgb-icc.jpg 8x8 JPEG, the same sRGB profile in APP2 (the JPEG side of
+               that guard: byte-identical to the file without it).
+  swapped-rot6.jpg 16x8 JPEG under the swapped profile, left half stored
+               red and right half green, EXIF Orientation 6: upright 8x16,
+               managed top half BLUE, bottom half green (the orientation
+               permutation on the managed path).
+  grey-icc.png 4x2 grey PNG, every pixel stored 128, under a grey profile
+               with a LINEAR (gamma 1.0) curve: managed it displays ~188
+               in sRGB, unmanaged 128 (grey -> sRGB working space).
+  grey-icc.jpg 8x8 greyscale JPEG of the same, the profile in APP2.
+  cmyk-icc.jpg 8x8 CMYK JPEG (ImageMagick) of C=0 M=Y=100% K=0 (red),
+               under a hand-built lut8 CMYK -> Lab printer profile
+               (write_cmyk_icc) that maps it to BLUE: managed through
+               babl's LCMS it displays blue, unmanaged red; the chain runs
+               in sRGB (CMYK -> sRGB working space).
 
-Uses only the Python stdlib + cjpeg + exiftool.
+Uses only the Python stdlib + cjpeg + exiftool, and ImageMagick (magick)
+for the one CMYK JPEG, which cjpeg cannot write.
 """
+import math
 import os
 import struct
 import subprocess
@@ -109,19 +126,10 @@ SRGB_B = (0.1431, 0.0606, 0.7141)
 D50 = (0.9642, 1.0, 0.8249)
 
 
-def write_icc(desc, r_xyz, g_xyz, b_xyz, trc):
-    """A minimal ICC v2.1 RGB display profile: header + 9 tags."""
-    tags = [
-        (b"desc", _tag_desc(desc)),
-        (b"cprt", _tag_text("ggaze test fixture, public domain")),
-        (b"wtpt", _tag_xyz(*D50)),
-        (b"rXYZ", _tag_xyz(*r_xyz)),
-        (b"gXYZ", _tag_xyz(*g_xyz)),
-        (b"bXYZ", _tag_xyz(*b_xyz)),
-        (b"rTRC", trc),
-        (b"gTRC", trc),
-        (b"bTRC", trc),
-    ]
+def _icc_from_tags(cls, space, pcs, tags):
+    """An ICC v2.1 profile of device class cls, colour space space and PCS
+    pcs from (signature, data) tags: header, tag table, 4-byte aligned
+    data."""
     table = b""
     body = b""
     offset = 128 + 4 + 12 * len(tags)
@@ -132,7 +140,7 @@ def write_icc(desc, r_xyz, g_xyz, b_xyz, trc):
     size = offset + len(body)
     header = (struct.pack(">I", size) + b"\0" * 4
               + struct.pack(">I", 0x02100000)          # version 2.1
-              + b"mntr" + b"RGB " + b"XYZ "
+              + cls + space + pcs
               + struct.pack(">6H", 2026, 1, 1, 0, 0, 0)
               + b"acsp" + b"\0" * 4 + struct.pack(">I", 0)
               + b"\0" * 4 + b"\0" * 4 + b"\0" * 8
@@ -143,17 +151,89 @@ def write_icc(desc, r_xyz, g_xyz, b_xyz, trc):
     return header + struct.pack(">I", len(tags)) + table + body
 
 
+def write_icc(desc, r_xyz, g_xyz, b_xyz, trc):
+    """A minimal ICC v2.1 RGB display profile: header + 9 tags."""
+    return _icc_from_tags(b"mntr", b"RGB ", b"XYZ ", [
+        (b"desc", _tag_desc(desc)),
+        (b"cprt", _tag_text("ggaze test fixture, public domain")),
+        (b"wtpt", _tag_xyz(*D50)),
+        (b"rXYZ", _tag_xyz(*r_xyz)),
+        (b"gXYZ", _tag_xyz(*g_xyz)),
+        (b"bXYZ", _tag_xyz(*b_xyz)),
+        (b"rTRC", trc),
+        (b"gTRC", trc),
+        (b"bTRC", trc),
+    ])
+
+
+def write_gray_icc(desc, gamma):
+    """A minimal ICC v2.1 grey display profile: desc, wtpt, kTRC."""
+    return _icc_from_tags(b"mntr", b"GRAY", b"XYZ ", [
+        (b"desc", _tag_desc(desc)),
+        (b"cprt", _tag_text("ggaze test fixture, public domain")),
+        (b"wtpt", _tag_xyz(*D50)),
+        (b"kTRC", _tag_curv_gamma(gamma)),
+    ])
+
+
+def _srgb_to_lab(r, g, b):
+    """sRGB (0..1) -> CIE Lab (D50-adapted via the sRGB D50 primaries)."""
+    lin = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+           for c in (r, g, b)]
+    xyz = [sum(m[i] * lin[j] for j, m in enumerate((SRGB_R, SRGB_G, SRGB_B)))
+           for i in range(3)]
+
+    def f(t):
+        return t ** (1 / 3) if t > 216 / 24389 else (24389 / 27 * t + 16) / 116
+    fx, fy, fz = (f(xyz[i] / D50[i]) for i in range(3))
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def _tag_lut8_cmyk_to_lab():
+    """lut8Type (mft1) A2B0: 4 in, 3 out, a 2-point grid whose 16 corners
+    are the Lab of the naive CMYK -> RGB of each corner with red and blue
+    SWAPPED (as swapped.png's primaries are, so managed and unmanaged
+    decodes tell apart: M+Y displays blue, not red); identity input and
+    output tables, identity matrix (unused with a Lab PCS)."""
+    ident = bytes(range(256))
+    clut = bytearray()
+    for c in (0, 1):
+        for m in (0, 1):
+            for y in (0, 1):
+                for k in (0, 1):
+                    L, a, b = _srgb_to_lab((1 - y) * (1 - k), (1 - m) * (1 - k),
+                                           (1 - c) * (1 - k))
+                    clut += bytes((round(L * 255 / 100),
+                                   max(0, min(255, round(a + 128))),
+                                   max(0, min(255, round(b + 128)))))
+    matrix = b"".join(_s15f16(v) for v in (1, 0, 0, 0, 1, 0, 0, 0, 1))
+    return (b"mft1" + b"\0" * 4 + bytes((4, 3, 2, 0)) + matrix
+            + ident * 4 + bytes(clut) + ident * 3)
+
+
+def write_cmyk_icc(desc):
+    """A minimal ICC v2.1 CMYK output profile: desc, wtpt, A2B0 (lut8)."""
+    return _icc_from_tags(b"prtr", b"CMYK", b"Lab ", [
+        (b"desc", _tag_desc(desc)),
+        (b"cprt", _tag_text("ggaze test fixture, public domain")),
+        (b"wtpt", _tag_xyz(*D50)),
+        (b"A2B0", _tag_lut8_cmyk_to_lab()),
+    ])
+
+
 def _png_chunk(typ, data):
     return (struct.pack(">I", len(data)) + typ + data
             + struct.pack(">I", zlib.crc32(typ + data) & 0xffffffff))
 
 
-def write_png_icc(path, w, h, iccp_payload):
-    """RGB PNG of solid (255, 0, 0) pixels with an iCCP chunk whose
-    zlib-compressed payload is iccp_payload (a profile, or garbage)."""
+def write_png_icc(path, w, h, iccp_payload, pixel=b"\xff\x00\x00"):
+    """PNG of solid pixels (RGB (255, 0, 0) by default; a one-byte pixel
+    makes it greyscale) with an iCCP chunk whose zlib-compressed payload is
+    iccp_payload (a profile, or garbage)."""
     sig = b"\x89PNG\r\n\x1a\n"
-    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-    raw = b"".join(b"\0" + b"\xff\x00\x00" * w for _ in range(h))
+    ctype = 0 if len(pixel) == 1 else 2
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, ctype, 0, 0, 0)
+    raw = b"".join(b"\0" + pixel * w for _ in range(h))
     iccp = b"ggaze\0" + b"\0" + zlib.compress(iccp_payload)
     with open(path, "wb") as f:
         f.write(sig + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"iCCP", iccp)
@@ -161,16 +241,10 @@ def write_png_icc(path, w, h, iccp_payload):
                 + _png_chunk(b"IEND", b""))
 
 
-def write_jpg_icc(path, w, h, icc):
-    """Solid (255, 0, 0) JPEG via cjpeg, then the profile spliced in as one
-    APP2 "ICC_PROFILE" segment right after SOI (where every writer puts
-    it; the profile is far below the 64 KiB segment limit)."""
-    ppm = path + ".ppm"
-    with open(ppm, "wb") as f:
-        f.write(b"P6\n%d %d\n255\n" % (w, h) + b"\xff\x00\x00" * (w * h))
-    subprocess.run(["cjpeg", "-quality", "100", "-outfile", path, ppm],
-                   check=True)
-    os.remove(ppm)
+def _splice_app2(path, icc):
+    """Put icc into the JPEG at path as one APP2 "ICC_PROFILE" segment right
+    after SOI (where every writer puts it; the profiles here are far below
+    the 64 KiB segment limit)."""
     with open(path, "rb") as f:
         jpg = f.read()
     assert jpg[:2] == b"\xff\xd8"
@@ -178,6 +252,23 @@ def write_jpg_icc(path, w, h, icc):
     app2 = b"\xff\xe2" + struct.pack(">H", len(payload) + 2) + payload
     with open(path, "wb") as f:
         f.write(jpg[:2] + app2 + jpg[2:])
+
+
+def write_jpg_icc(path, w, h, icc, pixels=None, grey=False, sample=None):
+    """A JPEG via cjpeg of pixels (row-major RGB or grey bytes; solid
+    (255, 0, 0) by default), with icc spliced in. sample="1x1" writes 4:4:4
+    so neighbouring colours do not bleed (swapped.jpg predates the option
+    and keeps cjpeg's default)."""
+    pnm = path + ".pnm"
+    if pixels is None:
+        pixels = b"\xff\x00\x00" * (w * h)
+    with open(pnm, "wb") as f:
+        f.write(b"P%d\n%d %d\n255\n" % (5 if grey else 6, w, h) + pixels)
+    opts = ["-sample", sample] if sample else []
+    subprocess.run(["cjpeg", "-quality", "100"] + opts + ["-outfile", path,
+                                                           pnm], check=True)
+    os.remove(pnm)
+    _splice_app2(path, icc)
 
 
 def write_icc_fixtures(out):
@@ -190,6 +281,28 @@ def write_icc_fixtures(out):
     srgb = write_icc("ggaze sRGB test", SRGB_R, SRGB_G, SRGB_B,
                      _tag_para_srgb())
     write_png_icc(os.path.join(out, "srgb-icc.png"), 6, 3, srgb)
+    write_icc_fixtures_2(out, swapped, srgb)
+
+
+def write_icc_fixtures_2(out, swapped, srgb):
+    """The sRGB JPEG, orientation, grey and CMYK fixtures (xb2 review)."""
+    write_jpg_icc(os.path.join(out, "srgb-icc.jpg"), 8, 8, srgb)
+    rot = os.path.join(out, "swapped-rot6.jpg")
+    halves = b"".join((b"\xff\x00\x00" if x < 8 else b"\x00\xff\x00")
+                      for y in range(8) for x in range(16))
+    write_jpg_icc(rot, 16, 8, swapped, pixels=halves, sample="1x1")
+    subprocess.run(["exiftool", "-q", "-overwrite_original",
+                    "-Orientation#=6", rot], check=True)
+    linear = write_gray_icc("ggaze linear grey", 1.0)
+    write_png_icc(os.path.join(out, "grey-icc.png"), 4, 2, linear,
+                  pixel=b"\x80")
+    write_jpg_icc(os.path.join(out, "grey-icc.jpg"), 8, 8, linear,
+                  pixels=b"\x80" * 64, grey=True)
+    cmyk = os.path.join(out, "cmyk-icc.jpg")
+    subprocess.run(["magick", "-size", "8x8", "xc:cmyk(0,255,255,0)",
+                    "-colorspace", "CMYK", "-quality", "100", "-strip",
+                    cmyk], check=True)
+    _splice_app2(cmyk, write_cmyk_icc("ggaze CMYK test"))
 
 
 def main():

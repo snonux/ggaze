@@ -83,7 +83,6 @@ ggaze_src = files(
       'src/info.c',
       'src/icc.c',
       'src/streamread.c',
-      'src/loader/intact.c',
       'src/delete-confirm.c',
       'src/fileops.c',
       'src/dialog-util.c',
@@ -123,8 +122,12 @@ if libjpeg_dep.found()
    ggaze_extra_deps += libjpeg_dep
 endif
 if gegl_dep.found()
+   # loader/intact.c vouches for a file before GEGL's loaders see it
+   # (decision #45); nothing else calls it, so the minimal build carries
+   # none of it. streamread.c stays above: icc.c walks with it in every
+   # build.
    ggaze_src += files('src/enhancer.c', 'src/enhance-ui.c', 'src/enhance-ctrl.c',
-      'src/tool-ctrl.c')
+      'src/tool-ctrl.c', 'src/loader/intact.c')
    ggaze_extra_deps += gegl_dep
 endif
 

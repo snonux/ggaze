@@ -304,18 +304,22 @@ test_icc = executable(
 )
 test('icc', test_icc, suite : 'unit', env : fixtures_env)
 
-# intact (xb2): the PNG / JPEG completeness check that keeps a truncated
-# file away from GEGL's loaders (which spin on EOF). Plain C over GIO
-# streams, every lane, over the fixtures and hand-cut copies.
-test_intact = executable(
-   'test_intact',
-   ['test_intact.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
-   dependencies : [glib_dep, gio_dep],
-   link_with : ggaze_lib,
-   install : false,
-)
-test('intact', test_intact, suite : 'unit', env : fixtures_env)
+# intact (xb2): the check that vouches for a PNG / JPEG before GEGL's
+# loaders see it (they spin on a truncated file and turn corrupt PNG data
+# into a silent black buffer). Plain C over GIO streams, no display; built
+# only with GEGL, like intact.c itself (meson.build), so the minimal lane
+# neither compiles nor tests code it cannot reach.
+if gegl_dep.found()
+   test_intact = executable(
+      'test_intact',
+      ['test_intact.c', ggaze_conf_h],
+      include_directories : [inc, src_inc],
+      dependencies : [glib_dep, gio_dep],
+      link_with : ggaze_lib,
+      install : false,
+   )
+   test('intact', test_intact, suite : 'unit', env : fixtures_env)
+endif
 
 # histogram: the plain-C RGB/luminance binner behind the info card's plot,
 # driven over hand-built pixel buffers and GdkMemoryTextures (no display).
@@ -378,6 +382,24 @@ if gegl_dep.found()
                                   'lsan_suppressions.txt'))
    test('enhancer', test_enhancer, suite : 'unit', env : enhancer_env,
       protocol : 'tap')
+
+   # enhancer_icc (xb2): colour management on the enhance path (decision
+   # #45) -- managed decodes, the loader's verdict for every broken file,
+   # the profile-keeping export, the missing-op fallbacks (the enhancer's
+   # test seam), a non-local file (tests/helpers/mem_file.c) and, when
+   # ./sample-images is there, every profiled camera file (a full read of
+   # each: the longer timeout).
+   test_enhancer_icc = executable(
+      'test_enhancer_icc', ['test_enhancer_icc.c', ggaze_conf_h],
+      include_directories : [inc, src_inc, test_helpers_inc],
+      dependencies : [glib_dep, gegl_dep, gtk4_dep],
+      link_with : [ggaze_lib, test_helpers_lib], install : false,
+   )
+   enhancer_icc_env = enhancer_env
+   enhancer_icc_env.set('GGAZE_SAMPLE_DIR',
+      join_paths(meson.project_source_root(), 'sample-images'))
+   test('enhancer_icc', test_enhancer_icc, suite : 'unit',
+      env : enhancer_icc_env, protocol : 'tap', timeout : 180)
 endif
 
 test_texturecache = executable(
