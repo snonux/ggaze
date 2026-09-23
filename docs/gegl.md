@@ -263,7 +263,11 @@ management" below) with the Orientation applied by the enhancer itself
 (an untagged or sRGB-profiled PNG/JPEG included) loads through ggaze's own
 orientation-aware loader
 (`loader_load`, every backend honors Orientation per decision #26) and its
-upright RGBA8 pixels are copied into an sRGB-tagged `GeglBuffer`. Either way
+upright RGBA8 pixels are copied into an sRGB-tagged `GeglBuffer` — read
+through a `GdkTextureDownloader` in an explicit `R8G8B8A8` layout since
+xb2 (before it, `gdk_texture_download()` handed back premultiplied
+`B8G8R8A8`, so every enhance preview and export had red and blue swapped
+and premultiplied pixels: a visible change with xb2, see decision #45). Either way
 the live preview and the per-preset preview thumbnails render upright for
 portrait phone JPEGs etc.
 
@@ -278,16 +282,22 @@ gboolean         enhancer_export_chain(GeglBuffer *p_in,
                                        GError **p_err);
 
 /* Async: load + apply_chain + buffer_to_texture in a GTask worker; finish
- * also reports the original's upright size (the crop tool's base). */
+ * also reports the original's upright size (the crop tool's base) and
+ * whether the decode was colour-managed. */
 void       enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
                                       guint8 u_mask, const Transform *p_xf,
-                                      gboolean b_want_original,
                                       GCancellable *p_cancel,
                                       GAsyncReadyCallback p_cb, gpointer p_data);
 GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, gint *p_orig_w,
-                                        gint *p_orig_h,
-                                        GdkTexture **pp_original,
+                                        gint *p_orig_h, gboolean *pb_managed,
                                         GError **p_err);
+/* Async: the managed original for hold-Space, fetched on the first press. */
+void        enhancer_managed_original_async(GFile *p_file,
+                                            GCancellable *p_cancel,
+                                            GAsyncReadyCallback p_cb,
+                                            gpointer p_data);
+GdkTexture *enhancer_managed_original_finish(GAsyncResult *p_res,
+                                             GError **p_err);
 ```
 
 Viewer integration: when a preset is active, the decoded pixels are imported
@@ -344,10 +354,19 @@ needs only the PNG/JPEG loaders and savers:
    an untagged file, an iCCP/APP2 holding no profile, a profile babl cannot
    use, and an **sRGB profile** (babl folds an equivalent profile onto its
    own sRGB space) all keep the loader path — faster, and byte for byte
-   what they decoded to before xb2 (a test compares an sRGB-profiled PNG and
-   JPEG with the same files stripped of their profile). A matrix/TRC RGB,
-   a grey TRC and — through the lcms2 babl links against — a CMYK profile
-   are managed. The loader path (tag sRGB) is not used for a managed file
+   what the same file decodes to with no profile at all (a test compares an
+   sRGB-profiled PNG and JPEG with the same files stripped of their
+   profile). That is NOT byte for byte what they decoded to on main before
+   xb2: main's enhancer copied the loader's texture with
+   `gdk_texture_download()`, i.e. premultiplied `B8G8R8A8`, into an
+   `R'G'B'A u8` buffer, so every enhance preview and export had red and
+   blue swapped (and premultiplied alpha). xb2 reads the texture in an
+   explicit `R8G8B8A8` layout — a visible fix for every file on the enhance
+   path, untagged ones included. A matrix/TRC RGB, a grey TRC and —
+   through the lcms2 babl links against — a CMYK profile are managed, as
+   long as the profile is for the image's number of colour components (a
+   grey profile on an RGB JPEG, or an RGB one on a CMYK file, cannot
+   describe the pixels and is declined: `IntactSize.u_comps`). The loader path (tag sRGB) is not used for a managed file
    because gdk-pixbuf may or may not have converted the pixels already, and
    tagging converted pixels would manage them twice.
 2. **Working space.** The pixels are copied to `R'G'B'A u8` *in the image's
@@ -373,14 +392,26 @@ needs only the PNG/JPEG loaders and savers:
 managed, so on a host whose decoder leaves the pixels alone (fedora:40's
 native loaders) a profiled image's plain view and its enhance preview differ
 in colour before any preset has changed a pixel. So hold-`Space` over a
-managed preview does not put the plain decode back: the render worker also
-returns the file's **identity chain through the same managed decode**
-(`enhancer_apply_chain_finish`'s `pp_original`, asked for once per file and
-converted to sRGB like the preview), and the controller shows that while
-`Space` is held — the compare shows exactly what the presets did. It is
-dropped with the file (navigation, a rewrite); until the first render of a
-file lands, and for every unmanaged file, hold-`Space` shows the plain
-decode as before. Turning the preview on or off (`0`, `Esc`, the Original
+managed preview does not put the plain decode back: it shows the file's
+**identity chain through the same managed decode** (converted to sRGB like
+the preview) — the compare shows exactly what the presets did. "Managed"
+is what the render reports (`enhancer_apply_chain_finish`'s `pb_managed`:
+the profile was applied), not the buffer's space, so the CMYK and grey
+files — whose chain runs in sRGB — compare managed too.
+
+The managed original is built **lazily**: on the first `Space` press over a
+managed render the controller asks `enhancer_managed_original_async` for it
+(a second decode in a worker, the same `_load` as the render) and shows the
+plain original meanwhile, swapping the managed one in when it lands if
+`Space` is still held; later presses show it at once. It is not built with
+every render because it is a second full-size texture — `w × h × 4` bytes,
+about 100 MB at 24 MP and 200 MB at 50 MP — held by the controller outside
+the texture cache's cap, which most enhance sessions never look at. It is
+dropped on discard / when nothing is left to render (`0`, `Esc`, the last
+preset off), on navigation and on a rewrite of the file. While it is up the
+`i` card plots it (it stands for the current file's original at the
+window's texture choke point, `enhance_ctrl_override_texture`). For every
+unmanaged file, hold-`Space` shows the plain decode as before. Turning the preview on or off (`0`, `Esc`, the Original
 card) still switches between the plain view and the managed preview, so on
 such a host that switch can show a colour shift the preset did not cause —
 the managed side is the correct one.
@@ -399,18 +430,35 @@ file reaches them only through:
   press profile, where a bounded header peek gave up and refused them):
   - **truncated** files: `gegl:png-load` / `gegl:jpg-load` restart the file
     on a premature EOF (libpng then reports a duplicate iCCP, libjpeg a second
-    SOF) and **never return**, so a PNG must reach IEND and a JPEG its EOI;
+    SOI / SOF) and **never return** — or, for a JPEG, **exit the process**
+    — so a PNG must reach IEND and a JPEG must decode to its EOI without
+    reading past the end of the file (the libjpeg pass below, whose EOF is
+    fatal). A byte scan for FF D9 after SOS, which xb2 first used, is not
+    enough: a progressive JPEG cut right after a COM / APPn / DQT / DHT
+    segment between two scans that holds the bytes FF D9 passed it, and so
+    did libjpeg's own stdio source, which inserts a fake EOI at EOF;
+  - **oversized** PNGs: IHDR's size is held against the loader's caps as
+    soon as IHDR is read, before any image data is inflated (a small file
+    declaring a huge image is a zlib bomb for the row check below);
   - **corrupt PNG image data**: libpng's error inside `gegl:png-load` is
     logged as "failed to open file" and the op yields a header-sized black or
     partial buffer, no error. So the walk checks the critical chunks' CRCs,
     inflates the IDAT stream (into a scratch buffer) to the rows IHDR promises
-    (Adam7 included) and checks every row's filter byte;
+    (Adam7 included) and checks every row's filter byte. The IDAT data is
+    one run of consecutive IDAT chunks, as libpng reads it: any other chunk
+    after an IDAT while rows are still missing ends it short ("Not enough
+    image data"), even if a later IDAT would complete it;
   - **JPEGs libjpeg gives up on**: `gegl:jpg-load` installs `jpeg_std_error()`
     with no longjmp handler, so libjpeg's fatal errors (two SOF markers, a
     bogus Huffman table, ...) **exit the process**. The file is decoded once
     by the same libjpeg at 1/8 scale under a longjmp handler first
-    (`intact_jpeg_decodes`); a build without the `jpeg` feature has no libjpeg
-    to do that with and keeps every JPEG on the loader path;
+    (`intact_jpeg_decodes`), through a source manager whose EOF raises a
+    fatal error (`JERR_INPUT_EOF`) the way GEGL's restart ends in one; a
+    build without the `jpeg` feature has no libjpeg to do that with and
+    keeps every JPEG on the loader path (CI's gegl lane installs
+    `libjpeg-turbo-devel` so it tests the managed JPEG path; the tests hold
+    in both builds). The whole-file passes (the PNG inflate, the libjpeg
+    pass) take the worker's `GCancellable` and stop between blocks;
   - padding between JPEG segments is skipped as libjpeg skips it
     (`streamread_jpeg_marker`), not refused;
 - after the decode, the op's bounding box and the buffer must match the
@@ -435,7 +483,12 @@ a saver the export is refused as unsupported (the tests reach both through
 `enhancer_test_set_missing_op`). A non-local file (GVFS) keeps the loader
 path, since GEGL's loaders need a path. Without GEGL (the minimal lane) none
 of this is compiled, `intact.c` included; the info card still names the
-colour space and says it is not managed in this build.
+colour space. The card adds "managed on enhance/export" only where it is
+true: `enhancer_would_manage` asks the managed path's own gates header-deep
+(GEGL present, a local PNG — or JPEG with libjpeg —, the loader op
+installed, a parseable non-sRGB profile for the image's components); the
+completeness checks are not run for the card, so a broken file can still
+fall back.
 
 **Left open:** RGB profiles babl cannot parse (LUT-only), profiles in
 WebP/AVIF/HEIF/JXL, a managed plain view, and non-sRGB displays.

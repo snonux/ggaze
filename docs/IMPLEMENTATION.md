@@ -471,12 +471,17 @@ color management on the enhance/export path is done (xb2, decision #45; see
 - Hold-`Space` compare (decision #23/#24): swaps to the cached original
   texture while held, restores the cached modified one on release — no GEGL
   recompute either way. For a colour-managed preview the original held up is
-  the managed one the render returned (decision #45), not the plain decode.
+  the managed one (decision #45), not the plain decode: fetched in a worker
+  on the first press (the plain original shows until it lands), dropped on
+  discard / navigation / rewrite, and plotted by the `i` card.
 - ICC color management via GEGL/babl (open question G, decision #45, xb2):
   a PNG/JPEG with a non-sRGB profile decodes through
   `gegl:png-load`/`gegl:jpg-load` (space-tagged; untagged and sRGB-profiled
-  files keep the loader path byte for byte), only when the loader's gate and
-  `loader/intact.c` vouch for it (else the loader path decides, as before);
+  files keep the loader path, byte for byte the same file without a
+  profile — main's copy swapped R/B and was premultiplied, fixed by xb2),
+  only when the loader's gate and `loader/intact.c` vouch for it and the
+  profile fits the image's components (else the loader path decides, as
+  before);
   preview converted to sRGB; hold-`Space` shows the managed original;
   PNG/JPEG exports keep the source profile, WebP exports come out sRGB. The
   `i` card names the colour space in every build (`icc.{c,h}`).
@@ -499,12 +504,18 @@ color management on the enhance/export path is done (xb2, decision #45; see
   past 64 KiB or padding between segments; the space survives two presets +
   a quarter turn; sRGB-profiled PNG/JPEG decode byte-identical to the same
   files stripped of the profile; untagged / corrupt-iCCP / non-local
-  (`mem_file`) / GEGL-op-missing (`enhancer_test_set_missing_op`) files take
-  the loader path; every broken file (cut, lying headers, two SOFs, corrupt
-  PNG data -- bad CRC, bad deflate, short IDAT) gets exactly the loader's
-  verdict; PNG/JPEG exports carry the source profile byte for byte, a WebP
-  export comes out sRGB, a missing saver is NOT_SUPPORTED; the async render
-  returns the managed original only when managed and asked; and every
+  (`mem_file`) / GEGL-op-missing (`enhancer_test_set_missing_op`) files and
+  a profile for other colour components (a grey profile on RGB) take the
+  loader path; every broken file (cut, lying headers, two SOFs, corrupt PNG
+  data -- bad CRC, bad deflate, short IDAT -- and a progressive JPEG cut
+  mid-scan or right after a COM holding FF D9 between scans, which made
+  `gegl:jpg-load` exit the process) gets exactly the loader's verdict;
+  PNG/JPEG exports carry the source profile byte for byte, a WebP export
+  comes out sRGB, a missing saver is NOT_SUPPORTED; the render reports
+  "managed" for CMYK/grey too; the lazy managed original (swapped, grey,
+  CMYK; none for an untagged file; CANCELLED when cancelled);
+  `enhancer_would_manage` (the card's note) per fixture; every JPEG case
+  also holds in a GEGL build without libjpeg (`GGAZE_HAVE_JPEG`); and every
   profiled file in `./sample-images` (skipped when absent) is vouched for
   with its size and, when its profile is not sRGB, decodes managed.
   `test_icc.c`, `test_info.c` (every lane) and `test_intact.c` (GEGL lane,
@@ -512,11 +523,16 @@ color management on the enhance/export path is done (xb2, decision #45; see
   padding skipped, every broken container), the `desc` parser, the card's
   colour-space line in each state (one line, capped at 64 characters, a
   padded JPEG not "unreadable"), the completeness walk and sizes (SOF past
-  64 KiB), PNG rows (Adam7 sizes cross-checked with real interlaced files),
-  CRC / inflate / filter corruption, and the libjpeg pass (a two-SOF JPEG).
+  64 KiB) and component counts, PNG rows (Adam7 sizes cross-checked with
+  real interlaced files), one IDAT run (IDAT, tEXt, IDAT is short), the
+  IHDR caps before the inflate (a <1 MB zlib bomb declaring 32768²), CRC /
+  inflate / filter corruption, cancellation, and the libjpeg pass (a
+  two-SOF JPEG; EOF fatal: cut, no EOI, the progressive cuts).
 - Integration: `test_enhance_flow.c` (gated `if gegl_dep.found()`): async
   apply swaps the texture without touching the original (byte-identical),
-  toggle-off resets to the original, hold-Space compares then restores,
+  toggle-off resets to the original, hold-Space compares then restores
+  (for a managed file -- swapped, CMYK, grey -- against the lazily fetched
+  managed original, which the `i` card plots and a discard drops),
   `s` twice produces collision-suffixed copies, non-dirty navigation is
   immediate — plus the Save/Discard/Cancel prompt driven to each outcome
   (see the suite table above). `test_grid_select_gate.c` covers `gridview.c`'s

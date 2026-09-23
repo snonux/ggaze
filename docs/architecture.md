@@ -346,6 +346,14 @@ feels instant.
   on navigation (an open or a drop of another file included: the open
   path runs the same identity reset, since a file that sorts first in its
   folder never emits "changed"), on a rewrite's rescan, and in dispose.
+  With GEGL a THIRD one may join them for a colour-managed file (decision
+  #45): the managed original hold-`Space` compares against, a full-size
+  RGBA8 texture (`w × h × 4` bytes: ~100 MB at 24 MP, ~200 MB at 50 MP).
+  It is built only on the first `Space` press over a managed render (a
+  worker re-decodes the file), never with every render, and dropped on
+  discard / nothing left to render, navigation, a rewrite and dispose — so
+  a session that never holds `Space` pays nothing for it (docs/gegl.md
+  "Color management").
 
 ## Threading / cancellation invariant
 

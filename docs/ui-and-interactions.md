@@ -184,9 +184,12 @@ Small card, top-left or bottom-right:
   plot down while the text stays (`t` back fills it in again). The text and
   the auto-hide timer are not touched by any of that.
 - **color space** (decision #45): the embedded ICC profile's own name for a
-  PNG or JPEG that carries one, with what this build does with it —
-  `Color space: Display P3 (embedded ICC; managed on enhance/export)` with
-  GEGL, `…; not managed in this build)` without. A PNG/JPEG with no profile
+  PNG or JPEG that carries one — `Color space: Display P3 (embedded ICC)` —
+  plus `; managed on enhance/export` inside the parentheses only when this
+  build's enhance path really will apply it (GEGL built in, a local file, a
+  JPEG only with the `jpeg` feature's libjpeg, a profile babl parses that is
+  not sRGB and fits the image's colour components; asked header-deep, so a
+  file whose data turns out broken can still fall back). A PNG/JPEG with no profile
   reads `sRGB (assumed, no embedded profile)`; a profile container that is
   there but broken (or holds no profile) reads `embedded ICC profile
   unreadable (shown as sRGB)` — never a silent sRGB. WebP/AVIF/HEIF/JXL are
