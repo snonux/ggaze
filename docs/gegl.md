@@ -348,9 +348,11 @@ needs only the PNG/JPEG loaders and savers:
 1. **Decode** (`enhancer_load`). `gegl:png-load` / `gegl:jpg-load` read the
    embedded profile (PNG iCCP, JPEG APP2) and **tag** the buffer's babl
    format with the space babl builds from it (`babl_space_from_icc`); no
-   pixel is converted. Only a local PNG/JPEG whose profile babl parses to a
-   space **other than sRGB** takes this path (`icc.c` reads the bytes, the
-   enhancer makes the same `babl_space_from_icc` call GEGL's loader will):
+   pixel is converted. Only a local PNG/JPEG whose profile the managed path
+   vouches for (below: "The profile is vetted before babl sees it") and
+   babl parses to a space **other than sRGB** takes this path (`icc.c` reads
+   the bytes, the enhancer makes the same `babl_space_from_icc` call GEGL's
+   loader will):
    an untagged file, an iCCP/APP2 holding no profile, a profile babl cannot
    use, and an **sRGB profile** (babl folds an equivalent profile onto its
    own sRGB space) all keep the loader path — faster, and byte for byte
@@ -401,14 +403,23 @@ files — whose chain runs in sRGB — compare managed too.
 
 The managed original is built **lazily**: on the first `Space` press over a
 managed render the controller asks `enhancer_managed_original_async` for it
-(a second decode in a worker, the same `_load` as the render) and shows the
+(a second decode in a worker through the render's managed path alone: a
+decline — the file rewritten into one with nothing to manage, gone, past
+the profile cap — is "no managed original", never a plain decode the
+viewer already has) and shows the
 plain original meanwhile, swapping the managed one in when it lands if
 `Space` is still held; later presses show it at once. It is not built with
 every render because it is a second full-size texture — `w × h × 4` bytes,
 about 100 MB at 24 MP and 200 MB at 50 MP — held by the controller outside
 the texture cache's cap, which most enhance sessions never look at. It is
 dropped on discard / when nothing is left to render (`0`, `Esc`, the last
-preset off), on navigation and on a rewrite of the file. While it is up the
+preset off), on navigation, on a rewrite of the file, and whenever the
+controller learns a new decode of the original in place of a known one (a
+rescan that finds a newer cached decode, a reload the viewer shows): it may
+come from contents that are gone, and the next press fetches it again.
+Released, navigated away, discarded or rewritten while the fetch is in
+flight, the landing puts nothing up (`tests/test_enhance_flow.c`,
+`icc_*_mid_fetch`). While it is up the
 `i` card plots it (it stands for the current file's original at the
 window's texture choke point, `enhance_ctrl_override_texture`). For every
 unmanaged file, hold-`Space` shows the plain decode as before. Turning the preview on or off (`0`, `Esc`, the Original
@@ -419,8 +430,53 @@ the managed side is the correct one.
 **The managed path never gives a verdict of its own.** It either yields a
 buffer it can vouch for or *declines*, and a declined file takes the loader
 path, which decodes it — or refuses it with its usual error — exactly as
-before xb2. GEGL's loaders fail badly where the loader fails cleanly, so a
-file reaches them only through:
+before xb2. "Vouch or decline" covers the embedded profile as much as the
+pixel data: babl and GEGL's loaders fail badly where the loader fails
+cleanly, so a file reaches them only through:
+
+- **the profile check, before babl sees a byte** (xb2 review 3). babl
+  0.1.128's `babl_space_from_icc` trusts the tag data it reads: a `curv`
+  count is a loop bound and an allocation size never held against the tag
+  (a gTRC count of `0x01000000` in a 520-byte profile segfaults it; a count
+  that goes negative as an `int` makes `babl_fatal` exit the process), and
+  its tag lookup loops over a count taken from the file. Pressing `i` on
+  such a file used to kill the viewer, since the card asks the same
+  question. `icc_profile_is_sane` (`icc.c`, plain C) now vouches first: the
+  header's size field is the byte count (babl insists too), at most 1024
+  tags whose table fits, every tag after the table and inside the profile
+  with room for its type header (tags may share data, as r/g/bTRC often
+  do), and every tag babl reads of the type and size it reads it as —
+  `XYZ ` tags (r/g/bXYZ, wtpt) of ≥ 20 bytes, `chrm` ≥ 36, `chad` ≥ 44, a
+  `curv` TRC with `12 + 2·count ≤ size` and at most 65536 points (babl
+  allocates and inverts the table), a `para` TRC of a known function type
+  (0–4) with all its parameters; a TRC of any other type is refused (babl
+  would read it as a `curv` count). Unit-tested with mutated profiles and a
+  seeded 20 000-profile fuzz (`tests/test_icc.c`, also under ASan); the 106
+  profiled files of the local corpus and the system's colord profiles all
+  pass. Two babl hazards the bytes alone do not show are handled in
+  `enhancer.c`:
+  - a **CMYK profile** goes to LCMS inside babl, which keeps whatever
+    transform LCMS returns — NULL included — and crashes on the first
+    conversion through it (a one-byte change to `cmyk-icc.jpg`'s lut8
+    header did it). So the enhancer builds that transform (CMYKA double →
+    babl's scRGB, relative colorimetric, black-point compensation) with
+    lcms2 first and declines a profile it fails for. Only that direction is
+    required: the reverse is used only to convert INTO the CMYK space,
+    which never happens (the chain runs in sRGB), and an input-only
+    profile cannot give it. lcms2 is babl's own dependency (`babl-devel`
+    requires it), so a GEGL build has it already;
+  - babl's **space and tone-curve tables** are fixed arrays of 100 entries,
+    never freed, and a full space table makes the next
+    `babl_space_from_icc` dereference NULL. Every distinct non-sRGB profile
+    adds a space and up to four curves, so at most 16 distinct profiles
+    per process (`GGAZE_ENHANCER_MAX_PROFILES`) that may grow those tables
+    are handed to babl (one babl sRGB or an already-known space takes no
+    slot); the verdict on each is kept by SHA-256, so a file seen again
+    costs a checksum and a camera's files never run out. Past the cap a
+    new profile is declined, and its file decodes on the loader path, sRGB.
+    The corpus has 15 distinct profiles, most of them sRGB.
+  A fuzz of this whole gate together with babl runs in subprocesses (each
+  round with fresh tables) in `tests/test_enhancer_icc.c`;
 
 - the loader's own sniff (`loader_read_header` + `loader_sniff_bytes`) and
   the shared dimension caps;
@@ -456,9 +512,14 @@ file reaches them only through:
     fatal error (`JERR_INPUT_EOF`) the way GEGL's restart ends in one; a
     build without the `jpeg` feature has no libjpeg to do that with and
     keeps every JPEG on the loader path (CI's gegl lane installs
-    `libjpeg-turbo-devel` so it tests the managed JPEG path; the tests hold
+    `libjpeg-turbo-devel` so it tests the managed JPEG path, and builds
+    `-Djpeg=disabled` a second time for its unit suite, so the tests hold
     in both builds). The whole-file passes (the PNG inflate, the libjpeg
-    pass) take the worker's `GCancellable` and stop between blocks;
+    pass) take the worker's `GCancellable` and stop between blocks. A load
+    whose checks the cancellation cut short returns `G_IO_ERROR_CANCELLED`
+    **without** falling through to the loader (a whole decode for a result
+    nobody takes), GEGL's own decode is not started once the cancellable
+    has fired, and the loader path's decode takes the same cancellable;
   - padding between JPEG segments is skipped as libjpeg skips it
     (`streamread_jpeg_marker`), not refused;
 - after the decode, the op's bounding box and the buffer must match the
@@ -483,12 +544,16 @@ a saver the export is refused as unsupported (the tests reach both through
 `enhancer_test_set_missing_op`). A non-local file (GVFS) keeps the loader
 path, since GEGL's loaders need a path. Without GEGL (the minimal lane) none
 of this is compiled, `intact.c` included; the info card still names the
-colour space. The card adds "managed on enhance/export" only where it is
-true: `enhancer_would_manage` asks the managed path's own gates header-deep
-(GEGL present, a local PNG — or JPEG with libjpeg —, the loader op
-installed, a parseable non-sRGB profile for the image's components); the
-completeness checks are not run for the card, so a broken file can still
-fall back.
+colour space. The card adds "may be managed on enhance/export" only where
+the managed path's own gates pass header-deep: `enhancer_would_manage`
+(GEGL present, a local PNG — or JPEG with libjpeg — within the size caps,
+the loader op installed, a vetted, parseable non-sRGB profile for the
+image's components). "May": the completeness checks read the whole file —
+measured on the corpus, ~0.02 ms a file for the header gates against
+~150 ms on average and ~0.9 s at most for the PNG inflate / libjpeg pass,
+on every `i` press — so the card does not run them, and a file whose data
+is broken past its headers (a JPEG cut inside its scan) still takes the
+loader path at enhance time.
 
 **Left open:** RGB profiles babl cannot parse (LUT-only), profiles in
 WebP/AVIF/HEIF/JXL, a managed plain view, and non-sRGB displays.

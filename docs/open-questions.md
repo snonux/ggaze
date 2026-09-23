@@ -54,8 +54,11 @@ locked in decision #37.
   (`gegl:icc-file-loader`, `gegl:convert-color-space`; the real ops are
   `gegl:icc-load`, `gegl:convert-space`, `gegl:cast-space`) and no op beyond
   the loaders and savers was needed. An sRGB-profiled or untagged file, and
-  any file GEGL's loaders cannot be trusted with (gegl.md "Color
-  management"), keeps the loader path exactly as before. The plain view
+  any file or embedded profile GEGL's loaders or babl cannot be trusted
+  with (gegl.md "Color management": babl does not bounds-check tag data,
+  so the profile is vetted first), keeps the loader path exactly as
+  before. lcms2 is linked in GEGL builds after all, but only to check that
+  a CMYK profile opens before babl keeps a broken LCMS transform. The plain view
   stays as the decoder delivers it (sRGB assumed), and the info card names
   the colour space in every build (`icc.{c,h}`). Left open: RGB profiles
   babl cannot parse (LUT-only; such a file keeps the loader path), profiles
