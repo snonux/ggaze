@@ -26,6 +26,8 @@
 #include <gio/gio.h>
 #include <glib.h>
 
+#include "animation.h"
+
 G_BEGIN_DECLS
 
 /* Return an upright copy of p_pix (EXIF Orientation applied), or a new ref on
@@ -68,18 +70,22 @@ GdkPixbufAnimation *pixbuf_util_decode_animation_bytes(const guchar *p_buf,
 
 /* The frames of p_anim as textures, decoded here and now (call it from a
  * worker thread): returns the first frame, with a GgazeAnimation holding
- * the others and every frame's delay attached (loader/animation.h), or --
- * when the decoder made a still of it after all (a webp module without
- * frame support, frames it could not read) -- that still with nothing
- * attached. u_frames is how many frames to take, the probe's count, which
- * the caller has checked against the budget (animation_within_budget).
+ * the others, every frame's delay and the play count attached
+ * (loader/animation.h), or -- when the decoder made a still of it after
+ * all (a webp module without frame support, frames it could not read) --
+ * that still with nothing attached. p_probe is what animation_probe() read
+ * from the same bytes, checked against the budget by the caller
+ * (animation_within_budget): its u_frames is how many frames to take and
+ * its u_plays how many times they play -- read from the container rather
+ * than from the iterator, because glycin's iterator loops for ever
+ * whatever the file says and 2.42's webp module does too.
  * Every texture owns its pixels (see pixbuf_util_to_texture). p_cancel is
  * checked between frames. Returns NULL with p_err set on cancel or when a
  * frame cannot be wrapped. (transfer full) */
-GdkTexture *pixbuf_util_animation_to_texture(GdkPixbufAnimation *p_anim,
-                                             guint               u_frames,
-                                             GCancellable       *p_cancel,
-                                             GError            **p_err);
+GdkTexture *pixbuf_util_animation_to_texture(GdkPixbufAnimation   *p_anim,
+                                             const GgazeAnimProbe *p_probe,
+                                             GCancellable         *p_cancel,
+                                             GError              **p_err);
 
 G_END_DECLS
 

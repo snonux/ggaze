@@ -253,9 +253,11 @@ _static_texture(GdkPixbufAnimation *p_anim, GError **p_err) {
 }
 
 GdkTexture *
-pixbuf_util_animation_to_texture(GdkPixbufAnimation *p_anim, guint u_frames,
+pixbuf_util_animation_to_texture(GdkPixbufAnimation   *p_anim,
+                                 const GgazeAnimProbe *p_probe,
                                  GCancellable *p_cancel, GError **p_err) {
    g_return_val_if_fail(GDK_IS_PIXBUF_ANIMATION(p_anim), NULL);
+   g_return_val_if_fail(p_probe != NULL, NULL);
    gint64                  i_t0 = g_get_real_time();
    GTimeVal                st_t = {(glong)(i_t0 / G_USEC_PER_SEC),
                                    (glong)(i_t0 % G_USEC_PER_SEC)};
@@ -270,8 +272,9 @@ pixbuf_util_animation_to_texture(GdkPixbufAnimation *p_anim, guint u_frames,
    gint            i_first  = gdk_pixbuf_animation_iter_get_delay_time(p_it);
    GgazeAnimation *p_frames = animation_new(i_first);
    gboolean        b_down   = _iter_counts_down(p_it, i_t0, i_first);
-   if (p_first == NULL || !_append_frames(p_it, p_frames, u_frames, i_t0,
-                                          b_down, p_cancel, p_err)) {
+   animation_set_plays(p_frames, p_probe->u_plays);
+   if (p_first == NULL || !_append_frames(p_it, p_frames, p_probe->u_frames,
+                                          i_t0, b_down, p_cancel, p_err)) {
       if (p_first == NULL) {
          g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
                      "could not build texture from the first frame");

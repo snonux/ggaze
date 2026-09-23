@@ -150,11 +150,12 @@ _pixbuf_decode_still(const guchar *p_buf, gsize u_len, GError **p_err) {
 }
 
 /* The animated path (top-of-file comment): the first frame as the
- * texture, the other u_frames - 1 attached to it -- unless the decoder
- * made a still of it after all, in which case the texture is that still
- * and nothing is attached. */
+ * texture, the other p_probe->u_frames - 1 attached to it with the play
+ * count -- unless the decoder made a still of it after all, in which case
+ * the texture is that still and nothing is attached. */
 static GdkTexture *
-_pixbuf_decode_animation(const guchar *p_buf, gsize u_len, guint u_frames,
+_pixbuf_decode_animation(const guchar *p_buf, gsize u_len,
+                         const GgazeAnimProbe *p_probe,
                          GCancellable *p_cancel, GError **p_err) {
    GdkPixbufAnimation *p_anim =
       pixbuf_util_decode_animation_bytes(p_buf, u_len, p_err);
@@ -162,28 +163,28 @@ _pixbuf_decode_animation(const guchar *p_buf, gsize u_len, guint u_frames,
       return (NULL);
    }
    GdkTexture *p_tex =
-      pixbuf_util_animation_to_texture(p_anim, u_frames, p_cancel, p_err);
+      pixbuf_util_animation_to_texture(p_anim, p_probe, p_cancel, p_err);
    g_object_unref(p_anim);
    return (p_tex);
 }
 
-/* The frame count of the gated bytes when they are a multi-frame GIF/WebP
- * the viewer may play -- probed animated and within the budget
- * (animation.h) -- else 0. An animation over budget is logged and shown as
- * its first frame. */
-static guint
-_pixbuf_animation_frames(const guint8 *p_buf, gsize u_len) {
-   GgazeAnimProbe st_probe;
-   if (!animation_probe(p_buf, u_len, &st_probe)) {
-      return (0);
+/* TRUE when the gated bytes are a multi-frame GIF/WebP the viewer may
+ * play -- probed animated and within the budget (animation.h) -- with
+ * *p_probe filled in. An animation over budget is logged and shown as its
+ * first frame. */
+static gboolean
+_pixbuf_playable_animation(const guint8 *p_buf, gsize u_len,
+                           GgazeAnimProbe *p_probe) {
+   if (!animation_probe(p_buf, u_len, p_probe)) {
+      return (FALSE);
    }
-   if (!animation_within_budget(&st_probe)) {
+   if (!animation_within_budget(p_probe)) {
       g_debug("ggaze: animation of %u frames at %ux%u is over the playback "
               "budget; showing its first frame only",
-              st_probe.u_frames, st_probe.u_width, st_probe.u_height);
-      return (0);
+              p_probe->u_frames, p_probe->u_width, p_probe->u_height);
+      return (FALSE);
    }
-   return (st_probe.u_frames);
+   return (TRUE);
 }
 
 static GdkTexture *
@@ -205,12 +206,12 @@ _pixbuf_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
       g_free(c_buf);
       return (NULL);
    }
-   const guchar *p_buf    = (const guchar *)c_buf;
-   guint         u_frames = _pixbuf_animation_frames(p_buf, u_len);
-   GdkTexture   *p_tex =
-      (u_frames >= 2)
-         ? _pixbuf_decode_animation(p_buf, u_len, u_frames, p_cancel, p_err)
-         : _pixbuf_decode_still(p_buf, u_len, p_err);
+   const guchar  *p_buf = (const guchar *)c_buf;
+   GgazeAnimProbe st_probe;
+   GdkTexture    *p_tex =
+      _pixbuf_playable_animation(p_buf, u_len, &st_probe)
+            ? _pixbuf_decode_animation(p_buf, u_len, &st_probe, p_cancel, p_err)
+            : _pixbuf_decode_still(p_buf, u_len, p_err);
    g_free(c_buf);
    return (p_tex);
 }

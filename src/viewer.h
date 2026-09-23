@@ -21,8 +21,9 @@
  * And it PLAYS an animated GIF/WebP (M5, task yb2): the texture it is
  * given is that file's first frame with the other frames attached
  * (loader/animation.h), and the viewer alone steps through them -- on the
- * frame clock while mapped, at each frame's own delay, restarting from the
- * first frame whenever the texture is set, holding it while a tool asks
+ * frame clock while mapped, at each frame's own delay, as many times as
+ * the file says, restarting from the first frame whenever the texture is
+ * set, holding it while a tool asks
  * (ggaze_viewer_hold_first_frame). Everything else in the app, and every
  * other accessor here, keeps seeing the first frame: zoom, pan and the
  * overlay geometry are the canvas's; ggaze_viewer_get_texture() is what
@@ -61,10 +62,17 @@ ggaze_viewer_get_texture(GgazeViewer *p_viewer); /* (transfer none) */
  * file's picture. */
 GdkTexture *ggaze_viewer_get_frame(GgazeViewer *p_viewer);
 
-/* TRUE while a next frame is scheduled: an animation is attached, the
- * widget is mapped, no hold is on and the animation has not ended on its
- * last frame. */
+/* TRUE while a next frame is scheduled (a tick callback on the frame
+ * clock, or the timeout that puts it back before the next frame): an
+ * animation is attached, the widget is mapped, no hold is on and the
+ * animation has not ended -- on a frame that holds for ever, or on its
+ * last frame once the file's plays are done. */
 gboolean ggaze_viewer_is_animating(GgazeViewer *p_viewer);
+
+/* How many times the animation tick callback has run in this widget's
+ * life. A test seam: it is how a test tells a slow animation that only
+ * ticks near its frames from one that keeps the frame clock busy. */
+guint ggaze_viewer_get_tick_count(GgazeViewer *p_viewer);
 
 /* Hold (TRUE) or release (FALSE) an animation on its first frame. The
  * crop / straighten tools hold while they are up: they lay out and apply
