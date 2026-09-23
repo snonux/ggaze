@@ -52,7 +52,13 @@ typedef struct {
 GgazeInfo *info_new(GFile *p_file);
 void       info_delete(GgazeInfo *p_info);
 
-/* Format the info as a multi-line string (caller frees). */
+/* Longest profile description the card shows, in characters; a longer
+ * one is cut there with an ellipsis. */
+#define INFO_ICC_DESC_MAX 64
+
+/* Format the info as a multi-line string (caller frees). An embedded
+ * profile's description is shown on one line: control characters become
+ * spaces and it is capped at INFO_ICC_DESC_MAX characters. */
 char *info_format(const GgazeInfo *p_info);
 
 /* The EXIF Orientation (1-8) of the file at c_path, or 0 when it has none

@@ -541,6 +541,79 @@ test_colorspace_unreadable_profile(void) {
    info_delete(p_info);
 }
 
+/* xb2 review: the profile's 'desc' is the file's text. A newline in it
+ * must not start a fake card line, and a paragraph must not fill the
+ * card: control characters become spaces, the name is cut at
+ * INFO_ICC_DESC_MAX characters (not bytes: the cut never splits a UTF-8
+ * sequence) with an ellipsis. */
+static void
+test_colorspace_description_is_capped_and_one_line(void) {
+   GString *p_desc = g_string_new("line1\nline2\t");
+   for (int i = 0; i < 100; i++) {
+      g_string_append(p_desc, "\u00e9"); /* 2 bytes, 1 character */
+   }
+   GgazeInfo t_info    = {0};
+   t_info.e_icc        = GGAZE_ICC_EMBEDDED;
+   t_info.c_colorspace = p_desc->str;
+   char       *c_fmt   = info_format(&t_info);
+   const char *c_line  = g_strstr_len(c_fmt, -1, "Color space: ");
+   g_assert_nonnull(c_line);
+   g_assert_null(strchr(c_line, '\n')); /* the card's last line: one line */
+   g_assert_true(g_str_has_prefix(c_line, "Color space: line1 line2 "));
+   const char *c_name = c_line + strlen("Color space: ");
+   const char *c_end  = g_strstr_len(c_name, -1, "\u2026 (embedded ICC; ");
+   g_assert_nonnull(c_end);
+   g_assert_true(g_utf8_validate(c_name, c_end - c_name, NULL));
+   g_assert_cmpint(g_utf8_strlen(c_name, c_end - c_name), ==,
+                   INFO_ICC_DESC_MAX);
+   g_free(c_fmt);
+   /* A short name is shown whole, with no ellipsis. */
+   t_info.c_colorspace = "Display P3";
+   c_fmt               = info_format(&t_info);
+   g_assert_nonnull(
+      g_strstr_len(c_fmt, -1, "Color space: Display P3 (embedded ICC; "));
+   g_free(c_fmt);
+   g_string_free(p_desc, TRUE);
+}
+
+/* Stray bytes between two JPEG segments, which libjpeg skips: an untagged
+ * file is still "sRGB (assumed)" -- not "unreadable" -- and a profiled one
+ * still names its profile (xb2 review). */
+static void
+test_colorspace_padded_jpeg(void) {
+   const char *C_NAMES[] = {"plain.jpg", "swapped.jpg"};
+   for (gsize u = 0; u < G_N_ELEMENTS(C_NAMES); u++) {
+      char *c_src =
+         g_build_filename(g_getenv("GGAZE_FIXTURES_DIR"), C_NAMES[u], NULL);
+      char *c_data = NULL;
+      gsize u_len  = 0;
+      g_assert_true(g_file_get_contents(c_src, &c_data, &u_len, NULL));
+      gsize    u_seg = 4 + (((gsize)(guint8)c_data[4] << 8) |
+                            (guint8)c_data[5]); /* after the first segment */
+      GString *p_pad = g_string_new_len(c_data, (gssize)u_seg);
+      g_string_append_len(p_pad, "\x00\x11\x22", 3);
+      g_string_append_len(p_pad, c_data + u_seg, (gssize)(u_len - u_seg));
+      char *c_tmp =
+         g_build_filename(g_get_tmp_dir(), "ggaze-pad-XXXXXX.jpg", NULL);
+      int i_fd = g_mkstemp(c_tmp);
+      g_assert_cmpint(i_fd, >=, 0);
+      close(i_fd);
+      g_assert_true(
+         g_file_set_contents(c_tmp, p_pad->str, (gssize)p_pad->len, NULL));
+      GFile     *p_file = g_file_new_for_path(c_tmp);
+      GgazeInfo *p_info = info_new(p_file);
+      g_assert_cmpint(p_info->e_icc, ==,
+                      u == 0 ? GGAZE_ICC_NONE : GGAZE_ICC_EMBEDDED);
+      info_delete(p_info);
+      g_object_unref(p_file);
+      unlink(c_tmp);
+      g_free(c_tmp);
+      g_string_free(p_pad, TRUE);
+      g_free(c_data);
+      g_free(c_src);
+   }
+}
+
 /* info_exif_orientation(): the validated Orientation read on its own. */
 static void
 test_exif_orientation_alone(void) {
@@ -584,6 +657,9 @@ main(int i_argc, char **c_argv) {
                    test_colorspace_uninspected_format);
    g_test_add_func("/info/colorspace_unreadable_profile",
                    test_colorspace_unreadable_profile);
+   g_test_add_func("/info/colorspace_description_is_capped_and_one_line",
+                   test_colorspace_description_is_capped_and_one_line);
+   g_test_add_func("/info/colorspace_padded_jpeg", test_colorspace_padded_jpeg);
    g_test_add_func("/info/exif_orientation_alone", test_exif_orientation_alone);
    g_test_add_func("/info/dnl_zero_height_jpeg_size_unknown",
                    test_dnl_zero_height_jpeg_size_unknown);

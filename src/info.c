@@ -241,13 +241,36 @@ _join(GString *p_str, const char *c_label, const char *c_val) {
    return (NULL);
 }
 
+/* The profile description as the card shows it: the profile's 'desc' is
+ * the file's text, not ggaze's, so control characters (a newline would
+ * start a fake card line) become spaces, and it is cut to
+ * INFO_ICC_DESC_MAX characters with an ellipsis (a v4 profile may carry a
+ * paragraph). Caller frees. */
+static char *
+_display_desc(const char *c_desc) {
+   GString *p_out = g_string_new(NULL);
+   glong    l_n   = 0;
+   for (const char *p = c_desc; *p != '\0'; p = g_utf8_next_char(p), l_n++) {
+      if (l_n == INFO_ICC_DESC_MAX) {
+         g_string_append(p_out, "…");
+         break;
+      }
+      gunichar u_c = g_utf8_get_char(p);
+      g_string_append_unichar(p_out, g_unichar_iscntrl(u_c) ? ' ' : u_c);
+   }
+   return (g_string_free(p_out, FALSE));
+}
+
 /* The colour-space line, one wording per GgazeIccState (see info.h). */
 static void
 _append_colorspace(GString *p_str, const GgazeInfo *p_info) {
+   char *c_desc = NULL;
    switch (p_info->e_icc) {
    case GGAZE_ICC_EMBEDDED:
+      c_desc = _display_desc(p_info->c_colorspace);
       g_string_append_printf(p_str, "Color space: %s (embedded ICC; %s)\n",
-                             p_info->c_colorspace, INFO_ICC_NOTE);
+                             c_desc, INFO_ICC_NOTE);
+      g_free(c_desc);
       break;
    case GGAZE_ICC_UNREADABLE:
       g_string_append(p_str, "Color space: embedded ICC profile unreadable "
