@@ -605,7 +605,9 @@ color management on the enhance/export path is done (xb2, decision #45; see
   data -- bad CRC, bad deflate, short IDAT -- and a progressive JPEG cut
   mid-scan or right after a COM holding FF D9 between scans, which made
   `gegl:jpg-load` exit the process) gets exactly the loader's verdict;
-  PNG/JPEG exports carry the source profile byte for byte, a WebP export
+  PNG/JPEG exports carry the source's profile (byte for byte for the first
+  profile of its kind in the process; babl answers a later equivalent
+  profile with the earlier one's space and bytes), a WebP export
   comes out sRGB, a missing saver is NOT_SUPPORTED; the render reports
   "managed" for CMYK/grey too; the lazy managed original (swapped, grey,
   CMYK; none for an untagged file; CANCELLED when cancelled);

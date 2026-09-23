@@ -1,4 +1,14 @@
 # GEGL library leaks during gegl_init and gegl_node_new_child (third-party)
+#
+# Two of these hide per-DECODE growth on the colour-managed enhance path
+# (xb2), measured and explained in docs/gegl.md, "Leaks we cannot fix":
+# `leak:babl` covers babl's grey branch re-copying a known grey space's
+# profile on each of the four babl_space_from_icc() calls GEGL's loaders
+# make per decode (4 x the profile's size per grey-profiled decode: 1472
+# bytes for tests/fixtures/grey-icc.png), and `leak:gio_source_init`
+# below gegl:jpg-load's 1 KiB source buffer, freed only by a
+# jpeg_finish_decompress() it never calls (4 KiB per managed JPEG
+# decode). Neither is ggaze's to free; do not widen them.
 leak:gegl_init
 leak:gegl_post_parse_hook
 leak:gegl_config
@@ -8,7 +18,8 @@ leak:gegl_node_new_child
 leak:gegl_node_new
 leak:gegl_operation
 # GEGL's jpg-load plugin leaks a gio source buffer during jpeg_read_header
-# (third-party, in jpg-load.so).
+# (third-party, in jpg-load.so): 1 KiB per header read, four per managed
+# JPEG decode (see the note above).
 leak:gio_source_init
 leak:gegl_jpg_load
 leak:jpg-load
