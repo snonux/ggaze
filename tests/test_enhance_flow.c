@@ -5418,6 +5418,203 @@ test_icc_hold_space_on_cmyk_and_grey(void) {
 #endif
 }
 
+/* --- xb2 review 3: the lazy fetch's edges --------------------------------
+ *
+ * The managed original is fetched on the first Space press, in a worker;
+ * whatever happens before it lands must not put it (or a stale one) on
+ * screen. Each subtest starts from swapped.png (6x3) under a Contrast
+ * preview; its managed original is BLUE. The press / release /
+ * navigation / discard below all run before any main-loop iteration, so
+ * the fetch is in flight when they happen, deterministically. */
+
+typedef struct {
+   char        *c_dir;
+   GFile       *p_file;
+   GgazeWindow *p_win;
+   GdkTexture  *p_orig; /* the plain decode (ref) */
+   GdkTexture  *p_prev; /* the Contrast render (ref) */
+} IccFx;
+
+static void
+icc_fx_open(IccFx *p_fx, const char *c_extra) {
+   GError *p_err = NULL;
+   p_fx->c_dir   = g_dir_make_tmp("ggaze-iccfetch-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   if (c_extra != NULL) {
+      copy_fixture(p_fx->c_dir, c_extra);
+   }
+   p_fx->p_win =
+      open_fixture_copy(p_fx->c_dir, "swapped.png", 6, 3, &p_fx->p_file);
+   p_fx->p_orig = ref_viewer_texture(p_fx->p_win);
+   fire(p_fx->p_win, "win.enhance-3");
+   wait_for_texture_change(p_fx->p_win, p_fx->p_orig);
+   p_fx->p_prev = ref_viewer_texture(p_fx->p_win);
+   g_assert_cmpuint(ggaze_window_enhance_managed_fetch_count(p_fx->p_win), ==,
+                    0); /* lazy: no press, no fetch */
+}
+
+static void
+icc_fx_close(IccFx *p_fx) {
+   g_clear_object(&p_fx->p_orig);
+   g_clear_object(&p_fx->p_prev);
+   g_clear_object(&p_fx->p_file);
+   close_window(p_fx->p_win);
+   ggtest_cleanup_temp_dir(p_fx->c_dir);
+}
+
+/* Pump for u_ms: long enough for a fetch of a fixture to land. */
+static void
+pump_ms(guint u_ms) {
+   for (guint u = 0; u < u_ms; u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+}
+
+/* Pump until the controller holds a landed managed original (5 s max). */
+static void
+wait_for_managed(GgazeWindow *p_win) {
+   for (guint u = 0;
+        u < 5000 && !ggaze_window_enhance_has_managed_original(p_win); u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(ggaze_window_enhance_has_managed_original(p_win));
+}
+
+/* Space released before the fetch lands: the release brings the preview
+ * back, the landing keeps the managed original WITHOUT putting it up, and
+ * the next press shows it at once -- no second fetch. */
+static void
+test_icc_release_before_the_fetch_lands(void) {
+   static const ManagedLook C_BLUE = {6, 3, 0, 0, 255};
+   IccFx                    fx;
+   icc_fx_open(&fx, NULL);
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_prev);
+   wait_for_managed(fx.p_win);
+   pump_ms(50);
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_prev); /* not put up */
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   GdkTexture *p_held = viewer_texture(fx.p_win);
+   g_assert_true(p_held != fx.p_orig && p_held != fx.p_prev);
+   assert_texture_pixel(p_held, C_BLUE.i_w, C_BLUE.i_h, C_BLUE.i_r, C_BLUE.i_g,
+                        C_BLUE.i_b);
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   g_assert_cmpuint(ggaze_window_enhance_managed_fetch_count(fx.p_win), ==, 1);
+   icc_fx_close(&fx);
+}
+
+/* Navigation while the fetch is in flight (Space still held): the fetch
+ * is dropped, its landing puts nothing up and keeps nothing, and the next
+ * file is on screen. The preview is saved first so the move is not gated;
+ * the folder is then swapped.png, swapped-enhanced.png, small.png. */
+static void
+test_icc_navigation_mid_fetch(void) {
+   IccFx fx;
+   icc_fx_open(&fx, "small.png");
+   char *c_out = g_build_filename(fx.c_dir, "swapped-enhanced.png", NULL);
+   fire(fx.p_win, "win.enhance-save");
+   wait_for_file(c_out);
+   ggtest_drain_main(700); /* the copy's rescan, past the debounce */
+   g_free(c_out);
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   g_assert_cmpuint(ggaze_window_enhance_managed_fetch_count(fx.p_win), ==, 1);
+   fire(fx.p_win, "win.next");
+   g_assert_nonnull(
+      g_strstr_len(window_title(fx.p_win), -1, "swapped-enhanced.png"));
+   wait_for_texture_change(fx.p_win, fx.p_prev);
+   pump_ms(300); /* the dropped fetch lands, stale */
+   g_assert_false(ggaze_window_enhance_has_managed_original(fx.p_win));
+   GdkTexture *p_now = viewer_texture(fx.p_win);
+   g_assert_true(p_now != fx.p_orig && p_now != fx.p_prev);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "Contrast"));
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   icc_fx_close(&fx);
+}
+
+/* Discard while the fetch is in flight: the plain original is back, the
+ * landing keeps nothing, and the next preview's first press fetches
+ * again (a second launch). */
+static void
+test_icc_discard_mid_fetch(void) {
+   IccFx fx;
+   icc_fx_open(&fx, NULL);
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   fire(fx.p_win, "win.back"); /* Esc: discard */
+   pump_ms(300);
+   g_assert_false(ggaze_window_enhance_has_managed_original(fx.p_win));
+   GdkTexture *p_plain = ref_viewer_texture(fx.p_win);
+   g_assert_true(p_plain != fx.p_prev);
+   fire(fx.p_win, "win.enhance-3");
+   wait_for_texture_change(fx.p_win, p_plain);
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   g_assert_cmpuint(ggaze_window_enhance_managed_fetch_count(fx.p_win), ==, 2);
+   wait_for_managed(fx.p_win);
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   g_object_unref(p_plain);
+   icc_fx_close(&fx);
+}
+
+/* swapped.png rewritten in place as grey-icc.png's bytes (4x2, a linear
+ * grey profile: managed ~188), by rename like an editor's save. */
+static void
+rewrite_as_grey_icc(IccFx *p_fx) {
+   const gchar *c_fx   = g_getenv("GGAZE_FIXTURES_DIR");
+   char        *c_src  = g_build_filename(c_fx, "grey-icc.png", NULL);
+   char        *c_data = NULL;
+   gsize        u_len  = 0;
+   g_assert_true(g_file_get_contents(c_src, &c_data, &u_len, NULL));
+   char *c_path = g_file_get_path(p_fx->p_file);
+   g_assert_true(g_file_set_contents(c_path, c_data, (gssize)u_len, NULL));
+   g_free(c_path);
+   g_free(c_data);
+   g_free(c_src);
+}
+
+/* After a rewrite the managed original of the OLD contents is gone -- it
+ * was fetched (b_landed) or in flight -- and the next press, on the
+ * re-render of the new contents, fetches the new file's: 4x2, ~188. */
+static void
+check_rewrite_drops_the_managed_original(gboolean b_landed) {
+   static const ManagedLook C_GREY = {4, 2, 188, 188, 188};
+   IccFx                    fx;
+   icc_fx_open(&fx, NULL);
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   if (b_landed) {
+      wait_for_managed(fx.p_win);
+   }
+   rewrite_as_grey_icc(&fx);
+   wait_for_texture_size(fx.p_win, 4, 2); /* the re-render, new contents */
+   pump_ms(300);
+   g_assert_false(ggaze_window_enhance_has_managed_original(fx.p_win));
+   GdkTexture *p_rend = ref_viewer_texture(fx.p_win);
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   g_assert_cmpuint(ggaze_window_enhance_managed_fetch_count(fx.p_win), ==, 2);
+   wait_for_managed(fx.p_win);
+   pump_ms(50);
+   assert_texture_pixel(viewer_texture(fx.p_win), C_GREY.i_w, C_GREY.i_h,
+                        C_GREY.i_r, C_GREY.i_g, C_GREY.i_b);
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   g_assert_true(viewer_texture(fx.p_win) == p_rend);
+   g_object_unref(p_rend);
+   icc_fx_close(&fx);
+}
+
+static void
+test_icc_rewrite_mid_fetch(void) {
+   check_rewrite_drops_the_managed_original(FALSE);
+}
+
+static void
+test_icc_rewrite_drops_the_managed_original(void) {
+   check_rewrite_drops_the_managed_original(TRUE);
+}
+
 static void
 add_icc_tests(void) {
    g_test_add_func("/enhance_flow/icc_preview_is_managed_and_export_keeps_"
@@ -5425,6 +5622,16 @@ add_icc_tests(void) {
                    test_icc_preview_is_managed_and_export_keeps_profile);
    g_test_add_func("/enhance_flow/icc_hold_space_on_cmyk_and_grey",
                    test_icc_hold_space_on_cmyk_and_grey);
+   g_test_add_func("/enhance_flow/icc_release_before_the_fetch_lands",
+                   test_icc_release_before_the_fetch_lands);
+   g_test_add_func("/enhance_flow/icc_navigation_mid_fetch",
+                   test_icc_navigation_mid_fetch);
+   g_test_add_func("/enhance_flow/icc_discard_mid_fetch",
+                   test_icc_discard_mid_fetch);
+   g_test_add_func("/enhance_flow/icc_rewrite_mid_fetch",
+                   test_icc_rewrite_mid_fetch);
+   g_test_add_func("/enhance_flow/icc_rewrite_drops_the_managed_original",
+                   test_icc_rewrite_drops_the_managed_original);
 }
 
 /* Seventh review round: a failed reload under the crop tool is named. */

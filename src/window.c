@@ -1575,6 +1575,18 @@ ggaze_window_enhance_preview_count(GgazeWindow *p_win) {
    return (enhance_ctrl_get_preview_count(p_win->p_enhance_ctrl));
 }
 
+guint
+ggaze_window_enhance_managed_fetch_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (enhance_ctrl_get_managed_fetch_count(p_win->p_enhance_ctrl));
+}
+
+gboolean
+ggaze_window_enhance_has_managed_original(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (enhance_ctrl_has_managed_original(p_win->p_enhance_ctrl));
+}
+
 gboolean
 ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
                             gint *p_base_w, gint *p_base_h) {
@@ -1716,6 +1728,18 @@ guint
 ggaze_window_enhance_preview_count(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
    return (0); /* no GEGL, no panel, no previews */
+}
+
+guint
+ggaze_window_enhance_managed_fetch_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (0); /* no GEGL, nothing managed */
+}
+
+gboolean
+ggaze_window_enhance_has_managed_original(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (FALSE);
 }
 
 gboolean

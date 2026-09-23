@@ -227,6 +227,15 @@ gboolean enhance_ctrl_get_orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
  * must cost at most two launches (tests/test_enhance_flow.c). */
 guint enhance_ctrl_get_render_count(EnhanceCtrl *p_ctrl);
 
+/* How many managed-original fetches (hold-Space on a colour-managed
+ * render, enhancer_managed_original_async) this controller has launched so
+ * far, and whether one has landed and is held now. Test seams for the lazy
+ * fetch: one launch per press that finds none held or in flight, dropped
+ * on discard / navigation / a new decode of the file
+ * (tests/test_enhance_flow.c). */
+guint    enhance_ctrl_get_managed_fetch_count(EnhanceCtrl *p_ctrl);
+gboolean enhance_ctrl_has_managed_original(EnhanceCtrl *p_ctrl);
+
 /* How many thumbnail-preview batches the open panel has started so far
  * (only batches that really launched: label-only cards and "no current
  * file" start none). A test seam: an open with the panel up must re-point

@@ -206,6 +206,13 @@ guint ggaze_window_enhance_render_count(GgazeWindow *p_win);
  * gd2). */
 guint ggaze_window_enhance_preview_count(GgazeWindow *p_win);
 
+/* How many managed-original fetches the enhance controller has launched,
+ * and whether it holds a landed one now (enhance_ctrl_get_managed_fetch_
+ * count, enhance_ctrl_has_managed_original); 0 / FALSE without GEGL. Test
+ * seams for hold-Space's lazy fetch (tests/test_enhance_flow.c). */
+guint    ggaze_window_enhance_managed_fetch_count(GgazeWindow *p_win);
+gboolean ggaze_window_enhance_has_managed_original(GgazeWindow *p_win);
+
 /* The crop rectangle as the overlay draws it right now (tool_ctrl_get_crop_
  * rect): TRUE with the rectangle and the size of the base it is laid out on
  * iff the crop tool is up and its overlay is visible over the texture on

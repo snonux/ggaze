@@ -39,6 +39,7 @@ static void     _start_previews(EnhanceCtrl *p_ctrl);
 static void     _card_toggle(EnhanceCtrl *p_ctrl, GtkWidget *p_btn);
 static gboolean _orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
 static void     _drop_managed(EnhanceCtrl *p_ctrl);
+static void     _drop_managed_orig(EnhanceCtrl *p_ctrl);
 static void     _fetch_managed_original(EnhanceCtrl *p_ctrl);
 
 /* --- struct --------------------------------------------------------------- */
@@ -73,7 +74,9 @@ struct EnhanceCtrl {
    gboolean b_relaunch;      /* the state changed while that apply ran: render
                               * once more when it lands (the coalescing slot;
                               * never more than one is ever queued) */
-   guint    u_render_count;  /* launches so far (a test seam) */
+   guint u_render_count;     /* launches so far (a test seam) */
+   guint u_orig_fetches;     /* managed-original fetches launched so far
+                              * (a test seam) */
    gboolean b_disposed;      /* set by enhance_ctrl_dispose */
    gboolean b_saved;         /* the state on screen IS the saved pair below:
                               * active but no longer dirty, so moving on does
@@ -388,6 +391,15 @@ _note_orig_size(EnhanceCtrl *p_ctrl, gint i_w, gint i_h) {
  * decode the viewer has not shown), so none can forget to tell it. */
 static void
 _learn_original(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
+   if (p_ctrl->p_orig_tex != NULL && p_ctrl->p_orig_tex != p_tex) {
+      /* A NEW decode of the file replaces a known one: the file may have
+       * been rewritten since the managed original was fetched from it, so
+       * that one (or its fetch in flight) goes too. b_managed stays: it is
+       * the last render's, and the next Space press fetches again from the
+       * file as it is now (a rewrite into an unmanaged file comes back
+       * NULL, which clears it). A same-content reload costs a re-fetch. */
+      _drop_managed_orig(p_ctrl);
+   }
    g_set_object(&p_ctrl->p_orig_tex, p_tex);
    _note_orig_size(p_ctrl, gdk_texture_get_width(p_tex),
                    gdk_texture_get_height(p_tex));
@@ -617,16 +629,22 @@ _sync_panel(EnhanceCtrl *p_ctrl) {
 
 /* --- the managed original (hold-Space on a colour-managed render) -------- */
 
-/* Forget the managed original and whether the file decodes managed, and
- * cancel a fetch in flight (its completion is stale by u_orig_gen). */
+/* Forget the managed original and cancel a fetch in flight (its
+ * completion is stale by u_orig_gen). */
 static void
-_drop_managed(EnhanceCtrl *p_ctrl) {
+_drop_managed_orig(EnhanceCtrl *p_ctrl) {
    p_ctrl->u_orig_gen++;
    if (p_ctrl->p_orig_cancel != NULL) {
       g_cancellable_cancel(p_ctrl->p_orig_cancel);
       g_clear_object(&p_ctrl->p_orig_cancel);
    }
    g_clear_object(&p_ctrl->p_managed_orig);
+}
+
+/* _drop_managed_orig(), and forget whether the file decodes managed. */
+static void
+_drop_managed(EnhanceCtrl *p_ctrl) {
+   _drop_managed_orig(p_ctrl);
    p_ctrl->b_managed = FALSE;
 }
 
@@ -680,6 +698,7 @@ _fetch_managed_original(EnhanceCtrl *p_ctrl) {
    p_req->p_ctrl         = p_ctrl;
    p_req->u_gen          = p_ctrl->u_orig_gen;
    p_ctrl->p_orig_cancel = g_cancellable_new();
+   p_ctrl->u_orig_fetches++;
    enhancer_managed_original_async(
       p_ctrl->p_enhance_file, p_ctrl->p_orig_cancel, _managed_orig_done, p_req);
 }
@@ -1039,6 +1058,18 @@ enhance_ctrl_get_render_count(EnhanceCtrl *p_ctrl) {
 }
 
 guint
+enhance_ctrl_get_managed_fetch_count(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, 0);
+   return (p_ctrl->u_orig_fetches);
+}
+
+gboolean
+enhance_ctrl_has_managed_original(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   return (p_ctrl->p_managed_orig != NULL);
+}
+
+guint
 enhance_ctrl_get_preview_count(EnhanceCtrl *p_ctrl) {
    g_return_val_if_fail(p_ctrl != NULL, 0);
    return (p_ctrl->u_preview_count);
@@ -1306,7 +1337,10 @@ enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx) {
  * very file that landed while its own visible load is still in flight):
  * take it, and tell the tool as the choke point does (_learn_original; a
  * crop tool used to stay laid out on the previous base until the visible
- * load showed its own decode).
+ * load showed its own decode). Either way a managed original fetched from
+ * the previous contents goes (_forget_original drops it; _learn_original
+ * drops it when it replaces a known decode), so hold-Space never compares
+ * a render of the new contents against the old file's managed decode.
  * Unchanged: nothing to do, and a crop tool open over the file keeps its
  * rectangle. This is the one deliberate cache lookup left in this
  * controller, and it runs on a rescan only. */
