@@ -593,12 +593,15 @@ test_window = executable(
 test('window', test_window, suite : 'integration', env : fixtures_env,
    is_parallel : false)
 
+# Links the helpers for GGTEST_WAIT_FOR_VIEW (gtk_helpers.h "large-view
+# readiness"): every subtest reads a scale that is only meaningful off the
+# full decode inside a settled allocation (2d2).
 test_viewer = executable(
    'test_viewer',
    ['test_viewer.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
-   link_with : ggaze_lib,
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
 test('viewer', test_viewer, suite : 'integration', env : fixtures_env)

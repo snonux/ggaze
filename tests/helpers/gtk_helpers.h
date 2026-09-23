@@ -10,6 +10,9 @@
  *     laid-out geometry, so callers never have to present a toplevel.
  *   - alert-dialog driving: find, count and press buttons on the dialogs
  *     gtk_alert_dialog_choose() puts up.
+ *   - large-view readiness: wait until a presented window's viewer shows the
+ *     full decode inside a settled allocation, the precondition of every
+ *     scale or pan read (2d2).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -21,6 +24,7 @@
 #include <gtk/gtk.h>
 
 #include "gridview.h"
+#include "viewer.h"
 #include "window.h"
 
 /* --- grid cells ---------------------------------------------------------- */
@@ -180,6 +184,64 @@ void ggtest_focus_viewer(GgazeWindow *p_win);
  * 366 ms). The numbers, the bound, and the pattern to copy are at
  * destroy_window_and_wait() in tests/test_settings_ui.c.
  */
+
+/* --- large-view readiness -------------------------------------------------
+ *
+ * Wait until p_win's viewer (its stack's "large" child) is showing the fully
+ * decoded picture inside its settled allocation, so a scale or pan read that
+ * follows is a read of what the window will KEEP showing; g_error() out,
+ * naming what was seen, when the ceiling expires. Call it through
+ * GGTEST_WAIT_FOR_VIEW() below, which supplies c_loc (the call site, as for
+ * GGTEST_ASSERT_DIALOG_UP).
+ *
+ * "Ready" is two conditions, and the suites' old two-loop wait ("texture is
+ * non-NULL, then width is non-zero") satisfied neither (2d2):
+ *
+ *   - THE TEXTURE IS THE FILE'S, not a stand-in: its size is i_tex_w x
+ *     i_tex_h, the decoded dimensions the caller knows from its fixture. The
+ *     JPEG backend's two-phase load (loader/backends/jpeg.c) hands the viewer
+ *     a 1/8-scale preview before the full decode (viewload.h "show_partial"),
+ *     and for tests/fixtures/plain.jpg (6x3) that preview is 1x1 -- so a
+ *     scale read taken between the two textures was the 1x1 stand-in's fit
+ *     (344 in the 590x344 viewer) rather than the file's (98.3), and a
+ *     zoom-in asserted against it "shrank" the picture when the real decode
+ *     landed a millisecond later. That was test_viewer's
+ *     zoom_in_never_shrinks_a_tiny_image flaking under load: the gap between
+ *     preview and full decode is the width of a starved worker thread's
+ *     schedule, so it opened only on a loaded lane with jpeg enabled (the
+ *     minimal lane's pixbuf path shows no preview). Matching the SIZE rather
+ *     than a load-finished flag needs no test hook in the product and also
+ *     rejects a texture of the wrong file (last-write-wins gone wrong).
+ *
+ *   - THE ALLOCATION HAS SETTLED: the viewer's width and height are non-zero
+ *     and unchanged across GGTEST_VIEW_SETTLE_ITERS consecutive main-loop
+ *     iterations, each of which dispatched what was ready. The fit scale is
+ *     derived from that allocation (viewer.c _fit_scale), so a read taken off
+ *     an interim allocation disagrees with every later read.
+ *
+ * Why the allocation is matched by stillness and NOT against the 600x400 the
+ * suites request through gtk_window_set_default_size(): the toplevel widget's
+ * allocation is not that number on every backend. Measured with a probe on
+ * gtk4-4.22.5, a 600x400 default size allocates the GtkWindow widget at
+ * 590x390 on Xvfb (X11 solid-csd, a 5 px border inside the surface, which is
+ * the 600x400) but at 600x400 on Wayland (the CSD shadow lives outside the
+ * widget, in a 650x450 surface), and a tiling compositor then re-configures
+ * it to whatever it likes (1276x771 under headless sway). The viewer's share
+ * below the header bar is theme-dependent on top of that. A wait for "600x400
+ * minus chrome" would therefore have to know the backend and the theme, and
+ * would time out on any desktop that overrides the size. The stillness check
+ * is honest on all of them, and where the toplevel arrives at its size in one
+ * configure -- which is what the probe showed on Xvfb, 0x0 straight to the
+ * final allocation -- the settle window costs a few tens of milliseconds and
+ * guards only against a late relayout of the chrome.
+ *
+ * Bounded by a real monotonic deadline (the same scaled ceiling as the dialog
+ * wait; see ggtest_wait_for_dialog), never by an iteration count. */
+GgazeViewer *ggtest_wait_for_view_at(const char *c_loc, GgazeWindow *p_win,
+                                     int i_tex_w, int i_tex_h);
+
+#define GGTEST_WAIT_FOR_VIEW(p_win, i_tex_w, i_tex_h)                          \
+   ggtest_wait_for_view_at(G_STRLOC, (p_win), (i_tex_w), (i_tex_h))
 
 /* --- alert dialogs -------------------------------------------------------- */
 
