@@ -3,8 +3,9 @@
  *
  * Gathers file info (GFileInfo), pixel dimensions (through the loader, so
  * every format the viewer shows is covered and the oversized-JPEG guard is
- * the loader's) and EXIF tags (libexif) into a GgazeInfo struct. Plain-C,
- * no GtkWidget; info-overlay.c runs it in a GTask worker.
+ * the loader's), EXIF tags (libexif) and the declared colour space (the
+ * embedded ICC profile's description, icc.c) into a GgazeInfo struct.
+ * Plain-C, no GtkWidget; info-overlay.c runs it in a GTask worker.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -16,7 +17,18 @@
 #include <libexif/exif-format.h>
 #include <libexif/exif-tag.h>
 
+#include "ggaze-config.h"
+#include "icc.h"
 #include "loader/loader.h"
+
+/* The card's note behind an embedded profile's name: what this build does
+ * with it. The plain (fast-decode) view is never managed by ggaze itself;
+ * with GEGL the enhance preview and the export are (decision #45). */
+#if GGAZE_HAVE_GEGL
+#define INFO_ICC_NOTE "managed on enhance/export"
+#else
+#define INFO_ICC_NOTE "not managed in this build"
+#endif
 
 static char *
 _dup_exif_value(ExifData *p_data, ExifTag e_tag) {
@@ -138,6 +150,48 @@ _fill_exif(GgazeInfo *p_info, const char *c_path) {
    exif_data_unref(p_exif);
 }
 
+int
+info_exif_orientation(const char *c_path) {
+   g_return_val_if_fail(c_path != NULL, 0);
+   ExifData *p_exif = exif_data_new_from_file(c_path);
+   if (p_exif == NULL) {
+      return (0);
+   }
+   int i_orient = _get_orientation(p_exif);
+   exif_data_unref(p_exif);
+   return (i_orient);
+}
+
+/* Colour space: the embedded ICC profile's description (icc.c) when the
+ * file carries a readable one. A profile container that is there but broken
+ * (INVALID_DATA), or bytes that are not a profile at all, are reported as
+ * unreadable rather than passed off as sRGB, so the card never claims a
+ * colour space the file does not deliver; an I/O failure (the file vanished
+ * mid-gather) reads as "none", like every other field here. */
+static void
+_fill_colorspace(GgazeInfo *p_info, GFile *p_file) {
+   GError *p_err = NULL;
+   GBytes *p_icc = icc_read_embedded(p_file, &p_err);
+   if (p_icc == NULL) {
+      p_info->e_icc =
+         g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_DATA)
+            ? GGAZE_ICC_UNREADABLE
+            : GGAZE_ICC_NONE;
+      g_clear_error(&p_err);
+      return;
+   }
+   if (!icc_is_profile(p_icc)) {
+      p_info->e_icc = GGAZE_ICC_UNREADABLE;
+   } else {
+      p_info->e_icc        = GGAZE_ICC_EMBEDDED;
+      p_info->c_colorspace = icc_description(p_icc);
+      if (p_info->c_colorspace == NULL) {
+         p_info->c_colorspace = g_strdup("unnamed profile");
+      }
+   }
+   g_bytes_unref(p_icc);
+}
+
 GgazeInfo *
 info_new(GFile *p_file) {
    g_return_val_if_fail(G_IS_FILE(p_file), NULL);
@@ -150,6 +204,7 @@ info_new(GFile *p_file) {
    _fill_file_info(p_info, p_file);
    _fill_dims(p_info, p_file);
    _fill_exif(p_info, c_path);
+   _fill_colorspace(p_info, p_file);
 
    g_free(c_path);
    return (p_info);
@@ -168,6 +223,7 @@ info_delete(GgazeInfo *p_info) {
    g_free(p_info->c_shutter);
    g_free(p_info->c_iso);
    g_free(p_info->c_datetime);
+   g_free(p_info->c_colorspace);
    g_free(p_info);
 }
 
@@ -177,6 +233,25 @@ _join(GString *p_str, const char *c_label, const char *c_val) {
       g_string_append_printf(p_str, "%s: %s\n", c_label, c_val);
    }
    return (NULL);
+}
+
+/* The colour-space line, one wording per GgazeIccState (see info.h). */
+static void
+_append_colorspace(GString *p_str, const GgazeInfo *p_info) {
+   switch (p_info->e_icc) {
+   case GGAZE_ICC_EMBEDDED:
+      g_string_append_printf(p_str, "Color space: %s (embedded ICC; %s)\n",
+                             p_info->c_colorspace, INFO_ICC_NOTE);
+      break;
+   case GGAZE_ICC_UNREADABLE:
+      g_string_append(p_str, "Color space: embedded ICC profile unreadable "
+                             "(shown as sRGB)\n");
+      break;
+   default:
+      g_string_append(p_str,
+                      "Color space: sRGB (assumed, no embedded profile)\n");
+      break;
+   }
 }
 
 char *
@@ -207,6 +282,7 @@ info_format(const GgazeInfo *p_info) {
    if (p_info->i_orientation > 0) {
       g_string_append_printf(p_str, "Orientation: %d\n", p_info->i_orientation);
    }
+   _append_colorspace(p_str, p_info);
    /* trim trailing newline */
    if (p_str->len > 0 && p_str->str[p_str->len - 1] == '\n') {
       g_string_truncate(p_str, p_str->len - 1);

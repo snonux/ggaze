@@ -10,6 +10,9 @@
  * format/undersized data buffer (lu0) -- both must fail safe, never crash --
  * and the truncated / empty / garbage-JXL files the loader's decode gate
  * (tb2) must turn away before gdk-pixbuf's glycin loaders can hang on them.
+ * xb2: the colour-space line -- an embedded profile's name (swapped.png /
+ * swapped.jpg), the sRGB assumption for an untagged file, an unreadable
+ * profile (badicc.png) -- and info_exif_orientation() on its own.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -466,6 +469,71 @@ test_dnl_zero_height_jpeg_size_unknown(void) {
    g_free(c_tmp);
 }
 
+/* xb2: the colour space the card names. swapped.png / swapped.jpg carry a
+ * hand-built profile called "ggaze swapped RGB" (tests/fixtures/gen.py);
+ * the line says so and says what this build does with it. */
+static void
+test_colorspace_embedded_profile(void) {
+   GgazeInfo *p_png = info_from_fixture("swapped.png");
+   g_assert_cmpint(p_png->e_icc, ==, GGAZE_ICC_EMBEDDED);
+   g_assert_cmpstr(p_png->c_colorspace, ==, "ggaze swapped RGB");
+   char *c_fmt = info_format(p_png);
+   g_assert_nonnull(g_strstr_len(
+      c_fmt, -1, "Color space: ggaze swapped RGB (embedded ICC; "));
+   g_assert_nonnull(g_strstr_len(c_fmt, -1, "6\u00d73"));
+   g_free(c_fmt);
+   info_delete(p_png);
+
+   GgazeInfo *p_jpg = info_from_fixture("swapped.jpg");
+   g_assert_cmpint(p_jpg->e_icc, ==, GGAZE_ICC_EMBEDDED);
+   g_assert_cmpstr(p_jpg->c_colorspace, ==, "ggaze swapped RGB");
+   g_assert_cmpint(p_jpg->i_width, ==, 8);
+   g_assert_cmpint(p_jpg->i_height, ==, 8);
+   info_delete(p_jpg);
+}
+
+/* No profile: sRGB is what every path assumes, and the card says so. */
+static void
+test_colorspace_assumed_srgb_without_profile(void) {
+   GgazeInfo *p_info = info_from_fixture("plain.jpg");
+   g_assert_cmpint(p_info->e_icc, ==, GGAZE_ICC_NONE);
+   g_assert_null(p_info->c_colorspace);
+   char *c_fmt = info_format(p_info);
+   g_assert_nonnull(g_strstr_len(c_fmt, -1, "Color space: sRGB (assumed"));
+   g_free(c_fmt);
+   info_delete(p_info);
+}
+
+/* badicc.png: an iCCP whose content is not a profile. The card must say
+ * "unreadable", never name it and never silently call it sRGB. */
+static void
+test_colorspace_unreadable_profile(void) {
+   GgazeInfo *p_info = info_from_fixture("badicc.png");
+   g_assert_cmpint(p_info->e_icc, ==, GGAZE_ICC_UNREADABLE);
+   g_assert_null(p_info->c_colorspace);
+   char *c_fmt = info_format(p_info);
+   g_assert_nonnull(
+      g_strstr_len(c_fmt, -1, "Color space: embedded ICC profile unreadable"));
+   g_free(c_fmt);
+   info_delete(p_info);
+}
+
+/* info_exif_orientation(): the validated Orientation read on its own. */
+static void
+test_exif_orientation_alone(void) {
+   const char *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   char       *c_rot = g_build_filename(c_dir, "rot6.jpg", NULL);
+   char       *c_pln = g_build_filename(c_dir, "plain.jpg", NULL);
+   char       *c_png = g_build_filename(c_dir, "small.png", NULL);
+   g_assert_cmpint(info_exif_orientation(c_rot), ==, 6);
+   g_assert_cmpint(info_exif_orientation(c_pln), ==, 1);
+   g_assert_cmpint(info_exif_orientation(c_png), ==, 0);
+   g_assert_cmpint(info_exif_orientation("/nonexistent/ggaze.jpg"), ==, 0);
+   g_free(c_rot);
+   g_free(c_pln);
+   g_free(c_png);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -485,6 +553,13 @@ main(int i_argc, char **c_argv) {
                    test_truncated_jxl_fails_fast);
    g_test_add_func("/info/empty_file_fails_fast", test_empty_file_fails_fast);
    g_test_add_func("/info/garbage_jxl_fails_fast", test_garbage_jxl_fails_fast);
+   g_test_add_func("/info/colorspace_embedded_profile",
+                   test_colorspace_embedded_profile);
+   g_test_add_func("/info/colorspace_assumed_srgb_without_profile",
+                   test_colorspace_assumed_srgb_without_profile);
+   g_test_add_func("/info/colorspace_unreadable_profile",
+                   test_colorspace_unreadable_profile);
+   g_test_add_func("/info/exif_orientation_alone", test_exif_orientation_alone);
    g_test_add_func("/info/dnl_zero_height_jpeg_size_unknown",
                    test_dnl_zero_height_jpeg_size_unknown);
    return (g_test_run());
