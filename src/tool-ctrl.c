@@ -32,6 +32,8 @@ static const char *_CROP_HINT =
    "· 1-4 aspect, 0 free · Enter applies, Esc cancels";
 static const char *_RENDERING =
    "Preview still rendering — try again in a moment";
+static const char *_NO_PICTURE =
+   "No picture on screen — the image did not load; Esc leaves the tool";
 static const char *_FINISH_FIRST =
    "Finish the current tool first (Enter applies, Esc cancels)";
 static const char *_RELEASE_SPACE =
@@ -105,6 +107,24 @@ _shown_is_current(ToolCtrl *p_tc) {
    GgazeViewer *p_v = _viewer(p_tc);
    return (p_v != NULL && enhance_ctrl_is_current_render(
                              p_tc->p_ec, ggaze_viewer_get_texture(p_v)));
+}
+
+/* Say why the tool cannot work on the picture right now. With no texture
+ * on screen at all no render is coming: the reload after a rewrite failed
+ * (viewload clears the canvas and reports "Cannot show ..."), or the
+ * file's first decode has not landed -- either way the base is unknown
+ * and "still rendering, try again" was a promise nothing kept, repeated
+ * on every key until the user guessed Esc. Name the state and the way out
+ * instead. With a picture up, a render IS pending (or the base's decode
+ * is), and waiting is the right advice. */
+static void
+_say_not_ready(ToolCtrl *p_tc) {
+   GgazeViewer *p_v = _viewer(p_tc);
+   if (p_v == NULL || ggaze_viewer_get_texture(p_v) == NULL) {
+      _status(p_tc, _NO_PICTURE);
+   } else {
+      _status(p_tc, _RENDERING);
+   }
 }
 
 /* TRUE iff the controller can name the picture the tool works on: the
@@ -526,7 +546,7 @@ _crop_key(ToolCtrl *p_tc, guint u_keyval) {
       return (FALSE);
    }
    if (!_ensure_rect(p_tc)) {
-      _status(p_tc, _RENDERING);
+      _say_not_ready(p_tc);
       return (TRUE);
    }
    gdouble d_step = _nudge_step(p_tc);
@@ -568,11 +588,12 @@ _crop_key(ToolCtrl *p_tc, guint u_keyval) {
 /* TRUE iff the rectangle can be edited or committed right now: laid out on
  * a known base, with that base's render on screen -- and not the original
  * Space is holding in its place. Otherwise says why, when b_say: "Release
- * Space first" before "still rendering", as the straighten tool orders
- * them, because under a held Space the screen shows the original whether
- * or not a render is pending, and advising to wait for a render the user
- * cannot see land was wrong (it used to be the only message). A drag says
- * it on BEGIN only, not on every refused motion event. */
+ * Space first" before "still rendering" (or "no picture on screen",
+ * _say_not_ready), as the straighten tool orders them, because under a
+ * held Space the screen shows the original whether or not a render is
+ * pending, and advising to wait for a render the user cannot see land was
+ * wrong (it used to be the only message). A drag says it on BEGIN only,
+ * not on every refused motion event. */
 static gboolean
 _crop_editable(ToolCtrl *p_tc, gboolean b_say) {
    if (enhance_ctrl_is_hold_original(p_tc->p_ec)) {
@@ -583,7 +604,7 @@ _crop_editable(ToolCtrl *p_tc, gboolean b_say) {
    }
    if (!_ensure_rect(p_tc) || !_shown_is_current(p_tc)) {
       if (b_say) {
-         _status(p_tc, _RENDERING);
+         _say_not_ready(p_tc);
       }
       return (FALSE);
    }
@@ -722,7 +743,7 @@ _horizon_measurable(ToolCtrl *p_tc) {
       return (FALSE);
    }
    if (!_original_known(p_tc) || !_shown_is_current(p_tc)) {
-      _status(p_tc, _RENDERING);
+      _say_not_ready(p_tc);
       return (FALSE);
    }
    return (TRUE);

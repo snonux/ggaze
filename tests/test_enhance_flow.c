@@ -4575,6 +4575,45 @@ rewrite_as_200x150_same_stamp(const char *c_path) {
    g_object_unref(p_f);
 }
 
+/* Pump until the window title contains c_part (up to 5 s) and assert it
+ * does: a folder rescan's observable effect when the listing changed --
+ * the title's "n/total" follows the navigator's count. Draining a fixed
+ * time past the monitor's 250 ms debounce instead passed vacuously when
+ * the monitor was late (seventh review). */
+static void
+wait_for_title_part(GgazeWindow *p_win, const char *c_part) {
+   for (guint u = 0;
+        u < 5000 && g_strstr_len(window_title(p_win), -1, c_part) == NULL;
+        u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   g_assert_nonnull(g_strstr_len(window_title(p_win), -1, c_part));
+   ggtest_drain_main(50);
+}
+
+/* Pump until the status line is hidden (up to 2 s) and assert it is: a
+ * folder rescan's observable effect when the listing did NOT change (the
+ * same file rewritten in place), since the window's "changed" handler
+ * dismisses the info overlay unconditionally (_dismiss_info_for_nav)
+ * while nothing about the picture, the title or the count moves. The
+ * label must be up when this is called, with a status whose auto-hide is
+ * further off than the 2 s waited here (the crop hint's is 4 s: 2 s + 1 s
+ * per 40 characters), so within the deadline only the rescan can hide it
+ * -- a late monitor fails here instead of passing by the fixed drain it
+ * replaced (seventh review). */
+static void
+wait_for_status_dismissed(GgazeWindow *p_win) {
+   GtkWidget *p_lbl = ggaze_window_get_info_label(p_win);
+   g_assert_true(gtk_widget_get_visible(p_lbl));
+   for (guint u = 0; u < 2000 && gtk_widget_get_visible(p_lbl); u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   g_assert_false(gtk_widget_get_visible(p_lbl));
+   ggtest_drain_main(50);
+}
+
 /* The crop tool is open on the 400x300 base when a render decodes the file
  * at another size before any reload has (rewrite_as_200x150_same_stamp:
  * the reload is a cache hit of the old decode, the preset's render reads
@@ -4593,8 +4632,9 @@ test_crop_tool_follows_a_render_of_another_size(void) {
    g_assert_cmpint(i_bw, ==, TOOL_W);
    g_assert_cmpint(i_bh, ==, TOOL_H);
    rewrite_as_200x150_same_stamp(fx.c_path);
-   ggtest_drain_main(700); /* past the monitor's debounce: the rescan finds
-                            * the entry fresh, the reload is a hit */
+   wait_for_status_dismissed(fx.p_win); /* the rescan happened (it hides
+                                         * the crop hint): the entry was
+                                         * fresh, the reload a hit */
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    fire_and_wait(fx.p_win, "win.enhance-1"); /* the render reads 200x150 */
@@ -4632,7 +4672,8 @@ test_first_rescan_after_an_open_is_a_same_file_event(void) {
    g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
    g_assert_cmpfloat(t_rect.d_w, ==, TOOL_W - 30.0); /* 10 steps of 3 px */
    copy_fixture(fx.c_dir, "plain.jpg"); /* a sibling: the folder rescans */
-   ggtest_drain_main(700);              /* past the monitor's debounce */
+   wait_for_title_part(fx.p_win, "/2"); /* ... and the rescan happened:
+                                         * two files in the title now */
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
    g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, 0);
@@ -4914,6 +4955,40 @@ add_tool_review5_tests(void) {
                    test_crop_tool_relays_out_on_the_rewritten_base);
 }
 
+/* --- wb2 seventh review round ------------------------------------------ */
+
+/* The reload after a rewrite fails: the file is replaced with bytes no
+ * decoder accepts (its size changes, so the rescan finds the cache entry
+ * stale, forgets the original and the reload decodes the file afresh),
+ * viewload clears the canvas and reports "Cannot show". Under the open
+ * crop tool every key and Enter then answered "Preview still rendering --
+ * try again in a moment" for as long as the user kept trying, though no
+ * render was coming. Now they say there is no picture on screen and name
+ * the way out, the tool stays until asked to leave, and Esc leaves it. */
+static void
+test_failed_reload_under_the_crop_tool_says_so(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop");
+   g_assert_true(
+      g_file_set_contents(fx.c_path, "not an image at all", -1, NULL));
+   wait_for_status_prefix(fx.p_win, "Cannot show");
+   g_assert_null(viewer_texture(fx.p_win));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   tool_key(fx.p_win, GDK_KEY_h);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "No picture"));
+   tool_key(fx.p_win, GDK_KEY_1);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "No picture"));
+   tool_key(fx.p_win, GDK_KEY_Return);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "No picture"));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Crop cancelled"));
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   tool_fx_close(&fx);
+}
+
 /* wb2 sixth review round: an open runs the choke point a navigation does,
  * a render of another size re-bases the crop tool, an open's baseline. */
 static void
@@ -4926,6 +5001,13 @@ add_tool_review6_tests(void) {
                    test_crop_tool_follows_a_render_of_another_size);
    g_test_add_func("/enhance_flow/first_rescan_after_an_open_is_same_file",
                    test_first_rescan_after_an_open_is_a_same_file_event);
+}
+
+/* Seventh review round: a failed reload under the crop tool is named. */
+static void
+add_tool_review7_tests(void) {
+   g_test_add_func("/enhance_flow/failed_reload_under_the_crop_tool_says_so",
+                   test_failed_reload_under_the_crop_tool_says_so);
 }
 
 int
@@ -4964,5 +5046,6 @@ main(int i_argc, char **c_argv) {
    add_tool_review4_tests();
    add_tool_review5_tests();
    add_tool_review6_tests();
+   add_tool_review7_tests();
    return (g_test_run());
 }

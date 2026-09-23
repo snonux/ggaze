@@ -821,10 +821,10 @@ if gegl_dep.found()
    # under a preset re-renders, the crop tool follows a rewrite with no
    # input; sixth round: an open of a first-sorted file ends the tool and
    # the saved transform, Save-then-open, a render of another size before
-   # the decode, an open's rescan baseline -- 93 in all): measured 136-144 s
-   # in the plain lane and 151 s in the ASan lane on a box shared with
-   # another test loop, so the 360 s budget is ~2.4x headroom over the
-   # slower ASan lane.
+   # the decode, an open's rescan baseline; seventh round: a failed reload
+   # under the crop tool -- 94 in all): measured 136-144 s in the plain
+   # lane and 151 s in the ASan lane on a box shared with another test
+   # loop, so the 360 s budget is ~2.4x headroom over the slower ASan lane.
    test('enhance_flow', test_enhance_flow,
       suite : 'integration', env : fixtures_env, depends : ggaze_gschemas,
       timeout : 360, is_parallel : false)

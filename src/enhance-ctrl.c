@@ -57,11 +57,14 @@ struct EnhanceCtrl {
    gint     i_orig_w;        /* the ORIGINAL's upright size, from the
                               * decode the viewer showed for it (learned
                               * with p_orig_tex below) or the last landed
-                              * apply's (0 = not known yet); every change
-                              * of it is told to the tool
+                              * apply's (0 = not known yet); every LEARNED
+                              * change of it is told to the tool
                               * (original_changed), since
                               * transform_base_size of it is the image the
-                              * crop rectangle lives on */
+                              * crop rectangle lives on. _forget_original
+                              * zeroes it without telling: the tool's draw
+                              * path re-reads it (_rect_on_base) and hides
+                              * the rectangle until it is learned again */
    gint     i_orig_h;
    gboolean b_apply_pending; /* an apply is in flight: what is on screen
                               * predates u_enhance_mask/t_xf */
@@ -350,21 +353,24 @@ _learn_original(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
    p_ctrl->p_ops->original_changed(p_ctrl->p_host);
 }
 
-/* The ONE place the original's identity (and, with it, its size) is
- * learned: the window tells this controller about every decoded texture of
- * the current file it is about to show -- a cache hit, a finished load, a
- * reload after a discard, a rescan's reload of a rewritten file -- and the
- * viewer only ever shows the current file's own decode (viewload's
- * last-write-wins), so that texture IS the original as of now, whether or
- * not a preview is going to be put on screen in its place. Learning it
- * here rather than looking it up from the cache on first need keeps the
- * remembered object in step with the one the viewer holds: a same-file
- * reload without a rescan (the file touched, then a preset discarded)
- * decodes a NEW object that a one-time lookup never saw, and every tool
- * check against the old one failed for good. The controller's own
- * textures teach it nothing: the window passes only what viewload decoded.
- * Nothing here looks anything up. A tool laid out on the previous object
- * is told so it can lay out again (original_changed, _learn_original). */
+/* Where the original's identity (and, with it, its size) is learned in
+ * the ordinary course (the other caller of _learn_original is
+ * _recheck_original, for a rescan that finds a decode the viewer has not
+ * shown yet): the window tells this controller about every decoded
+ * texture of the current file it is about to show -- a cache hit, a
+ * finished load, a reload after a discard, a rescan's reload of a
+ * rewritten file -- and the viewer only ever shows the current file's own
+ * decode (viewload's last-write-wins), so that texture IS the original as
+ * of now, whether or not a preview is going to be put on screen in its
+ * place. Learning it here rather than looking it up from the cache on
+ * first need keeps the remembered object in step with the one the viewer
+ * holds: a same-file reload without a rescan (the file touched, then a
+ * preset discarded) decodes a NEW object that a one-time lookup never saw,
+ * and every tool check against the old one failed for good. The
+ * controller's own textures teach it nothing: the window passes only what
+ * viewload decoded. Nothing here looks anything up. A tool laid out on the
+ * previous object is told so it can lay out again (original_changed,
+ * _learn_original). */
 void
 enhance_ctrl_texture_shown(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
    if (p_ctrl == NULL || p_tex == NULL || _disposed(p_ctrl) ||

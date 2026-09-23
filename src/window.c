@@ -1766,9 +1766,10 @@ _show_info(GgazeWindow *p_win) {
 
 /* Hide the info overlay because the current file changed: reached from
  * _nav_changed_cb (the choke point every navigation path funnels through)
- * and from _open_now (which does not reliably emit "changed"). The card must
- * never keep showing a PREVIOUS file's data over the new one; a status line
- * shown right after re-shows the label with its own fresh timer. */
+ * and from _open_leave_previous (an open does not reliably emit "changed",
+ * see _open_build_navigator). The card must never keep showing a PREVIOUS
+ * file's data over the new one; a status line shown right after re-shows
+ * the label with its own fresh timer. */
 static void
 _dismiss_info_for_nav(GgazeWindow *p_win) {
    info_overlay_dismiss(p_win->p_info);
@@ -3336,7 +3337,10 @@ _open_resolve_target(GFile *p_arg, GFile **p_out_dir, GFile **p_out_start) {
  * once: the info overlay (gu0), the tools' and the enhance controller's
  * choke point (wb2 sixth review: a tool and a saved transform used to
  * survive into a folder whose file sorted first) and the load. Connecting
- * before the cursor only made the index != 0 case load the file twice. */
+ * before the cursor only made the index != 0 case load the file twice.
+ * That "once" is _open_now's: a multi-file open (_proceed_open_many) still
+ * calls navigator_set_current_file AFTER it, and that "changed" runs the
+ * choke point and the load a second time (task gd2). */
 static void
 _open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
                       GgazeSort e_sort, gboolean b_wrap, gboolean b_hide_raw) {
