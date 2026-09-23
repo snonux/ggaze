@@ -110,6 +110,17 @@ test('app', test_app,
 # tests/helpers/tiny_images.h (the smallest real 1x1 file per format, as
 # inline bytes) via test_helpers_inc; test_loader_pixbuf also links the
 # helpers library for mem_file.c.
+#
+# The unit binaries that g_test_skip() one of their cases (test_detect's
+# /proc/self/mem failed read, test_enhancer's and test_thumbnail's
+# as-root cases) are registered with protocol : 'tap': with the default
+# exitcode protocol a skipped case is invisible -- the binary exits 0 and
+# meson prints a plain OK -- while over TAP (GLib's default output since
+# 2.62) meson parses the per-case "ok N ... # SKIP" lines: the result
+# line counts only the cases that ran ("35 subtests passed" where 36 are
+# registered), the testlog names the skipped case with its reason, and
+# the whole test reads SKIP when every case skips. (meson 1.11 prints no
+# separate skipped count in that line; that is meson's, not ours.)
 test_detect = executable(
    'test_detect',
    ['test_detect.c', ggaze_conf_h],
@@ -118,7 +129,8 @@ test_detect = executable(
    link_with : ggaze_lib,
    install : false,
 )
-test('detect', test_detect, suite : 'unit', env : fixtures_env)
+test('detect', test_detect, suite : 'unit', env : fixtures_env,
+   protocol : 'tap')
 
 test_loader_pixbuf = executable(
    'test_loader_pixbuf',
@@ -219,7 +231,8 @@ test_thumbnail = executable(
    link_with : ggaze_lib,
    install : false,
 )
-test('thumbnail', test_thumbnail, suite : 'unit', env : fixtures_env)
+test('thumbnail', test_thumbnail, suite : 'unit', env : fixtures_env,
+   protocol : 'tap')
 
 test_info = executable(
    'test_info',
@@ -278,7 +291,8 @@ if gegl_dep.found()
    enhancer_env.set('LSAN_OPTIONS',
       'suppressions=' + join_paths(meson.project_source_root(), 'tests',
                                   'lsan_suppressions.txt'))
-   test('enhancer', test_enhancer, suite : 'unit', env : enhancer_env)
+   test('enhancer', test_enhancer, suite : 'unit', env : enhancer_env,
+      protocol : 'tap')
 endif
 
 test_texturecache = executable(

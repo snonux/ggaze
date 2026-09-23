@@ -85,8 +85,10 @@ once and gates *that* buffer before the `GdkPixbufLoader` sees it -- with
 `loader_sniff_bytes_for_fallback()`, which is the gate plus the dispatch
 rule: bytes that a format-specific backend of the build claims are refused
 (`G_IO_ERROR_BUSY`, "<format> file changed while loading; try again" --
-a status-line message, and a code a caller can tell from the gate's
-`INVALID_DATA`/`NOT_SUPPORTED` and the backends' generic `FAILED`), since
+a status-line message, and a code a caller could tell from the gate's
+`INVALID_DATA`/`NOT_SUPPORTED` and the backends' generic `FAILED`; no
+caller matches it today, and `loader.c` notes why a future auto-reload
+must not key on the code alone -- it is also GIO's mapping of `EBUSY`), since
 the fallback can only be
 holding them because the file changed between the dispatcher's sniff and
 the backend's read. The dispatch rule is what makes the JXL refusal

@@ -12,7 +12,9 @@
  * ~/.cache/thumbnails is written by every TMS app, so the cache read needs
  * the gate as much as the source decode does, only a PNG may be decoded
  * from it at all, and its size is bounded (test_oversize_entry_regenerated
- * pins GGAZE_THUMB_ENTRY_MAX_BYTES from both sides).
+ * pins GGAZE_THUMB_ENTRY_MAX_BYTES from both sides). The cancellation pair
+ * at the end proves the task's GCancellable reaches that cache read itself
+ * (test_cancel_mid_entry_read parks the worker inside it, on a FIFO).
  *
  * Persistence (ix0) is covered by the _marker_ tests below. The older
  * "second get should hit the cache" assertion could not see the ix0 bug at
@@ -28,13 +30,17 @@
 
 #include "thumbnail.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <poll.h>
+#include <signal.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utime.h>
@@ -893,6 +899,272 @@ test_oversize_entry_regenerated(void) {
    g_free(c_tmp);
 }
 
+/* --- cancellation -------------------------------------------------------- */
+
+/* One request for p_file with p_cancel through a fresh Thumbnail, expected
+ * to end in an error: GGAZE_RESULT/GGAZE_ERR are left for the caller to
+ * assert on and free. */
+static void
+_request_expecting_error(GFile *p_file, GCancellable *p_cancel) {
+   Thumbnail *p_t = thumbnail_new();
+   GGAZE_RESULT   = NULL;
+   GGAZE_ERR      = NULL;
+   GGAZE_LOOP     = g_main_loop_new(NULL, FALSE);
+   thumbnail_get_async(p_t, p_file, 128, p_cancel, _thumb_err_cb, NULL);
+   g_main_loop_run(GGAZE_LOOP);
+   g_main_loop_unref(GGAZE_LOOP);
+   GGAZE_LOOP = NULL;
+   thumbnail_delete(p_t);
+}
+
+/* A request handed an already-cancelled GCancellable (a grid item scrolled
+ * out of view before the pool got to it) completes with
+ * G_IO_ERROR_CANCELLED before any I/O: no texture, and the planted marker
+ * entry is byte for byte what it was, so it was neither regenerated nor
+ * rewritten on the way out. */
+static void
+test_precancelled_request(void) {
+   char  *c_tmp  = _copy_fixture_to_tmp("plain.jpg");
+   GFile *p_file = g_file_new_for_path(c_tmp);
+   char  *c_uri  = g_file_get_uri(p_file);
+   char  *c_ent  = thumbnail_cache_path(p_file, 128);
+   _write_marker(c_ent, _mtime_of(p_file), c_uri);
+   gchar *c_before = NULL;
+   gsize  u_before = 0;
+   g_assert_true(g_file_get_contents(c_ent, &c_before, &u_before, NULL));
+
+   GCancellable *p_cancel = g_cancellable_new();
+   g_cancellable_cancel(p_cancel);
+   _request_expecting_error(p_file, p_cancel);
+   g_object_unref(p_cancel);
+   g_assert_null(GGAZE_RESULT);
+   g_assert_error(GGAZE_ERR, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+   g_clear_error(&GGAZE_ERR);
+
+   gchar *c_after = NULL;
+   gsize  u_after = 0;
+   g_assert_true(g_file_get_contents(c_ent, &c_after, &u_after, NULL));
+   g_assert_cmpmem(c_before, u_before, c_after, u_after);
+   g_free(c_before);
+   g_free(c_after);
+   g_free(c_ent);
+   g_free(c_uri);
+   g_object_unref(p_file);
+   unlink(c_tmp);
+   g_free(c_tmp);
+}
+
+/* The writer behind a FIFO planted under the cache entry's name: the one
+ * way to park the pool worker INSIDE _read_entry_bounded(), between two
+ * reads, and cancel it there. (A large regular entry is read to its end in
+ * milliseconds, so a cancel timed from another thread lands before, during
+ * or after the read by luck and proves nothing either way.) The writer
+ * serves the valid marker PNG in two chunks: chunk one, a wait until the
+ * reader has taken it, THEN the cancel, then chunk two -- so wherever the
+ * reader is at that moment (about to call read(), or blocked in it for
+ * chunk two) its next read() call is one it enters with the cancellable
+ * already cancelled, which GLocalFileInputStream checks before read(2).
+ *
+ * What proves the READ LOOP honoured the cancel, and not a later check:
+ * GTask's own check_cancellable makes thumbnail_get_finish() report
+ * CANCELLED for any cancelled request whatever _thumb_run() returned, so
+ * the result alone would pass with a read loop that ignores its
+ * cancellable. What such a loop cannot fake is when it lets go of the
+ * FIFO: a loop that honours the cancel fails its next read() call without
+ * touching the pipe and closes -- the write end sees POLLERR at once --
+ * while one that ignores it takes chunk two and blocks in read() for more,
+ * holding the FIFO open until the writer gives up. So the writer keeps the
+ * write end open after chunk two and waits, within the budget, for the
+ * reader to be gone; a reader still there when the budget is spent is the
+ * named failure, and the writer closes anyway so that reader gets its EOF
+ * and the test fails an assertion rather than meson's timeout. Every wait
+ * is bounded by the one deadline. */
+#define GGAZE_ENTRY_WRITER_BUDGET_US (5 * G_USEC_PER_SEC)
+
+typedef struct {
+   const char   *c_fifo; /* the entry path, a FIFO */
+   const guint8 *p_png;  /* the valid marker entry, served in two */
+   gsize         u_len;
+   GCancellable *p_cancel;      /* cancelled between the two chunks */
+   gint64        i_deadline;    /* monotonic, bounds every wait */
+   const char   *c_failure;     /* first failure, NULL when none */
+   char          c_errmsg[128]; /* formatted text c_failure may point at */
+} EntryWriter;
+
+static gboolean
+_entry_writer_expired(const EntryWriter *p_w) {
+   return (g_get_monotonic_time() >= p_w->i_deadline);
+}
+
+static void
+_entry_writer_fail(EntryWriter *p_w, const char *c_what) {
+   if (p_w->c_failure == NULL) {
+      p_w->c_failure = c_what;
+   }
+}
+
+/* Open the write end once the reader's open has counted it (ENXIO until
+ * then, the only errno retried); any other errno, or the budget, is a
+ * failure named with its text. */
+static int
+_entry_writer_open(EntryWriter *p_w) {
+   for (;;) {
+      int i_fd = open(p_w->c_fifo, O_WRONLY | O_NONBLOCK);
+      if (i_fd >= 0) {
+         return (i_fd);
+      }
+      if (errno != ENXIO) {
+         g_snprintf(p_w->c_errmsg, sizeof(p_w->c_errmsg),
+                    "opening the entry FIFO for writing failed: %s",
+                    g_strerror(errno));
+         _entry_writer_fail(p_w, p_w->c_errmsg);
+         return (-1);
+      }
+      if (_entry_writer_expired(p_w)) {
+         _entry_writer_fail(p_w, "the pool never opened the entry");
+         return (-1);
+      }
+      g_usleep(1000);
+   }
+}
+
+/* TRUE once the pipe is empty (FIONREAD == 0: the reader took chunk one,
+ * so the cancel that follows lands between two reads); FALSE, failure
+ * recorded, if bytes are still there when the budget is spent. */
+static gboolean
+_entry_writer_wait_drained(EntryWriter *p_w, int i_fd) {
+   for (;;) {
+      int i_pending = 0;
+      if (ioctl(i_fd, FIONREAD, &i_pending) != 0) {
+         _entry_writer_fail(p_w, "FIONREAD on the entry FIFO failed");
+         return (FALSE);
+      }
+      if (i_pending == 0) {
+         return (TRUE);
+      }
+      if (_entry_writer_expired(p_w)) {
+         _entry_writer_fail(p_w, "the reader never took chunk one");
+         return (FALSE);
+      }
+      g_usleep(1000);
+   }
+}
+
+/* TRUE once no reader holds the FIFO: poll() on a write end with no events
+ * requested wakes for POLLERR, which Linux raises the moment the last
+ * reader is gone. FALSE, failure recorded, if a reader is still there
+ * when the budget is spent -- the read loop that ignored its cancellable. */
+static gboolean
+_entry_writer_wait_reader_gone(EntryWriter *p_w, int i_fd) {
+   for (;;) {
+      struct pollfd pfd = {.fd = i_fd, .events = 0};
+      if (poll(&pfd, 1, 10) > 0 && (pfd.revents & POLLERR) != 0) {
+         return (TRUE);
+      }
+      if (_entry_writer_expired(p_w)) {
+         _entry_writer_fail(p_w,
+                            "the reader kept the entry open after the cancel");
+         return (FALSE);
+      }
+   }
+}
+
+/* Chunk one, drain, cancel, chunk two, then wait for the reader to let go.
+ * EPIPE on chunk two is fine: the reader saw the cancel before it called
+ * read() again and is gone already (SIGPIPE is ignored by the test). The
+ * close at the end is the EOF a reader that ignored the cancel needs to
+ * come back at all. */
+static gpointer
+_entry_writer_thread(gpointer p_data) {
+   EntryWriter *p_w  = (EntryWriter *)p_data;
+   int          i_fd = _entry_writer_open(p_w);
+   if (i_fd < 0) {
+      return (NULL);
+   }
+   gsize u_first = p_w->u_len / 2;
+   if ((gsize)write(i_fd, p_w->p_png, u_first) != u_first) {
+      _entry_writer_fail(p_w, "short write of chunk one");
+   } else if (_entry_writer_wait_drained(p_w, i_fd)) {
+      g_cancellable_cancel(p_w->p_cancel);
+      gsize u_rest = p_w->u_len - u_first;
+      if ((gsize)write(i_fd, p_w->p_png + u_first, u_rest) != u_rest &&
+          errno != EPIPE) {
+         _entry_writer_fail(p_w, "short write of chunk two");
+      } else {
+         _entry_writer_wait_reader_gone(p_w, i_fd);
+      }
+   }
+   close(i_fd);
+   return (NULL);
+}
+
+/* The bytes of a valid marker entry for p_file (correct Thumb::MTime and
+ * Thumb::URI), built through a scratch file so gdk_pixbuf_save()'s tEXt
+ * options are the ones the module verifies. Caller g_frees. */
+static guint8 *
+_marker_entry_bytes(GFile *p_file, gsize *p_len) {
+   gchar *c_scratch = NULL;
+   gint   i_fd = g_file_open_tmp("ggaze-thumb-marker-XXXXXX", &c_scratch, NULL);
+   g_assert_cmpint(i_fd, >=, 0);
+   close(i_fd);
+   char *c_uri = g_file_get_uri(p_file);
+   _write_marker(c_scratch, _mtime_of(p_file), c_uri);
+   g_free(c_uri);
+   gchar *c_png = NULL;
+   g_assert_true(g_file_get_contents(c_scratch, &c_png, p_len, NULL));
+   unlink(c_scratch);
+   g_free(c_scratch);
+   return ((guint8 *)c_png);
+}
+
+/* The task's GCancellable reaches the cache read itself: a request
+ * cancelled while _read_entry_bounded() is between two reads of a VALID
+ * entry ends with G_IO_ERROR_CANCELLED, no texture, no critical (g_test
+ * makes criticals fatal) and no leak of the partial buffer (the ASan lane
+ * runs this under LSan) -- and, the proof the read loop and not a later
+ * check stopped it, the reader lets go of the entry at once (EntryWriter
+ * above). A regression that drops the cancellable from the read loop
+ * fails "the reader kept the entry open after the cancel" after the
+ * budget. */
+static void
+test_cancel_mid_entry_read(void) {
+   char   *c_tmp  = _copy_fixture_to_tmp("plain.jpg");
+   GFile  *p_file = g_file_new_for_path(c_tmp);
+   gsize   u_len  = 0;
+   guint8 *p_png  = _marker_entry_bytes(p_file, &u_len);
+   char   *c_ent  = thumbnail_cache_path(p_file, 128);
+   char   *c_dir  = g_path_get_dirname(c_ent);
+   g_assert_cmpint(g_mkdir_with_parents(c_dir, 0700), ==, 0);
+   g_free(c_dir);
+   g_assert_cmpint(mkfifo(c_ent, 0600), ==, 0);
+   signal(SIGPIPE, SIG_IGN); /* a reader gone early is EPIPE, not death */
+
+   EntryWriter s_w = {
+      .c_fifo     = c_ent,
+      .p_png      = p_png,
+      .u_len      = u_len,
+      .p_cancel   = g_cancellable_new(),
+      .i_deadline = g_get_monotonic_time() + GGAZE_ENTRY_WRITER_BUDGET_US,
+      .c_failure  = NULL,
+   };
+   GThread *p_thread = g_thread_new("entry-writer", _entry_writer_thread, &s_w);
+   _request_expecting_error(p_file, s_w.p_cancel);
+   g_thread_join(p_thread);
+
+   g_assert_cmpstr(s_w.c_failure, ==, NULL);
+   g_assert_null(GGAZE_RESULT);
+   g_assert_error(GGAZE_ERR, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+   g_clear_error(&GGAZE_ERR);
+
+   g_object_unref(s_w.p_cancel);
+   g_free(p_png);
+   unlink(c_ent);
+   g_free(c_ent);
+   g_object_unref(p_file);
+   unlink(c_tmp);
+   g_free(c_tmp);
+}
+
 /* Registration is split by theme so no function approaches the 50-line
  * mark (c-best-practices). */
 static void
@@ -934,6 +1206,14 @@ _add_gate_tests(void) {
                    test_non_png_entry_regenerated);
    g_test_add_func("/thumbnail/oversize_entry_regenerated",
                    test_oversize_entry_regenerated);
+}
+
+static void
+_add_cancel_tests(void) {
+   g_test_add_func("/thumbnail/precancelled_request",
+                   test_precancelled_request);
+   g_test_add_func("/thumbnail/cancel_mid_entry_read",
+                   test_cancel_mid_entry_read);
 }
 
 /* Delete every file in the bucket directory p_dir. */
@@ -998,6 +1278,7 @@ main(int i_argc, char **c_argv) {
 
    _add_cache_tests();
    _add_gate_tests();
+   _add_cancel_tests();
    int i_ret = g_test_run();
    _remove_cache_dir();
    return (i_ret);

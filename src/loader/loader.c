@@ -233,10 +233,16 @@ loader_sniff_bytes(const guint8 *p_bytes, gsize u_len, GgazeFormat *p_format,
  * garbage JXL in a libjxl build, hang glycin-jxl. The refusal is
  * G_IO_ERROR_BUSY: a transient verdict about the file's state, distinct
  * from the gate's INVALID_DATA/NOT_SUPPORTED and from the backends'
- * generic FAILED, so a caller can tell "reload" from "broken"; and its
- * message is the user's, since viewload.c prints it on the status line
- * as is -- the format name says what the file turned into, the rest is
- * the advice. In the minimal build _backend_for() can only name the
+ * generic FAILED, so a caller could tell "reload" from "broken" -- none
+ * matches it today (viewload.c prints the message and moves on; nothing
+ * retries). Its message is the user's, since viewload.c prints it on
+ * the status line as is: the format name says what the file turned
+ * into, the rest is the advice. A future auto-reload caller must not key
+ * on the code alone: G_IO_ERROR_BUSY is also what g_io_error_from_errno()
+ * makes of a kernel EBUSY (an open refused for a busy device, say), so a
+ * retry loop keyed on BUSY would spin on that too; match this refusal
+ * specifically (its message, or give it a code of its own then) and
+ * bound the retries. In the minimal build _backend_for() can only name the
  * fallback, so the rule is compiled out there (GGAZE_HAVE_ANY_BACKEND,
  * top-of-file comment) and this IS the plain gate. */
 gboolean

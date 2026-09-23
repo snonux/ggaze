@@ -77,10 +77,11 @@ meson test -C build --suite unit
 meson test -C build --suite integration
 ```
 
-A minimal build (GdkPixbuf-only, no GEGL) is valid and fast:
+A minimal build (GdkPixbuf-only, no GEGL, no libjpeg) is valid and fast,
+and is what the minimal CI lane builds:
 
 ```sh
-meson setup build -Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled
+meson setup build -Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled -Djpeg=disabled
 ```
 
 Enable optional backends with the matching feature option (`auto` by default):

@@ -510,7 +510,7 @@ _assert_inotify_ok(int i_ret, const char *c_call) {
 #define GGAZE_FIFO_WRITER_NAME "writer.fifo"
 
 typedef struct {
-   const char   *c_fifo; /* the reader's name (what the tests hand out) */
+   gchar        *c_fifo; /* the reader's name (what the tests hand out) */
    gchar        *c_writer_link; /* the writer's name: a hard link to c_fifo */
    const guint8 *p_img;
    gsize         u_len;
@@ -522,10 +522,11 @@ typedef struct {
    } events; /* read but not yet consumed, u_ev_pos..u_ev_len */
    gsize       u_ev_len;
    gsize       u_ev_pos;
-   gint64      i_deadline; /* monotonic, every wait checks it */
-   gint        i_done;     /* atomic: main thread's call returned */
-   guint       u_opens;    /* reader sessions served */
-   const char *c_failure;  /* first failure, NULL when none */
+   gint64      i_deadline;    /* monotonic, every wait checks it */
+   gint        i_done;        /* atomic: main thread's call returned */
+   guint       u_opens;       /* reader sessions served */
+   const char *c_failure;     /* first failure, NULL when none */
+   char        c_errmsg[160]; /* formatted text c_failure may point at */
    GThread    *p_thread;
    gchar      *c_tmpdir;
 } FifoWriter;
@@ -549,16 +550,28 @@ _fifo_fail(FifoWriter *p_w, const char *c_what) {
    }
 }
 
-/* Open the write end as soon as a reader is counted (ENXIO until then), or
- * return -1 once the main thread is done or the budget is spent. The count
- * may be a closing reader's (fact 2 above): the caller confirms a live one
- * before it writes. */
+/* Open the write end as soon as a reader is counted, or return -1 once the
+ * main thread is done or the budget is spent. ENXIO is the one errno that
+ * means "no reader yet" (what O_NONBLOCK promises on a FIFO) and the only
+ * one worth another try; anything else -- ENOENT with the temp dir gone,
+ * EACCES, EMFILE -- is the harness's own breakage and is named at once,
+ * errno text included, rather than polled for a whole budget and then
+ * reported as a reader that never came. The count may be a closing
+ * reader's (fact 2 above): the caller confirms a live one before it
+ * writes. */
 static int
 _fifo_open_writer(FifoWriter *p_w) {
    while (!g_atomic_int_get(&p_w->i_done)) {
       int i_fd = open(p_w->c_writer_link, O_WRONLY | O_NONBLOCK);
       if (i_fd >= 0) {
          return (i_fd);
+      }
+      if (errno != ENXIO) {
+         g_snprintf(p_w->c_errmsg, sizeof(p_w->c_errmsg),
+                    "opening the FIFO's write end failed: %s",
+                    g_strerror(errno));
+         _fifo_fail(p_w, p_w->c_errmsg);
+         return (-1);
       }
       if (_fifo_expired(p_w)) {
          _fifo_fail(p_w, "no reader opened the FIFO within the budget");
@@ -731,13 +744,14 @@ _fifo_start(FifoWriter *p_w) {
    /* Should a reader ever close early, the writer must see EPIPE, not
     * take the whole test binary down with SIGPIPE. */
    signal(SIGPIPE, SIG_IGN);
-   p_w->i_deadline = g_get_monotonic_time() + GGAZE_FIFO_BUDGET_US;
-   p_w->i_done     = 0;
-   p_w->u_opens    = 0;
-   p_w->u_ev_len   = 0;
-   p_w->u_ev_pos   = 0;
-   p_w->c_failure  = NULL;
-   p_w->p_thread   = g_thread_new("fifo-writer", _fifo_writer_thread, p_w);
+   p_w->i_deadline  = g_get_monotonic_time() + GGAZE_FIFO_BUDGET_US;
+   p_w->i_done      = 0;
+   p_w->u_opens     = 0;
+   p_w->u_ev_len    = 0;
+   p_w->u_ev_pos    = 0;
+   p_w->c_failure   = NULL;
+   p_w->c_errmsg[0] = '\0';
+   p_w->p_thread    = g_thread_new("fifo-writer", _fifo_writer_thread, p_w);
 }
 
 /* Stop the writer (the call under test has returned), surface its first
@@ -752,7 +766,7 @@ _fifo_finish(FifoWriter *p_w) {
    unlink(p_w->c_writer_link);
    unlink(p_w->c_fifo);
    g_rmdir(p_w->c_tmpdir);
-   g_free((gchar *)p_w->c_fifo);
+   g_free(p_w->c_fifo);
    g_free(p_w->c_writer_link);
    g_free(p_w->c_tmpdir);
    return (p_w->u_opens);
