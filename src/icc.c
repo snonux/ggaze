@@ -515,3 +515,100 @@ icc_description(GBytes *p_icc) {
    }
    return (c_text);
 }
+
+/* --- the profile as babl will parse it ------------------------------------
+ *
+ * babl_space_from_icc() trusts the tag data it reads: a 'curv' count is a
+ * loop bound and an allocation size with no check against the tag (a huge
+ * count reads past the buffer or makes babl_fatal() exit the process), and
+ * its tag lookup walks a tag count taken straight from the file. So a
+ * profile goes to babl only when everything babl reads lies inside the
+ * profile, sized for what babl reads from it (babl-icc.c, 0.1.128). */
+
+/* Parameter count of each 'para' function type babl knows (ICC.1 10.18);
+ * any other type is refused (babl would fall back to a guessed gamma). */
+static const guint PARA_PARAMS[] = {1, 3, 4, 5, 7};
+
+/* The tone curve tags babl reads: 'curv' with 12 + 2 * count bytes and at
+ * most ICC_MAX_CURVE_POINTS points, or 'para' of a known type with all its
+ * s15Fixed16 parameters. A TRC tag of another type is refused: babl would
+ * read it as a 'curv' count. */
+static gboolean
+_trc_is_sane(const guint8 *p_tag, guint32 u_size) {
+   if (u_size < 12) {
+      return (FALSE);
+   }
+   if (memcmp(p_tag, "curv", 4) == 0) {
+      guint32 u_count = _be32(p_tag + 8);
+      return (u_count <= ICC_MAX_CURVE_POINTS &&
+              12u + 2u * (guint64)u_count <= u_size);
+   }
+   if (memcmp(p_tag, "para", 4) == 0) {
+      guint u_fn = ((guint)p_tag[8] << 8) | p_tag[9];
+      return (u_fn < G_N_ELEMENTS(PARA_PARAMS) &&
+              12u + 4u * PARA_PARAMS[u_fn] <= u_size);
+   }
+   return (FALSE);
+}
+
+/* The type and least size of every other tag babl (or, for 'chad', LCMS
+ * behind babl's CMYK path) reads a fixed layout from: three s15Fixed16
+ * numbers after the 8-byte type header for an XYZ tag, the channel count,
+ * phosphor type and three xy pairs for 'chrm', nine numbers for 'chad'. */
+static const struct {
+   const char *c_sig;
+   const char *c_type;
+   guint32     u_min;
+} FIXED_TAGS[] = {
+   {"rXYZ", "XYZ ", 20}, {"gXYZ", "XYZ ", 20}, {"bXYZ", "XYZ ", 20},
+   {"wtpt", "XYZ ", 20}, {"chrm", "chrm", 36}, {"chad", "sf32", 44},
+};
+
+/* Whether one tag's data, already known to lie inside the profile, is
+ * what babl will take it for (above). Tags babl does not read pass. */
+static gboolean
+_tag_data_is_sane(const guint8 *p_sig, const guint8 *p_tag, guint32 u_size) {
+   if (memcmp(p_sig, "rTRC", 4) == 0 || memcmp(p_sig, "gTRC", 4) == 0 ||
+       memcmp(p_sig, "bTRC", 4) == 0 || memcmp(p_sig, "kTRC", 4) == 0) {
+      return (_trc_is_sane(p_tag, u_size));
+   }
+   for (gsize u = 0; u < G_N_ELEMENTS(FIXED_TAGS); u++) {
+      if (memcmp(p_sig, FIXED_TAGS[u].c_sig, 4) == 0) {
+         return (memcmp(p_tag, FIXED_TAGS[u].c_type, 4) == 0 &&
+                 u_size >= FIXED_TAGS[u].u_min);
+      }
+   }
+   return (TRUE);
+}
+
+gboolean
+icc_profile_is_sane(GBytes *p_icc) {
+   if (!icc_is_profile(p_icc)) {
+      return (FALSE);
+   }
+   gsize         u_len;
+   const guint8 *p = g_bytes_get_data(p_icc, &u_len);
+   /* babl refuses a size field other than the buffer's; a tag table past
+    * ICC_MAX_TAGS is a loop babl would run for every lookup. */
+   guint32 u_count = _be32(p + 128);
+   if (_be32(p) != u_len || u_count > ICC_MAX_TAGS ||
+       132u + 12u * (guint64)u_count > u_len) {
+      return (FALSE);
+   }
+   guint64 u_data = 132u + 12u * (guint64)u_count;
+   for (guint32 u = 0; u < u_count; u++) {
+      const guint8 *p_e    = p + 132 + 12 * u;
+      guint32       u_off  = _be32(p_e + 4);
+      guint32       u_size = _be32(p_e + 8);
+      /* Every tag (not only the ones babl reads: LCMS reads the others on
+       * the CMYK path) lies after the table and inside the profile, with
+       * room for its type signature and reserved word. Tags may share
+       * data -- rTRC / gTRC / bTRC often do -- so overlap between tags is
+       * allowed; a tag over the header or the table is not. */
+      if (u_off < u_data || u_size < 8 || (guint64)u_off + u_size > u_len ||
+          !_tag_data_is_sane(p_e, p + u_off, u_size)) {
+         return (FALSE);
+      }
+   }
+   return (TRUE);
+}

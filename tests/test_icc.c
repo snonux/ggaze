@@ -512,6 +512,294 @@ test_description_broken_headers(void) {
    assert_desc(patched_profile(132, "cprt", 4), NULL);
 }
 
+/* --- icc_profile_is_sane: what babl may be handed --------------------------
+ *
+ * Each case mutates one field of a fixture profile (tag tables printed in
+ * tests/fixtures/gen.py's terms: swapped.png's r/g/bTRC are 14-byte
+ * 'curv' tags with one point, srgb-icc.png's are 32-byte 'para' type 3,
+ * grey-icc.png has a kTRC, cmyk-icc.jpg an A2B0 CLUT). */
+
+/* A writable copy of c_name's embedded profile. */
+static GByteArray *
+profile_copy(const char *c_name) {
+   GBytes     *p_icc = read_fixture_profile(c_name);
+   gsize       u_len = 0;
+   const void *p_src = g_bytes_get_data(p_icc, &u_len);
+   GByteArray *p_arr = g_byte_array_sized_new((guint)u_len);
+   g_byte_array_append(p_arr, p_src, (guint)u_len);
+   g_bytes_unref(p_icc);
+   return (p_arr);
+}
+
+static guint32
+get_be32(const guint8 *p) {
+   return (((guint32)p[0] << 24) | ((guint32)p[1] << 16) |
+           ((guint32)p[2] << 8) | p[3]);
+}
+
+/* The tag-table entry of c_sig (signature, offset, size) in p_arr. */
+static guint8 *
+tag_entry(GByteArray *p_arr, const char *c_sig) {
+   guint32 u_count = get_be32(p_arr->data + 128);
+   for (guint32 u = 0; u < u_count; u++) {
+      guint8 *p_e = p_arr->data + 132 + 12 * u;
+      if (memcmp(p_e, c_sig, 4) == 0) {
+         return (p_e);
+      }
+   }
+   g_assert_not_reached();
+   return (NULL);
+}
+
+/* The data of tag c_sig in p_arr. */
+static guint8 *
+tag_data(GByteArray *p_arr, const char *c_sig) {
+   return (p_arr->data + get_be32(tag_entry(p_arr, c_sig) + 4));
+}
+
+static gboolean
+is_sane(GByteArray *p_arr) {
+   GBytes  *p_b    = g_bytes_new(p_arr->data, p_arr->len);
+   gboolean b_sane = icc_profile_is_sane(p_b);
+   g_bytes_unref(p_b);
+   return (b_sane);
+}
+
+/* Every fixture profile passes: matrix/TRC with 'curv' and 'para' curves,
+ * grey, CMYK; garbage and NULL do not. */
+static void
+test_sane_fixture_profiles_pass(void) {
+   const char *C_NAMES[] = {"swapped.png",  "srgb-icc.png", "grey-icc.png",
+                            "cmyk-icc.jpg", "grey-icc.jpg", "srgb-icc.jpg"};
+   for (gsize u = 0; u < G_N_ELEMENTS(C_NAMES); u++) {
+      GByteArray *p_arr = profile_copy(C_NAMES[u]);
+      g_assert_true(is_sane(p_arr));
+      g_byte_array_unref(p_arr);
+   }
+   g_assert_false(icc_profile_is_sane(NULL));
+   GBytes *p_bad = read_fixture_profile("badicc.png");
+   g_assert_false(icc_profile_is_sane(p_bad));
+   g_bytes_unref(p_bad);
+}
+
+/* The header: a size field other than the byte count (either way), and a
+ * tag count whose table would run past the profile. */
+static void
+test_sane_header_and_table(void) {
+   GByteArray *p_arr  = profile_copy("swapped.png");
+   guint8      c_zero = 0;
+   g_byte_array_append(p_arr, &c_zero, 1); /* one byte the size omits */
+   g_assert_false(is_sane(p_arr));
+   put_be32(p_arr->data, p_arr->len); /* now it says so */
+   g_assert_true(is_sane(p_arr));
+   put_be32(p_arr->data, p_arr->len + 4);
+   g_assert_false(is_sane(p_arr));
+   g_byte_array_unref(p_arr);
+   p_arr = profile_copy("swapped.png");
+   put_be32(p_arr->data + 128, 0x7fffffffu);
+   g_assert_false(is_sane(p_arr));
+   put_be32(p_arr->data + 128, 10); /* one entry past the real nine: the
+                                     * 'desc' data read as a tag entry */
+   g_assert_false(is_sane(p_arr));
+   g_byte_array_unref(p_arr);
+}
+
+/* More than ICC_MAX_TAGS entries, each a sound 8-byte tag, is refused
+ * even though every one of them lies inside the profile. */
+static void
+test_sane_tag_count_is_bounded(void) {
+   for (guint32 u_n = ICC_MAX_TAGS; u_n <= ICC_MAX_TAGS + 1; u_n++) {
+      guint32 u_data = 132 + 12 * u_n;
+      guint32 u_len  = u_data + 8;
+      guint8 *p      = g_malloc0(u_len);
+      put_be32(p, u_len);
+      memcpy(p + 36, "acsp", 4);
+      put_be32(p + 128, u_n);
+      for (guint32 u = 0; u < u_n; u++) {
+         memcpy(p + 132 + 12 * u, "zzzz", 4);
+         put_be32(p + 132 + 12 * u + 4, u_data);
+         put_be32(p + 132 + 12 * u + 8, 8);
+      }
+      memcpy(p + u_data, "junk", 4);
+      GBytes *p_b = g_bytes_new_take(p, u_len);
+      g_assert_true(icc_profile_is_sane(p_b) == (u_n <= ICC_MAX_TAGS));
+      g_bytes_unref(p_b);
+   }
+}
+
+/* A tag outside the profile, over the header / table, too small for its
+ * type header, or with an offset + size that wraps 32 bits ("negative"
+ * to babl's int arithmetic) is refused; tags SHARING data -- rTRC, gTRC
+ * and bTRC pointing at one curve, as real profiles do -- are fine. */
+static void
+test_sane_tag_bounds(void) {
+   struct {
+      guint32  u_off;
+      guint32  u_size;
+      gboolean b_ok;
+   } CASES[] = {
+      {488, 14, TRUE},            /* as it is */
+      {472, 14, TRUE},            /* rTRC's data, shared */
+      {512, 14, FALSE},           /* past the end (520 bytes) */
+      {488, 33, FALSE},           /* runs past the end */
+      {0, 14, FALSE},             /* over the header */
+      {140, 14, FALSE},           /* over the tag table */
+      {488, 4, FALSE},            /* no room for the type header */
+      {0xfffffff0u, 0x20, FALSE}, /* offset + size wraps */
+      {0x80000000u, 14, FALSE},   /* a negative int to babl */
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      GByteArray *p_arr = profile_copy("swapped.png");
+      guint8     *p_e   = tag_entry(p_arr, "gTRC");
+      put_be32(p_e + 4, CASES[u].u_off);
+      put_be32(p_e + 8, CASES[u].u_size);
+      g_assert_true(is_sane(p_arr) == CASES[u].b_ok);
+      g_byte_array_unref(p_arr);
+   }
+   /* A tag babl never reads is held to the same bounds (LCMS reads it). */
+   GByteArray *p_arr = profile_copy("swapped.png");
+   put_be32(tag_entry(p_arr, "cprt") + 8, 1000);
+   g_assert_false(is_sane(p_arr));
+   g_byte_array_unref(p_arr);
+}
+
+/* A 'curv' count: the one babl turned into a crash (0x01000000 points in
+ * a 14-byte tag), and the edges -- exactly filling the tag, one more. */
+static void
+test_sane_curv_count(void) {
+   GByteArray *p_arr = profile_copy("swapped.png");
+   put_be32(tag_data(p_arr, "gTRC") + 8, 0x01000000u);
+   g_assert_false(is_sane(p_arr));
+   put_be32(tag_data(p_arr, "gTRC") + 8, 0xffffffffu);
+   g_assert_false(is_sane(p_arr));
+   put_be32(tag_data(p_arr, "gTRC") + 8, 0); /* identity: no points */
+   g_assert_true(is_sane(p_arr));
+   put_be32(tag_entry(p_arr, "gTRC") + 8, 16); /* room for 2 points */
+   put_be32(tag_data(p_arr, "gTRC") + 8, 2);
+   g_assert_true(is_sane(p_arr));
+   put_be32(tag_data(p_arr, "gTRC") + 8, 3);
+   g_assert_false(is_sane(p_arr));
+   put_be32(tag_entry(p_arr, "gTRC") + 8, 11); /* no room for the count */
+   put_be32(tag_data(p_arr, "gTRC") + 8, 0);
+   g_assert_false(is_sane(p_arr));
+   g_byte_array_unref(p_arr);
+   /* The point cap, in a profile large enough to hold the points. */
+   for (guint32 u_n = ICC_MAX_CURVE_POINTS; u_n <= ICC_MAX_CURVE_POINTS + 1;
+        u_n++) {
+      p_arr          = profile_copy("grey-icc.png");
+      guint32 u_off  = p_arr->len;
+      guint32 u_size = 12 + 2 * u_n;
+      g_byte_array_set_size(p_arr, u_off + u_size);
+      memset(p_arr->data + u_off, 0, u_size);
+      memcpy(p_arr->data + u_off, "curv", 4);
+      put_be32(p_arr->data + u_off + 8, u_n);
+      put_be32(tag_entry(p_arr, "kTRC") + 4, u_off);
+      put_be32(tag_entry(p_arr, "kTRC") + 8, u_size);
+      put_be32(p_arr->data, p_arr->len);
+      g_assert_true(is_sane(p_arr) == (u_n <= ICC_MAX_CURVE_POINTS));
+      g_byte_array_unref(p_arr);
+   }
+}
+
+/* A 'para' curve: a truncated one (type 3 needs 12 + 5 * 4 bytes), each
+ * known function type at its own least size, an unknown type, and a TRC
+ * of a type babl would misread as a 'curv'. */
+static void
+test_sane_para_and_trc_types(void) {
+   GByteArray *p_arr = profile_copy("srgb-icc.png");
+   put_be32(tag_entry(p_arr, "gTRC") + 8, 31);
+   g_assert_false(is_sane(p_arr));
+   const guint32 C_NEED[] = {16, 24, 28, 32};
+   for (guint u_fn = 0; u_fn < G_N_ELEMENTS(C_NEED); u_fn++) {
+      tag_data(p_arr, "gTRC")[9] = (guint8)u_fn;
+      put_be32(tag_entry(p_arr, "gTRC") + 8, C_NEED[u_fn]);
+      g_assert_true(is_sane(p_arr));
+      put_be32(tag_entry(p_arr, "gTRC") + 8, C_NEED[u_fn] - 1);
+      g_assert_false(is_sane(p_arr));
+   }
+   put_be32(tag_entry(p_arr, "gTRC") + 8, 32);
+   tag_data(p_arr, "gTRC")[9] = 4; /* type 4 needs 7 parameters: 40 */
+   g_assert_false(is_sane(p_arr));
+   tag_data(p_arr, "gTRC")[9] = 5; /* no such type */
+   g_assert_false(is_sane(p_arr));
+   tag_data(p_arr, "gTRC")[9] = 3;
+   g_assert_true(is_sane(p_arr));
+   memcpy(tag_data(p_arr, "gTRC"), "text", 4);
+   g_assert_false(is_sane(p_arr));
+   g_byte_array_unref(p_arr);
+}
+
+/* The XYZ tags babl reads three numbers from: 20 bytes and the 'XYZ '
+ * type, for the primaries and the white point. */
+static void
+test_sane_xyz_tags(void) {
+   const char *C_SIGS[] = {"rXYZ", "gXYZ", "bXYZ", "wtpt"};
+   for (gsize u = 0; u < G_N_ELEMENTS(C_SIGS); u++) {
+      GByteArray *p_arr = profile_copy("swapped.png");
+      put_be32(tag_entry(p_arr, C_SIGS[u]) + 8, 19);
+      g_assert_false(is_sane(p_arr));
+      put_be32(tag_entry(p_arr, C_SIGS[u]) + 8, 20);
+      g_assert_true(is_sane(p_arr));
+      memcpy(tag_data(p_arr, C_SIGS[u]), "curv", 4);
+      g_assert_false(is_sane(p_arr));
+      g_byte_array_unref(p_arr);
+   }
+}
+
+/* Random damage to every fixture profile, many times over: the validator
+ * (and icc_description over the same bytes) must never read outside them
+ * -- the ASan lane is where this bites -- and whatever it passes must still
+ * be what it promises for the tags babl reads. A fixed seed per run
+ * (g_test_rand_*), so a failure reproduces with the printed seed. */
+static void
+mutate(GByteArray *p_arr) {
+   guint u_pos = (guint)g_test_rand_int_range(0, (gint32)p_arr->len);
+   switch (g_test_rand_int_range(0, 4)) {
+   case 0:
+      p_arr->data[u_pos] = (guint8)g_test_rand_int_range(0, 256);
+      break;
+   case 1: {
+      static const guint32 C_EDGE[] = {
+         0, 1, 0x7fffffffu, 0x80000000u, 0xffffffffu, 0x01000000u, 20, 14};
+      if (u_pos + 4 <= p_arr->len) {
+         put_be32(p_arr->data + u_pos,
+                  C_EDGE[g_test_rand_int_range(0, G_N_ELEMENTS(C_EDGE))]);
+      }
+      break;
+   }
+   case 2:
+      g_byte_array_set_size(
+         p_arr, (guint)g_test_rand_int_range(132, (gint32)p_arr->len + 1));
+      break;
+   default:
+      put_be32(p_arr->data, p_arr->len); /* keep the size field honest */
+      break;
+   }
+}
+
+static void
+test_sane_fuzz(void) {
+   const char *C_NAMES[] = {"swapped.png", "srgb-icc.png", "grey-icc.png",
+                            "cmyk-icc.jpg"};
+   guint       u_passed  = 0;
+   for (guint u_run = 0; u_run < 20000; u_run++) {
+      GByteArray *p_arr = profile_copy(C_NAMES[u_run % G_N_ELEMENTS(C_NAMES)]);
+      guint       u_n   = (guint)g_test_rand_int_range(1, 6);
+      for (guint u = 0; u < u_n; u++) {
+         mutate(p_arr);
+      }
+      GBytes *p_b = g_bytes_new(p_arr->data, p_arr->len);
+      if (icc_profile_is_sane(p_b)) {
+         u_passed++;
+         g_assert_cmpuint(get_be32(p_arr->data), ==, p_arr->len);
+      }
+      g_free(icc_description(p_b));
+      g_bytes_unref(p_b);
+      g_byte_array_unref(p_arr);
+   }
+   g_test_message("%u of 20000 mutated profiles passed", u_passed);
+}
+
 int
 main(int argc, char **argv) {
    g_test_init(&argc, &argv, NULL);
@@ -542,5 +830,16 @@ main(int argc, char **argv) {
                    test_description_broken_headers);
    g_test_add_func("/icc/description_ascii_and_broken_tables",
                    test_description_ascii_and_broken_tables);
+   g_test_add_func("/icc/sane_fixture_profiles_pass",
+                   test_sane_fixture_profiles_pass);
+   g_test_add_func("/icc/sane_header_and_table", test_sane_header_and_table);
+   g_test_add_func("/icc/sane_tag_count_is_bounded",
+                   test_sane_tag_count_is_bounded);
+   g_test_add_func("/icc/sane_tag_bounds", test_sane_tag_bounds);
+   g_test_add_func("/icc/sane_curv_count", test_sane_curv_count);
+   g_test_add_func("/icc/sane_para_and_trc_types",
+                   test_sane_para_and_trc_types);
+   g_test_add_func("/icc/sane_xyz_tags", test_sane_xyz_tags);
+   g_test_add_func("/icc/sane_fuzz", test_sane_fuzz);
    return (g_test_run());
 }

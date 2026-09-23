@@ -66,6 +66,26 @@ GBytes *icc_extract(const guint8 *p_data, gsize u_len, GError **p_err);
  * is unreadable rather than naming nothing. */
 gboolean icc_is_profile(GBytes *p_icc);
 
+/* Bounds icc_profile_is_sane() holds a profile to: the tag table's
+ * length (real profiles carry a few dozen tags) and the points of a 'curv'
+ * tone curve (real ones stop at 4096; babl allocates and inverts the
+ * table, so its length is also a cost). */
+#define ICC_MAX_TAGS 1024u
+#define ICC_MAX_CURVE_POINTS 65536u
+
+/* TRUE iff p_icc is a profile babl_space_from_icc() can be handed: a
+ * plausible header (icc_is_profile) whose size field IS the byte count, a
+ * tag table of at most ICC_MAX_TAGS entries inside the profile, every tag
+ * after the table and inside the profile (at least 8 bytes), and every tag
+ * babl reads (r/g/b/kTRC, r/g/bXYZ, wtpt, chrm, chad) of the type and
+ * size babl reads it as -- a 'curv' with 12 + 2 * count bytes (count <=
+ * ICC_MAX_CURVE_POINTS), a 'para' of a known function type with all its
+ * parameters, an XYZ tag of 20 bytes or more. babl bounds-checks none of
+ * that itself: a huge 'curv' count crashes it or exits the process
+ * (babl_fatal). FALSE for NULL. Says nothing about CLUT tags (A2B0, ...),
+ * which only LCMS reads, on babl's CMYK path: see enhancer.c. */
+gboolean icc_profile_is_sane(GBytes *p_icc);
+
 /* The profile's description ('desc' tag) as UTF-8, caller frees: the ASCII
  * text of a v2 textDescriptionType or, for a v4 multiLocalizedUnicodeType,
  * the English record when there is one and the first record otherwise.
