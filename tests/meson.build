@@ -272,6 +272,21 @@ test_info = executable(
 )
 test('info', test_info, suite : 'unit', env : fixtures_env)
 
+# icc (xb2): the embedded-ICC-profile reader behind the info card's colour
+# space line and the enhancer's profile-preserving export. Plain C over GIO
+# streams -- no GEGL, no display -- so it runs in every lane, the minimal
+# one included, over the committed swapped/badicc/srgb-icc fixtures and
+# hand-built containers.
+test_icc = executable(
+   'test_icc',
+   ['test_icc.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('icc', test_icc, suite : 'unit', env : fixtures_env)
+
 # histogram: the plain-C RGB/luminance binner behind the info card's plot,
 # driven over hand-built pixel buffers and GdkMemoryTextures (no display).
 test_histogram = executable(

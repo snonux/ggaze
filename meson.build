@@ -81,6 +81,7 @@ ggaze_src = files(
       'src/trash.c',
       'src/gridview.c',
       'src/info.c',
+      'src/icc.c',
       'src/delete-confirm.c',
       'src/fileops.c',
       'src/dialog-util.c',
