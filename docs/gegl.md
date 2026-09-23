@@ -224,9 +224,11 @@ which the enhancer appends to the chain after the colour presets in decision
   keyboard; `Enter` applies. The overlay is drawn, drags are measured and
   `Enter` is accepted only while the texture on screen IS the render of
   the tool's state (`enhance_ctrl_is_current_render`: the last landed
-  apply, or the cached original when nothing needs GEGL — an identity, not
-  a size comparison, which could not tell 0° from 180° or a preset toggled
-  under the tool from the base it replaced). While the tool is open the base is shown
+  apply, or — when nothing needs GEGL — the original as the viewer last
+  showed it, learned at the window's texture choke point so a reload that
+  decodes the file again refreshes it; an identity, not a size comparison,
+  which could not tell 0° from 180° or a preset toggled under the tool from
+  the base it replaced; no cache lookup on the draw or drag path). While the tool is open the base is shown
   through a *preview override* (`enhance_ctrl_set_preview_transform`), not
   a commit: the committed crop keeps counting as work, so `s` in the tool
   exports it, navigation prompts for it, and a saved crop stays saved

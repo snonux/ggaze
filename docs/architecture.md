@@ -273,7 +273,11 @@ feels instant.
   `GCancellable` so a rapid `jjjj` cancels stale work).
 - Thumbnail I/O on a low-priority thread or `GThreadPool`.
 - A bounded LRU of decoded `GdkTexture`s (e.g. 4) to bound memory on large
-  folders / huge images.
+  folders / huge images. The enhance controller may hold two more outside
+  that cap — the current file's original as the viewer last showed it (the
+  identity the tools and hold-`Space` compare against, learned at the
+  window's texture choke point) and the rendered preview — bounded to those
+  two, and released on navigation, on a rewrite's rescan, and in dispose.
 
 ## Threading / cancellation invariant
 
