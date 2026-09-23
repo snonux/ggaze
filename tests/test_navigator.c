@@ -160,6 +160,20 @@ test_hide_raw_sidecars(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* navigator_is_raw_name is what window.c asks before blaming a file the
+ * listing skipped: only the RAW table counts, case-insensitively, and a
+ * name with no extension (or only a leading dot) is not RAW. */
+static void
+test_is_raw_name(void) {
+   g_assert_true(navigator_is_raw_name("img.raf"));
+   g_assert_true(navigator_is_raw_name("IMG_0001.CR2"));
+   g_assert_true(navigator_is_raw_name("shot.Nef"));
+   g_assert_false(navigator_is_raw_name("img.jpg"));
+   g_assert_false(navigator_is_raw_name("notes.txt"));
+   g_assert_false(navigator_is_raw_name("noext"));
+   g_assert_false(navigator_is_raw_name(".cr2"));
+}
+
 static void
 test_sort_time_and_size(void) {
    char *c_dir = make_temp_dir();
@@ -823,6 +837,7 @@ main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
    g_test_add_func("/navigator/filter_and_listing", test_filter_and_listing);
    g_test_add_func("/navigator/hide_raw_sidecars", test_hide_raw_sidecars);
+   g_test_add_func("/navigator/is_raw_name", test_is_raw_name);
    g_test_add_func("/navigator/sort_time_and_size", test_sort_time_and_size);
    g_test_add_func("/navigator/sort_non_utf8_name", test_sort_non_utf8_name);
    g_test_add_func("/navigator/sort_name_natural", test_sort_name_natural);

@@ -70,6 +70,7 @@
 #include "histogram-view.h"
 #include "histogram.h"
 #include "settings.h"
+#include "temp_dir.h"
 #include "transform.h"
 #include "viewer.h"
 #include "window.h"
@@ -110,37 +111,11 @@ copy_fixture(const char *c_dir, const char *c_name) {
    g_free(c_dst);
 }
 
-/* Recursive: the trash subtests leave a "./.Trash" folder (trash.c's lazy
- * bin) inside the temp dir, and a non-empty directory cannot be
- * g_file_delete()d. */
-static void
-remove_tree(GFile *p_dir) {
-   GFileEnumerator *p_e =
-      g_file_enumerate_children(p_dir, "standard::name,standard::type",
-                                G_FILE_QUERY_INFO_NONE, NULL, NULL);
-   if (p_e != NULL) {
-      GFileInfo *p_info;
-      while ((p_info = g_file_enumerator_next_file(p_e, NULL, NULL)) != NULL) {
-         GFile *p_child = g_file_get_child(p_dir, g_file_info_get_name(p_info));
-         if (g_file_info_get_file_type(p_info) == G_FILE_TYPE_DIRECTORY) {
-            remove_tree(p_child);
-         }
-         g_file_delete(p_child, NULL, NULL);
-         g_object_unref(p_child);
-         g_object_unref(p_info);
-      }
-      g_object_unref(p_e);
-   }
-}
-
-static void
-cleanup_temp_dir(char *c_dir) {
-   GFile *p_dir = g_file_new_for_path(c_dir);
-   remove_tree(p_dir);
-   g_file_delete(p_dir, NULL, NULL);
-   g_object_unref(p_dir);
-   g_free(c_dir);
-}
+/* Temp folders come down through ggtest_cleanup_temp_dir (tests/helpers/
+ * temp_dir.h): recursive, because the trash subtests leave a "./.Trash"
+ * folder (trash.c's lazy bin) inside the temp dir, and asserting the final
+ * rmdir, so a subtest that leaves a file behind -- an export still landing,
+ * a permission not restored -- fails here instead of littering $TMPDIR. */
 
 static GdkTexture *
 viewer_texture(GgazeWindow *p_win) {
@@ -177,13 +152,34 @@ ref_viewer_texture(GgazeWindow *p_win) {
    return (g_object_ref(p_tex));
 }
 
+/* tests/fixtures/plain.jpg's decoded (and upright: orientation 1) size, which
+ * every open of it below waits for. */
+#define PLAIN_JPG_W 6
+#define PLAIN_JPG_H 3
+
+/* Wait until the viewer holds the i_w x i_h full decode of the file just
+ * opened (gtk_helpers.h "large-view readiness"), then settle.
+ *
+ * The SIZE is the point (2d2). This used to wait for any non-NULL texture and
+ * then drain a fixed 200 ms, but the JPEG backend shows a 1/8-scale preview
+ * first -- 1x1 for plain.jpg -- so on a loaded lane the preview could still
+ * be on screen when the drain ran out and be taken for the original (a
+ * "p_orig" ref, a render base). The 200 ms drain stays as a SETTLE for the
+ * idles that follow a load (info card, panel previews), not as the wait: the
+ * assertions after it are the check. A timeout names this line, not the
+ * caller's; GLib's TAP line names the subtest. */
 static void
-wait_for_load(GgazeWindow *p_win) {
-   for (guint u = 0; u < 3000 && viewer_texture(p_win) == NULL; u++) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
-   g_assert_nonnull(viewer_texture(p_win));
+wait_for_load(GgazeWindow *p_win, gint i_w, gint i_h) {
+   GGTEST_WAIT_FOR_TEXTURE(p_win, i_w, i_h);
+   ggtest_drain_main(200);
+}
+
+/* wait_for_load() for a PRESENTED window: also waits for the viewer's
+ * allocation to settle (GGTEST_WAIT_FOR_VIEW), which the drag subtests' widget
+ * -> image pixel mapping and the panel's layout lean on. */
+static void
+wait_for_view(GgazeWindow *p_win, gint i_w, gint i_h) {
+   GGTEST_WAIT_FOR_VIEW(p_win, i_w, i_h);
    ggtest_drain_main(200);
 }
 
@@ -386,7 +382,7 @@ open_presented(gboolean b_thumbnails, const char *c_tmpl, char **c_dir_out,
    g_object_unref(p_file);
    gtk_window_set_default_size(GTK_WINDOW(p_win), 900, 700);
    gtk_window_present(GTK_WINDOW(p_win));
-   wait_for_load(p_win);
+   wait_for_view(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    *c_dir_out  = c_dir;
    *c_path_out = c_path;
    return (p_win);
@@ -403,7 +399,7 @@ close_presented(GgazeWindow *p_win, char *c_dir, char *c_path) {
    gtk_window_destroy(GTK_WINDOW(p_win));
    g_free(c_path);
    ggtest_drain_main(300);
-   cleanup_temp_dir(c_dir);
+   ggtest_cleanup_temp_dir(c_dir);
 }
 
 /* `a` opens the panel INSIDE the window, beside the viewer -- no second
@@ -595,12 +591,15 @@ fixture_open_clean(DirtyFixture *p_fx, const char *c_tmpl,
    for (guint u = 0; c_names[u] != NULL; u++) {
       copy_fixture(p_fx->c_dir, c_names[u]);
    }
+   /* The load wait below matches plain.jpg's decoded size, so the start file
+    * has to be plain.jpg; every caller's list starts with it. */
+   g_assert_cmpstr(c_names[0], ==, "plain.jpg");
    p_fx->c_path = g_build_filename(p_fx->c_dir, c_names[0], NULL);
    p_fx->p_file = g_file_new_for_path(p_fx->c_path);
    p_fx->p_win  = new_window();
    g_object_ref(p_fx->p_win);
    ggaze_window_open(p_fx->p_win, p_fx->p_file);
-   wait_for_load(p_fx->p_win);
+   wait_for_load(p_fx->p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
 }
 
@@ -637,7 +636,7 @@ fixture_teardown(DirtyFixture *p_fx) {
     * teardown; no-ops for a fixture that never went dirty. */
    g_clear_object(&p_fx->p_orig);
    g_clear_object(&p_fx->p_mod);
-   cleanup_temp_dir(p_fx->c_dir);
+   ggtest_cleanup_temp_dir(p_fx->c_dir);
 }
 
 /* The window's refcount must be back where it was before the prompt: every
@@ -820,7 +819,7 @@ test_apply_is_async_and_original_untouched(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    g_assert_false(ggaze_window_enhance_is_dirty(p_win));
 
    GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
@@ -846,7 +845,7 @@ test_apply_is_async_and_original_untouched(void) {
    g_free(c_path);
    ggtest_drain_main(300);
    g_object_unref(p_orig_tex);
-   cleanup_temp_dir(c_dir);
+   ggtest_cleanup_temp_dir(c_dir);
 }
 
 /* Requirement 5: toggling the same preset off again is a full reset -- the
@@ -861,7 +860,7 @@ test_toggle_off_resets_to_original(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
@@ -881,7 +880,7 @@ test_toggle_off_resets_to_original(void) {
    ggtest_drain_main(300);
    g_object_unref(p_orig_tex);
    g_object_unref(p_enhanced_tex);
-   cleanup_temp_dir(c_dir);
+   ggtest_cleanup_temp_dir(c_dir);
 }
 
 /* The crop tool under a held Space, on a preview p_enhanced whose original
@@ -924,7 +923,7 @@ test_hold_space_compares_then_restores(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
@@ -952,7 +951,7 @@ test_hold_space_compares_then_restores(void) {
    ggtest_drain_main(300);
    g_object_unref(p_orig_tex);
    g_object_unref(p_enhanced_tex);
-   cleanup_temp_dir(c_dir);
+   ggtest_cleanup_temp_dir(c_dir);
 }
 
 /* Drain until the `i` card's plot holds a histogram whose bins are those of
@@ -1013,7 +1012,7 @@ test_info_plots_preview(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    GdkTexture *p_orig = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
@@ -1045,7 +1044,7 @@ test_info_plots_preview(void) {
    g_object_unref(p_orig);
    g_object_unref(p_mod);
    g_object_unref(p_mod2);
-   cleanup_temp_dir(c_dir);
+   ggtest_cleanup_temp_dir(c_dir);
 }
 
 /* Requirement 4 regression (tu0 review round 2, issue 4): the internal
@@ -1089,7 +1088,7 @@ test_hold_flag_not_stuck_after_mask_cleared(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
@@ -1118,7 +1117,7 @@ test_hold_flag_not_stuck_after_mask_cleared(void) {
    g_free(c_path);
    ggtest_drain_main(300);
    g_object_unref(p_orig_tex);
-   cleanup_temp_dir(c_dir);
+   ggtest_cleanup_temp_dir(c_dir);
 }
 
 /* A second `s` while the window is still dirty must not clobber the first
@@ -1148,7 +1147,7 @@ test_save_exports_collision_safe_copy(void) {
    GFile       *p_file = g_file_new_for_path(c_path);
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    gsize u_before_len;
    char *c_before = load_bytes(c_path, &u_before_len);
@@ -1186,7 +1185,7 @@ test_save_exports_collision_safe_copy(void) {
    g_free(c_path);
    ggtest_drain_main(300);
    g_object_unref(p_orig_tex);
-   cleanup_temp_dir(c_dir);
+   ggtest_cleanup_temp_dir(c_dir);
 }
 
 /* Requirement 7 (partial, see file header): the dirty gate's non-dialog
@@ -1205,7 +1204,7 @@ test_navigate_when_not_dirty_is_immediate(void) {
    GFile       *p_f0  = g_file_new_for_path(c_p0);
    GgazeWindow *p_win = new_window();
    ggaze_window_open(p_win, p_f0);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
 
    g_assert_false(ggaze_window_enhance_is_dirty(p_win));
    fire(p_win, "win.next"); /* not dirty -> _maybe_save_then proceeds inline */
@@ -1216,7 +1215,7 @@ test_navigate_when_not_dirty_is_immediate(void) {
    g_free(c_p0);
    gtk_window_destroy(GTK_WINDOW(p_win));
    ggtest_drain_main(300);
-   cleanup_temp_dir(c_dir);
+   ggtest_cleanup_temp_dir(c_dir);
 }
 
 /* Requirement 6 (tu0 review round 2, issue 1): grid/thumbnail selection must
@@ -1310,7 +1309,7 @@ test_close_request_gates_dirty_enhance(void) {
    { /* control: a clean window is never blocked and never prompts */
       GgazeWindow *p_clean = new_window();
       ggaze_window_open(p_clean, p_file);
-      wait_for_load(p_clean);
+      wait_for_load(p_clean, PLAIN_JPG_W, PLAIN_JPG_H);
       gboolean b_stop = FALSE;
       g_signal_emit_by_name(p_clean, "close-request", &b_stop);
       g_assert_false(b_stop);
@@ -1322,7 +1321,7 @@ test_close_request_gates_dirty_enhance(void) {
 
    GgazeWindow *p_win = new_window();
    ggaze_window_open(p_win, p_file);
-   wait_for_load(p_win);
+   wait_for_load(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    GdkTexture *p_orig_tex = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-1");
    wait_for_texture_change(p_win, p_orig_tex);
@@ -1343,7 +1342,7 @@ test_close_request_gates_dirty_enhance(void) {
    g_free(c_path);
    ggtest_drain_main(300);
    g_object_unref(p_orig_tex);
-   cleanup_temp_dir(c_dir);
+   ggtest_cleanup_temp_dir(c_dir);
 }
 
 /* --- driving the prompt to a decision ------------------------------------
@@ -1706,7 +1705,7 @@ test_open_while_dirty_cancel_then_discard(void) {
    g_object_unref(p_target);
    g_free(c_target);
    fixture_teardown(&fx);
-   cleanup_temp_dir(c_other);
+   ggtest_cleanup_temp_dir(c_other);
 }
 
 /* `m` -> destination row while dirty: same two halves for _MoveIdxCtx and
@@ -1735,7 +1734,7 @@ test_move_while_dirty_cancel_then_discard(void) {
    g_assert_true(file_exists_in(c_dest, "plain.jpg")); /* _proceed_move_idx */
 
    fixture_teardown(&fx);
-   cleanup_temp_dir(c_dest);
+   ggtest_cleanup_temp_dir(c_dest);
    reset_destinations();
 }
 
@@ -1819,7 +1818,7 @@ test_request_behind_stale_prompt_is_not_run(void) {
    g_object_unref(p_target);
    g_free(c_target);
    fixture_teardown(&fx);
-   cleanup_temp_dir(c_other);
+   ggtest_cleanup_temp_dir(c_other);
 }
 
 /* Round 3, finding (k): answering Save on a prompt whose preview has since
@@ -1891,7 +1890,7 @@ test_second_request_is_queued_then_retried(void) {
    g_object_unref(p_target);
    g_free(c_target);
    fixture_teardown(&fx);
-   cleanup_temp_dir(c_other);
+   ggtest_cleanup_temp_dir(c_other);
 }
 
 /* Round 3, finding (i), the drop half. Cancel means "stay on this image, keep
@@ -1929,7 +1928,7 @@ test_queued_request_is_dropped_on_cancel(void) {
    g_object_unref(p_target);
    g_free(c_target);
    fixture_teardown(&fx);
-   cleanup_temp_dir(c_other);
+   ggtest_cleanup_temp_dir(c_other);
 }
 
 /* Save on close-request, the success half: the export lands AND the window
@@ -2269,8 +2268,8 @@ test_second_queued_request_displaces_the_first(void) {
    g_free(c_pa);
    g_free(c_pb);
    fixture_teardown(&fx);
-   cleanup_temp_dir(c_a);
-   cleanup_temp_dir(c_b);
+   ggtest_cleanup_temp_dir(c_a);
+   ggtest_cleanup_temp_dir(c_b);
 }
 
 /* Round 4, finding (r): when the answered prompt's OWN continuation is the
@@ -2309,7 +2308,7 @@ test_quit_continuation_drops_the_queued_request(void) {
    g_object_unref(p_target);
    g_free(c_target);
    fixture_teardown(&fx);
-   cleanup_temp_dir(c_other);
+   ggtest_cleanup_temp_dir(c_other);
 }
 
 /* Round 4: _move_go's capture behind a prompt -- the move twin of
@@ -2340,7 +2339,7 @@ test_move_acts_on_the_targets_captured_at_click(void) {
 
    fixture_teardown(&fx);
    reset_destinations();
-   cleanup_temp_dir(c_dst);
+   ggtest_cleanup_temp_dir(c_dst);
 }
 
 /* Round 5, finding (x): _move_captured advanced the cursor whenever ANY file
@@ -2373,7 +2372,7 @@ test_move_does_not_advance_past_an_unseen_image(void) {
 
    fixture_teardown(&fx);
    reset_destinations();
-   cleanup_temp_dir(c_dst);
+   ggtest_cleanup_temp_dir(c_dst);
 }
 
 /* The other direction of the same gate: when the moved set DOES contain the
@@ -2407,7 +2406,7 @@ test_move_advances_when_the_current_image_moves(void) {
 
    fixture_teardown(&fx);
    reset_destinations();
-   cleanup_temp_dir(c_dst);
+   ggtest_cleanup_temp_dir(c_dst);
 }
 
 /* --- 4w0: `d`'s cursor advance, both directions --------------------------
@@ -2566,7 +2565,7 @@ test_dispose_under_a_live_prompt_releases_it(void) {
    g_object_unref(p_target);
    g_free(c_target);
    fixture_teardown(&fx);
-   cleanup_temp_dir(c_other);
+   ggtest_cleanup_temp_dir(c_other);
 }
 
 /* 2w0 review finding (A): "close-request is prompt-gated" was FALSE.
@@ -2822,15 +2821,10 @@ tool_fx_open(ToolFx *p_fx, gboolean b_present) {
    }
    ggaze_window_open(p_fx->p_win, p_file);
    g_object_unref(p_file);
-   wait_for_load(p_fx->p_win);
    if (b_present) {
-      GtkWidget *p_v = gtk_stack_get_child_by_name(
-         ggaze_window_get_stack(p_fx->p_win), "large");
-      for (guint u = 0; u < 3000 && gtk_widget_get_width(p_v) == 0; u++) {
-         g_main_context_iteration(g_main_context_default(), FALSE);
-         g_usleep(1000);
-      }
-      g_assert_cmpint(gtk_widget_get_width(p_v), >, 0);
+      wait_for_view(p_fx->p_win, TOOL_W, TOOL_H);
+   } else {
+      wait_for_load(p_fx->p_win, TOOL_W, TOOL_H);
    }
    p_fx->p_orig = ref_viewer_texture(p_fx->p_win);
    g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
@@ -2860,7 +2854,7 @@ tool_fx_open_siblings(ToolFx *p_fx, guint u_siblings) {
    p_fx->p_win   = new_window();
    ggaze_window_open(p_fx->p_win, p_file);
    g_object_unref(p_file);
-   wait_for_load(p_fx->p_win);
+   wait_for_load(p_fx->p_win, TOOL_W, TOOL_H); /* opened on tool.png */
    p_fx->p_orig = ref_viewer_texture(p_fx->p_win);
    g_assert_false(ggaze_window_enhance_is_dirty(p_fx->p_win));
 }
@@ -2871,19 +2865,15 @@ tool_fx_open_with_sibling(ToolFx *p_fx) {
    tool_fx_open_siblings(p_fx, 1);
 }
 
-/* Pump until the viewer shows an i_w x i_h texture (a render landed with
- * that size), up to 10 s; asserts it did. */
+/* Wait until the viewer shows an i_w x i_h texture (a render or a load
+ * landed with that size) on the shared scaled deadline (GGTEST_WAIT_FOR_
+ * TEXTURE, which g_error()s out if it never does), then settle 50 ms and
+ * assert the texture is STILL that size: a render that lands during the
+ * settle and replaces it is a failure here, as it was before the shared
+ * helper replaced this suite's own iteration-counted loop. */
 static void
 wait_for_texture_size(GgazeWindow *p_win, gint i_w, gint i_h) {
-   for (guint u = 0; u < 10000; u++) {
-      GdkTexture *p_tex = viewer_texture(p_win);
-      if (p_tex != NULL && gdk_texture_get_width(p_tex) == i_w &&
-          gdk_texture_get_height(p_tex) == i_h) {
-         break;
-      }
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
+   GGTEST_WAIT_FOR_TEXTURE(p_win, i_w, i_h);
    ggtest_drain_main(50);
    GdkTexture *p_tex = viewer_texture(p_win);
    g_assert_nonnull(p_tex);
@@ -2897,7 +2887,7 @@ tool_fx_close(ToolFx *p_fx) {
    ggtest_drain_main(300);
    g_clear_object(&p_fx->p_orig);
    g_free(p_fx->c_path);
-   cleanup_temp_dir(p_fx->c_dir);
+   ggtest_cleanup_temp_dir(p_fx->c_dir);
 }
 
 static void
@@ -4594,7 +4584,7 @@ test_open_ends_the_tool_and_the_saved_transform(void) {
    g_free(c_b);
    g_free(c_out);
    tool_fx_close(&fx);
-   cleanup_temp_dir(c_other);
+   ggtest_cleanup_temp_dir(c_other);
 }
 
 /* A dirty (a turn, the crop tool up), the open of a first-sorted B is
@@ -4629,7 +4619,7 @@ test_open_save_exports_then_shows_the_new_file_clean(void) {
    g_free(c_b);
    g_free(c_out);
    tool_fx_close(&fx);
-   cleanup_temp_dir(c_other);
+   ggtest_cleanup_temp_dir(c_other);
 }
 
 /* Rewrite c_path as a 200x150 PNG that keeps the texture cache's stamp --
@@ -5117,6 +5107,65 @@ add_tool_review7_tests(void) {
                    test_failed_reload_under_the_crop_tool_says_so);
 }
 
+/* --- gd2: a multi-file open is one pass ----------------------------------
+ *
+ * With the panel up, an open re-points it at the new file and starts one
+ * thumbnail batch for it (enhance_ctrl_nav_changed -> _retarget_panel).
+ * ggaze_window_open_files used to open the first file's FOLDER and place
+ * the cursor afterwards: for a start file not sorted first that emitted
+ * "changed" and ran the whole sequence again -- two loads and two batches,
+ * the first of each cancelled. Now the start file arrives with the folder
+ * (window.c _open_now), so the load and the batch happen once. rot6.jpg
+ * sorts after plain.jpg in the second folder: the exact case that doubled. */
+static void
+test_open_many_re_points_the_panel_once(void) {
+   Settings *p_cfg = settings_new();
+   settings_set_enhance_preview_thumbnails(p_cfg, TRUE);
+   DirtyFixture             fx      = {0};
+   static const char *const c_two[] = {"plain.jpg", "rot6.jpg", NULL};
+   fixture_open_clean(&fx, "ggaze-open-many-a-XXXXXX", c_two);
+   fire(fx.p_win, "win.enhance");
+   g_assert_nonnull(find_label_prefix(find_panel(fx.p_win), "Enhance plain"));
+   g_assert_cmpuint(ggaze_window_enhance_preview_count(fx.p_win), ==, 1);
+   guint u_loads = ggaze_window_load_count(fx.p_win);
+
+   GError *p_err   = NULL;
+   char   *c_other = g_dir_make_tmp("ggaze-open-many-b-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_other, "plain.jpg");
+   copy_fixture(c_other, "rot6.jpg");
+   GFile *pp_files[2];
+   pp_files[0] = g_file_new_build_filename(c_other, "rot6.jpg", NULL);
+   pp_files[1] = g_file_new_build_filename(c_other, "plain.jpg", NULL);
+   ggaze_window_open_files(fx.p_win, pp_files, 2); /* clean: no prompt */
+   /* Synchronous through the gate (nothing dirty): final before any
+    * main-loop iteration could deliver a second "changed". */
+   g_assert_cmpuint(ggaze_window_load_count(fx.p_win), ==, u_loads + 1);
+   g_assert_cmpuint(ggaze_window_enhance_preview_count(fx.p_win), ==, 2);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, 0);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(fx.p_win)), ==,
+      "grid");
+   g_assert_nonnull(find_label_prefix(find_panel(fx.p_win), "Enhance rot6"));
+   wait_for_texture_size(fx.p_win, 4, 8); /* the start file's own decode */
+   g_assert_cmpuint(ggaze_window_load_count(fx.p_win), ==, u_loads + 1);
+   g_assert_cmpuint(ggaze_window_enhance_preview_count(fx.p_win), ==, 2);
+
+   g_object_unref(pp_files[0]);
+   g_object_unref(pp_files[1]);
+   g_settings_reset(settings_get_gsettings(p_cfg),
+                    "enhance-preview-thumbnails");
+   settings_delete(p_cfg);
+   fixture_teardown(&fx);
+   ggtest_cleanup_temp_dir(c_other);
+}
+
+static void
+add_open_many_tests(void) {
+   g_test_add_func("/enhance_flow/open_many_re_points_the_panel_once",
+                   test_open_many_re_points_the_panel_once);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -5154,5 +5203,6 @@ main(int i_argc, char **c_argv) {
    add_tool_review5_tests();
    add_tool_review6_tests();
    add_tool_review7_tests();
+   add_open_many_tests();
    return (g_test_run());
 }

@@ -69,18 +69,27 @@ gsettings_env.set('GSETTINGS_BACKEND', 'memory')
 gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 
 # Shared test helpers (AGENTS.md: "Shared helpers go in tests/helpers/").
-# Grid-cell activation and alert-dialog driving are used by more than one
+# Grid-cell activation, alert-dialog driving and the large-view readiness
+# waits (GGTEST_WAIT_FOR_TEXTURE / GGTEST_WAIT_FOR_VIEW: the viewer shows the
+# FULL decode of a known size, not the JPEG preview, and for a presented
+# window inside a settled allocation -- 2d2) are used by more than one
 # suite, so they live here instead of being copy-pasted per binary;
 # mem_file.c (a GFile served from memory, for cancelling INSIDE a read) is
 # the loader suites' stream-path driver; open_counter.c (an inotify count
 # of the opens of one file) is how test_loader_pixbuf proves gdk-pixbuf was
 # not consulted and test_thumbnail that a pre-cancelled request opened
-# nothing.
+# nothing; temp_dir.c (recursive temp-folder teardown that ASSERTS the
+# rmdir) is how the suites working on fixture copies prove they left
+# nothing behind (gd2 review); wait_until.c (poll a condition under a
+# monotonic deadline, plus the GGAZE_TEST_TIMEOUT_SCALE / sanitizer
+# scaling of every wait budget) is how a test waits for another thread's
+# work without a fixed-duration sleep that a loaded lane outlives (1w0,
+# hd2).
 test_helpers_inc = include_directories('helpers')
 test_helpers_lib = static_library(
    'ggaze_test_helpers',
    ['helpers/gtk_helpers.c', 'helpers/mem_file.c', 'helpers/open_counter.c',
-    ggaze_conf_h],
+    'helpers/temp_dir.c', 'helpers/wait_until.c', ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
    install : false,
@@ -113,7 +122,8 @@ test('app', test_app,
 # test_detect, test_loader_pixbuf and test_thumbnail share
 # tests/helpers/tiny_images.h (the smallest real 1x1 file per format, as
 # inline bytes) via test_helpers_inc; test_loader_pixbuf and
-# test_thumbnail also link the helpers library (mem_file.c, open_counter.c).
+# test_thumbnail also link the helpers library (mem_file.c, open_counter.c,
+# wait_until.c).
 #
 # The unit binaries that g_test_skip() one of their cases (test_detect's
 # /proc/self/mem failed read, test_enhancer's and test_thumbnail's
@@ -259,8 +269,15 @@ test_thumbnail = executable(
    link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
+# timeout : 120, not meson's default 30: test_delete_completes_queued_requests
+# waits for the pool's in-flight decodes under a 20 s budget (hd2), which
+# ggtest_wait_scale() triples on the sanitizer lane. The budget has to
+# expire BEFORE meson gives up, so a request that really never completes
+# fails the test's named assertion ("only 23 of 24 ... completed") and not
+# the harness, whose TIMEOUT names nothing. The suite itself finishes in a
+# few seconds; the ceiling is only what a hang costs.
 test('thumbnail', test_thumbnail, suite : 'unit', env : fixtures_env,
-   protocol : 'tap')
+   protocol : 'tap', timeout : 120)
 
 test_info = executable(
    'test_info',
@@ -369,6 +386,19 @@ test_fileops = executable(
    install : false,
 )
 test('fileops', test_fileops, suite : 'unit', env : fixtures_env)
+
+# temp_dir: self-test of the shared teardown helper -- a symlink to a folder
+# outside the tree is unlinked, never followed (gd2 review). Links only
+# test_helpers_lib; the archive pulls in just temp_dir.o, which needs gio.
+test_temp_dir = executable(
+   'test_temp_dir',
+   ['test_temp_dir.c', ggaze_conf_h],
+   include_directories : [inc, test_helpers_inc],
+   dependencies : [glib_dep, gio_dep],
+   link_with : test_helpers_lib,
+   install : false,
+)
+test('temp_dir', test_temp_dir, suite : 'unit')
 
 # --- integration track (needs a display; CI uses xvfb-run) ---
 #
@@ -594,8 +624,15 @@ test('window', test_window, suite : 'integration', env : fixtures_env,
    is_parallel : false)
 
 # Links the helpers for GGTEST_WAIT_FOR_VIEW (gtk_helpers.h "large-view
-# readiness"): every subtest reads a scale that is only meaningful off the
+# readiness"): the subtests read a scale that is only meaningful off the
 # full decode inside a settled allocation (2d2).
+#
+# timeout : 90, not meson's default 30: that wait's ceiling is 10 s, scaled
+# x3 under ASan (wait_until.c), i.e. 30 s -- exactly meson's default. A view
+# that never gets ready must fail on the wait's own g_error, which names the
+# call site and what the viewer showed, and not on meson killing the binary
+# first with nothing but "TIMEOUT"; 90 s leaves room for the wait plus the
+# rest of the suite on a loaded sanitizer lane.
 test_viewer = executable(
    'test_viewer',
    ['test_viewer.c', ggaze_conf_h],
@@ -604,7 +641,8 @@ test_viewer = executable(
    link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
-test('viewer', test_viewer, suite : 'integration', env : fixtures_env)
+test('viewer', test_viewer, suite : 'integration', env : fixtures_env,
+   timeout : 90)
 
 # info_overlay: the InfoOverlay driven directly on a bare GtkOverlay (no
 # GgazeWindow), for the paths the window suites cannot reach -- a plot-only
@@ -625,9 +663,9 @@ test('info_overlay', test_info_overlay, suite : 'integration',
 test_open_and_show = executable(
    'test_open_and_show',
    ['test_open_and_show.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
-   link_with : ggaze_lib,
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
 test('open_and_show', test_open_and_show,

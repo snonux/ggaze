@@ -19,10 +19,13 @@
  *
  * Fixtures are generated here rather than taken from tests/fixtures: the
  * shared ones are a few pixels across (plain.jpg is 6x3), which in a 600x400
- * window puts the fit scale at 98 -- above GGAZE_ZOOM_MAX (64) -- so they
- * cannot express "zooming in makes it bigger" at all.
+ * window puts the fit scale at about 98-100 depending on backend (the
+ * viewer's share of the window differs, see gtk_helpers.h "large-view
+ * readiness") -- above GGAZE_ZOOM_MAX (64) either way -- so they cannot
+ * express "zooming in makes it bigger" at all.
  *
- * Every subtest opens its window through open_and_settle(), which waits for
+ * Every subtest that shows a picture opens its window through
+ * open_and_settle(), which waits for
  * the FULL decode inside a SETTLED allocation (gtk_helpers.h "large-view
  * readiness") before anything reads a scale. A read taken off the JPEG
  * backend's 1x1 preview of plain.jpg, or off an interim allocation, disagrees
@@ -62,10 +65,12 @@
 /* Present p_win at the 600x400 the header comment's numbers assume, open
  * p_file on it and wait until the viewer shows the i_tex_w x i_tex_h decode
  * inside its settled allocation (gtk_helpers.h "large-view readiness").
- * Every subtest reads ggaze_viewer_get_scale() right after this, and that
- * scale is meaningless off an unallocated viewer (_compute_geom's zero-size
- * guard returns a fit ratio of 1.0) and WRONG off the JPEG backend's 1/8-scale
- * preview -- the 344-vs-98.3 flake of 2d2. Returns the viewer (borrowed). */
+ * Its callers go on to read the viewer's scale or pan (directly or through
+ * a zoom/pan/fit step), and those are meaningless off an unallocated viewer
+ * (_compute_geom's zero-size guard returns a fit ratio of 1.0) and WRONG off
+ * the JPEG backend's 1/8-scale preview -- the flake of 2d2, where the 1x1
+ * preview's fit (about 344) was read in place of the file's (about 98).
+ * Returns the viewer (borrowed). */
 static GgazeViewer *
 open_and_settle(GgazeWindow *p_win, GFile *p_file, int i_tex_w, int i_tex_h) {
    gtk_window_set_default_size(GTK_WINDOW(p_win), 600, 400);
@@ -270,19 +275,20 @@ test_finite_pan_still_applies(void) {
 
 /* jx0: an image small enough that fit-to-window already exceeds
  * GGAZE_ZOOM_MAX. tests/fixtures/plain.jpg is 6x3, so in this 600x400 window
- * it fits at 98x (590 px of viewer width over 6) -- above the 64x ceiling.
- * Zooming in must never make such a picture SMALLER, which is exactly what
- * clamping to a bare GGAZE_ZOOM_MAX did (scale went 98 -> 64 on the first
+ * it fits at about 98-100x depending on backend (roughly 590-600 px of
+ * viewer width over 6) -- above the 64x ceiling. Zooming in must never make
+ * such a picture SMALLER, which is exactly what clamping to a bare
+ * GGAZE_ZOOM_MAX did (scale went from the fit down to 64 on the first
  * win.zoom-in). At the top end a no-op is correct; a reversal is not.
  *
  * The wait in open_and_settle matches the texture's size against the file's
  * (2d2): the JPEG backend shows a 1/8-scale preview before the full decode,
- * and plain.jpg's 1x1 preview fits at 344x. A d_fit read off that preview
- * passed the premise below, and the real decode landing a millisecond later
- * then read as a shrink -- a flake whose window was the gap between the two
- * textures, which only a starved worker thread on a loaded lane made wide
- * enough to hit. The minimal lane (jpeg disabled) never showed a preview and
- * never flaked. */
+ * and plain.jpg's 1x1 preview fits at roughly 344x (backend-dependent, like
+ * the 98). A d_fit read off that preview passed the premise below, and the
+ * real decode landing a millisecond later then read as a shrink -- a flake
+ * whose window was the gap between the two textures, which only a starved
+ * worker thread on a loaded lane made wide enough to hit. The minimal lane
+ * (jpeg disabled) never showed a preview and never flaked. */
 static void
 test_zoom_in_never_shrinks_a_tiny_image(void) {
    const gchar *c_fx = g_getenv("GGAZE_FIXTURES_DIR");

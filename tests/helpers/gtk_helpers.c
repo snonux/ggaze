@@ -10,6 +10,8 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "wait_until.h"
+
 /* --- grid cells ---------------------------------------------------------- */
 
 GtkFlowBox *
@@ -140,48 +142,32 @@ ggtest_count_dialogs(GtkWindow *p_skip, const char *c_label) {
  * wait before calling it a bug". */
 #define GGTEST_DIALOG_WAIT_MS 10000
 
-/* Scale factor applied to that ceiling.
- *
- * ASan/UBSan builds run several times slower than the plain lanes, and they
- * are the same lanes meson packs nproc-wide in parallel, so they need the most
- * room. GGAZE_TEST_TIMEOUT_SCALE lets a slow or heavily loaded machine widen
- * every wait without a rebuild. Computed once; the test main loop is single-
- * threaded, so the cached value needs no locking. */
-static gdouble
-_wait_scale(void) {
-   static gdouble d_scale = -1.0;
-   if (d_scale < 0.0) {
-      const char *c_env = g_getenv("GGAZE_TEST_TIMEOUT_SCALE");
-      d_scale           = (c_env != NULL) ? g_ascii_strtod(c_env, NULL) : 1.0;
-      if (!(d_scale > 0.0)) {
-         d_scale = 1.0; /* unset, unparseable or nonsense: ignore it */
-      }
-#ifdef __SANITIZE_ADDRESS__
-      d_scale *= 3.0;
-#endif
-   }
-   return (d_scale);
+typedef struct {
+   GtkWindow  *p_skip;
+   const char *c_label;
+   GtkWindow  *p_dlg; /* the dialog once found */
+} DialogWait;
+
+/* GgtestCondFn for ggtest_wait_for_dialog(): the dialog is up. */
+static gboolean
+_dialog_is_up(gpointer p_data) {
+   DialogWait *p_w = (DialogWait *)p_data;
+   p_w->p_dlg      = ggtest_find_dialog(p_w->p_skip, p_w->c_label);
+   return (p_w->p_dlg != NULL);
 }
 
-/* The monotonic instant u_ms scaled milliseconds from now: the deadline every
- * condition wait in this file polls against.
+/* Poll until the dialog is up, or until the ceiling, scaled by
+ * ggtest_wait_scale() (wait_until.c: sanitizer lanes and
+ * GGAZE_TEST_TIMEOUT_SCALE), expires.
  *
- * A budget is a real monotonic deadline, never a count of poll iterations.
- * The dialog wait used to count iterations, each followed by a 1 ms sleep,
- * which made it load-dependent in the worst possible direction: a *sleeping*
- * poll loop is barely slowed by an oversubscribed box, while the worker
- * thread it is waiting on is starved of CPU by exactly that oversubscription.
- * So the loop kept roughly its nominal 2 s while the work it waited for took
- * far longer, and a wait that always passed with the suite run alone failed
- * on a full parallel lane (1w0). */
-static gint64
-_deadline_us(guint u_ms) {
-   gint64 i_budget_us =
-      (gint64)(u_ms * _wait_scale()) * G_GINT64_CONSTANT(1000);
-   return (g_get_monotonic_time() + i_budget_us);
-}
-
-/* Poll until the dialog is up, or until the scaled ceiling expires.
+ * The budget is a real monotonic deadline -- ggtest_wait_until()'s, which
+ * applies the scaling. It used to be a count of poll iterations, each
+ * followed by a 1 ms sleep, which made it load-dependent in
+ * the worst possible direction: a *sleeping* poll loop is barely slowed by an
+ * oversubscribed box, while the worker thread it is waiting on is starved of
+ * CPU by exactly that oversubscription. So the loop kept roughly its nominal
+ * 2 s while the work it waited for took far longer, and a wait that always
+ * passed with the suite run alone failed on a full parallel lane (1w0).
  *
  * Widening a CONDITION wait cannot hide a defect: this returns the instant the
  * dialog exists, so a dialog that is genuinely never shown still fails the
@@ -190,18 +176,10 @@ _deadline_us(guint u_ms) {
  * assertion aborts the suite. */
 GtkWindow *
 ggtest_wait_for_dialog(GtkWindow *p_skip, const char *c_label) {
-   gint64 i_deadline = _deadline_us(GGTEST_DIALOG_WAIT_MS);
-   for (;;) {
-      GtkWindow *p_dlg = ggtest_find_dialog(p_skip, c_label);
-      if (p_dlg != NULL) {
-         return (p_dlg);
-      }
-      if (g_get_monotonic_time() >= i_deadline) {
-         return (NULL);
-      }
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
+   DialogWait s_w = {.p_skip = p_skip, .c_label = c_label, .p_dlg = NULL};
+   ggtest_wait_until(_dialog_is_up, &s_w,
+                     GGTEST_DIALOG_WAIT_MS * G_GINT64_CONSTANT(1000));
+   return (s_w.p_dlg);
 }
 
 void
@@ -258,18 +236,21 @@ ggtest_assert_dialog_up_at(const char *c_loc, GtkWindow *p_own,
 
 /* --- large-view readiness ------------------------------------------------- */
 
-/* Patience ceiling for ggtest_wait_for_view_at(), in milliseconds before the
- * same scaling as GGTEST_DIALOG_WAIT_MS. A fixture decodes and a toplevel
- * gets its first configure within a few hundred milliseconds; the ceiling is
- * how long we wait before calling a missing one a bug. */
+/* Patience ceiling for both large-view waits, in milliseconds before
+ * ggtest_wait_until()'s scaling (x3 under ASan, so up to 30 s there, which is
+ * why tests/meson.build gives the suites that call it a longer timeout than
+ * meson's 30 s default). A fixture decodes and a toplevel gets its first
+ * configure within a few hundred milliseconds; the ceiling is how long we wait
+ * before calling a missing one a bug. */
 #define GGTEST_VIEW_WAIT_MS 10000
 
-/* Consecutive dispatched main-loop iterations the viewer's allocation must
- * hold still for before it counts as settled; see gtk_helpers.h "large-view
- * readiness" for why stillness is the criterion. About 30-40 ms at the poll
- * cadence below: a guard against a late chrome relayout, not a wait for the
- * first configure, which the texture-size condition already outlasts. */
-#define GGTEST_VIEW_SETTLE_ITERS 30
+/* Consecutive polls the viewer's allocation must hold still for before it
+ * counts as settled; each poll is separated from the last by one main-context
+ * iteration and a 1 ms sleep. That is a COUNT, not a duration, so under load
+ * it bounds nothing in time: it guards against a relayout that is already
+ * queued when the texture lands (a prompt one), not against one that arrives
+ * later. See gtk_helpers.h "large-view readiness". */
+#define GGTEST_VIEW_SETTLE_POLLS 30
 
 /* What the viewer shows at one instant: its allocation and the size of the
  * texture it holds (0x0 while it holds none). */
@@ -279,6 +260,17 @@ typedef struct {
    int i_tex_w;
    int i_tex_h;
 } ViewState;
+
+/* One view wait in progress: the GgtestCondFn state of both large-view waits.
+ * b_settle selects whether the allocation must also be non-empty and still. */
+typedef struct {
+   GgazeViewer *p_v;
+   int          i_want_w; /* the decoded texture size waited for */
+   int          i_want_h;
+   gboolean     b_settle;
+   ViewState    last;    /* what the previous poll saw */
+   guint        u_still; /* consecutive polls with an unchanged allocation */
+} ViewWait;
 
 static ViewState
 _view_state(GgazeViewer *p_v) {
@@ -293,41 +285,66 @@ _view_state(GgazeViewer *p_v) {
    return (s);
 }
 
-/* TRUE when p_now shows the i_tex_w x i_tex_h texture inside a non-empty
- * allocation that is the same one p_last saw: one settled iteration. */
+/* GgtestCondFn for both waits. With b_settle, TRUE once the wanted texture has
+ * sat in the same non-empty allocation for GGTEST_VIEW_SETTLE_POLLS polls; any
+ * change (texture or allocation) restarts the count, so only an unbroken run
+ * of fully decoded, unchanged polls counts. Without it, TRUE as soon as the
+ * texture has the wanted size. */
 static gboolean
-_view_held(const ViewState *p_now, const ViewState *p_last, int i_tex_w,
-           int i_tex_h) {
-   return (p_now->i_tex_w == i_tex_w && p_now->i_tex_h == i_tex_h &&
-           p_now->i_w > 0 && p_now->i_h > 0 && p_now->i_w == p_last->i_w &&
-           p_now->i_h == p_last->i_h);
+_view_ready(gpointer p_data) {
+   ViewWait *p_w = (ViewWait *)p_data;
+   ViewState now = _view_state(p_w->p_v);
+   gboolean  b_tex =
+      (now.i_tex_w == p_w->i_want_w && now.i_tex_h == p_w->i_want_h);
+   gboolean b_held = b_tex && now.i_w > 0 && now.i_h > 0 &&
+                     now.i_w == p_w->last.i_w && now.i_h == p_w->last.i_h;
+   p_w->u_still    = b_held ? p_w->u_still + 1 : 0;
+   p_w->last       = now;
+   if (!p_w->b_settle) {
+      return (b_tex);
+   }
+   return (p_w->u_still >= GGTEST_VIEW_SETTLE_POLLS);
+}
+
+/* Shared body of the two public waits: poll _view_ready, g_error() naming the
+ * call site and what was last seen if the ceiling expires. On success the
+ * settling wait also asserts the stack really shows the viewer -- a scale
+ * read off a hidden page is as meaningless as one off an unallocated viewer.
+ * The texture-only wait does not: it only promises a texture, and a caller
+ * may legitimately wait for a decode while another page is on screen. */
+static GgazeViewer *
+_wait_view(const char *c_loc, GgazeWindow *p_win, int i_tex_w, int i_tex_h,
+           gboolean b_settle) {
+   ViewWait  s_w     = {.p_v      = _viewer_of(p_win),
+                        .i_want_w = i_tex_w,
+                        .i_want_h = i_tex_h,
+                        .b_settle = b_settle};
+   GtkStack *p_stack = ggaze_window_get_stack(p_win);
+   gint64    i_start = g_get_monotonic_time();
+   if (!ggtest_wait_until(_view_ready, &s_w,
+                          GGTEST_VIEW_WAIT_MS * G_GINT64_CONSTANT(1000))) {
+      g_error("%s: large view not ready after %" G_GINT64_FORMAT
+              " ms: stack shows \"%s\", viewer allocated %dx%d, texture "
+              "%dx%d (wanted %dx%d%s)",
+              c_loc, (g_get_monotonic_time() - i_start) / 1000,
+              gtk_stack_get_visible_child_name(p_stack), s_w.last.i_w,
+              s_w.last.i_h, s_w.last.i_tex_w, s_w.last.i_tex_h, i_tex_w,
+              i_tex_h, b_settle ? ", settled" : "");
+   }
+   if (b_settle) {
+      g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "large");
+   }
+   return (s_w.p_v);
+}
+
+GgazeViewer *
+ggtest_wait_for_texture_at(const char *c_loc, GgazeWindow *p_win, int i_tex_w,
+                           int i_tex_h) {
+   return (_wait_view(c_loc, p_win, i_tex_w, i_tex_h, FALSE));
 }
 
 GgazeViewer *
 ggtest_wait_for_view_at(const char *c_loc, GgazeWindow *p_win, int i_tex_w,
                         int i_tex_h) {
-   GgazeViewer *p_v        = _viewer_of(p_win);
-   gint64       i_start    = g_get_monotonic_time();
-   gint64       i_deadline = _deadline_us(GGTEST_VIEW_WAIT_MS);
-   ViewState    last       = {0};
-   guint        u_still    = 0;
-   for (;;) {
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      ViewState now = _view_state(p_v);
-      /* Any change restarts the settle count: only a run of unchanged,
-       * fully decoded iterations proves the geometry is what the window will
-       * keep showing. */
-      u_still = _view_held(&now, &last, i_tex_w, i_tex_h) ? u_still + 1 : 0;
-      if (u_still >= GGTEST_VIEW_SETTLE_ITERS) {
-         return (p_v);
-      }
-      last = now;
-      if (g_get_monotonic_time() >= i_deadline) {
-         g_error("%s: large view not ready after %" G_GINT64_FORMAT
-                 " ms: viewer allocated %dx%d, texture %dx%d (wanted %dx%d)",
-                 c_loc, (g_get_monotonic_time() - i_start) / 1000, now.i_w,
-                 now.i_h, now.i_tex_w, now.i_tex_h, i_tex_w, i_tex_h);
-      }
-      g_usleep(1000);
-   }
+   return (_wait_view(c_loc, p_win, i_tex_w, i_tex_h, TRUE));
 }
