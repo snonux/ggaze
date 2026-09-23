@@ -84,12 +84,16 @@ gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 # monotonic deadline, plus the GGAZE_TEST_TIMEOUT_SCALE / sanitizer
 # scaling of every wait budget) is how a test waits for another thread's
 # work without a fixed-duration sleep that a loaded lane outlives (1w0,
-# hd2).
+# hd2); file_stamp.c (read a file's mtime-to-the-ns/size/inode stamp and
+# set its mtime back, failing clearly on a whole-second filesystem) is how
+# test_texturecache and test_enhance_flow drive the texture cache's stamp
+# into a hit or a miss (fd2).
 test_helpers_inc = include_directories('helpers')
 test_helpers_lib = static_library(
    'ggaze_test_helpers',
    ['helpers/gtk_helpers.c', 'helpers/mem_file.c', 'helpers/open_counter.c',
-    'helpers/temp_dir.c', 'helpers/wait_until.c', ggaze_conf_h],
+    'helpers/temp_dir.c', 'helpers/wait_until.c', 'helpers/file_stamp.c',
+    ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
    install : false,
@@ -405,9 +409,9 @@ endif
 test_texturecache = executable(
    'test_texturecache',
    ['test_texturecache.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
+   include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
-   link_with : ggaze_lib,
+   link_with : [ggaze_lib, test_helpers_lib],
    install : false,
 )
 test('texturecache', test_texturecache, suite : 'unit', env : fixtures_env)

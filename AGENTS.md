@@ -185,7 +185,7 @@ src/transform.{c,h}   rotate 90 / straighten / crop state + the sizes the tools 
 src/tool-ctrl.{c,h}   optional modal crop (c) / straighten (R) session: viewer overlay, keys, drags
 src/clipboard.{c,h}   image/png (displayed texture) or file-URI content providers
 src/thumbnail.{c,h}   freedesktop TMS cache (bounded pool)
-src/texturecache.{c,h} bounded LRU of decoded GdkTextures (mtime/size validated)
+src/texturecache.{c,h} bounded LRU of decoded GdkTextures (stamp: mtime ns, size, inode)
 src/settings.{c,h}    GSettings wrapper (org.buetow.ggaze)
 src/prefs.{c,h}       Preferences dialog (schema-driven enums, list editors)
 src/info.{c,h}        EXIF/dimensions/colour-space gather (libexif, icc)

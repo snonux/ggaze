@@ -20,8 +20,11 @@ project('ggaze', 'c',
 # >= 4.10: GdkTextureDownloader + gdk_texture_get_format (histogram.c reads a
 # texture's pixels in its native layout through them; both are 4.10 API).
 gtk4_dep       = dependency('gtk4', version : '>= 4.10')
-glib_dep       = dependency('glib-2.0')
-gio_dep        = dependency('gio-2.0')
+# >= 2.74: G_FILE_ATTRIBUTE_TIME_MODIFIED_NSEC, the sub-second mtime the
+# texture cache's stamp compares (texturecache.c). Pinned here rather than
+# left to whatever GLib GTK happens to pull in.
+glib_dep       = dependency('glib-2.0', version : '>= 2.74')
+gio_dep        = dependency('gio-2.0', version : '>= 2.74')
 adwaita_dep    = dependency('libadwaita-1')
 gdkpixbuf_dep  = dependency('gdk-pixbuf-2.0')  # pixbuf loader backend
 libexif_dep    = dependency('libexif')           # EXIF gather (info overlay, M4)
