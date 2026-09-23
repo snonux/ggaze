@@ -1434,22 +1434,23 @@ _load_patched_code(const char *c_fixture, gsize u_at, const void *p_patch,
  * (the loader's shared dimension cap, NOT_SUPPORTED), and an IHDR that
  * lies about the width (its CRC no longer matches), which the decoder
  * itself rejects: GEGL's loader reports an empty bounding box for it, and
- * the load fails as INVALID_DATA before anything is processed. small.png
- * is 5x2; swapped.jpg's SOF0 height sits at byte 701. */
+ * the load fails as INVALID_DATA before anything is processed. Only a
+ * profiled file takes the GEGL path, hence the profiled fixtures:
+ * swapped.png is 6x3, swapped.jpg's SOF0 height sits at byte 701. */
 static void
 test_icc_header_refusals(void) {
-   const guint8 C_ZERO[4] = {0, 0, 0, 0};
-   const guint8 C_HUGE[4] = {0x00, 0x10, 0x00, 0x00}; /* 1048576 */
-   const guint8 C_SIX[4]  = {0, 0, 0, 6};
-   g_assert_cmpint(_load_patched_code("small.png", 12, "XXXX", 4), ==,
+   const guint8 C_ZERO[4]  = {0, 0, 0, 0};
+   const guint8 C_HUGE[4]  = {0x00, 0x10, 0x00, 0x00}; /* 1048576 */
+   const guint8 C_SEVEN[4] = {0, 0, 0, 7};
+   g_assert_cmpint(_load_patched_code("swapped.png", 12, "XXXX", 4), ==,
                    G_IO_ERROR_INVALID_DATA);
-   g_assert_cmpint(_load_patched_code("small.png", 16, C_ZERO, 4), ==,
+   g_assert_cmpint(_load_patched_code("swapped.png", 16, C_ZERO, 4), ==,
                    G_IO_ERROR_INVALID_DATA);
-   g_assert_cmpint(_load_patched_code("small.png", 16, C_HUGE, 4), ==,
+   g_assert_cmpint(_load_patched_code("swapped.png", 16, C_HUGE, 4), ==,
                    G_IO_ERROR_NOT_SUPPORTED); /* the shared caps' code */
    g_assert_cmpint(_load_patched_code("swapped.jpg", 701, C_ZERO, 2), ==,
                    G_IO_ERROR_INVALID_DATA);
-   g_assert_cmpint(_load_patched_code("small.png", 16, C_SIX, 4), ==,
+   g_assert_cmpint(_load_patched_code("swapped.png", 16, C_SEVEN, 4), ==,
                    G_IO_ERROR_INVALID_DATA);
 }
 

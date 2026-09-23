@@ -25,6 +25,7 @@
 
 #include "enhancer-gegl.h"
 #include "ggaze-config.h"
+#include "icc.h"                /* is there a profile to manage at all? */
 #include "info.h"               /* EXIF Orientation for the GEGL decode */
 #include "loader/detect.h"      /* format sniff + the shared size caps */
 #include "loader/intact.h"      /* GEGL's loaders spin on a truncated file */
@@ -773,16 +774,19 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
  * Two paths, one result: an upright RGBA8 GeglBuffer whose babl format
  * carries the image's colour space.
  *
- * PNG and JPEG (decision #45) decode through GEGL's own gegl:png-load /
- * gegl:jpg-load, which read the embedded ICC profile and TAG the buffer's
+ * A PNG or JPEG that embeds an ICC profile (decision #45) decodes through
+ * GEGL's own gegl:png-load / gegl:jpg-load, which read that profile and
+ * TAG the buffer's
  * format with the space it describes -- they never convert a pixel. That
  * tag is the whole of the colour management: the preset chain runs in the
  * image's own space (GEGL's ops negotiate their formats with the input's
  * space), enhancer_buffer_to_texture() asks babl for sRGB pixels and so gets
  * the colorimetric conversion the preview needs, and the savers write the
- * space's profile back into the export. A file without a profile, or with
- * one babl cannot use (a LUT-based profile, garbage in an iCCP), is tagged
- * sRGB by the loader itself: today's pixels exactly. Why not ggaze's loader
+ * space's profile back into the export. A profile babl cannot use (a
+ * LUT-based one) is tagged sRGB by the GEGL loader itself. A file with no
+ * profile at all -- or an iCCP / APP2 that holds no profile -- never comes
+ * here: it has nothing to manage and keeps the loader path below, so its
+ * pixels are exactly the pre-xb2 ones. Why not ggaze's loader
  * plus a tag: gdk-pixbuf may or may not have converted the pixels already
  * (a glycin desktop does, fedora:40's native loaders do not), and tagging
  * converted pixels would manage them twice. The gate stays: the same sniff
@@ -795,7 +799,7 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
  * buffer rather than an error) is reported. The EXIF Orientation is
  * applied here, since GEGL's loaders do not.
  *
- * Every other format keeps the previous path: ggaze's orientation-aware
+ * Every other file keeps the previous path: ggaze's orientation-aware
  * loader, pixels copied as sRGB. */
 
 /* Plain gegl:load into a GeglBuffer (no EXIF orientation). The fallback in
@@ -1042,9 +1046,25 @@ _rgba8_upright(GeglBuffer *p_buf, int i_orient) {
    return (p_out);
 }
 
+/* Whether p_file embeds something that looks like an ICC profile (icc.c's
+ * header walk: a few KiB, no decode). Only such a file needs GEGL's
+ * ICC-aware decode; an untagged file (or a broken / non-profile container,
+ * which GEGL would tag sRGB anyway) keeps the loader path and so decodes
+ * exactly as before xb2. */
+static gboolean
+_has_embedded_profile(GFile *p_file) {
+   GBytes  *p_icc = icc_read_embedded(p_file, NULL);
+   gboolean b_yes = icc_is_profile(p_icc);
+   if (p_icc != NULL) {
+      g_bytes_unref(p_icc);
+   }
+   return (b_yes);
+}
+
 /* The ICC-aware path (section comment above). *p_taken says whether the
- * file is this path's to decode: FALSE means "not a PNG / JPEG, use the
- * loader" (no error set); TRUE with a NULL return means it failed here. */
+ * file is this path's to decode: FALSE means "not a profiled PNG / JPEG,
+ * use the loader" (no error set); TRUE with a NULL return means it failed
+ * here. */
 static GeglBuffer *
 _load_icc_aware(GFile *p_file, const char *c_path, gboolean *p_taken,
                 GError **p_err) {
@@ -1056,7 +1076,7 @@ _load_icc_aware(GFile *p_file, const char *c_path, gboolean *p_taken,
       return (NULL); /* unreadable, or refused by the decode gate */
    }
    const char *c_op = _gegl_loader_for(e_fmt);
-   if (c_op == NULL) {
+   if (c_op == NULL || !_has_embedded_profile(p_file)) {
       *p_taken = FALSE;
       return (NULL);
    }

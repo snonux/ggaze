@@ -44,7 +44,7 @@ locked in decision #37.
   `gegl:convert-color-space`) — no separate lcms2 wiring. Without GEGL, stay
   sRGB-only.
 - **Resolved (xb2, decision #45):** with GEGL, the enhance preview and the
-  `s` export of a PNG/JPEG are colour-managed: `gegl:png-load` /
+  `s` export of a PNG/JPEG with an embedded profile are colour-managed: `gegl:png-load` /
   `gegl:jpg-load` tag the buffer with the embedded profile's babl space, the
   chain runs in it, the preview asks babl for sRGB, and `gegl:png-save` /
   `gegl:jpg-save` write the source's profile back byte for byte (a WebP

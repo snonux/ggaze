@@ -256,10 +256,10 @@ GEGL-free geometry those tools and the chain share, `tool-ctrl.{c,h}` the
 interactive crop/straighten session over the viewer.
 
 `enhancer_load` does NOT use `gegl:load` (which ignores EXIF Orientation).
-A PNG or JPEG decodes through `gegl:png-load` / `gegl:jpg-load` for their ICC
-awareness (see "Color management" below) with the Orientation applied by the
+A PNG or JPEG with an embedded ICC profile decodes through `gegl:png-load` /
+`gegl:jpg-load` for their ICC awareness (see "Color management" below) with the Orientation applied by the
 enhancer itself (pixbuf-util's permutation, the one every backend uses);
-every other format loads through ggaze's own orientation-aware loader
+every other file (an untagged PNG/JPEG included) loads through ggaze's own orientation-aware loader
 (`loader_load`, every backend honors Orientation per decision #26) and its
 upright RGBA8 pixels are copied into an sRGB-tagged `GeglBuffer`. Either way
 the live preview and the per-preset preview thumbnails render upright for
@@ -331,10 +331,11 @@ needs only the loaders, the savers and `gegl:convert-space`:
 1. **Decode** (`enhancer_load`). `gegl:png-load` / `gegl:jpg-load` read the
    embedded profile (PNG iCCP, JPEG APP2) and **tag** the buffer's babl
    format with the space babl builds from it (`babl_space_from_icc`); no
-   pixel is converted. A file with no profile, or one babl cannot use (a
-   LUT-based profile, garbage in the iCCP), is tagged sRGB by the loader:
-   today's pixels exactly. The loader path (tag sRGB) is not used for these
-   formats because gdk-pixbuf may or may not have converted the pixels
+   pixel is converted. Only a file that embeds a profile takes this path
+   (`icc.c`'s header walk decides): an untagged PNG/JPEG, or an iCCP/APP2
+   holding no profile, keeps the loader path and decodes exactly as before.
+   A profile babl cannot use (LUT-based) is tagged sRGB by the GEGL loader.
+   The loader path (tag sRGB) is not used for profiled files because gdk-pixbuf may or may not have converted the pixels
    already, and tagging converted pixels would manage them twice.
 2. **Working space.** The pixels are copied to `R'G'B'A u8` *in the image's
    own space* (`babl_format_with_space`), so presets, crop and rotation run

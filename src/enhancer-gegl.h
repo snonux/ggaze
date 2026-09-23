@@ -77,12 +77,13 @@ gboolean enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err);
 
 /* Load a file into an upright (EXIF Orientation applied) RGBA8 GeglBuffer
  * whose babl format carries the image's colour space (decision #45): a PNG
- * or JPEG decodes through GEGL's ICC-aware gegl:png-load / gegl:jpg-load,
- * which tag the buffer with the embedded profile's space (sRGB when there
- * is none, or none babl can use), behind the loader's own decode gate
+ * or JPEG with an embedded ICC profile decodes through GEGL's ICC-aware
+ * gegl:png-load / gegl:jpg-load, which tag the buffer with the profile's
+ * space (sRGB when babl cannot use it), behind the loader's own decode gate
  * (empty / truncated / oversized refusals, G_IO_ERROR_INVALID_DATA) and
- * with the orientation applied here; every other format goes through
- * ggaze's orientation-aware loader and is tagged sRGB. Returns a new
+ * with the orientation applied here; every other file (untagged PNG / JPEG
+ * included) goes through ggaze's orientation-aware loader and is tagged
+ * sRGB, exactly as before. Returns a new
  * buffer (caller unrefs) or NULL with p_err set. */
 GeglBuffer *enhancer_load(GFile *p_file, GError **p_err);
 

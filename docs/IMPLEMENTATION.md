@@ -461,10 +461,10 @@ color management on the enhance/export path is done (xb2, decision #45; see
   texture while held, restores the cached modified one on release — no GEGL
   recompute either way.
 - ICC color management via GEGL/babl (open question G, decision #45, xb2):
-  PNG/JPEG decode through `gegl:png-load`/`gegl:jpg-load` (space-tagged),
-  behind the loader's gate + `loader/intact.c`; preview converted to sRGB;
-  PNG/JPEG exports keep the source profile, WebP exports are converted to
-  sRGB. The `i` card names the colour space in every build (`icc.{c,h}`).
+  a profiled PNG/JPEG decodes through `gegl:png-load`/`gegl:jpg-load`
+  (space-tagged; untagged files keep the loader path), behind the loader's
+  gate + `loader/intact.c`; preview converted to sRGB; PNG/JPEG exports
+  keep the source profile, WebP exports are converted to sRGB. The `i` card names the colour space in every build (`icc.{c,h}`).
 - "GEGL not built in" status message (via the info-overlay label; this
   project has no toast infra) for `a`/`s` when the build has no GEGL; safe no-op for the numeric preset hotkeys.
 
