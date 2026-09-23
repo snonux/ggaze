@@ -3143,6 +3143,59 @@ test_crop_esc_and_toggle_cancel(void) {
    tool_fx_close(&fx);
 }
 
+/* yb2 review finding 8: the crop tool over an animated GIF holds its FIRST
+ * frame -- the texture the rectangle is laid out on and Enter applies to
+ * -- for as long as the tool is up, and Esc lets the animation play on.
+ * The identity transform needs no render, so the original (the animated
+ * texture) stays on screen under the tool, which is exactly the case the
+ * hold exists for. Leaving by APPLYING releases the hold too (second
+ * review, finding 5): Enter on the untouched rectangle commits "no crop",
+ * which renders nothing, so the animated original stays up and must play
+ * on rather than stay frozen on frame 1. Presented: an unmapped viewer
+ * plays nothing anyway. */
+static void
+test_crop_tool_holds_animation_first_frame(void) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-tool-anim-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "anim.gif");
+   char        *c_path = g_build_filename(c_dir, "anim.gif", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GgazeWindow *p_win  = new_window();
+   gtk_window_set_default_size(GTK_WINDOW(p_win), 600, 400);
+   gtk_window_present(GTK_WINDOW(p_win));
+   ggaze_window_open(p_win, p_file);
+   g_object_unref(p_file);
+   g_free(c_path);
+   GgazeViewer *p_v    = GGTEST_WAIT_FOR_VIEW(p_win, 8, 6);
+   GdkTexture  *p_orig = viewer_texture(p_win);
+   g_assert_true(ggaze_viewer_is_animating(p_v));
+
+   fire(p_win, "win.crop");
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   g_assert_false(ggaze_viewer_is_animating(p_v));
+   g_assert_true(ggaze_viewer_get_frame(p_v) == p_orig);
+   ggtest_drain_main(250); /* more than two of the fixture's 100 ms frames */
+   g_assert_false(ggaze_viewer_is_animating(p_v));
+   g_assert_true(ggaze_viewer_get_frame(p_v) == p_orig);
+
+   tool_key(p_win, GDK_KEY_Escape);
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_true(ggaze_viewer_is_animating(p_v));
+
+   fire(p_win, "win.crop");
+   g_assert_false(ggaze_viewer_is_animating(p_v));
+   tool_key(p_win, GDK_KEY_Return); /* the whole image: no crop */
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
+   ggtest_drain_main(100);
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   g_assert_true(ggaze_viewer_is_animating(p_v));
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   ggtest_drain_main(300);
+   ggtest_cleanup_temp_dir(c_dir);
+}
+
 /* 1-4 lock the aspect (largest such rectangle inside the current one,
  * centred), 0 frees it, and Enter commits that shape. */
 static void
@@ -4853,6 +4906,8 @@ add_tool_tests(void) {
                    test_crop_keys_then_enter_commits);
    g_test_add_func("/enhance_flow/crop_esc_and_toggle_cancel",
                    test_crop_esc_and_toggle_cancel);
+   g_test_add_func("/enhance_flow/crop_tool_holds_animation_first_frame",
+                   test_crop_tool_holds_animation_first_frame);
    g_test_add_func("/enhance_flow/crop_aspect_presets",
                    test_crop_aspect_presets);
    g_test_add_func("/enhance_flow/crop_drag_resizes_and_moves",

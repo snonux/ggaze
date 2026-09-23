@@ -137,11 +137,18 @@ when adding an optional backend — gate code with `GGAZE_HAVE_*` from
   `GCancellable` and drops its result. The viewer only ever shows a texture
   whose path == `navigator.current` (**last-write-wins**).
 - Bounded `GdkTexture` LRU (cap 4) to bound memory.
-- Plain-C modules (`navigator`, `loader`, `detect`, `thumbnail`, `trash`,
-  `mover`, `opener`, `runner`, `enhancer`, `info`, `histogram`,
-  `texturecache`, `clipboard`, `viewload`, `pathutil`, `settings-pair`,
-  `undo`, `croprect`, `transform`) own no GtkWidget and are unit-tested
-  standalone.
+- Plain-C modules (`navigator`, `loader`, `detect`, `animation`,
+  `thumbnail`, `trash`, `mover`, `opener`, `runner`, `enhancer`, `info`,
+  `histogram`, `texturecache`, `clipboard`, `viewload`, `pathutil`,
+  `settings-pair`, `undo`, `croprect`, `transform`) own no GtkWidget and
+  are unit-tested standalone.
+- An animated GIF/WebP is **one texture per file** like any still: the
+  loader returns its first frame with the other frames attached as
+  textures of their own (`loader/animation.h`, decoded and COPIED on the
+  worker -- gdk-pixbuf 2.42 hands out one shared, mutating composite
+  buffer), and only the viewer plays it. Every other
+  consumer (cache, prefetch, grid, histogram, enhance, tools, clipboard)
+  operates on the first frame by construction; keep it that way.
 
 ## Memory (C has no GC)
 
@@ -191,7 +198,8 @@ src/prefs.{c,h}       Preferences dialog (schema-driven enums, list editors)
 src/info.{c,h}        EXIF/dimensions gather (libexif)
 src/loader/loader.{c,h}   sync + async load API; sniff, dispatch, explicit pixbuf fallback
 src/loader/detect.{c,h}   content-sniff format detection + the one dimension cap
-src/loader/pixbuf-util.{c,h} GdkPixbuf -> upright GdkTexture
+src/loader/animation.{c,h} animated GIF/WebP: decoder-free frame probe, playback budget, delay clamp, frame store, texture <-> frames channel
+src/loader/pixbuf-util.{c,h} GdkPixbuf -> upright GdkTexture; bytes -> pixbuf / animation decode; one owned texture per frame
 src/loader/backends/       pixbuf.c jpeg.c jxl.c avif.c heif.c
 ```
 

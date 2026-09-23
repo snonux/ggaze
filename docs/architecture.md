@@ -35,7 +35,8 @@ ggaze
 ├── loader/
 │   ├── loader.{c,h}      # sync + async load API; sniff, dispatch, explicit pixbuf fallback
 │   ├── detect.{c,h}      # sniff format from contents (magic), not extension; dimension caps
-│   ├── pixbuf-util.{c,h} # GdkPixbuf -> upright GdkTexture (shared by three decoders)
+│   ├── animation.{c,h}   # animated GIF/WebP: decoder-free frame probe, playback budget, delay clamp, frame store, texture <-> frames channel
+│   ├── pixbuf-util.{c,h} # GdkPixbuf -> upright GdkTexture (shared by three decoders); bytes -> pixbuf / animation decode; animation -> one owned texture per frame
 │   └── backends/         # one file per format family, behind a backend struct
 │       ├── pixbuf.c      # fallback via GdkPixbuf (PNG/GIF/WebP/TIFF/ICO, JPEG without libjpeg)
 │       ├── jpeg.c        # libjpeg-turbo: progressive low-res preview + full decode
@@ -85,7 +86,21 @@ ggaze
   (or `GtkSnapshot` paintable). Owns zoom level, pan offset, fit mode. Draws
   via GTK4 render nodes. Holds both the raw and GEGL-processed textures;
   `Space` swaps to the raw (compare) while held. Emits "needs-next" when nearing
-  the end of a preloaded set.
+  the end of a preloaded set. **Plays an animated GIF/WebP** (yb2): the
+  texture it is given is that file's first frame with the other frames
+  attached as textures of their own (`loader/animation.h`, decoded by the
+  loader's worker), and the viewer alone steps through them — a tick
+  callback on the frame clock picks the frame due at the clamped delay
+  (`animation_playback_advance`, plain C), drawn at the first frame's
+  geometry, only while mapped and while the frame clock runs. The tick is
+  on the clock only near a frame change (a timeout re-adds it 40 ms
+  before the next one; a tick callback makes GDK draw every vblank). It
+  plays as many times as the file says (GIF NETSCAPE2.0 count N → N + 1
+  plays, no block → once; WebP ANIM count as is; 0 → for ever) and then
+  holds the last frame, restarts from the first frame on every
+  `set_texture`, remap and hold release, and holds the first frame while
+  a crop / straighten tool is up. Every other accessor, and every other
+  module, keeps seeing the first frame.
 - **gridview** — the *thumbnail* view. A `GtkGridView` (or `GtkFlowBox`)
   backed by a `GListModel` of the navigator's files, each cell rendered from
   the `thumbnail` cache. Thumbnail size is adjustable (`+`/`-`); cells reflow
@@ -327,8 +342,28 @@ feels instant.
   kernels/filesystems stamp mtimes from the coarse clock (1-4 ms ticks),
   so a same-size rewrite within one tick is still a hit; a whole-second
   filesystem falls back to seconds + size; grid thumbnails validate on
-  the spec's whole-second `Thumb::MTime` + size (decision #47). The
-  enhance controller may hold two more outside that cap — the current
+  the spec's whole-second `Thumb::MTime` + size (decision #47).
+  An animated GIF/WebP is one entry like any still —
+  its first frame, with the other frames riding on that texture and
+  evicted with it; what such an entry may hold is bounded by the playback
+  budget in `loader/animation.h` (frames × canvas ≤ 32 Mi pixels, i.e.
+  128 MiB of RGBA; a canvas ≤ 4 Mi pixels; ≤ 1000 frames; beyond it the
+  file is shown as its first frame). Every frame is decoded and copied
+  into a texture of its own on the `GTask` thread; playback on the main
+  thread only picks which texture to draw (plus the renderer's one-time
+  upload of each frame). Memory, measured on Fedora 44 (glycin): a
+  109-frame 640×480 GIF, just under the cap, holds 135 MB after its load
+  and peaks at 270 MB during it (the decoder's frames and the copies live
+  side by side until the decoder is dropped); one frame more takes the
+  still path at 8 MB. Worst case if every file in sight is a maximal
+  animation: 4 cache entries × 128 MiB held plus three decodes in flight
+  (the visible load and two neighbour prefetches, which take every frame
+  too — a first-frame-only prefetch would leave an entry a hit could not
+  play; `viewload.c` `_prefetch`) at ~256 MiB peak each, ~1.3 GiB,
+  plus the renderer's upload of the visible animation's frames as they
+  play (up to another 128 MiB, system RAM on an integrated GPU with
+  shared memory), ~1.4 GiB.
+  The enhance controller may hold two more outside that cap — the current
   file's original as the viewer last showed it (the identity the tools
   and hold-`Space` compare against, learned at the window's texture choke
   point) and the rendered preview — bounded to those two, and released

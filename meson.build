@@ -100,6 +100,7 @@ ggaze_src = files(
       'src/clipboard.c',
       'src/loader/loader.c',
       'src/loader/detect.c',
+      'src/loader/animation.c',
       'src/loader/pixbuf-util.c',
       'src/loader/backends/pixbuf.c',
    )

@@ -152,6 +152,38 @@ test_detect = executable(
 test('detect', test_detect, suite : 'unit', env : fixtures_env,
    protocol : 'tap')
 
+# animation (yb2): the plain-C half of animated GIF/WebP playback -- the
+# decoder-free frame probe, the playback budget, the delay clamp, the frame
+# store and the texture <-> frames channel -- over the animated fixtures and
+# hand-built containers, plus pixbuf_util's frame walk (one owned texture
+# per frame). Needs gdk-pixbuf for the decode half only. TAP, like the
+# other unit suites whose cases are worth seeing one by one.
+test_animation = executable(
+   'test_animation',
+   ['test_animation.c', ggaze_conf_h],
+   include_directories : [inc, src_inc, test_helpers_inc],
+   dependencies : [gdkpixbuf_dep, gtk4_dep, glib_dep, gio_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('animation', test_animation, suite : 'unit', env : fixtures_env,
+   protocol : 'tap')
+
+# animation_playback (yb2 review): the playback schedule -- anchor, due
+# times, average rate, stall resync, the file's play count, hold-for-ever
+# frames -- over a fake clock. Plain C; GDK only to make stand-in frame
+# textures, no display.
+test_animation_playback = executable(
+   'test_animation_playback',
+   ['test_animation_playback.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [gtk4_dep, glib_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('animation_playback', test_animation_playback, suite : 'unit',
+   protocol : 'tap')
+
 test_loader_pixbuf = executable(
    'test_loader_pixbuf',
    ['test_loader_pixbuf.c', ggaze_conf_h],
