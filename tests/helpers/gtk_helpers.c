@@ -10,6 +10,8 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "wait_until.h"
+
 /* --- grid cells ---------------------------------------------------------- */
 
 GtkFlowBox *
@@ -130,33 +132,27 @@ ggtest_count_dialogs(GtkWindow *p_skip, const char *c_label) {
  * wait before calling it a bug". */
 #define GGTEST_DIALOG_WAIT_MS 10000
 
-/* Scale factor applied to that ceiling.
- *
- * ASan/UBSan builds run several times slower than the plain lanes, and they
- * are the same lanes meson packs nproc-wide in parallel, so they need the most
- * room. GGAZE_TEST_TIMEOUT_SCALE lets a slow or heavily loaded machine widen
- * every wait without a rebuild. Computed once; the test main loop is single-
- * threaded, so the cached value needs no locking. */
-static gdouble
-_wait_scale(void) {
-   static gdouble d_scale = -1.0;
-   if (d_scale < 0.0) {
-      const char *c_env = g_getenv("GGAZE_TEST_TIMEOUT_SCALE");
-      d_scale           = (c_env != NULL) ? g_ascii_strtod(c_env, NULL) : 1.0;
-      if (!(d_scale > 0.0)) {
-         d_scale = 1.0; /* unset, unparseable or nonsense: ignore it */
-      }
-#ifdef __SANITIZE_ADDRESS__
-      d_scale *= 3.0;
-#endif
-   }
-   return (d_scale);
+typedef struct {
+   GtkWindow  *p_skip;
+   const char *c_label;
+   GtkWindow  *p_dlg; /* the dialog once found */
+} DialogWait;
+
+/* GgtestCondFn for ggtest_wait_for_dialog(): the dialog is up. */
+static gboolean
+_dialog_is_up(gpointer p_data) {
+   DialogWait *p_w = (DialogWait *)p_data;
+   p_w->p_dlg      = ggtest_find_dialog(p_w->p_skip, p_w->c_label);
+   return (p_w->p_dlg != NULL);
 }
 
-/* Poll until the dialog is up, or until the scaled ceiling expires.
+/* Poll until the dialog is up, or until the ceiling, scaled by
+ * ggtest_wait_scale() (wait_until.c: sanitizer lanes and
+ * GGAZE_TEST_TIMEOUT_SCALE), expires.
  *
- * The budget is a real monotonic deadline. It used to be a count of poll
- * iterations, each followed by a 1 ms sleep, which made it load-dependent in
+ * The budget is a real monotonic deadline -- ggtest_wait_until()'s, which
+ * applies the scaling. It used to be a count of poll iterations, each
+ * followed by a 1 ms sleep, which made it load-dependent in
  * the worst possible direction: a *sleeping* poll loop is barely slowed by an
  * oversubscribed box, while the worker thread it is waiting on is starved of
  * CPU by exactly that oversubscription. So the loop kept roughly its nominal
@@ -170,20 +166,10 @@ _wait_scale(void) {
  * assertion aborts the suite. */
 GtkWindow *
 ggtest_wait_for_dialog(GtkWindow *p_skip, const char *c_label) {
-   gint64 i_budget_us =
-      (gint64)(GGTEST_DIALOG_WAIT_MS * _wait_scale()) * G_GINT64_CONSTANT(1000);
-   gint64 i_deadline = g_get_monotonic_time() + i_budget_us;
-   for (;;) {
-      GtkWindow *p_dlg = ggtest_find_dialog(p_skip, c_label);
-      if (p_dlg != NULL) {
-         return (p_dlg);
-      }
-      if (g_get_monotonic_time() >= i_deadline) {
-         return (NULL);
-      }
-      g_main_context_iteration(g_main_context_default(), FALSE);
-      g_usleep(1000);
-   }
+   DialogWait s_w = {.p_skip = p_skip, .c_label = c_label, .p_dlg = NULL};
+   ggtest_wait_until(_dialog_is_up, &s_w,
+                     GGTEST_DIALOG_WAIT_MS * G_GINT64_CONSTANT(1000));
+   return (s_w.p_dlg);
 }
 
 void

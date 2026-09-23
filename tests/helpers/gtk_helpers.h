@@ -205,8 +205,9 @@ guint ggtest_count_dialogs(GtkWindow *p_skip, const char *c_label);
  * There is deliberately no per-call budget: every call site wanted the same
  * "as soon as it shows up, and give up eventually", and how long "eventually"
  * has to be is a property of the machine and the build (sanitizers, parallel
- * lane load), not of the call site. The ceiling and its scaling live in one
- * documented place in gtk_helpers.c; GGAZE_TEST_TIMEOUT_SCALE widens it. */
+ * lane load), not of the call site. The ceiling lives in one documented
+ * place in gtk_helpers.c and its scaling in wait_until.c (shared with the
+ * plain-GLib waits); GGAZE_TEST_TIMEOUT_SCALE widens it. */
 GtkWindow *ggtest_wait_for_dialog(GtkWindow *p_skip, const char *c_label);
 
 /* Click p_btn by emitting "clicked" -- what a real pointer click ends in.

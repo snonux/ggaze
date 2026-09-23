@@ -100,7 +100,9 @@ struct EnhanceCtrl {
 
    GCancellable *p_preview_cancel; /* thumbnail-preview batch */
    guint         u_preview_gen;    /* invalidates stale batch completions */
-   GdkTexture   *p_enhance_tex;    /* last-applied modified texture, cached
+   guint         u_preview_count;  /* batches started so far (a test seam:
+                                    * an open re-points the panel once) */
+   GdkTexture *p_enhance_tex;      /* last-applied modified texture, cached
                                     * so hold-Space can restore it without a
                                     * GEGL recompute */
    GdkTexture *p_orig_tex;         /* the current file's ORIGINAL as the
@@ -902,6 +904,12 @@ enhance_ctrl_get_render_count(EnhanceCtrl *p_ctrl) {
    return (p_ctrl->u_render_count);
 }
 
+guint
+enhance_ctrl_get_preview_count(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, 0);
+   return (p_ctrl->u_preview_count);
+}
+
 gboolean
 enhance_ctrl_is_pending(EnhanceCtrl *p_ctrl) {
    g_return_val_if_fail(p_ctrl != NULL, FALSE);
@@ -1010,7 +1018,9 @@ _preview_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
 }
 
 /* Start (or restart) the one cancellable thumbnail batch for the current
- * file. A no-op for label-only cards or when there is no current file. */
+ * file. A no-op for label-only cards or when there is no current file.
+ * Counted (u_preview_count) only when a batch really starts, so the seam
+ * measures work launched, not calls made. */
 static void
 _start_previews(EnhanceCtrl *p_ctrl) {
    if (!p_ctrl->b_thumbnails) {
@@ -1020,6 +1030,7 @@ _start_previews(EnhanceCtrl *p_ctrl) {
    if (p_file == NULL) {
       return;
    }
+   p_ctrl->u_preview_count++;
    p_ctrl->u_preview_gen++;
    g_cancellable_cancel(p_ctrl->p_preview_cancel);
    g_clear_object(&p_ctrl->p_preview_cancel);

@@ -93,12 +93,14 @@ struct _GgazeWindow {
                             * side panel is appended to while open; shown
                             * only in the large view (_set_view) */
    InfoOverlay *p_info;    /* info card + status line over the stack */
-   guint        u_slideshow;     /* slideshow timeout id (0=off) */
-   gint64       i_esc_at;        /* monotonic us of the last grid Esc (two-step
-                                  * quit), 0 = none */
-   GtkWidget     *p_status_page; /* AdwStatusPage: the "empty" stack child */
-   GtkWidget     *p_menu_btn;    /* header-bar main menu (F10) */
-   gboolean       b_disposed;    /* set in dispose; async callbacks check it */
+   guint        u_slideshow; /* slideshow timeout id (0=off) */
+   gint64       i_esc_at;    /* monotonic us of the last grid Esc (two-step
+                              * quit), 0 = none */
+   GtkWidget *p_status_page; /* AdwStatusPage: the "empty" stack child */
+   GtkWidget *p_menu_btn;    /* header-bar main menu (F10) */
+   gboolean   b_disposed;    /* set in dispose; async callbacks check it */
+   guint      u_load_count;  /* _load_current runs with a navigator so
+                              * far (a test seam: an open is one load) */
    DeleteConfirm *p_delete_confirm; /* bulk-delete confirm flow
                                      * (captured targets + outstanding
                                      * dialog + folder-identity re-check). */
@@ -1567,6 +1569,12 @@ ggaze_window_enhance_render_count(GgazeWindow *p_win) {
    return (enhance_ctrl_get_render_count(p_win->p_enhance_ctrl));
 }
 
+guint
+ggaze_window_enhance_preview_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (enhance_ctrl_get_preview_count(p_win->p_enhance_ctrl));
+}
+
 gboolean
 ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
                             gint *p_base_w, gint *p_base_h) {
@@ -1702,6 +1710,12 @@ guint
 ggaze_window_enhance_render_count(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
    return (0); /* no GEGL, no renders */
+}
+
+guint
+ggaze_window_enhance_preview_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (0); /* no GEGL, no panel, no previews */
 }
 
 gboolean
@@ -2673,12 +2687,16 @@ _show_texture(GgazeWindow *p_win, GdkTexture *p_tex, gboolean b_decoded) {
 }
 
 /* Show navigator.current through the ViewLoad pipeline (texture LRU, one
- * active load, prefetch, last-write-wins -- see viewload.h). */
+ * active load, prefetch, last-write-wins -- see viewload.h). Counted for
+ * the ggaze_window_load_count seam: a cache hit is a load too, since the
+ * count pins how often a path ASKED for the current file, not how often
+ * the decoder ran. */
 static void
 _load_current(GgazeWindow *p_win) {
    if (p_win->p_nav == NULL) {
       return;
    }
+   p_win->u_load_count++;
    viewload_load_current(p_win->p_viewload);
 }
 
@@ -3414,12 +3432,13 @@ _open_resolve_target(GFile *p_arg, GFile **p_out_dir, GFile **p_out_start) {
  * choke point (wb2 sixth review: a tool and a saved transform used to
  * survive into a folder whose file sorted first) and the load. Connecting
  * before the cursor only made the index != 0 case load the file twice.
- * That "once" is _open_now's: a multi-file open (_proceed_open_many) still
- * calls navigator_set_current_file AFTER it, and by the rule above that
- * call emits "changed" -- so the handler runs the choke point and the load
- * a second time -- only when the start file resolves to an index other than 0.
- * A start file that sorts first in its folder is loaded once; any other
- * twice (task gd2 tracks the double pass). */
+ * Every open goes through here with its start file, the multi-file one
+ * included: it used to open the folder first and place the cursor
+ * afterwards, which -- by the rule above -- emitted "changed" for a start
+ * file at any index other than 0 and ran the choke point, the load and the
+ * enhance panel's preview batch a second time (gd2). Now the start file
+ * arrives with the folder and the grid intent, so one pass is all there
+ * is. */
 static void
 _open_build_navigator(GgazeWindow *p_win, GFile *p_dir, GFile *p_start,
                       GgazeSort e_sort, gboolean b_wrap, gboolean b_hide_raw) {
@@ -3508,30 +3527,59 @@ _open_rebuild_grid(GgazeWindow *p_win, gboolean b_hide_trashed) {
                        "grid");
 }
 
+/* Why the requested file p_arg (basename c_name) is not what the navigator
+ * ended up on, as a status line to own, or NULL when it is exactly the
+ * current file. Four cases, told apart because each asks for a different
+ * fix from the user: the path does not exist (a typo); its name starts
+ * with '.' (the listing drops every dotfile before it looks at the type,
+ * so neither "not an image" nor the RAW message below is true -- a macOS
+ * AppleDouble "._IMG_0001.CR2" has a RAW name but was never a sidecar
+ * candidate); it exists but the listing skipped it as a RAW sidecar of a
+ * JPEG twin (the hide-raw preference -- calling that "not an image" sent
+ * people looking for a broken file); or it is a file of this folder that
+ * is not an image at all. */
+static char *
+_open_target_mismatch(GgazeWindow *p_win, GFile *p_arg, const char *c_name) {
+   if (!g_file_query_exists(p_arg, NULL)) {
+      return (g_strdup_printf("%s not found \u2014 opened its folder", c_name));
+   }
+   GFile *p_cur = navigator_get_current(p_win->p_nav);
+   if (p_cur != NULL && g_file_equal(p_cur, p_arg)) {
+      return (NULL);
+   }
+   if (c_name[0] == '.') {
+      /* Checked before the RAW rule: the dotfile filter runs first in the
+       * listing, so a RAW-named dotfile never reached the RAW pruning. */
+      return (g_strdup_printf("%s is a hidden dotfile, never listed "
+                              "\u2014 opened the folder",
+                              c_name));
+   }
+   if (navigator_get_hide_raw(p_win->p_nav) && navigator_is_raw_name(c_name)) {
+      /* A RAW with no JPEG twin is listed even with the preference on, so a
+       * RAW that exists and is not current can only be a pruned sidecar. */
+      return (g_strdup_printf("%s is a RAW sidecar hidden by Preferences "
+                              "\u2014 opened the folder",
+                              c_name));
+   }
+   return (g_strdup_printf(
+      "%s is not an image in this folder \u2014 opened the folder", c_name));
+}
+
 /* After the folder is open: say when the requested file was not what the
- * user thinks it is -- a path that does not exist, or a file that is not an
- * image of this folder -- instead of silently showing the folder's first
- * image under a title that never mentions the mistake. */
+ * user thinks it is (_open_target_mismatch) instead of silently showing the
+ * folder's first image under a title that never mentions the mistake. A
+ * folder arg asked for nothing more specific, so there is nothing to
+ * report for it. */
 static void
 _report_open_target(GgazeWindow *p_win, GFile *p_arg, gboolean b_is_dir) {
    if (b_is_dir || p_win->p_nav == NULL) {
       return;
    }
    char *c_name = g_file_get_basename(p_arg);
-   if (!g_file_query_exists(p_arg, NULL)) {
-      char *c_msg =
-         g_strdup_printf("%s not found \u2014 opened its folder", c_name);
+   char *c_msg  = _open_target_mismatch(p_win, p_arg, c_name);
+   if (c_msg != NULL) {
       _show_status(p_win, c_msg);
       g_free(c_msg);
-   } else {
-      GFile *p_cur = navigator_get_current(p_win->p_nav);
-      if (p_cur == NULL || !g_file_equal(p_cur, p_arg)) {
-         char *c_msg = g_strdup_printf(
-            "%s is not an image in this folder \u2014 opened the folder",
-            c_name);
-         _show_status(p_win, c_msg);
-         g_free(c_msg);
-      }
    }
    g_free(c_name);
 }
@@ -3579,10 +3627,16 @@ _open_rebuild(GgazeWindow *p_win, GFile *p_dir, GFile *p_start) {
 
 /* The actual open logic (was ggaze_window_open's whole body before tu0 added
  * the dirty-preview gate below). Kept as a separate static function so the
- * public entry point can defer it behind a Save/Discard/Cancel prompt
- * without duplicating any of it. */
+ * public entry points can defer it behind a Save/Discard/Cancel prompt
+ * without duplicating any of it. b_grid asks for the grid even when p_arg
+ * is a file: the multi-file open (decision #27) lands in the grid with its
+ * first file current. The start file travels WITH the folder into
+ * _open_rebuild, so the cursor is placed before the "changed" handler is
+ * connected and the choke point, the load and the enhance panel's preview
+ * batch below run exactly once (gd2: opening the folder and placing the
+ * cursor afterwards ran them twice for any start file not sorted first). */
 static void
-_open_now(GgazeWindow *p_win, GFile *p_arg) {
+_open_now(GgazeWindow *p_win, GFile *p_arg, gboolean b_grid) {
    GFile   *p_dir    = NULL;
    GFile   *p_start  = NULL;
    gboolean b_is_dir = _open_resolve_target(p_arg, &p_dir, &p_start);
@@ -3601,24 +3655,25 @@ _open_now(GgazeWindow *p_win, GFile *p_arg) {
    g_clear_object(&p_start);
 
    /* Folder arg → start in the thumbnail grid (folder-to-grid behavior,
-    * docs/ui-and-interactions.md 33-47); file arg → large view on that image.
-    * _load_current is run either way so the large view is ready when toggled.
-    */
-   _set_view(p_win, b_is_dir ? GGAZE_VIEW_GRID : GGAZE_VIEW_LARGE);
+    * docs/ui-and-interactions.md 33-47); file arg → large view on that image
+    * unless the caller wants the grid. _load_current is run either way so
+    * the large view is ready when toggled. */
+   _set_view(p_win, (b_is_dir || b_grid) ? GGAZE_VIEW_GRID : GGAZE_VIEW_LARGE);
    _load_current(p_win);
    _update_empty_state(p_win);
    _report_open_target(p_win, p_arg, b_is_dir);
 }
 
 typedef struct {
-   GgazeWindow *p_win; /* owned ref */
-   GFile       *p_arg; /* owned ref */
+   GgazeWindow *p_win;  /* owned ref */
+   GFile       *p_arg;  /* owned ref */
+   gboolean     b_grid; /* land in the grid even for a file arg */
 } _OpenCtx;
 
 static gboolean
 _proceed_open(gpointer p_data) {
    _OpenCtx *p_ctx = (_OpenCtx *)p_data;
-   _open_now(p_ctx->p_win, p_ctx->p_arg);
+   _open_now(p_ctx->p_win, p_ctx->p_arg, p_ctx->b_grid);
    return (G_SOURCE_REMOVE);
 }
 
@@ -3629,6 +3684,18 @@ _open_ctx_free(gpointer p_data) {
    g_object_unref(p_ctx->p_win);
    g_object_unref(p_ctx->p_arg);
    g_free(p_ctx);
+}
+
+/* Both public opens: queue _open_now(p_arg, b_grid) behind the Save/
+ * Discard/Cancel gate (the ctx owns its refs on every exit path). */
+static void
+_open_gated(GgazeWindow *p_win, GFile *p_arg, gboolean b_grid) {
+   _OpenCtx *p_ctx = g_new(_OpenCtx, 1);
+   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->p_arg    = (GFile *)g_object_ref(p_arg);
+   p_ctx->b_grid   = b_grid;
+   save_gate_maybe_save_then(p_win->p_save_gate, _proceed_open, p_ctx,
+                             _open_ctx_free);
 }
 
 /* Open p_arg (File->Open dialog, drag-and-drop, or single-instance
@@ -3644,46 +3711,27 @@ void
 ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));
    g_return_if_fail(G_IS_FILE(p_arg));
-   _OpenCtx *p_ctx = g_new(_OpenCtx, 1);
-   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
-   p_ctx->p_arg    = (GFile *)g_object_ref(p_arg);
-   save_gate_maybe_save_then(p_win->p_save_gate, _proceed_open, p_ctx,
-                             _open_ctx_free);
+   _open_gated(p_win, p_arg, FALSE);
 }
 
 /* Several files: open the FIRST one's folder in the grid with it current
- * (decision #27). One file: the usual large-view open. */
-static gboolean
-_proceed_open_many(gpointer p_data) {
-   _OpenCtx *p_ctx = (_OpenCtx *)p_data;
-   GFile    *p_dir = g_file_get_parent(p_ctx->p_arg);
-   if (p_dir == NULL) {
-      _open_now(p_ctx->p_win, p_ctx->p_arg);
-      return (G_SOURCE_REMOVE);
-   }
-   _open_now(p_ctx->p_win, p_dir);
-   if (p_ctx->p_win->p_nav != NULL) {
-      navigator_set_current_file(p_ctx->p_win->p_nav, p_ctx->p_arg);
-   }
-   g_object_unref(p_dir);
-   return (G_SOURCE_REMOVE);
-}
-
+ * (decision #27) -- one gated pass with the start file, exactly like a
+ * single-file open but landing in the grid (see _open_now). One file: the
+ * usual large-view open. The first entry decides everything and the rest
+ * only ask for the grid: a first entry that is itself a folder opens THAT
+ * folder (not its parent), as ggaze_window_open would; a first entry that
+ * is missing, not an image, or a hidden RAW sidecar opens its folder on the
+ * first-sorted image with _report_open_target's status line saying so
+ * (it used to be silent, because the old two-step open reported the
+ * folder, never the file). */
 void
 ggaze_window_open_files(GgazeWindow *p_win, GFile **pp_files, gint i_n_files) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));
    if (pp_files == NULL || i_n_files <= 0) {
       return;
    }
-   if (i_n_files == 1) {
-      ggaze_window_open(p_win, pp_files[0]);
-      return;
-   }
-   _OpenCtx *p_ctx = g_new(_OpenCtx, 1);
-   p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
-   p_ctx->p_arg    = (GFile *)g_object_ref(pp_files[0]);
-   save_gate_maybe_save_then(p_win->p_save_gate, _proceed_open_many, p_ctx,
-                             _open_ctx_free);
+   g_return_if_fail(G_IS_FILE(pp_files[0]));
+   _open_gated(p_win, pp_files[0], i_n_files > 1);
 }
 
 /* Step the cursor by i_dir and give a cue at the folder edge: "Wrapped to
@@ -3751,6 +3799,12 @@ void
 ggaze_window_clear_texture_cache(GgazeWindow *p_win) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));
    viewload_clear_cache(p_win->p_viewload);
+}
+
+guint
+ggaze_window_load_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (p_win->u_load_count);
 }
 
 GtkWidget *
