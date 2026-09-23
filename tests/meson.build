@@ -812,13 +812,15 @@ if gegl_dep.found()
    # generous enough for a loaded CI box, tight enough that a real hang is
    # caught in three minutes rather than five. Re-measure this when the
    # subtest count grows: the margin shrinks with every one added. wb2 added
-   # 15 tool subtests, its review rounds 19 more (86 in all -- second
+   # 15 tool subtests, its review rounds 22 more (89 in all -- second
    # round: discard hooks, foreign keys, the drag guard; third round: the
    # exact-render guard, refused horizon drags, every discard path, a crop
    # kept outside the view; fourth round: a refused drag BEGIN, the overlay
-   # under a touch, `c` over an outside crop, a same-file rewrite): measured
-   # 116 s in the plain lane and 121 s in the ASan lane, so the
-   # budget is now 360 s -- ~3.0x headroom over the slower ASan lane.
+   # under a touch, `c` over an outside crop, a same-file rewrite; fifth
+   # round: a same-file reload refreshes the original's identity, a rewrite
+   # under a preset re-renders, the crop tool follows a rewrite with no
+   # input): measured 120 s in the plain lane and 137 s in the ASan lane,
+   # so the budget is now 360 s -- ~2.6x headroom over the slower ASan lane.
    test('enhance_flow', test_enhance_flow,
       suite : 'integration', env : fixtures_env, depends : ggaze_gschemas,
       timeout : 360, is_parallel : false)

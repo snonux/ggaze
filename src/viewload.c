@@ -170,9 +170,12 @@ static gboolean
 _on_progress_main(gpointer p_data) {
    ProgressInvoke *p_pi = (ProgressInvoke *)p_data;
    /* Last-write-wins: show the partial only if its source file is still the
-    * current one; the full result replaces it in _load_finish_cb. */
+    * current one; the full result replaces it in _load_finish_cb. Through
+    * show_partial, not show_texture: a low-res stand-in is not the file's
+    * picture, and a host that remembers what it showed must not take it
+    * for one. */
    if (_is_current(p_pi->p_vl, p_pi->p_file)) {
-      p_pi->p_vl->p_ops->show_texture(p_pi->p_vl->p_host, p_pi->p_tex);
+      p_pi->p_vl->p_ops->show_partial(p_pi->p_vl->p_host, p_pi->p_tex);
    }
    g_object_unref(p_pi->p_tex);
    g_object_unref(p_pi->p_file);

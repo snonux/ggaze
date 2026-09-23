@@ -26,13 +26,15 @@
  *
  * Both overlays are about the pixels on screen, so both check that the
  * texture shown is exactly what the controller rendered for the state
- * being edited (enhance_ctrl_is_current_render, a pure identity test once
- * the controller has learned the original -- which the tools make it do
- * before comparing anything, so no texture-cache lookup runs per frame or
- * per pointer motion): the crop rectangle is drawn over, and its drags
- * measured on, no other picture, and a horizon drag, a crop drag and the
- * crop's Enter are refused while a render is pending or Space holds the
- * original ("Release Space first" wins over "still rendering").
+ * being edited (enhance_ctrl_is_current_render, a pure identity test: the
+ * controller learns the original from the window as it is shown, so no
+ * texture-cache lookup runs per frame or per pointer motion, and a reload
+ * that decodes the same file again is followed -- tool_ctrl_original_
+ * changed lays the crop rectangle out again on it): the crop rectangle is
+ * drawn over, and its drags measured on, no other picture, and a horizon
+ * drag, a crop drag and the crop's Enter are refused while a render is
+ * pending or Space holds the original ("Release Space first" wins over
+ * "still rendering").
  *
  * Geometry is delegated: croprect.c owns how the rectangle moves,
  * transform.c the angles and sizes, viewer.c the image-to-widget mapping.
@@ -50,6 +52,7 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "croprect.h" /* CropRect, for the rectangle seam below */
 #include "enhance-ctrl.h"
 #include "ggaze-enums.h" /* GgazeTool */
 #include "viewer.h"
@@ -140,8 +143,29 @@ void tool_ctrl_abandon(ToolCtrl *p_tc);
 void tool_ctrl_discarded(ToolCtrl *p_tc);
 
 /* The navigator "changed" choke point: abandon iff the current file is no
- * longer the one the tool started on (a same-file rescan keeps it). */
+ * longer the one the tool started on (a same-file rescan keeps it -- the
+ * rectangle follows the reload through tool_ctrl_original_changed, since
+ * at this point the rewritten file's decode has not landed yet). */
 void tool_ctrl_nav_changed(ToolCtrl *p_tc);
+
+/* The current file's original on screen is another texture object now (the
+ * enhance controller learned it as the window showed it: the file's first
+ * decode after the tool started, or its reload after a rewrite in place or
+ * a discard): a crop tool lays its rectangle out again -- on the new base
+ * size, refitted if that changed -- and both tools redraw. With no tool
+ * active, nothing. Before this the rectangle stayed hidden, laid out on the
+ * old base, until the first key or drag. */
+void tool_ctrl_original_changed(ToolCtrl *p_tc);
+
+/* The crop rectangle exactly as the overlay draws it right now: TRUE iff
+ * the crop tool is active, its rectangle is laid out and the texture on
+ * screen is the base it is laid out on (_draw_crop's own condition), with
+ * the rectangle and that base's size in the out-params; FALSE whenever the
+ * overlay is hidden. A test seam: a test cannot read a snapshot, and every
+ * key or drag lays the rectangle out itself, so this is the only way to
+ * check "drawn on the new base without any input" after a rewrite. */
+gboolean tool_ctrl_get_crop_rect(ToolCtrl *p_tc, CropRect *p_rect,
+                                 gint *p_base_w, gint *p_base_h);
 
 G_END_DECLS
 

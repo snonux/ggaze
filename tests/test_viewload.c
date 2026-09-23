@@ -57,8 +57,11 @@ _fh_show_status(gpointer p_host, const char *c_msg) {
    p_h->c_status = g_strdup(c_msg);
 }
 
+/* A partial counts as a show like any other here (the counters below are
+ * about what reached the screen, not about what the host remembers). */
 static const ViewLoadHostOps FAKE_OPS = {
    .show_texture  = _fh_show_texture,
+   .show_partial  = _fh_show_texture,
    .update_header = _fh_update_header,
    .show_status   = _fh_show_status,
 };

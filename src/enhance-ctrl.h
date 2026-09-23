@@ -12,12 +12,12 @@
  * hold-Space compare flag, the file the preview applies to, the
  * saved-already flag, the enhance side panel and every card/picture it is
  * built of, and the Enhancer engine itself. window.c forwards only the
- * a/s/digit/Space/0/Esc/[/] actions and a few choke-point queries
- * (is_dirty, override_texture, nav_changed); the interactive crop and
- * straighten tools (tool-ctrl.c) edit the Transform through
- * enhance_ctrl_set_transform; every other enhance concern lives here (SRP:
- * window.c is layout + action routing, this module is the enhance
- * feature).
+ * a/s/digit/Space/0/Esc/[/] actions and a few choke-point calls
+ * (is_dirty, texture_shown, override_texture, nav_changed); the
+ * interactive crop and straighten tools (tool-ctrl.c) edit the Transform
+ * through enhance_ctrl_set_transform; every other enhance concern lives
+ * here (SRP: window.c is layout + action routing, this module is the
+ * enhance feature).
  *
  * The panel sits BESIDE the large view, inside the window's own widget tree
  * (the host hands over a slot to put it in), so the image keeps the whole
@@ -103,7 +103,10 @@ typedef struct {
    /* The navigator's current file (NULL if no folder is open or the folder
     * is empty). Safe to call in any state. */
    GFile *(*get_current_file)(gpointer p_host);
-   /* The cached texture for p_file (NULL if evicted), for hold-Space. */
+   /* The cached texture for p_file (NULL if evicted or stale). Used on a
+    * same-file rescan only, to tell a rewrite of the current file from the
+    * rescan a save's "-enhanced" copy causes (the cache's stamp answers it
+    * with no second stat). */
    GdkTexture *(*get_cached_texture)(gpointer p_host, GFile *p_file);
    /* The GtkBox beside the large view that the panel is appended to while
     * open (and removed from when closed). The window shows it only in the
@@ -121,6 +124,12 @@ typedef struct {
     * left running kept its working angle / turn and re-applied the
     * discarded state on the next nudge or Enter. */
    void (*abandon_tool)(gpointer p_host);
+   /* The current file's original on screen is another texture object than
+    * before (its first decode landed, or a reload after a rewrite / a
+    * discard decoded it again -- enhance_ctrl_texture_shown): a tool laid
+    * out on the previous one lays out again and redraws. Called from
+    * inside the window's texture choke point, before the viewer shows it. */
+   void (*original_changed)(gpointer p_host);
 } EnhanceUIHostOps;
 
 /* Continuation for enhance_ctrl_save_async: b_ok is TRUE on a real write. */
@@ -182,17 +191,17 @@ gboolean enhance_ctrl_is_pending(EnhanceCtrl *p_ctrl);
  * current state renders to: the last landed apply for the current mask and
  * render transform (a tool's override, else the committed one), with none
  * newer in flight; or, when that state needs no GEGL at all, the original
- * of the current file as this controller last learned it from the texture
- * cache (enhance_ctrl_get_base_size / enhance_ctrl_get_orig_size and a
- * Space press learn it; an original never learned is never current). It is
- * FALSE for the picture that is still up while a render is pending, for
- * the original shown under a held Space, and for another file's texture
- * waiting for a load to land. Pure identity comparisons, no cache lookup:
- * safe per snapshot and per pointer motion, and a `touch` on the file
- * (which stales its cache entry) cannot make an overlay vanish. The tools
- * draw the crop rectangle over, and measure drags on, only a texture this
- * says yes to: a size comparison could not tell 0 from 180 degrees, +a
- * from -a, or a preset toggled under the tool from the base it replaced. */
+ * of the current file as the viewer last showed it (learned through
+ * enhance_ctrl_texture_shown; an original not shown since the last
+ * navigation or rewrite is never current). It is FALSE for the picture
+ * that is still up while a render is pending, for the original shown under
+ * a held Space, and for another file's texture waiting for a load to land.
+ * Pure identity comparisons, no cache lookup: safe per snapshot and per
+ * pointer motion, and a `touch` on the file (which stales its cache entry)
+ * cannot make an overlay vanish. The tools draw the crop rectangle over,
+ * and measure drags on, only a texture this says yes to: a size comparison
+ * could not tell 0 from 180 degrees, +a from -a, or a preset toggled under
+ * the tool from the base it replaced. */
 gboolean enhance_ctrl_is_current_render(EnhanceCtrl *p_ctrl, GdkTexture *p_tex);
 
 /* TRUE while Space is held and the original is on screen in place of the
@@ -201,16 +210,16 @@ gboolean enhance_ctrl_is_hold_original(EnhanceCtrl *p_ctrl);
 
 /* The size of the base image the crop rectangle refers to (the original
  * after the current turn and straighten, crop ignored --
- * transform_base_size), or FALSE when the original's size is not known yet
- * (no apply has landed for this file and its texture is not cached). The
- * first successful call learns the original from the cache -- one lookup,
- * none once known -- which is what lets enhance_ctrl_is_current_render
- * recognise it on screen afterwards. */
+ * transform_base_size), or FALSE while the original's size is not known:
+ * the viewer has not shown the file's decode yet (enhance_ctrl_texture_
+ * shown) and no apply has landed for it. A pure read, safe from a draw
+ * callback: nothing is looked up. */
 gboolean enhance_ctrl_get_base_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
 
 /* The original's upright size on the same terms (FALSE when unknown): what
  * the straighten tool feeds transform_rebase_crop to keep a crop over the
- * same content while the angle changes the base. */
+ * same content while the angle changes the base, and what tells it the
+ * original is known before it measures a horizon at 0 degrees. */
 gboolean enhance_ctrl_get_orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
 
 /* How many preview renders (full decode + chain) this controller has
@@ -234,13 +243,29 @@ gboolean enhance_ctrl_is_open(EnhanceCtrl *p_ctrl);
 /* The hot-path override: returns the texture the viewer should show given the
  * natural candidate p_tex. An active, non-hold-original preview wins; else
  * p_tex is returned unchanged. Called from the window's single texture
- * choke point (_show_texture). */
+ * choke point (_show_texture). A pure query: it learns nothing. */
 GdkTexture *enhance_ctrl_override_texture(EnhanceCtrl *p_ctrl,
                                           GdkTexture  *p_tex);
 
-/* Hold-Space compare: TRUE shows the cached original (texturecache, cheap);
- * FALSE restores the cached modified texture. No-op if nothing is active or
- * the requested state is already in effect. */
+/* The window is about to show p_tex, a DECODED texture of the current file
+ * (a cache hit, a finished load -- never a progressive loader's low-res
+ * partial, and never this controller's own render or the original it
+ * re-shows under Space, which teach it nothing): remember it as the file's
+ * original, with its size. This is the one place the original's identity
+ * is learned, so it is exactly the object the viewer holds -- a same-file
+ * reload that decodes a new object (the file touched, a preset discarded)
+ * refreshes it, where an identity looked up once from the cache went stale
+ * and refused every tool action for good. Called from the window's texture
+ * choke point right before enhance_ctrl_override_texture, whatever that
+ * decides to show. When the object changed, a tool laid out on the old one
+ * is told through the host (original_changed). No lookup, no stat. */
+void enhance_ctrl_texture_shown(EnhanceCtrl *p_ctrl, GdkTexture *p_tex);
+
+/* Hold-Space compare: TRUE shows the original as the viewer last showed it
+ * (this controller's own reference -- an evicted or stale cache entry does
+ * not matter); FALSE restores the cached modified texture. No-op if nothing
+ * is active, the requested state is already in effect, or the file's decode
+ * has not been shown since a rewrite forgot it. */
 void enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold);
 
 /* --- action entry points (the GActions stay window-side; these do the work) */
@@ -275,8 +300,11 @@ gboolean enhance_ctrl_can_save(EnhanceCtrl *p_ctrl);
  * current file's IDENTITY actually changed (see the comment in the .c). An
  * open panel stays open and re-previews the new file. A rescan of the SAME
  * file re-checks the original against the texture cache: rewritten in
- * place (`e`, `!`) with another size, its size and identity are forgotten
- * and learned again from the fresh decode. */
+ * place (`e`, `!`), possibly with another size, its size and identity are
+ * forgotten (the reload that follows shows the fresh decode, which is
+ * learned) and an active preview is rendered again from the new contents;
+ * the rescan a save's "-enhanced" copy causes finds the entry fresh and
+ * changes nothing. */
 void enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl);
 
 /* Drop the current enhance preview and go back to the original (Esc, `0`,

@@ -132,7 +132,8 @@ G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
 
 /* --- forward decls ------------------------------------------------------- */
 static void     _load_current(GgazeWindow *p_win);
-static void     _show_texture(GgazeWindow *p_win, GdkTexture *p_tex);
+static void     _show_texture(GgazeWindow *p_win, GdkTexture *p_tex,
+                              gboolean b_decoded);
 static void     _update_header(GgazeWindow *p_win);
 static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
 static void     _show_info(GgazeWindow *p_win);
@@ -1302,9 +1303,11 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * no controller (p_enhance_ctrl stays NULL) and the actions/public API below
  * are stubs. */
 #if GGAZE_HAVE_GEGL
+/* The controller's own textures (its render, the original it re-shows
+ * under Space) teach it nothing about the original: never "decoded". */
 static void
 _ec_show_texture(gpointer p_host, GdkTexture *p_tex) {
-   _show_texture(GGAZE_WINDOW(p_host), p_tex);
+   _show_texture(GGAZE_WINDOW(p_host), p_tex, FALSE);
 }
 
 static void
@@ -1362,6 +1365,14 @@ _ec_abandon_tool(gpointer p_host) {
    }
 }
 
+static void
+_ec_original_changed(gpointer p_host) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_host);
+   if (p_win->p_tool_ctrl != NULL) {
+      tool_ctrl_original_changed(p_win->p_tool_ctrl);
+   }
+}
+
 static const EnhanceUIHostOps _ENHANCE_OPS = {
    .show_texture       = _ec_show_texture,
    .update_header      = _ec_update_header,
@@ -1373,6 +1384,7 @@ static const EnhanceUIHostOps _ENHANCE_OPS = {
    .panel_slot         = _ec_panel_slot,
    .has_navigator      = _ec_has_navigator,
    .abandon_tool       = _ec_abandon_tool,
+   .original_changed   = _ec_original_changed,
 };
 
 /* win.enhance (key 'a'): open the side panel beside the large view (with a
@@ -1543,6 +1555,14 @@ ggaze_window_enhance_render_count(GgazeWindow *p_win) {
    return (enhance_ctrl_get_render_count(p_win->p_enhance_ctrl));
 }
 
+gboolean
+ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
+                            gint *p_base_w, gint *p_base_h) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (
+      tool_ctrl_get_crop_rect(p_win->p_tool_ctrl, p_rect, p_base_w, p_base_h));
+}
+
 /* The tools' key controller (window-level, capture phase, see
  * _init_tool_state): while a tool is active its modal keys are answered
  * here and STOPPED, so the GLOBAL-scope shortcut table (which runs later, in
@@ -1670,6 +1690,16 @@ guint
 ggaze_window_enhance_render_count(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
    return (0); /* no GEGL, no renders */
+}
+
+gboolean
+ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
+                            gint *p_base_w, gint *p_base_h) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   (void)p_rect;
+   (void)p_base_w;
+   (void)p_base_h;
+   return (FALSE); /* no tool, no rectangle */
 }
 static void
 _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
@@ -2514,8 +2544,12 @@ _action_empty_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 
 /* --- load current into the viewer ---------------------------------------- */
 
+/* b_decoded says p_tex is the current file's own decode (a cache hit, a
+ * finished load): the one kind of texture the enhance controller learns
+ * the original from. A progressive loader's low-res partial and the
+ * controller's own textures pass FALSE. */
 static void
-_show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
+_show_texture(GgazeWindow *p_win, GdkTexture *p_tex, gboolean b_decoded) {
    /* Only update the viewer's texture here; do NOT force the stack to "large".
     * The stack is owned by the caller: file-open / toggle / grid-activate set
     * "large" themselves before loading, and directory-open sets "grid".
@@ -2529,9 +2563,20 @@ _show_texture(GgazeWindow *p_win, GdkTexture *p_tex) {
     * Point-patching _on_grid_activate was not enough: the pipeline only
     * paints synchronously on a texturecache HIT, so on a miss the async
     * finish landed after the restore and the plain original won the race;
-    * and the view toggle (`t`, `t`) never had the patch at all. */
+    * and the view toggle (`t`, `t`) never had the patch at all.
+    *
+    * The same funnel is where the controller learns the current file's
+    * original: every decode the viewer is handed goes past it here, so the
+    * identity it remembers is exactly the object on screen -- also after a
+    * same-file reload that decoded a new one (the file touched, a preset
+    * discarded), which an identity looked up once from the cache missed. */
 #if GGAZE_HAVE_GEGL
+   if (b_decoded) {
+      enhance_ctrl_texture_shown(p_win->p_enhance_ctrl, p_tex);
+   }
    p_tex = enhance_ctrl_override_texture(p_win->p_enhance_ctrl, p_tex);
+#else
+   (void)b_decoded;
 #endif
    ggaze_viewer_set_texture(GGAZE_VIEWER(p_win->p_viewer), p_tex);
 }
@@ -2550,7 +2595,15 @@ _load_current(GgazeWindow *p_win) {
 
 static void
 _vl_show_texture(gpointer p_host, GdkTexture *p_tex) {
-   _show_texture(GGAZE_WINDOW(p_host), p_tex);
+   _show_texture(GGAZE_WINDOW(p_host), p_tex, TRUE);
+}
+
+/* A low-res stand-in for the file still decoding: shown like any texture
+ * (an active preview still wins over it), but it is not the original and
+ * nothing may remember it as such -- the full decode replaces it. */
+static void
+_vl_show_partial(gpointer p_host, GdkTexture *p_tex) {
+   _show_texture(GGAZE_WINDOW(p_host), p_tex, FALSE);
 }
 
 static void
@@ -2565,6 +2618,7 @@ _vl_show_status(gpointer p_host, const char *c_msg) {
 
 static const ViewLoadHostOps _VIEWLOAD_OPS = {
    .show_texture  = _vl_show_texture,
+   .show_partial  = _vl_show_partial,
    .update_header = _vl_update_header,
    .show_status   = _vl_show_status,
 };

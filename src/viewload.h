@@ -40,9 +40,16 @@ typedef struct ViewLoad ViewLoad;
 /* Host-side operations. p_host is borrowed for the duration of each call and
  * is never called after viewload_dispose(). */
 typedef struct {
-   /* Put p_tex on screen (NULL clears the canvas). The host applies its own
-    * overrides here (e.g. an active enhance preview). */
+   /* Put p_tex -- the current file's decoded texture, from the cache or a
+    * finished load -- on screen (NULL clears the canvas). The host applies
+    * its own overrides here (e.g. an active enhance preview) and may
+    * remember p_tex as the file's picture. */
    void (*show_texture)(gpointer p_host, GdkTexture *p_tex);
+   /* Put a progressive loader's low-res partial of the file still decoding
+    * on screen: a stand-in the full result replaces through show_texture,
+    * never the file's picture -- the host must not remember it as such
+    * (its size is not the image's). */
+   void (*show_partial)(gpointer p_host, GdkTexture *p_tex);
    /* Refresh the title after the current file changed. */
    void (*update_header)(gpointer p_host);
    /* Transient status line for a load failure. */

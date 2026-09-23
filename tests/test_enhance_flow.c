@@ -58,6 +58,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
+#include "croprect.h"
 #include "enhance-ui.h"
 #include "gridview.h"
 #include "gtk_helpers.h"
@@ -2807,6 +2808,52 @@ assert_texture_size(GgazeWindow *p_win, gint i_w, gint i_h) {
    g_assert_cmpint(gdk_texture_get_height(p_tex), ==, i_h);
 }
 
+/* Bump c_path's mtime (5 s into the future, so it differs whatever the
+ * clock did): the texture cache's stamp is stale afterwards -- the next
+ * load decodes a NEW texture object -- while the folder monitor, which
+ * ignores attribute changes, schedules no rescan. */
+static void
+touch_file(const char *c_path) {
+   GFile *p_f = g_file_new_for_path(c_path);
+   g_assert_true(g_file_set_attribute_uint64(
+      p_f, G_FILE_ATTRIBUTE_TIME_MODIFIED, (guint64)time(NULL) + 5,
+      G_FILE_QUERY_INFO_NONE, NULL, NULL));
+   g_object_unref(p_f);
+}
+
+/* Pump until the viewer shows a texture that is neither p_a nor p_b (a
+ * reload's fresh decode of the same file, told from the texture it
+ * replaced AND the original it re-decodes), up to 5 s; asserts it did. */
+static void
+wait_for_fresh_texture(GgazeWindow *p_win, GdkTexture *p_a, GdkTexture *p_b) {
+   for (guint u = 0; u < 5000; u++) {
+      GdkTexture *p_tex = viewer_texture(p_win);
+      if (p_tex != NULL && p_tex != p_a && p_tex != p_b) {
+         break;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   ggtest_drain_main(50);
+   GdkTexture *p_tex = viewer_texture(p_win);
+   g_assert_nonnull(p_tex);
+   g_assert_true(p_tex != p_a && p_tex != p_b);
+}
+
+/* Rewrite c_path in place as a 200x150 PNG of another colour: another size
+ * AND another byte count, so the cache's mtime/size stamp misses even when
+ * the rewrite lands within the same second, and the folder monitor's
+ * rescan follows (a content change, unlike touch_file's). */
+static void
+rewrite_as_200x150(const char *c_path) {
+   GdkPixbuf *p_pix = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 200, 150);
+   gdk_pixbuf_fill(p_pix, 0x99cc33ffu);
+   GError *p_err = NULL;
+   g_assert_true(gdk_pixbuf_save(p_pix, c_path, "png", &p_err, NULL));
+   g_assert_no_error(p_err);
+   g_object_unref(p_pix);
+}
+
 /* Fire c_action and wait for the async preview to replace the texture. */
 static void
 fire_and_wait(GgazeWindow *p_win, const char *c_action) {
@@ -4114,9 +4161,14 @@ test_refused_drag_begin_grabs_nothing(void) {
  * motion made a `touch` on the file (its mtime bumped -- an attribute
  * change the folder monitor ignores, so nothing reloads) drop the
  * rectangle mid-session. Here the file is touched AND the cache emptied
- * under an open crop tool: the next drag still moves the rectangle and
- * Enter still commits it. Before the fix the drag was ignored and Enter
- * answered "Preview still rendering" for ever. */
+ * under an open crop tool, and then the same file is RELOADED under it (a
+ * preset toggled on and off again: the restore misses the emptied cache
+ * and decodes a new texture object): the next drag still moves the
+ * rectangle and Enter still commits it. Before the round-4 fix the drag
+ * was ignored and Enter answered "Preview still rendering" for ever; a
+ * remembered identity that was never refreshed (round 4) passed the touch
+ * and failed the reload the same way, which is what the reload step tells
+ * apart. */
 static void
 test_crop_overlay_survives_a_touch(void) {
    ToolFx fx;
@@ -4131,14 +4183,17 @@ test_crop_overlay_survives_a_touch(void) {
                           g.d_x + TOOL_W * d_s, g.d_y + TOOL_H * d_s);
    ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 300 * d_s,
                           g.d_y + 200 * d_s);
-   GFile *p_f = g_file_new_for_path(fx.c_path);
-   g_assert_true(g_file_set_attribute_uint64(
-      p_f, G_FILE_ATTRIBUTE_TIME_MODIFIED, (guint64)time(NULL) + 5,
-      G_FILE_QUERY_INFO_NONE, NULL, NULL));
-   g_object_unref(p_f);
+   touch_file(fx.c_path);
    ggaze_window_clear_texture_cache(fx.p_win); /* the entry is gone */
    ggtest_drain_main(400); /* past the monitor's debounce: no rescan */
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   fire_and_wait(fx.p_win, "win.enhance-1"); /* a preset under the tool */
+   GdkTexture *p_render = ref_viewer_texture(fx.p_win);
+   fire(fx.p_win, "win.enhance-1"); /* off again: the restore reloads */
+   wait_for_fresh_texture(fx.p_win, p_render, fx.p_orig);
+   g_object_unref(p_render);
+   assert_texture_size(fx.p_win, TOOL_W, TOOL_H);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN, g.d_x + 100 * d_s,
                           g.d_y + 100 * d_s);
@@ -4217,17 +4272,143 @@ test_rewritten_file_rebases_the_crop_tool(void) {
    fire(fx.p_win, "win.back");               /* Esc: discarded, original */
    ggtest_drain_main(100);
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
-   /* Another size AND another byte count, so the cache's mtime/size stamp
-    * misses even when the rewrite lands within the same second. */
-   GdkPixbuf *p_pix = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 200, 150);
-   gdk_pixbuf_fill(p_pix, 0x99cc33ffu);
-   GError *p_err = NULL;
-   g_assert_true(gdk_pixbuf_save(p_pix, fx.c_path, "png", &p_err, NULL));
-   g_assert_no_error(p_err);
-   g_object_unref(p_pix);
+   rewrite_as_200x150(fx.c_path);
    wait_for_texture_size(fx.p_win, 200, 150); /* the rescan reloaded it */
    g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "tool.png"));
    fire(fx.p_win, "win.crop");
+   for (guint u = 0; u < 10; u++) {
+      tool_key(fx.p_win, GDK_KEY_H);
+   }
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_texture_size(fx.p_win, 190, 150);
+   tool_fx_close(&fx);
+}
+
+/* The original's identity is learned where the viewer learns it -- the
+ * window's texture choke point, for every decoded texture it shows -- not
+ * once from the cache. A same-file reload WITHOUT a rescan (`c`, Esc, a
+ * preset, the file touched, Esc: the discard's restore finds the cache
+ * entry stale and decodes a NEW texture object for the same file) used to
+ * leave the remembered identity on the old object: every later `c` +
+ * Enter was refused with "Preview still rendering", the rectangle never
+ * drawn, a horizon drag at 0 degrees refused the same way, and Space (a
+ * no-op with nothing active) could not cure it. Now the reload teaches the
+ * controller the new object and both tools work on it at once. */
+static void
+test_reload_refreshes_the_original_identity(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop"); /* the tool learns the original ... */
+   fire(fx.p_win, "win.back"); /* ... and Esc cancels it */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   fire_and_wait(fx.p_win, "win.enhance-1");
+   GdkTexture *p_render = ref_viewer_texture(fx.p_win);
+   touch_file(fx.c_path);      /* the cache entry is stale now */
+   fire(fx.p_win, "win.back"); /* Esc: discarded -> the restore reloads */
+   wait_for_fresh_texture(fx.p_win, p_render, fx.p_orig);
+   g_object_unref(p_render);
+   assert_texture_size(fx.p_win, TOOL_W, TOOL_H);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   GgazeViewer *p_v = GGAZE_VIEWER(
+      gtk_stack_get_child_by_name(ggaze_window_get_stack(fx.p_win), "large"));
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   gdouble d_s = g.d_scale;
+   fire(fx.p_win, "win.straighten"); /* a horizon at 0 degrees: accepted */
+   GdkTexture *p_before = ref_viewer_texture(fx.p_win);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN, g.d_x + 50 * d_s,
+                          g.d_y + 100 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 150 * d_s,
+                          g.d_y + 117.63 * d_s);
+   wait_for_texture_change(fx.p_win, p_before);
+   g_object_unref(p_before);
+   g_assert_nonnull(
+      g_strstr_len(window_title(fx.p_win), -1, "straighten 10.0° CCW"));
+   fire(fx.p_win, "win.back"); /* Esc: back to 0 degrees, reloaded again */
+   ggtest_drain_main(300);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   assert_texture_size(fx.p_win, TOOL_W, TOOL_H);
+   fire(fx.p_win, "win.crop");
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   d_s = g.d_scale;
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN,
+                          g.d_x + TOOL_W * d_s, g.d_y + TOOL_H * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 300 * d_s,
+                          g.d_y + 200 * d_s);
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return); /* accepted, not refused */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   assert_texture_size(fx.p_win, 300, 200);
+   tool_fx_close(&fx);
+}
+
+/* A preset is active when the file is rewritten in place with another
+ * size: the rescan finds the original evicted (a real rewrite, not the
+ * "-enhanced" copy a save writes next to it, whose rescan keeps a fresh
+ * entry and must not re-render -- the render count says so) and renders
+ * the preview again from the file as it is now, so what is on screen is a
+ * NEW render of the NEW size, and hold-Space compares it against the new
+ * original. Before the fix the preview kept showing the old 400x300 render
+ * over a 200x150 file until the next state change. */
+static void
+test_rewrite_under_a_preset_rerenders(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.enhance-1");
+   GdkTexture *p_r1 = ref_viewer_texture(fx.p_win);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, 1);
+   fire(fx.p_win, "win.enhance-save");
+   char *c_out = g_build_filename(fx.c_dir, "tool-enhanced.png", NULL);
+   wait_for_file(c_out);
+   g_free(c_out);
+   ggtest_drain_main(700); /* past the monitor's debounce: the copy's
+                            * rescan, with a fresh entry: no re-render */
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, 1);
+   g_assert_true(viewer_texture(fx.p_win) == p_r1);
+   rewrite_as_200x150(fx.c_path);
+   wait_for_texture_size(fx.p_win, 200, 150); /* a new render, new size */
+   g_assert_true(viewer_texture(fx.p_win) != p_r1);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, 2);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "Auto-fix"));
+   GdkTexture *p_r2 = ref_viewer_texture(fx.p_win);
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   ggtest_drain_main(50);
+   GdkTexture *p_held = viewer_texture(fx.p_win);
+   g_assert_nonnull(p_held);
+   g_assert_true(p_held != p_r2 && p_held != fx.p_orig); /* the new one */
+   assert_texture_size(fx.p_win, 200, 150);
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   ggtest_drain_main(50);
+   g_assert_true(viewer_texture(fx.p_win) == p_r2);
+   g_object_unref(p_r2);
+   g_object_unref(p_r1);
+   tool_fx_close(&fx);
+}
+
+/* The crop tool is OPEN when the file is rewritten in place with another
+ * size: once the rescan's reload has put the new picture on screen the
+ * rectangle is laid out on the new base and drawn over it with no key
+ * pressed and nothing dragged (the reload teaches the controller the new
+ * original, and the controller tells the tool). It used to stay hidden --
+ * laid out on the old 400x300 base, over a picture that was no longer it
+ * -- until the first key or drag laid it out again. */
+static void
+test_crop_tool_relays_out_on_the_rewritten_base(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop");
+   CropRect t_rect;
+   gint     i_bw, i_bh;
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
+   g_assert_cmpint(i_bw, ==, TOOL_W);
+   g_assert_cmpint(i_bh, ==, TOOL_H);
+   rewrite_as_200x150(fx.c_path);
+   wait_for_texture_size(fx.p_win, 200, 150); /* the rescan reloaded it */
+   ggtest_drain_main(100);                    /* a frame, nothing else */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
+   g_assert_cmpint(i_bw, ==, 200);
+   g_assert_cmpint(i_bh, ==, 150);
+   g_assert_true(croprect_is_full(&t_rect, 200.0, 150.0));
    for (guint u = 0; u < 10; u++) {
       tool_key(fx.p_win, GDK_KEY_H);
    }
@@ -4492,6 +4673,20 @@ add_tool_review4_tests(void) {
                    test_rewritten_file_rebases_the_crop_tool);
 }
 
+/* wb2 fifth review round: the original's identity is learned at the
+ * window's texture choke point (a same-file reload refreshes it), a rewrite
+ * under a preset re-renders, and a crop tool open through a rewrite is laid
+ * out on the new base without any input. */
+static void
+add_tool_review5_tests(void) {
+   g_test_add_func("/enhance_flow/reload_refreshes_the_original_identity",
+                   test_reload_refreshes_the_original_identity);
+   g_test_add_func("/enhance_flow/rewrite_under_a_preset_rerenders",
+                   test_rewrite_under_a_preset_rerenders);
+   g_test_add_func("/enhance_flow/crop_tool_relays_out_on_rewritten_base",
+                   test_crop_tool_relays_out_on_the_rewritten_base);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -4526,5 +4721,6 @@ main(int i_argc, char **c_argv) {
    add_tool_review2_tests();
    add_tool_review3_tests();
    add_tool_review4_tests();
+   add_tool_review5_tests();
    return (g_test_run());
 }

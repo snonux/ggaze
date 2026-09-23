@@ -108,12 +108,12 @@ _shown_is_current(ToolCtrl *p_tc) {
 }
 
 /* TRUE iff the controller can name the picture the tool works on: the
- * original's identity and size are learned from the texture cache on first
- * need (enhance_ctrl_get_orig_size) -- one lookup then, none once known --
- * so _shown_is_current, run per frame and per pointer motion, stays a pure
- * comparison. FALSE while the original is not decoded yet. The crop tool
- * gets this through _ensure_rect (the base size); the straighten tool at 0
- * degrees, with nothing rendered, has to ask before measuring a horizon. */
+ * original's identity and size, learned as the window showed its decode
+ * (enhance_ctrl_texture_shown), so this and _shown_is_current -- run per
+ * frame and per pointer motion -- are pure reads. FALSE while the original
+ * is not decoded yet. The crop tool gets this through _ensure_rect (the
+ * base size); the straighten tool at 0 degrees, with nothing rendered, has
+ * to ask before measuring a horizon. */
 static gboolean
 _original_known(ToolCtrl *p_tc) {
    gint i_w, i_h;
@@ -313,9 +313,11 @@ _refit_rect(ToolCtrl *p_tc, gint i_w, gint i_h) {
 
 /* Lay the rectangle out on the base image (the whole of it, or the crop the
  * tool started with -- refitted, see _refit_rect), or refit it when the
- * base changed size under it. FALSE while the base size is not known yet;
- * the first success also teaches the controller the original's identity
- * (_original_known), so every later _shown_is_current is a comparison. */
+ * base changed size under it (a rewrite in place, tool_ctrl_original_
+ * changed). FALSE while the base size is not known yet -- the file's
+ * decode has not been shown -- in which case it is laid out as soon as it
+ * is (tool_ctrl_original_changed again). A pure read of the controller:
+ * nothing is looked up. */
 static gboolean
 _ensure_rect(ToolCtrl *p_tc) {
    gint i_w, i_h;
@@ -980,4 +982,32 @@ tool_ctrl_nav_changed(ToolCtrl *p_tc) {
        * the preview already belongs to it. */
       _leave(p_tc);
    }
+}
+
+void
+tool_ctrl_original_changed(ToolCtrl *p_tc) {
+   g_return_if_fail(p_tc != NULL);
+   if (p_tc->e_tool == GGAZE_TOOL_NONE) {
+      return;
+   }
+   if (p_tc->e_tool == GGAZE_TOOL_CROP) {
+      _ensure_rect(p_tc); /* the new base: laid out, or refitted */
+   }
+   _redraw(p_tc);
+}
+
+gboolean
+tool_ctrl_get_crop_rect(ToolCtrl *p_tc, CropRect *p_rect, gint *p_base_w,
+                        gint *p_base_h) {
+   g_return_val_if_fail(p_tc != NULL && p_rect != NULL && p_base_w != NULL &&
+                           p_base_h != NULL,
+                        FALSE);
+   if (p_tc->e_tool != GGAZE_TOOL_CROP || !p_tc->b_rect_set ||
+       !_shown_is_current(p_tc)) {
+      return (FALSE); /* hidden: the same test _draw_crop makes */
+   }
+   *p_rect   = p_tc->t_rect;
+   *p_base_w = p_tc->i_base_w;
+   *p_base_h = p_tc->i_base_h;
+   return (TRUE);
 }

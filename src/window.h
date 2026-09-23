@@ -20,6 +20,7 @@
 
 #include <gtk/gtk.h>
 
+#include "croprect.h"    /* CropRect, for the crop-rectangle seam */
 #include "ggaze-enums.h" /* GgazeTool */
 #include "viewer.h"      /* GgazeViewerDragPhase */
 
@@ -179,6 +180,15 @@ void ggaze_window_tool_drag(GgazeWindow *p_win, GgazeViewerDragPhase e_phase,
  * tests/test_enhance_flow.c pins that a burst of N changes costs at most two
  * launches. */
 guint ggaze_window_enhance_render_count(GgazeWindow *p_win);
+
+/* The crop rectangle as the overlay draws it right now (tool_ctrl_get_crop_
+ * rect): TRUE with the rectangle and the size of the base it is laid out on
+ * iff the crop tool is up and its overlay is visible over the texture on
+ * screen; FALSE while it is hidden, with no tool, and always without GEGL.
+ * A test seam for "the overlay follows a rewrite of the file with no key
+ * pressed" (tests/test_enhance_flow.c). */
+gboolean ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
+                                     gint *p_base_w, gint *p_base_h);
 
 /* --- INTERNAL: bulk-delete safety (used by the confirm-dialog flow and the
  * delete-safety regression test) -------------------------------------------
