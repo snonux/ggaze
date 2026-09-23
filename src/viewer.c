@@ -298,31 +298,32 @@ ggaze_viewer_measure(GtkWidget *p_widget, GtkOrientation o, int i_for_size,
    *p_nat_bl = -1;
 }
 
+/* The background colour for e_bg (configurable via settings, applied by
+ * the window). */
+static GdkRGBA
+_background_rgba(GgazeBackground e_bg) {
+   switch (e_bg) {
+   case GGAZE_BG_BLACK:
+      return ((GdkRGBA){0.0f, 0.0f, 0.0f, 1.0f});
+   case GGAZE_BG_GREY:
+      return ((GdkRGBA){0.2f, 0.2f, 0.2f, 1.0f});
+   case GGAZE_BG_CHECKER:
+      /* Flat mid-grey placeholder; a real checkerboard pattern would be drawn
+       * here. Keeps the background distinct from dark/grey for now. */
+      return ((GdkRGBA){0.3f, 0.3f, 0.3f, 1.0f});
+   case GGAZE_BG_DARK:
+   default:
+      return ((GdkRGBA){0.07f, 0.07f, 0.07f, 1.0f});
+   }
+}
+
 static void
 ggaze_viewer_snapshot(GtkWidget *p_widget, GtkSnapshot *p_snap) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_widget);
    int          i_w = gtk_widget_get_width(p_widget);
    int          i_h = gtk_widget_get_height(p_widget);
 
-   /* Dark background (configurable via settings, applied by the window). */
-   GdkRGBA bg;
-   switch (p_v->e_bg) {
-   case GGAZE_BG_BLACK:
-      bg = (GdkRGBA){0.0f, 0.0f, 0.0f, 1.0f};
-      break;
-   case GGAZE_BG_GREY:
-      bg = (GdkRGBA){0.2f, 0.2f, 0.2f, 1.0f};
-      break;
-   case GGAZE_BG_CHECKER:
-      /* Flat mid-grey placeholder; a real checkerboard pattern would be drawn
-       * here. Keeps the background distinct from dark/grey for now. */
-      bg = (GdkRGBA){0.3f, 0.3f, 0.3f, 1.0f};
-      break;
-   case GGAZE_BG_DARK:
-   default:
-      bg = (GdkRGBA){0.07f, 0.07f, 0.07f, 1.0f};
-      break;
-   }
+   GdkRGBA         bg = _background_rgba(p_v->e_bg);
    graphene_rect_t bg_rect =
       GRAPHENE_RECT_INIT(0.f, 0.f, (float)i_w, (float)i_h);
    gtk_snapshot_append_color(p_snap, &bg, &bg_rect);
