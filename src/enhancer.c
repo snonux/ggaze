@@ -1222,7 +1222,10 @@ _space_name_ok(const Babl *p_space) {
  * 0.0019 (a Rec. 709 type 4 'para' with e = f = 0.0019 against the plain
  * type 3, ~6 sRGB steps at black), a knee at 0.025 against one at 0.095
  * (0.0047 apart at 0.095, ~16 steps against ~3). A swapped curve closer
- * than that passes, off by at most about one display step near black. A
+ * than that at the probes passes: about one display step off at them, and
+ * up to ~3 steps (review 9, a searched worst case) between black and the
+ * first even probe, at input codes of about 1 to 5, where only the
+ * profile's own knee is probed. A
  * curve babl approximates worse than the tolerance on its own -- a to-
  * linear gamma under 1 of d 0, 0.0053 off at black for 0.45 -- is
  * declined on any babl. The relative term keeps float rounding of values

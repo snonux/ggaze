@@ -637,8 +637,10 @@ cleanly, so a file reaches them only through:
     approximation of a real formula curve is off by at most 3.1e-4 (a type
     3 `para` of `d` 0 and gamma 1.1–1.2, at black only) and by 7e-5 or less
     elsewhere; 4e-4 is about one 8-bit sRGB display step at black and finer
-    above, so a swapped curve closer than that still passes, off by at most
-    about that. A curve babl itself approximates worse — a to-linear gamma
+    above, so a swapped curve closer than that at the probes still passes:
+    off by about that at them, and by up to ~3 steps between black and the
+    first even probe (1/63), at input codes of about 1 to 5, where only the
+    profile's own knee is probed (review 9). A curve babl itself approximates worse — a to-linear gamma
     under 1 with `d` 0, 0.0053 off at black for 0.45 — is declined on any
     babl. Table
     curves are not checked — babl tells tables apart byte for byte and
