@@ -591,8 +591,9 @@ test_colorspace_padded_jpeg(void) {
       char *c_data = NULL;
       gsize u_len  = 0;
       g_assert_true(g_file_get_contents(c_src, &c_data, &u_len, NULL));
-      gsize    u_seg = 4 + (((gsize)(guint8)c_data[4] << 8) |
-                            (guint8)c_data[5]); /* after the first segment */
+      /* the offset right after the first segment */
+      gsize    u_hi  = (guint8)c_data[4];
+      gsize    u_seg = 4 + ((u_hi << 8) | (guint8)c_data[5]);
       GString *p_pad = g_string_new_len(c_data, (gssize)u_seg);
       g_string_append_len(p_pad, "\x00\x11\x22", 3);
       g_string_append_len(p_pad, c_data + u_seg, (gssize)(u_len - u_seg));

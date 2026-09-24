@@ -383,25 +383,37 @@ icc_extract(const guint8 *p_data, gsize u_len, GError **p_err) {
    return (p_icc);
 }
 
-/* --- the iCCP libpng keeps (xb2 review 5) --------------------------------
+/* --- the iCCP libpng keeps (xb2 reviews 5 and 6) --------------------------
  *
- * gegl:png-load tags its buffer from what libpng hands it: the iCCP
- * profile when libpng kept one, else -- with a gAMA chunk -- a space babl
- * builds from gAMA / cHRM, a new space and curve per file OUTSIDE the
- * enhancer's slot cap (110 such files filled babl's tables and the next
- * profile crashed it). libpng drops an iCCP for reasons babl does not
- * share, so a PNG is managed only when the profile ggaze vets is the one
- * GEGL will use, which is when every rule below holds. They are libpng
- * 1.6's, the fatal ones: 1.6.40 (fedora:40) and 1.6.58 agree on them
- * (png.c png_icc_check_length / _header / _tag_table, pngrutil.c
- * png_handle_iCCP); the warnings are left out.
+ * gegl:png-load (0.4.58 and 0.4.72 alike, gegl_png_space) tags its buffer
+ * from what libpng hands it, in this order: the iCCP profile when libpng
+ * kept one -- and then nothing else, even when babl declines it -- else
+ * sRGB for an sRGB chunk, else, with a gAMA chunk, a space babl builds
+ * from gAMA / cHRM: a new space and curve per file OUTSIDE the enhancer's
+ * slot cap (110 such files filled babl's tables and the next profile
+ * crashed it). libpng drops an iCCP for reasons babl does not share, so a
+ * PNG is managed only when the profile ggaze vets is the one GEGL will
+ * use, which is when every rule below holds; then the gAMA / cHRM fallback
+ * is never reached. They are libpng 1.6's, the fatal ones, as 1.6.40
+ * (fedora:40) and 1.6.58 apply them (png.c png_icc_check_length / _header
+ * / _tag_table, png_colorspace_set_gamma / _check_xy, pngrutil.c
+ * png_handle_iCCP / _gAMA / _cHRM / _sRGB, 1.6.58's png_handle_chunk);
+ * where they differ the stricter one is taken, and the warnings are left
+ * out.
  *   - one iCCP, before PLTE (a second one is "duplicate", one after PLTE
  *     "out of place"), with its stored CRC right (whatever a given libpng
  *     does with a damaged ancillary chunk, it is not vouched for);
- *   - no gAMA, cHRM or sRGB chunk at all: those are what GEGL falls back
- *     on, and libpng 1.6.40 ranks them against the iCCP by its own rules
- *     (an sRGB before the iCCP makes it drop the iCCP). The corpus's
- *     profiled PNGs carry none;
+ *   - no sRGB chunk. 1.6.40 allows one sRGB-or-iCCP: an sRGB before the
+ *     iCCP makes it skip the iCCP, one after marks the colour space
+ *     invalid, which throws the iCCP away (1.6.58 keeps both);
+ *   - at most one gAMA and one cHRM, before PLTE, of their exact lengths
+ *     (4 and 32 bytes), CRCs right, and values 1.6.40 accepts: a gamma of
+ *     16 to 625 000 000, chromaticities its round trip passes (below).
+ *     1.6.40 invalidates the colour space -- dropping the iCCP, before or
+ *     after it -- for a duplicate or an out-of-range value, and a cHRM
+ *     overflowing its arithmetic fails the load. gegl:png-save writes
+ *     gAMA and cHRM beside the iCCP (so do GIMP and ImageMagick), so
+ *     ggaze's own exports rely on this;
  *   - the profile: 132 bytes or more, at most ICC_PNG_MAX_PROFILE_LEN;
  *     a v4 or later one a multiple of 4 long; 'acsp'; a tag table inside
  *     it (12 bytes an entry) whose tags lie inside it; a rendering intent
@@ -421,10 +433,215 @@ typedef struct {
    guint8   u_ctype; /* IHDR's colour type */
    gboolean b_ihdr;  /* IHDR was read */
    gboolean b_plte;  /* a PLTE was seen: an iCCP now is out of place */
-   gboolean b_other; /* a gAMA, cHRM or sRGB chunk */
-   gboolean b_bad;   /* an iCCP libpng would not keep: stop */
+   gboolean b_gama;  /* a gAMA was taken: a second one is a duplicate */
+   gboolean b_chrm;  /* a cHRM was taken: likewise */
+   gboolean b_bad;   /* a chunk that costs the iCCP on some libpng: stop */
    GBytes  *p_iccp;  /* the iCCP chunk's data, CRC checked */
 } PngColour;
+
+/* --- libpng 1.6.40's cHRM check, ported ----------------------------------
+ *
+ * libpng 1.6.40 runs a cHRM's chromaticities through png_colorspace_check_
+ * xy (png.c): xy -> XYZ -> xy in its own fixed point (1.0 = 100000), with
+ * png_muldiv's floating-point build (the default, and Fedora's), and the
+ * round trip within 5. A set that fails marks the colour space invalid,
+ * which throws the iCCP away (read before or after it), and an internal
+ * overflow is a png_error that fails the whole load; 1.6.58 checks
+ * nothing at read time. So a cHRM beside an iCCP is vouched for only when
+ * this port of 1.6.40's arithmetic -- int32 wrap-around included -- passes
+ * it. x[] is the chunk's order: white, red, green, blue, x then y. */
+
+#define PNG_FP_1 100000
+
+/* png_muldiv: a * times / divisor, rounded; FALSE on overflow or a zero
+ * divisor. */
+static gboolean
+_png_muldiv(gint32 *p_res, gint32 a, gint32 times, gint32 divisor) {
+   if (divisor == 0) {
+      return (FALSE);
+   }
+   if (a == 0 || times == 0) {
+      *p_res = 0;
+      return (TRUE);
+   }
+   double r = a;
+   r *= times;
+   r /= divisor;
+   r = floor(r + .5);
+   if (r > 2147483647. || r < -2147483648.) {
+      return (FALSE);
+   }
+   *p_res = (gint32)r;
+   return (TRUE);
+}
+
+/* png_reciprocal: 1E10 / a, rounded; 0 on overflow. */
+static gint32
+_png_reciprocal(gint32 a) {
+   double r = floor(1E10 / a + .5);
+   return (r <= 2147483647. && r >= -2147483648. ? (gint32)r : 0);
+}
+
+/* libpng's int32 sums and differences, which wrap (as two's complement). */
+static gint32
+_png_add(gint32 a, gint32 b) {
+   return ((gint32)((guint32)a + (guint32)b));
+}
+
+static gint32
+_png_sub(gint32 a, gint32 b) {
+   return ((gint32)((guint32)a - (guint32)b));
+}
+
+/* png_XYZ_from_xy's first half: the red and green inverse scales and the
+ * blue scale (c_s[0..2]). 0, or libpng's 1 (invalid) / 2 (png_error). */
+static int
+_png_xy_scales(const gint32 *x, gint32 *c_s) {
+   gint32 l, r;
+   if (!_png_muldiv(&l, x[4] - x[6], x[3] - x[7], 7) ||
+       !_png_muldiv(&r, x[5] - x[7], x[2] - x[6], 7)) {
+      return (2);
+   }
+   gint32 u_den = _png_sub(l, r);
+   if (!_png_muldiv(&l, x[4] - x[6], x[1] - x[7], 7) ||
+       !_png_muldiv(&r, x[5] - x[7], x[0] - x[6], 7)) {
+      return (2);
+   }
+   if (!_png_muldiv(&c_s[0], x[1], u_den, _png_sub(l, r)) || c_s[0] <= x[1]) {
+      return (1);
+   }
+   if (!_png_muldiv(&l, x[3] - x[7], x[0] - x[6], 7) ||
+       !_png_muldiv(&r, x[2] - x[6], x[1] - x[7], 7)) {
+      return (2);
+   }
+   if (!_png_muldiv(&c_s[1], x[1], u_den, _png_sub(l, r)) || c_s[1] <= x[1]) {
+      return (1);
+   }
+   c_s[2] = _png_sub(_png_sub(_png_reciprocal(x[1]), _png_reciprocal(c_s[0])),
+                     _png_reciprocal(c_s[1]));
+   return (c_s[2] <= 0 ? 1 : 0);
+}
+
+/* png_XYZ_from_xy: the primaries' X, Y, Z (c_xyz, red first) of x. */
+static int
+_png_xyz_from_xy(const gint32 *x, gint32 *c_xyz) {
+   for (int i = 0; i < 8; i += 2) {
+      gint32 u_lim = i == 0 ? 5 : 0; /* white y must be 5 or more */
+      if (x[i] < 0 || x[i] > PNG_FP_1 || x[i + 1] < u_lim ||
+          x[i + 1] > PNG_FP_1 - x[i]) {
+         return (1);
+      }
+   }
+   gint32 c_s[3];
+   int    i_rc = _png_xy_scales(x, c_s);
+   for (int c = 0; c < 3 && i_rc == 0; c++) {
+      gint32 c_v[3] = {x[2 + 2 * c], x[3 + 2 * c],
+                       PNG_FP_1 - x[2 + 2 * c] - x[3 + 2 * c]};
+      for (int k = 0; k < 3 && i_rc == 0; k++) {
+         gboolean b_ok =
+            c < 2 ? _png_muldiv(&c_xyz[3 * c + k], c_v[k], PNG_FP_1, c_s[c])
+                  : _png_muldiv(&c_xyz[3 * c + k], c_v[k], c_s[2], PNG_FP_1);
+         i_rc = b_ok ? 0 : 1;
+      }
+   }
+   return (i_rc);
+}
+
+/* png_xy_from_XYZ: c_xyz back to chromaticities y (chunk order). */
+static gboolean
+_png_xy_from_xyz(const gint32 *c_xyz, gint32 *y) {
+   gint32 u_dw = 0, u_wx = 0, u_wy = 0;
+   for (int c = 0; c < 3; c++) {
+      const gint32 *v = c_xyz + 3 * c;
+      gint32        d = _png_add(_png_add(v[0], v[1]), v[2]);
+      if (!_png_muldiv(&y[2 + 2 * c], v[0], PNG_FP_1, d) ||
+          !_png_muldiv(&y[3 + 2 * c], v[1], PNG_FP_1, d)) {
+         return (FALSE);
+      }
+      u_dw = _png_add(u_dw, d);
+      u_wx = _png_add(u_wx, v[0]);
+      u_wy = _png_add(u_wy, v[1]);
+   }
+   return (_png_muldiv(&y[0], u_wx, PNG_FP_1, u_dw) &&
+           _png_muldiv(&y[1], u_wy, PNG_FP_1, u_dw));
+}
+
+/* TRUE iff libpng 1.6.40 takes the 32-byte cHRM data p: every value a
+ * non-negative int32 (else "invalid values") and png_colorspace_check_xy
+ * passing -- valid ranges, invertible, the round trip within 5. */
+static gboolean
+_libpng_chrm_ok(const guint8 *p) {
+   gint32 x[8], y[8], c_xyz[9];
+   for (int i = 0; i < 8; i++) {
+      guint32 u = _be32(p + 4 * i);
+      if (u > 0x7FFFFFFFu) {
+         return (FALSE);
+      }
+      x[i] = (gint32)u;
+   }
+   if (_png_xyz_from_xy(x, c_xyz) != 0 || !_png_xy_from_xyz(c_xyz, y)) {
+      return (FALSE);
+   }
+   for (int i = 0; i < 8; i++) {
+      if (y[i] < x[i] - 5 || y[i] > x[i] + 5) {
+         return (FALSE);
+      }
+   }
+   return (TRUE);
+}
+
+/* TRUE iff libpng takes the 4-byte gAMA data p: 1.6.40's range, 16 to
+ * 625 000 000 (outside it the colour space is invalid and the iCCP lost),
+ * inside 1.6.58's (at most 2^31 - 1). */
+static gboolean
+_libpng_gama_ok(const guint8 *p) {
+   guint32 u_g = _be32(p);
+   return (u_g >= 16 && u_g <= 625000000u);
+}
+
+/* The data of a chunk of type c_t and u_len bytes (its header read), with
+ * *pb_crc_ok whether its stored CRC is right; NULL on a read error. */
+static GBytes *
+_png_read_checked(GInputStream *p_in, const guint8 *c_t, gsize u_len,
+                  gboolean *pb_crc_ok, GError **p_err) {
+   GBytes *p_data = _read_payload(p_in, u_len, p_err);
+   guint8  c_crc[4];
+   if (p_data == NULL ||
+       streamread_exact(p_in, c_crc, 4, p_err) != STREAMREAD_OK) {
+      g_clear_pointer(&p_data, g_bytes_unref);
+      return (NULL);
+   }
+   guint32 u_crc = streamread_crc32(STREAMREAD_CRC32_INIT, c_t, 4);
+   u_crc      = streamread_crc32(u_crc, g_bytes_get_data(p_data, NULL), u_len);
+   *pb_crc_ok = _be32(c_crc) == (u_crc ^ STREAMREAD_CRC32_INIT);
+   return (p_data);
+}
+
+/* A gAMA or cHRM chunk (c_t) of u_len data bytes, its header read: taken
+ * when it is the first of its kind, before PLTE, of its exact length, its
+ * CRC right and its values ones both libpngs keep (above); anything else
+ * sets p_c->b_bad. Stricter than libpng, never looser: a chunk libpng
+ * would merely ignore (a bad CRC, one after PLTE) is refused too. */
+static StreamReadStatus
+_png_take_gamut(GInputStream *p_in, const guint8 *c_t, gsize u_len,
+                PngColour *p_c, GError **p_err) {
+   gboolean  b_gama = memcmp(c_t, "gAMA", 4) == 0;
+   gboolean *pb_had = b_gama ? &p_c->b_gama : &p_c->b_chrm;
+   if (*pb_had || p_c->b_plte || u_len != (b_gama ? 4u : 32u)) {
+      p_c->b_bad = TRUE;
+      return (STREAMREAD_OK);
+   }
+   gboolean b_crc  = FALSE;
+   GBytes  *p_data = _png_read_checked(p_in, c_t, u_len, &b_crc, p_err);
+   if (p_data == NULL) {
+      return (STREAMREAD_ERROR);
+   }
+   const guint8 *p = g_bytes_get_data(p_data, NULL);
+   *pb_had         = TRUE;
+   p_c->b_bad = !b_crc || !(b_gama ? _libpng_gama_ok(p) : _libpng_chrm_ok(p));
+   g_bytes_unref(p_data);
+   return (STREAMREAD_OK);
+}
 
 /* libpng's fatal checks of the profile header (section comment above)
  * for a PNG of colour type u_ctype. */
@@ -468,23 +685,18 @@ _libpng_takes(GBytes *p_icc, guint8 u_ctype) {
 /* An iCCP chunk of u_len data bytes (its header read): kept in p_c when it
  * is the first, before PLTE, and its CRC is right; otherwise p_c->b_bad. */
 static StreamReadStatus
-_png_take_iccp(GInputStream *p_in, gsize u_len, PngColour *p_c,
-               GError **p_err) {
+_png_take_iccp(GInputStream *p_in, const guint8 *c_t, gsize u_len,
+               PngColour *p_c, GError **p_err) {
    if (p_c->p_iccp != NULL || p_c->b_plte || u_len > ICC_MAX_PROFILE_LEN) {
       p_c->b_bad = TRUE;
       return (STREAMREAD_OK);
    }
-   GBytes *p_data = _read_payload(p_in, u_len, p_err);
-   guint8  c_crc[4];
-   if (p_data == NULL ||
-       streamread_exact(p_in, c_crc, 4, p_err) != STREAMREAD_OK) {
-      g_clear_pointer(&p_data, g_bytes_unref);
+   gboolean b_crc  = FALSE;
+   GBytes  *p_data = _png_read_checked(p_in, c_t, u_len, &b_crc, p_err);
+   if (p_data == NULL) {
       return (STREAMREAD_ERROR);
    }
-   guint32 u_crc =
-      streamread_crc32(STREAMREAD_CRC32_INIT, (const guint8 *)"iCCP", 4);
-   u_crc = streamread_crc32(u_crc, g_bytes_get_data(p_data, NULL), u_len);
-   if (_be32(c_crc) != (u_crc ^ STREAMREAD_CRC32_INIT)) {
+   if (!b_crc) {
       p_c->b_bad = TRUE;
       g_bytes_unref(p_data);
       return (STREAMREAD_OK);
@@ -494,8 +706,8 @@ _png_take_iccp(GInputStream *p_in, gsize u_len, PngColour *p_c,
 }
 
 /* One chunk (its 8-byte header c_hdr read) of the walk to the image data:
- * IHDR's colour type (IHDR must come first), the iCCP, the colour chunks
- * noted; the rest skipped (data + CRC). */
+ * IHDR's colour type (IHDR must come first), the iCCP, gAMA and cHRM
+ * checked, an sRGB the end of it; the rest skipped (data + CRC). */
 static StreamReadStatus
 _png_colour_chunk(GInputStream *p_in, const guint8 *c_hdr, PngColour *p_c,
                   GError **p_err) {
@@ -506,7 +718,14 @@ _png_colour_chunk(GInputStream *p_in, const guint8 *c_hdr, PngColour *p_c,
       return (STREAMREAD_OK);
    }
    if (memcmp(c_t, "iCCP", 4) == 0) {
-      return (_png_take_iccp(p_in, u_len, p_c, p_err));
+      return (_png_take_iccp(p_in, c_t, u_len, p_c, p_err));
+   }
+   if (memcmp(c_t, "gAMA", 4) == 0 || memcmp(c_t, "cHRM", 4) == 0) {
+      return (_png_take_gamut(p_in, c_t, u_len, p_c, p_err));
+   }
+   if (memcmp(c_t, "sRGB", 4) == 0) {
+      p_c->b_bad = TRUE; /* 1.6.40 drops the iCCP for it (section comment) */
+      return (STREAMREAD_OK);
    }
    if (memcmp(c_t, "IHDR", 4) == 0 && u_len == 13 && !p_c->b_ihdr) {
       guint8 c_ihdr[13 + 4] = {0};
@@ -516,8 +735,6 @@ _png_colour_chunk(GInputStream *p_in, const guint8 *c_hdr, PngColour *p_c,
       return (p_c->b_ihdr ? STREAMREAD_OK : STREAMREAD_ERROR);
    }
    p_c->b_plte |= memcmp(c_t, "PLTE", 4) == 0;
-   p_c->b_other |= memcmp(c_t, "gAMA", 4) == 0 || memcmp(c_t, "cHRM", 4) == 0 ||
-                   memcmp(c_t, "sRGB", 4) == 0;
    return (streamread_skip(p_in, u_len + 4, p_err));
 }
 
@@ -555,8 +772,7 @@ icc_png_applied_profile(GFile *p_file) {
    g_object_unref(p_in);
    g_object_unref(p_fin);
    GBytes *p_icc = NULL;
-   if (p_err == NULL && t_c.b_ihdr && !t_c.b_bad && !t_c.b_other &&
-       t_c.p_iccp != NULL) {
+   if (p_err == NULL && t_c.b_ihdr && !t_c.b_bad && t_c.p_iccp != NULL) {
       p_icc = _png_inflate_iccp(t_c.p_iccp, &p_err);
    }
    if (p_icc != NULL && !_libpng_takes(p_icc, t_c.u_ctype)) {
@@ -766,7 +982,7 @@ static const guint PARA_PARAMS[] = {1, 0, 0, 5, 7};
  * between them spun forever in an uncancellable GEGL decode. g and a in
  * (0, ICC_PARA_MAX], every other parameter within +-ICC_PARA_MAX, keep
  * each printed parameter to eight characters; enhancer.c also checks the
- * name babl built (ENHANCER_MAX_SPACE_NAME). */
+ * name babl built (GGAZE_ENHANCER_MAX_SPACE_NAME). */
 #define ICC_PARA_MAX 10.0f
 
 /* Whether the u_n parameters at p_p (s15Fixed16) are in the bounds above:
@@ -943,9 +1159,9 @@ _trc_is_sane(const guint8 *p_tag, guint32 u_size) {
       return (FALSE);
    }
    if (memcmp(p_tag, "curv", 4) == 0) {
-      guint32 u_count = _be32(p_tag + 8);
-      b_ok            = u_count <= ICC_MAX_CURVE_POINTS &&
-                        12u + 2u * (guint64)u_count <= u_size;
+      guint32  u_count = _be32(p_tag + 8);
+      gboolean b_fits  = 12u + 2u * (guint64)u_count <= u_size;
+      b_ok             = u_count <= ICC_MAX_CURVE_POINTS && b_fits;
    } else if (memcmp(p_tag, "para", 4) == 0) {
       b_ok = _para_is_sane(p_tag, u_size);
    }
@@ -1016,8 +1232,10 @@ icc_profile_is_sane(GBytes *p_icc) {
 
 /* --- what babl will make of it --------------------------------------------
  *
- * babl_space_from_icc()'s own early exits (babl-icc.c, 0.1.128, with
- * BABL_ICC_INTENT_DEFAULT = relative colorimetric, accuracy wanted), in
+ * babl_space_from_icc()'s own early exits (babl-icc.c, 0.1.112 and
+ * 0.1.128, with BABL_ICC_INTENT_RELATIVE_COLORIMETRIC, the intent the
+ * gegl loaders pass; 0.1.128 also names it BABL_ICC_INTENT_DEFAULT, 0.1.112
+ * does not), in
  * its order, so a caller can keep babl from being asked at all: a CMYK
  * profile goes to LCMS whatever its class; otherwise the colour space must
  * be RGB or grey, the class a display or input one, the PCS XYZ, and a

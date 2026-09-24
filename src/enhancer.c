@@ -1037,8 +1037,10 @@ _babl_space_for(GBytes *p_icc, IccBablKind e_kind, gboolean *pb_asked) {
    }
    const char *c_err = NULL;
    *pb_asked         = TRUE;
-   return (
-      babl_space_from_icc(c_data, (int)u_len, BABL_ICC_INTENT_DEFAULT, &c_err));
+   /* Relative colorimetric, what gegl:png-load / gegl:jpg-load pass (spelt
+    * out: babl 0.1.112, fedora:40's, has no BABL_ICC_INTENT_DEFAULT). */
+   return (babl_space_from_icc(c_data, (int)u_len,
+                               BABL_ICC_INTENT_RELATIVE_COLORIMETRIC, &c_err));
 }
 
 /* One kept verdict (section comment above). */
@@ -1103,32 +1105,21 @@ _keep_verdict(char *c_key, const Babl *p_space, gboolean b_slot) {
    }
 }
 
-/* The longest space name a managed space may have. babl names each format
- * of a space "<encoding>-<space name>" and cuts the name at 255 bytes
- * (babl-format.c, format_new_from_format_with_space); two formats whose
- * names are cut to the same bytes are then one to babl's name lookups, and
- * its fish search between them spun forever in an uncancellable GEGL
- * decode (xb2 review 5: a 238-character name from a 'para' curve at
- * -32767). The longest encoding babl and GEGL register is 24 characters
- * ("CIE LCH(ab) alpha double", listed with babl_format_class_for_each),
- * so 254 - 1 - 24 = 229 is the true limit; 220 leaves room for a longer
- * one. icc.c's parameter bounds keep real curves well inside: a Rec. 709
- * 'para' curve on all three channels names its space in 208. */
-#define ENHANCER_MAX_SPACE_NAME 220u
-
 /* Whether babl's new space p_space can be managed by name: its name short
- * enough (above) and naming no other space. babl names spaces it makes
- * from a profile by its content only in part -- every grey table-curve
- * space is "space-gray-lut-trc", an RGB space's primaries go to four
- * decimals -- and babl_format_with_space() and GEGL find a space's formats
- * by that name: a second space under the first one's name would decode
- * and convert with the FIRST one's formats, silently in the wrong
- * colours. So a space babl_space() does not return by its own name is
- * declined. */
+ * enough (GGAZE_ENHANCER_MAX_SPACE_NAME, enhancer-gegl.h) and naming no
+ * other space. babl names spaces it makes from a profile by its content
+ * only in part -- every grey table-curve space is "space-gray-lut-trc", an
+ * RGB space's primaries go to four decimals -- and
+ * babl_format_with_space() and GEGL find a space's formats by that name: a
+ * second space under the first one's name would decode and convert with
+ * the FIRST one's formats, silently in the wrong colours. So a space
+ * babl_space() does not return by its own name is declined. */
+static guint u_max_space_name = GGAZE_ENHANCER_MAX_SPACE_NAME; /* seam */
+
 static gboolean
 _space_name_ok(const Babl *p_space) {
    const char *c_name = babl_get_name(p_space);
-   if (strlen(c_name) > ENHANCER_MAX_SPACE_NAME) {
+   if (strlen(c_name) > u_max_space_name) {
       g_debug("enhancer: not managed, babl's space name is %" G_GSIZE_FORMAT
               " characters long",
               strlen(c_name));
@@ -1208,10 +1199,11 @@ _space_of_profile(GBytes *p_icc) {
 
 /* _space_of_profile() for the profile GEGL's loader will tag p_file's
  * decoded buffer with: a JPEG's embedded one, and for a PNG (e_fmt) the
- * iCCP libpng keeps with no gAMA / cHRM / sRGB chunk beside it
- * (icc_png_applied_profile) -- any other PNG is declined, since GEGL
- * would tag it with a space it builds from those chunks, outside the
- * slot cap (xb2 review 5), or with none. */
+ * iCCP libpng keeps -- no sRGB chunk beside it, any gAMA / cHRM one libpng
+ * takes without dropping the iCCP (icc_png_applied_profile). Any other PNG
+ * is declined, since GEGL would tag it with a space it builds from gAMA /
+ * cHRM, outside the slot cap (xb2 review 5), or with none; a kept iCCP
+ * wins over those chunks in gegl:png-load, so none is built then. */
 static const Babl *
 _managed_space(GFile *p_file, GgazeFormat e_fmt) {
    GBytes     *p_icc = e_fmt == GGAZE_FMT_PNG ? icc_png_applied_profile(p_file)
@@ -1240,6 +1232,13 @@ enhancer_test_profile_slots(void) {
    guint u_slots = u_profile_slots;
    g_mutex_unlock(&t_profiles_lock);
    return (u_slots);
+}
+
+void
+enhancer_test_set_max_space_name(guint u_max) {
+   g_mutex_lock(&t_profiles_lock);
+   u_max_space_name = u_max > 0 ? u_max : GGAZE_ENHANCER_MAX_SPACE_NAME;
+   g_mutex_unlock(&t_profiles_lock);
 }
 
 guint

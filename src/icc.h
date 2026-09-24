@@ -51,10 +51,12 @@ GBytes *icc_read_embedded(GFile *p_file, GError **p_err);
  * its iCCP profile, inflated, when libpng keeps it -- one iCCP before
  * PLTE with its CRC right, a profile libpng 1.6's fatal checks pass (a
  * rendering intent under 0xFFFF, a v4 length a multiple of 4, at most
- * 8 000 000 bytes, the colour space the PNG's colour type needs, ...) --
- * and no gAMA, cHRM or sRGB chunk GEGL could build a space from instead.
- * NULL otherwise, for a file that is not a PNG, and on any read error:
- * the enhancer declines such a PNG for colour management (icc.c has the
+ * 8 000 000 bytes, the colour space the PNG's colour type needs, ...),
+ * no sRGB chunk, and any gAMA / cHRM single, well-formed and of values
+ * libpng 1.6.40 keeps (an invalid one costs the iCCP there). GEGL then
+ * uses the iCCP and never builds a space from gAMA / cHRM. NULL
+ * otherwise, for a file that is not a PNG, and on any read error: the
+ * enhancer declines such a PNG for colour management (icc.c has the
  * rules and why). Not validated as a profile beyond that: see
  * icc_profile_is_sane(). */
 GBytes *icc_png_applied_profile(GFile *p_file);
@@ -120,7 +122,8 @@ typedef enum {
    ICC_BABL_CMYK,     /* handed to babl's LCMS path */
 } IccBablKind;
 
-/* The kind of space babl_space_from_icc() (BABL_ICC_INTENT_DEFAULT) makes
+/* The kind of space babl_space_from_icc() makes, with the intent
+ * gegl:png-load / gegl:jpg-load pass (BABL_ICC_INTENT_RELATIVE_COLORIMETRIC),
  * of p_icc, decided from its header and tag table alone: ICC_BABL_CMYK for
  * any CMYK profile; ICC_BABL_RGB / ICC_BABL_GRAY for a display or input
  * ('mntr' / 'scnr') RGB / grey profile with an XYZ PCS and not both A2B0

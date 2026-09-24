@@ -749,22 +749,25 @@ test_extent_check_catches_what_the_walk_cannot(void) {
 /* Corrupt image data in a profiled PNG -- a flipped byte (bad CRC), the
  * same with the CRC fixed (the deflate stream breaks), and a shortened
  * IDAT (the rows run out) -- made gegl:png-load hand back a silent black
- * buffer. Now it is the loader's error, as before xb2. */
+ * buffer. Now the managed path declines them all and the loader decides,
+ * as before xb2: whether that is an error is the loader's business (gdk-
+ * pixbuf 2.42, fedora:40's, decodes past a bad IDAT CRC; newer loaders
+ * refuse it), so only the agreement is asserted -- and that what loads
+ * came through the loader (sRGB), never GEGL's black buffer. */
 static void
-test_corrupt_png_data_is_an_error(void) {
+test_corrupt_png_data_gets_the_loaders_verdict(void) {
    GByteArray  *p_a      = fixture_bytes("swapped.png");
    gsize        u_idat   = png_chunk_at(p_a, "IDAT");
    const guint8 C_BAD[2] = {0xFF, 0x7E};
-   g_assert_false(patched_verdict("swapped.png", u_idat + 10, C_BAD, 2, -1));
-   g_assert_false(
-      patched_verdict("swapped.png", u_idat + 10, C_BAD, 2, (gssize)u_idat));
+   patched_verdict("swapped.png", u_idat + 10, C_BAD, 2, -1);
+   patched_verdict("swapped.png", u_idat + 10, C_BAD, 2, (gssize)u_idat);
    /* short: keep 6 bytes of the IDAT data (zlib header + a partial block) */
    guint32 u_len = be32(p_a->data + u_idat);
    g_byte_array_remove_range(p_a, (guint)u_idat + 8 + 6, u_len - 6);
    guint32 u_six = GUINT32_TO_BE(6);
    memcpy(p_a->data + u_idat, &u_six, 4);
    png_fix_crc(p_a, u_idat);
-   g_assert_false(assert_loader_verdict("short.png", p_a));
+   assert_loader_verdict("short.png", p_a);
    g_byte_array_unref(p_a);
 }
 
@@ -772,7 +775,13 @@ test_corrupt_png_data_is_an_error(void) {
  */
 
 /* Export p_buf with p_preset to c_dir/c_name: the file carries exactly
- * p_want as its profile and reloads managed (blue). */
+ * p_want as its profile and reloads managed -- the enhancer vouches for
+ * it (enhancer_would_manage) and the pixel comes back blue. gegl:png-save
+ * writes gAMA and cHRM beside the iCCP; a PNG with them used to be
+ * declined, so the reload went to the loader, which on gdk-pixbuf 2.42
+ * (fedora:40) reads it as sRGB (red) -- the colour alone hid that where
+ * the loader applies the profile itself. A JPEG is managed only with
+ * libjpeg built in. */
 static void
 export_keeps_profile(GeglBuffer *p_buf, const EnhancerPreset *p_preset,
                      const char *c_name, GBytes *p_want) {
@@ -786,10 +795,21 @@ export_keeps_profile(GeglBuffer *p_buf, const EnhancerPreset *p_preset,
    g_assert_nonnull(p_got);
    g_assert_true(g_bytes_equal(p_want, p_got));
    g_bytes_unref(p_got);
+   if (g_str_has_suffix(c_name, ".png")) {
+      char *c_data = NULL;
+      gsize u_len  = 0;
+      g_assert_true(g_file_get_contents(c_out, &c_data, &u_len, NULL));
+      GByteArray *p_a = g_byte_array_new_take((guint8 *)c_data, u_len);
+      png_chunk_at(p_a, "gAMA"); /* asserts they are there */
+      png_chunk_at(p_a, "cHRM");
+      g_byte_array_unref(p_a);
+   }
+   gboolean b_managed = GGAZE_HAVE_JPEG || g_str_has_suffix(c_name, ".png");
+   g_assert_true(enhancer_would_manage(p_out) == b_managed);
    GeglBuffer *p_re = load_ok(p_out);
    guint8      c_px[4];
    preview_pixel(p_re, 0, 0, c_px);
-   if (GGAZE_HAVE_JPEG || g_str_has_suffix(c_name, ".png")) {
+   if (b_managed) {
       assert_rgb(c_name, c_px, 0, 0, 255, 15); /* reloaded managed */
    }
    g_object_unref(p_re);
@@ -1458,21 +1478,48 @@ babl_format_count(void) {
    return (u_n);
 }
 
+/* The length of babl's name for p_icc's space (made now if babl has not
+ * got it yet). */
+static gsize
+babl_name_len(GBytes *p_icc) {
+   gsize       u_len   = 0;
+   const char *c_data  = g_bytes_get_data(p_icc, &u_len);
+   const char *c_err   = NULL;
+   const Babl *p_space = babl_space_from_icc(
+      c_data, (int)u_len, BABL_ICC_INTENT_RELATIVE_COLORIMETRIC, &c_err);
+   g_assert_nonnull(p_space);
+   return (strlen(babl_get_name(p_space)));
+}
+
+/* An RGB profile of Rec. 709 'para' curves named c_desc: the same space
+ * for every c_desc, under a name babl can use (217 characters in babl
+ * 0.1.128, 220 in 0.1.112, with these primaries). */
+static GBytes *
+rec709_profile(const char *c_desc) {
+   const double R709[7] = {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5,
+                           0.081,    0.005,     0.005};
+   return (rgb_of(c_desc, icc_build_para(4, R709, 7)));
+}
+
 /* The review's 'para' at -32767 is refused by icc.c's parameter bounds
- * (no slot); a curve inside them whose space name babl makes 238
- * characters long is declined on the name (a slot, kept: asking again
- * costs nothing), its twin at 220 characters managed; a file carrying the
- * long one decodes on the loader path, promptly. */
+ * (no slot); a curve inside them whose space name babl makes over 220
+ * characters long (238 in babl 0.1.128, 241 in 0.1.112) is declined on
+ * the name (a slot, kept: asking again costs nothing), and a file
+ * carrying it decodes on the loader path, promptly. babl spells names
+ * differently from version to version, so the limit itself is checked at
+ * the length babl gives a short name here: with the limit (test seam)
+ * one under it the space is declined, at it managed. */
 static void
 test_long_space_name_is_declined(void) {
    const double HANG[7] = {-32767, -1.31, -1.7, 0.768, 0.038, 0.604, 1.10};
    assert_built_profile_declined("para at -32767",
                                  rgb_of("hang", icc_build_para(4, HANG, 7)));
-   double  f_long[7] = {2.4, 0.2807, 1.1841, -1.5, 0.0, -1.5, -1.2345};
-   GBytes *p_long    = rgb_of("long", icc_build_para(4, f_long, 7));
+   const double F_LONG[7] = {2.4, 0.2807, 1.1841, -1.5, 0.0, -1.5, -1.2345};
+   GBytes      *p_long    = rgb_of("long", icc_build_para(4, F_LONG, 7));
    g_assert_true(icc_profile_is_sane(p_long));
    guint u_slots = enhancer_test_profile_slots();
    g_assert_false(enhancer_test_profile_is_managed(p_long));
+   g_assert_cmpuint(babl_name_len(p_long), >, GGAZE_ENHANCER_MAX_SPACE_NAME);
    g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
    g_assert_false(enhancer_test_profile_is_managed(p_long));
    g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
@@ -1480,9 +1527,17 @@ test_long_space_name_is_declined(void) {
    assert_profile_declined("longname.png", p_png);
    g_byte_array_unref(p_png);
    g_bytes_unref(p_long);
-   f_long[6] = 0.0; /* "-1.-2345" -> "0.": 220 characters */
-   assert_built_profile_managed(
-      "space name of 220", rgb_of("long220", icc_build_para(4, f_long, 7)));
+   GBytes *p_under = rec709_profile("one over the limit");
+   gsize   u_len   = babl_name_len(p_under);
+   g_test_message("babl names the Rec. 709 space in %" G_GSIZE_FORMAT, u_len);
+   g_assert_cmpuint(u_len, <=, 254 - 1 - 24); /* babl's true limit */
+   enhancer_test_set_max_space_name((guint)u_len - 1);
+   g_assert_false(enhancer_test_profile_is_managed(p_under));
+   enhancer_test_set_max_space_name((guint)u_len);
+   assert_built_profile_managed("a name at the limit",
+                                rec709_profile("at the limit"));
+   enhancer_test_set_max_space_name(0);
+   g_bytes_unref(p_under);
 }
 
 /* c_fixture with its iCCP chunk carrying p_icc instead. */
@@ -1596,41 +1651,102 @@ fresh_profile(guint u_n, gsize u_at, guint32 u_val, gboolean b_v4_odd) {
    return (g_byte_array_free_to_bytes(p_arr));
 }
 
+/* The colour chunks the cases below put in front of a PNG's iCCP. */
+typedef struct {
+   const char  *c_name; /* the case's name for it */
+   const char  *c_type; /* the chunk type */
+   const guint8 c_data[32];
+   guint32      u_len;
+} ColourChunk;
+
+static const ColourChunk COLOUR_CHUNKS[] = {
+   {"gAMA", "gAMA", {0, 0, 0x75, 0x30}, 4}, /* 1 / 3.33 */
+   {"gAMA0", "gAMA", {0}, 4},               /* out of libpng's range */
+   /* sRGB's chromaticities, as gegl:png-save writes them for its space */
+   {"cHRM",
+    "cHRM",
+    {0, 0, 0x7a, 0x26, 0, 0, 0x80, 0x84, 0, 0, 0xfa, 0x00, 0, 0, 0x80, 0xe8,
+     0, 0, 0x75, 0x30, 0, 0, 0xea, 0x60, 0, 0, 0x3a, 0x98, 0, 0, 0x17, 0x70},
+    32},
+   {"cHRM0", "cHRM", {0, 0, 0x7a, 0x26}, 32}, /* no primaries at all */
+   {"sRGB", "sRGB", {0}, 1},
+};
+
+/* p_a with the chunks c_names names (space-separated, COLOUR_CHUNKS) in
+ * front of its iCCP, in that order. */
+static void
+insert_colour_chunks(GByteArray *p_a, const char *c_names) {
+   char **c_n = g_strsplit(c_names, " ", -1);
+   for (char **c = c_n; *c != NULL; c++) {
+      const ColourChunk *p_ch = NULL;
+      for (guint u = 0; u < G_N_ELEMENTS(COLOUR_CHUNKS); u++) {
+         p_ch =
+            strcmp(COLOUR_CHUNKS[u].c_name, *c) == 0 ? &COLOUR_CHUNKS[u] : p_ch;
+      }
+      g_assert_nonnull(p_ch);
+      insert_before_iccp(p_a, p_ch->c_type, p_ch->c_data, p_ch->u_len);
+   }
+   g_strfreev(c_n);
+}
+
+/* p_a (taken), carrying p_icc, managed in p_icc's own space -- the one
+ * the enhancer vetted, so gegl:png-load used the iCCP and built no space
+ * from the gAMA / cHRM beside it. */
+static void
+assert_png_managed_as_vetted(const char *c_what, GByteArray *p_a,
+                             GBytes *p_icc) {
+   g_test_message("managed: %s", c_what);
+   const Babl *p_want = enhancer_test_profile_space(p_icc);
+   g_assert_nonnull(p_want);
+   GFile *p_file = temp_file("kept.png", p_a);
+   g_assert_true(enhancer_would_manage(p_file));
+   GeglBuffer *p_buf = load_ok(p_file);
+   g_assert_true(babl_format_get_space(gegl_buffer_get_format(p_buf)) ==
+                 p_want);
+   g_object_unref(p_buf);
+   drop_temp(p_file);
+   g_byte_array_unref(p_a);
+}
+
 /* PNGs whose iCCP libpng drops -- a rendering intent of 0xFFFF, a v4
- * profile whose length is no multiple of 4 -- next to a gAMA (and cHRM)
- * GEGL would build a new space from, and sound profiles next to a gAMA,
- * cHRM or sRGB chunk: each declined before babl sees it, and nothing
- * grows babl's tables. The same profile alone in the file is managed. */
+ * profile whose length is no multiple of 4 -- next to a gAMA GEGL would
+ * build a new space from, and sound profiles next to an sRGB chunk (which
+ * costs the iCCP on libpng 1.6.40) or a gAMA / cHRM libpng 1.6.40 rejects
+ * (out of range, duplicate, no primaries: that too costs the iCCP there):
+ * each declined before babl sees it, and nothing grows babl's tables.
+ * Sound profiles beside a well-formed gAMA and cHRM -- what gegl:png-save,
+ * GIMP and ImageMagick write -- are managed in the profile's own space
+ * (xb2 review 6), as is the same profile alone in the file. */
 static void
 test_png_iccp_libpng_drops_is_declined(void) {
-   static const guint8 C_GAMA[4]  = {0, 0, 0x75, 0x30}; /* 1 / 3.33 */
-   static const guint8 C_CHRM[32] = {0, 0, 0x7a, 0x26};
-   static const guint8 C_SRGB[1]  = {0};
    const struct {
       const char *c_what;
       gsize       u_at;
       guint32     u_val;
       gboolean    b_v4_odd;
-      const char *c_chunk;
+      const char *c_chunks;
+      gboolean    b_managed;
    } CASES[] = {
-      {"intent 0xFFFF + gAMA", 64, 0xFFFFu, FALSE, "gAMA"},
-      {"v4, odd length + gAMA", 0, 0, TRUE, "gAMA"},
-      {"sound + gAMA", 0, 0, FALSE, "gAMA"},
-      {"sound + cHRM", 0, 0, FALSE, "cHRM"},
-      {"sound + sRGB", 0, 0, FALSE, "sRGB"},
+      {"intent 0xFFFF + gAMA", 64, 0xFFFFu, FALSE, "gAMA", FALSE},
+      {"v4, odd length + gAMA", 0, 0, TRUE, "gAMA", FALSE},
+      {"sound + gAMA of 0", 0, 0, FALSE, "gAMA0", FALSE},
+      {"sound + two gAMA", 0, 0, FALSE, "gAMA gAMA", FALSE},
+      {"sound + cHRM without primaries", 0, 0, FALSE, "cHRM0", FALSE},
+      {"sound + sRGB", 0, 0, FALSE, "sRGB", FALSE},
+      {"sound + gAMA", 0, 0, FALSE, "gAMA", TRUE},
+      {"sound + gAMA + cHRM", 0, 0, FALSE, "gAMA cHRM", TRUE},
    };
    for (guint u = 0; u < G_N_ELEMENTS(CASES); u++) {
       GBytes *p_icc =
          fresh_profile(u, CASES[u].u_at, CASES[u].u_val, CASES[u].b_v4_odd);
       g_assert_true(icc_profile_is_sane(p_icc));
-      GByteArray   *p_a    = png_with_profile(p_icc);
-      const char   *c_ch   = CASES[u].c_chunk;
-      const guint8 *p_data = c_ch[0] == 'g'   ? C_GAMA
-                             : c_ch[0] == 'c' ? C_CHRM
-                                              : C_SRGB;
-      guint32       u_len  = c_ch[0] == 'g' ? 4 : c_ch[0] == 'c' ? 32 : 1;
-      insert_before_iccp(p_a, c_ch, p_data, u_len);
-      assert_png_declined_quietly(CASES[u].c_what, p_a);
+      GByteArray *p_a = png_with_profile(p_icc);
+      insert_colour_chunks(p_a, CASES[u].c_chunks);
+      if (CASES[u].b_managed) {
+         assert_png_managed_as_vetted(CASES[u].c_what, p_a, p_icc);
+      } else {
+         assert_png_declined_quietly(CASES[u].c_what, p_a);
+      }
       g_bytes_unref(p_icc);
    }
    GBytes *p_ok = fresh_profile(G_N_ELEMENTS(CASES), 0, 0, FALSE);
@@ -2112,8 +2228,9 @@ profile_space(GFile *p_file) {
    gsize       u_len  = 0;
    const char *c_data = g_bytes_get_data(p_icc, &u_len);
    const char *c_err  = NULL;
-   const Babl *p_space =
-      babl_space_from_icc(c_data, (int)u_len, BABL_ICC_INTENT_DEFAULT, &c_err);
+   /* The intent the loaders pass (babl 0.1.112 lacks _DEFAULT). */
+   const Babl *p_space = babl_space_from_icc(
+      c_data, (int)u_len, BABL_ICC_INTENT_RELATIVE_COLORIMETRIC, &c_err);
    if (p_space != NULL) {
       g_assert_true(icc_profile_is_sane(p_icc));
       g_assert_cmpint(icc_babl_kind(p_icc), !=, ICC_BABL_NONE);
@@ -2239,8 +2356,8 @@ add_decode_tests(void) {
       test_cut_progressive_jpeg_gets_the_loaders_verdict);
    g_test_add_func("/enhancer_icc/extent_check_catches_what_the_walk_cannot",
                    test_extent_check_catches_what_the_walk_cannot);
-   g_test_add_func("/enhancer_icc/corrupt_png_data_is_an_error",
-                   test_corrupt_png_data_is_an_error);
+   g_test_add_func("/enhancer_icc/corrupt_png_data_gets_the_loaders_verdict",
+                   test_corrupt_png_data_gets_the_loaders_verdict);
    g_test_add_func("/enhancer_icc/export_preserves_profile",
                    test_export_preserves_profile);
    g_test_add_func("/enhancer_icc/missing_saver_is_not_supported",

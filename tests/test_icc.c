@@ -1216,14 +1216,34 @@ test_sane_fuzz(void) {
  * break exactly one of libpng 1.6's fatal rules (or, for the passing
  * twins, only a warning of libpng's). */
 
-/* A PNG of colour type u_ctype whose chunks are c_layout's, space-
- * separated and in order: "iCCP" carries p_icc (zlib), "iCCP!" the same
- * with a wrong CRC, "IHDR" a 1 x 1 8-bit header, any other type 4 zero
- * bytes. Every other CRC is right. Written to a temp file (caller
- * deletes and unrefs). */
+/* sRGB's chromaticities as a cHRM stores them (x 100000): white, red,
+ * green, blue, x then y. */
+static const guint32 CHRM_SRGB[8] = {31270, 32900, 64000, 33000,
+                                     30000, 60000, 15000, 6000};
+
+/* A cHRM's data: CHRM_SRGB, or the 8 comma-separated decimals of c_vals
+ * (read as int64 and stored as 32 bits, so -1 is 0xFFFFFFFF). */
 static GBytes *
-layout_chunk_data(const char *c_type, guint8 u_ctype, GBytes *p_icc) {
-   if (g_str_has_prefix(c_type, "iCCP")) {
+chrm_data(const char *c_vals) {
+   guint8 c_d[32];
+   char **c_v = c_vals != NULL ? g_strsplit(c_vals, ",", 8) : NULL;
+   for (guint u = 0; u < 8; u++) {
+      g_assert_true(c_v == NULL || c_v[u] != NULL);
+      put_be32(c_d + 4 * u, c_v != NULL
+                               ? (guint32)g_ascii_strtoll(c_v[u], NULL, 10)
+                               : CHRM_SRGB[u]);
+   }
+   g_strfreev(c_v);
+   return (g_bytes_new(c_d, sizeof(c_d)));
+}
+
+/* The data of layout_png()'s chunk token c_tok (its syntax there), but
+ * for the '+'. */
+static GBytes *
+layout_chunk_data(const char *c_tok, guint8 u_ctype, GBytes *p_icc) {
+   const char *c_val = strchr(c_tok, '=');
+   c_val             = c_val != NULL ? c_val + 1 : NULL;
+   if (g_str_has_prefix(c_tok, "iCCP")) {
       GBytes     *p_z = icc_build_zlib(p_icc);
       GByteArray *p_c = g_byte_array_new();
       g_byte_array_append(p_c, (const guint8 *)"ggaze\0\0", 7);
@@ -1232,11 +1252,31 @@ layout_chunk_data(const char *c_type, guint8 u_ctype, GBytes *p_icc) {
       g_bytes_unref(p_z);
       return (g_byte_array_free_to_bytes(p_c));
    }
-   if (strcmp(c_type, "IHDR") == 0) {
+   if (g_str_has_prefix(c_tok, "IHDR")) {
       const guint8 C_IHDR[13] = {0, 0, 0, 1, 0, 0, 0, 1, 8, u_ctype, 0, 0, 0};
       return (g_bytes_new(C_IHDR, sizeof(C_IHDR)));
    }
-   return (g_bytes_new_static("\0\0\0\0", 4));
+   if (g_str_has_prefix(c_tok, "cHRM")) {
+      return (chrm_data(c_val));
+   }
+   guint8 c_d[4] = {0};
+   if (g_str_has_prefix(c_tok, "gAMA")) {
+      put_be32(c_d, c_val != NULL ? (guint32)g_ascii_strtoll(c_val, NULL, 10)
+                                  : 45455u);
+   }
+   return (g_bytes_new(c_d, sizeof(c_d)));
+}
+
+/* layout_chunk_data(), one zero byte longer for a token with a '+'. */
+static GBytes *
+layout_chunk(const char *c_tok, guint8 u_ctype, GBytes *p_icc) {
+   GBytes *p_d = layout_chunk_data(c_tok, u_ctype, p_icc);
+   if (strchr(c_tok, '+') == NULL) {
+      return (p_d);
+   }
+   GByteArray *p_a = g_bytes_unref_to_array(p_d);
+   g_byte_array_append(p_a, (const guint8 *)"", 1);
+   return (g_byte_array_free_to_bytes(p_a));
 }
 
 /* p_png written to a new temp file (caller deletes and unrefs). */
@@ -1254,9 +1294,11 @@ temp_png(const GByteArray *p_png) {
 }
 
 /* A PNG of colour type u_ctype whose chunks are c_layout's, space-
- * separated and in order: "iCCP" carries p_icc (zlib), "iCCP!" the same
- * with a wrong CRC, "IHDR" a 1 x 1 8-bit header, any other type 4 zero
- * bytes. Every other CRC is right. Written to a temp file (caller
+ * separated and in order. A token is the chunk type, then optionally
+ * "=value", "+" (one byte too long) and "!" (a wrong CRC). "iCCP" carries
+ * p_icc (zlib), "IHDR" a 1 x 1 8-bit header, "gAMA" 45455 (1/2.2) or its
+ * value, "cHRM" sRGB's chromaticities or its 8 values; any other type 4
+ * zero bytes. Every other CRC is right. Written to a temp file (caller
  * deletes and unrefs). */
 static GFile *
 layout_png(guint8 u_ctype, GBytes *p_icc, const char *c_layout) {
@@ -1264,7 +1306,7 @@ layout_png(guint8 u_ctype, GBytes *p_icc, const char *c_layout) {
    char      **c_types = g_strsplit(c_layout, " ", -1);
    g_byte_array_append(p_png, (const guint8 *)"\x89PNG\r\n\x1a\n", 8);
    for (char **c_t = c_types; *c_t != NULL; c_t++) {
-      GBytes       *p_data = layout_chunk_data(*c_t, u_ctype, p_icc);
+      GBytes       *p_data = layout_chunk(*c_t, u_ctype, p_icc);
       gsize         u_len  = 0;
       const guint8 *p_d    = g_bytes_get_data(p_data, &u_len);
       guint8        c_len[4];
@@ -1275,7 +1317,7 @@ layout_png(guint8 u_ctype, GBytes *p_icc, const char *c_layout) {
       guint32 u_crc =
          streamread_crc32(STREAMREAD_CRC32_INIT, (const guint8 *)*c_t, 4);
       u_crc = streamread_crc32(u_crc, p_d, u_len) ^ STREAMREAD_CRC32_INIT;
-      put_be32(c_len, strcmp(*c_t, "iCCP!") == 0 ? ~u_crc : u_crc);
+      put_be32(c_len, g_str_has_suffix(*c_t, "!") ? ~u_crc : u_crc);
       g_byte_array_append(p_png, c_len, 4);
       g_bytes_unref(p_data);
    }
@@ -1302,7 +1344,8 @@ applied(guint8 u_ctype, GBytes *p_icc, const char *c_layout) {
 #define PNG_OK "IHDR iCCP IDAT IEND"
 
 /* The chunk rules: one iCCP, before PLTE, its CRC right, IHDR first, no
- * gAMA / cHRM / sRGB anywhere before the image data. */
+ * sRGB anywhere before the image data (libpng 1.6.40 drops the iCCP for
+ * one before or after it), the gAMA / cHRM rules below. */
 static void
 test_png_applied_chunk_rules(void) {
    GBytes *p_icc = read_fixture_profile("swapped.png");
@@ -1312,10 +1355,9 @@ test_png_applied_chunk_rules(void) {
    g_assert_false(applied(2, p_icc, "IHDR PLTE iCCP IDAT IEND"));
    g_assert_false(applied(2, p_icc, "IHDR iCCP iCCP IDAT IEND"));
    g_assert_false(applied(2, p_icc, "IHDR iCCP! IDAT IEND"));
-   g_assert_false(applied(2, p_icc, "IHDR gAMA iCCP IDAT IEND"));
-   g_assert_false(applied(2, p_icc, "IHDR iCCP gAMA IDAT IEND"));
-   g_assert_false(applied(2, p_icc, "IHDR iCCP cHRM IDAT IEND"));
    g_assert_false(applied(2, p_icc, "IHDR sRGB iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP sRGB IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP PLTE sRGB IDAT IEND"));
    g_assert_false(applied(2, p_icc, "iCCP IHDR IDAT IEND"));
    g_assert_false(applied(2, p_icc, "IHDR IDAT iCCP IEND"));
    g_assert_false(applied(2, p_icc, "IHDR tEXt")); /* cut short */
@@ -1327,6 +1369,65 @@ test_png_applied_chunk_rules(void) {
    p_file = fixture("no-such-file.png");
    g_assert_null(icc_png_applied_profile(p_file));
    g_object_unref(p_file);
+}
+
+/* gAMA and cHRM beside the iCCP, as gegl:png-save (and GIMP, ImageMagick)
+ * write them: libpng keeps the iCCP and gegl:png-load uses it, never the
+ * gAMA / cHRM space, when each is single, well-formed and of values
+ * libpng 1.6.40 takes. Anything 1.6.40 invalidates the colour space for
+ * -- and so drops the iCCP -- is refused, and so is what libpng merely
+ * ignores (bad CRC, out of place, wrong length): never looser than it. */
+static void
+test_png_applied_gamut_rules(void) {
+   GBytes *p_icc = read_fixture_profile("swapped.png");
+   g_assert_true(applied(2, p_icc, "IHDR gAMA iCCP IDAT IEND"));
+   g_assert_true(applied(2, p_icc, "IHDR iCCP gAMA cHRM IDAT IEND"));
+   g_assert_true(applied(2, p_icc, "IHDR cHRM gAMA iCCP PLTE IDAT IEND"));
+   GBytes *p_grey = read_fixture_profile("grey-icc.png");
+   g_assert_true(applied(0, p_grey, "IHDR gAMA cHRM iCCP IDAT IEND"));
+   g_bytes_unref(p_grey);
+   g_assert_true(applied(2, p_icc, "IHDR gAMA=220000 iCCP IDAT IEND"));
+   g_assert_true(applied(2, p_icc, "IHDR gAMA=16 iCCP IDAT IEND"));
+   g_assert_true(applied(2, p_icc, "IHDR gAMA=625000000 iCCP IDAT IEND"));
+   /* Adobe RGB (1998)'s primaries, D65 */
+   g_assert_true(
+      applied(2, p_icc,
+              "IHDR cHRM=31270,32900,64000,33000,21000,71000,15000,6000 "
+              "iCCP IDAT IEND"));
+   /* gAMA: out of 1.6.40's range, duplicate, damaged, misplaced, sized */
+   g_assert_false(applied(2, p_icc, "IHDR gAMA=0 iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR gAMA=15 iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP gAMA=625000001 IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP gAMA=-1 IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR gAMA iCCP gAMA IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR gAMA! iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP PLTE gAMA IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR gAMA+ iCCP IDAT IEND"));
+   /* cHRM: likewise, and chromaticities 1.6.40 cannot invert */
+   g_assert_false(applied(2, p_icc, "IHDR cHRM iCCP cHRM IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP cHRM! IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP PLTE cHRM IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR cHRM+ iCCP IDAT IEND"));
+   g_assert_false(
+      applied(2, p_icc, "IHDR cHRM=0,0,0,0,0,0,0,0 iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc,
+                          "IHDR cHRM=31270,32900,64000,33000,"
+                          "30000,60000,15000,-1 iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc,
+                          "IHDR cHRM=31270,4,64000,33000,"
+                          "30000,60000,15000,6000 iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc,
+                          "IHDR cHRM=31270,32900,64000,36001,"
+                          "30000,60000,15000,6000 iCCP IDAT IEND"));
+   /* a white point outside the primaries' triangle: no positive scales */
+   g_assert_false(applied(2, p_icc,
+                          "IHDR cHRM=5000,90000,64000,33000,"
+                          "30000,60000,15000,6000 iCCP IDAT IEND"));
+   /* three collinear primaries: the matrix does not invert */
+   g_assert_false(applied(2, p_icc,
+                          "IHDR cHRM=31270,32900,60000,30000,"
+                          "40000,40000,20000,50000 iCCP IDAT IEND"));
+   g_bytes_unref(p_icc);
 }
 
 /* p_icc (taken) with the 32-bit field at u_at set to u_val, or with u_pad
@@ -1488,6 +1589,8 @@ add_gate_tests(void) {
    g_test_add_func("/icc/babl_kind_fixtures", test_babl_kind_fixtures);
    g_test_add_func("/icc/babl_curve_tags", test_babl_curve_tags);
    g_test_add_func("/icc/sane_fuzz", test_sane_fuzz);
+   g_test_add_func("/icc/png_applied_gamut_rules",
+                   test_png_applied_gamut_rules);
    g_test_add_func("/icc/png_applied_chunk_rules",
                    test_png_applied_chunk_rules);
    g_test_add_func("/icc/png_applied_header_rules",
