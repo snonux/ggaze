@@ -1,5 +1,5 @@
 /*:*
- * ggaze — the interactive crop (c) and straighten (R) tools
+ * ggaze — the interactive crop (c) and straighten (r) tools
  *
  * See tool-ctrl.h. The state machine (start / key / drag / apply / cancel /
  * abandon), the two overlays, and the glue between widget pixels (the
@@ -18,6 +18,7 @@
 
 #include "croprect.h"
 #include "transform.h"
+#include "shortcuts.h"
 
 /* How close (widget px) the pointer must be to an edge or corner to grab it
  * rather than move the rectangle; scaled into image px per drag. */
@@ -27,9 +28,12 @@
 /* The straighten grid: lines at every 1/8 of the image. */
 #define _GRID_DIVISIONS 8
 
+/* The start-of-tool status lines say what the mouse does; the keys are on
+ * the key-hint bar under the image (edit-mode.c, from shortcuts.c's table),
+ * so they are not repeated -- and cannot go stale -- here. */
 static const char *_CROP_HINT =
-   "Crop — drag to move or resize · h/l/j/k move, H/L/J/K resize "
-   "· 1-4 aspect, 0 free · Enter applies, Esc cancels";
+   "Crop — drag inside to move, drag an edge or corner to resize · "
+   "Enter applies, Esc cancels";
 static const char *_RENDERING =
    "Preview still rendering — try again in a moment";
 static const char *_NO_PICTURE =
@@ -52,12 +56,22 @@ struct ToolCtrl {
    Transform t_work;  /* the transform on the preview while editing */
 
    /* crop */
-   CropRect t_rect;     /* the rectangle, in base-image px */
-   gboolean b_rect_set; /* t_rect has been laid out (needs the base size) */
-   gdouble  d_aspect;   /* aspect lock w/h, 0 = free */
-   gint     i_base_w;   /* the base size t_rect was laid out on (0 = none
-                         * yet), so a base that changed size under it can
-                         * be told and the rectangle re-clamped */
+   CropRect t_rect;         /* the rectangle, in base-image px */
+   gboolean b_rect_set;     /* t_rect has been laid out (needs the base
+                             * size) */
+   CropRectAspect e_aspect; /* the lock `a` cycled to ... */
+   gdouble        d_aspect; /* ... as a ratio w/h, 0 = free (ORIGINAL is
+                             * the base's shape when it was picked) */
+   CropRect t_aspect_ref;   /* the rectangle the cycle fits each lock
+                             * into: the one the user left before the
+                             * first `a` (see _rect_aspect_cycle) ... */
+   CropRect t_aspect_out;   /* ... and what the last `a` made of it, to
+                             * tell a later hand edit (a new reference)
+                             * from a run of `a` presses */
+   gboolean b_aspect_run;   /* t_aspect_ref / _out are this session's */
+   gint     i_base_w;       /* the base size t_rect was laid out on (0 = none
+                             * yet), so a base that changed size under it can
+                             * be told and the rectangle re-clamped */
    gint i_base_h;
 
    /* an in-progress pointer drag */
@@ -310,6 +324,16 @@ _drag_cb(GgazeViewerDragPhase e_phase, gdouble d_x, gdouble d_y,
 
 /* --- session -------------------------------------------------------------- */
 
+/* Tell the host the key mode changed (a tool started or ended), so the
+ * key-hint bar follows every way a session ends -- Enter, Esc, a
+ * navigation, a discard, the view switching -- not just the keys. */
+static void
+_mode_changed(ToolCtrl *p_tc) {
+   if (p_tc->p_ops->mode_changed != NULL) {
+      p_tc->p_ops->mode_changed(p_tc->p_host);
+   }
+}
+
 /* Drop the overlay and every per-session field; the transform is left to the
  * caller (apply commits it, cancel and abandon restore it, a discard resets
  * it). */
@@ -325,6 +349,7 @@ _leave(ToolCtrl *p_tc) {
       ggaze_viewer_set_overlay(p_v, NULL, NULL, NULL);
       ggaze_viewer_hold_first_frame(p_v, FALSE); /* an animation plays on */
    }
+   _mode_changed(p_tc);
 }
 
 /* Common start: needs a current file; records what Esc will restore, puts
@@ -346,6 +371,7 @@ _begin(ToolCtrl *p_tc, GgazeTool e_tool) {
     * (the texture the controller renders from), so that is what it shows
     * (viewer.h ggaze_viewer_hold_first_frame). */
    ggaze_viewer_hold_first_frame(_viewer(p_tc), TRUE);
+   _mode_changed(p_tc);
    return (TRUE);
 }
 
@@ -409,7 +435,9 @@ _start_crop(ToolCtrl *p_tc) {
    }
    p_tc->b_rect_set    = p_tc->t_saved.b_crop;
    p_tc->t_rect        = p_tc->t_saved.t_crop;
+   p_tc->e_aspect      = CROPRECT_ASPECT_FREE;
    p_tc->d_aspect      = 0.0;
+   p_tc->b_aspect_run  = FALSE;
    p_tc->i_base_w      = 0;
    p_tc->i_base_h      = 0;
    p_tc->t_work.b_crop = FALSE;
@@ -450,8 +478,8 @@ static void
 _straighten_status(ToolCtrl *p_tc) {
    char *c_angle = _angle_text(p_tc->t_work.d_degrees);
    char *c_msg =
-      g_strdup_printf("Straighten %s — drag along the horizon · h/l nudge "
-                      "½° · A auto-crop %s · Enter applies, Esc cancels%s",
+      g_strdup_printf("Straighten %s — drag along the horizon · auto-crop "
+                      "%s · Enter applies, Esc cancels%s",
                       c_angle, p_tc->t_work.b_autocrop ? "on" : "off",
                       _crop_outside(p_tc) ? " · crop outside the view at "
                                             "this angle (nothing cropped)"
@@ -500,107 +528,98 @@ _rect_resize(ToolCtrl *p_tc, CropRectHit e_edge, gdouble d_dx, gdouble d_dy) {
    _redraw(p_tc);
 }
 
+/* `a`: the next aspect lock in the cycle (croprect.h), fitted around the
+ * centre and said on the status line -- the hint bar names the key, only
+ * the status line can name the lock now in force. "original" is the base's
+ * shape at the moment it is picked.
+ *
+ * Every lock is fitted into the SAME reference rectangle: the one the user
+ * left before the run of `a` presses (any move, resize or drag since the
+ * last press starts a new run from the rectangle as it is then). Fitting
+ * each lock into the previous lock's result instead -- croprect_set_aspect
+ * takes the largest shape inside the CURRENT rectangle -- shrank the
+ * rectangle a little with every press of a cycling key, and coming round
+ * to "free" gave back that shrunk remnant rather than what was drawn. */
 static void
-_rect_aspect(ToolCtrl *p_tc, gdouble d_aspect) {
-   p_tc->d_aspect = d_aspect;
-   croprect_set_aspect(&p_tc->t_rect, d_aspect, p_tc->i_base_w, p_tc->i_base_h);
+_rect_aspect_cycle(ToolCtrl *p_tc) {
+   if (!p_tc->b_aspect_run ||
+       !croprect_equal(&p_tc->t_rect, &p_tc->t_aspect_out)) {
+      p_tc->t_aspect_ref = p_tc->t_rect; /* a new run from what is drawn */
+      p_tc->b_aspect_run = TRUE;
+   }
+   p_tc->e_aspect = croprect_aspect_next(p_tc->e_aspect);
+   p_tc->d_aspect =
+      croprect_aspect_ratio(p_tc->e_aspect, p_tc->i_base_w, p_tc->i_base_h);
+   p_tc->t_rect = p_tc->t_aspect_ref;
+   croprect_set_aspect(&p_tc->t_rect, p_tc->d_aspect, p_tc->i_base_w,
+                       p_tc->i_base_h);
+   p_tc->t_aspect_out = p_tc->t_rect;
    _redraw(p_tc);
+   char *c_msg = g_strdup_printf("Crop aspect: %s (a cycles free, original, "
+                                 "1:1, 3:2, 4:3, 16:9)",
+                                 croprect_aspect_name(p_tc->e_aspect));
+   _status(p_tc, c_msg);
+   g_free(c_msg);
 }
 
-/* The aspect presets: 1-4 lock 1:1 / 3:2 / 4:3 / 16:9, 0 frees. TRUE iff
- * u_keyval is one of them, with the ratio in *p_aspect. */
-static gboolean
-_aspect_for_key(guint u_keyval, gdouble *p_aspect) {
-   static const struct {
-      guint   u_key;
-      gdouble d_aspect;
-   } ASPECTS[] = {{GDK_KEY_1, 1.0},
-                  {GDK_KEY_2, 3.0 / 2.0},
-                  {GDK_KEY_3, 4.0 / 3.0},
-                  {GDK_KEY_4, 16.0 / 9.0},
-                  {GDK_KEY_0, 0.0}};
-   for (gsize u = 0; u < G_N_ELEMENTS(ASPECTS); u++) {
-      if (ASPECTS[u].u_key == u_keyval) {
-         *p_aspect = ASPECTS[u].d_aspect;
-         return (TRUE);
-      }
-   }
-   return (FALSE);
-}
+/* Which edge a keyboard crop op moves and which way, in steps: a move
+ * shifts the whole rectangle (HIT_INSIDE); a grow moves the side the key
+ * points at outward, a shrink moves it inward -- the four sides alike (the
+ * old H/L/J/K reached only the right and bottom edges). */
+static const struct {
+   GgazeKeyOp  e_op;
+   CropRectHit e_edge;
+   gint        i_dx;
+   gint        i_dy;
+} _CROP_STEPS[] = {
+   {GGAZE_KEY_OP_CROP_MOVE_LEFT, CROPRECT_HIT_INSIDE, -1, 0},
+   {GGAZE_KEY_OP_CROP_MOVE_RIGHT, CROPRECT_HIT_INSIDE, 1, 0},
+   {GGAZE_KEY_OP_CROP_MOVE_UP, CROPRECT_HIT_INSIDE, 0, -1},
+   {GGAZE_KEY_OP_CROP_MOVE_DOWN, CROPRECT_HIT_INSIDE, 0, 1},
+   {GGAZE_KEY_OP_CROP_GROW_LEFT, CROPRECT_HIT_LEFT, -1, 0},
+   {GGAZE_KEY_OP_CROP_GROW_RIGHT, CROPRECT_HIT_RIGHT, 1, 0},
+   {GGAZE_KEY_OP_CROP_GROW_TOP, CROPRECT_HIT_TOP, 0, -1},
+   {GGAZE_KEY_OP_CROP_GROW_BOTTOM, CROPRECT_HIT_BOTTOM, 0, 1},
+   {GGAZE_KEY_OP_CROP_SHRINK_LEFT, CROPRECT_HIT_LEFT, 1, 0},
+   {GGAZE_KEY_OP_CROP_SHRINK_RIGHT, CROPRECT_HIT_RIGHT, -1, 0},
+   {GGAZE_KEY_OP_CROP_SHRINK_TOP, CROPRECT_HIT_TOP, 0, 1},
+   {GGAZE_KEY_OP_CROP_SHRINK_BOTTOM, CROPRECT_HIT_BOTTOM, 0, -1},
+};
 
-/* TRUE iff u_keyval is one of the crop tool's own editing keys: the moves
- * and resizes below plus the aspect presets. */
-static gboolean
-_is_crop_key(guint u_keyval) {
-   gdouble d_unused;
-   switch (u_keyval) {
-   case GDK_KEY_h:
-   case GDK_KEY_l:
-   case GDK_KEY_j:
-   case GDK_KEY_k:
-   case GDK_KEY_H:
-   case GDK_KEY_L:
-   case GDK_KEY_J:
-   case GDK_KEY_K:
-      return (TRUE);
-   default:
-      return (_aspect_for_key(u_keyval, &d_unused));
-   }
-}
-
-/* The crop tool's own keys (the common Enter/Esc/tool keys are handled
- * before this). A key that is not the tool's is never consumed, so q, s,
- * ?, t, Space ... keep their meaning at every moment of the session.
- * Every edit needs the rectangle laid out, which needs the base size:
- * until that is known the tool's OWN keys are consumed with a status line
- * rather than passed on to, say, win.prev (an earlier version swallowed
- * every plain key in that state, and `q` could not quit). */
-static gboolean
-_crop_key(ToolCtrl *p_tc, guint u_keyval) {
-   if (!_is_crop_key(u_keyval)) {
-      return (FALSE);
-   }
+/* One crop editing op (shortcuts.c maps the keys to it; Enter / Esc and
+ * the tool keys are handled before this, and a key that maps to no op
+ * never gets here, so q, s, ?, t, Space ... keep their meaning at every
+ * moment of the session). Every edit needs the rectangle laid out, which
+ * needs the base size: until that is known the op is consumed with a
+ * status line rather than passed on to, say, win.prev (an earlier version
+ * swallowed every plain key in that state, and `q` could not quit). */
+static void
+_crop_op(ToolCtrl *p_tc, GgazeKeyOp e_op) {
    /* A key edit made while two fingers were down is kept: a REVERT that
     * follows must not undo it along with the first finger's jitter. */
    p_tc->b_revertable = FALSE;
    if (!_ensure_rect(p_tc)) {
       _say_not_ready(p_tc);
-      return (TRUE);
+      return;
+   }
+   if (e_op == GGAZE_KEY_OP_CROP_ASPECT) {
+      _rect_aspect_cycle(p_tc);
+      return;
    }
    gdouble d_step = _nudge_step(p_tc);
-   gdouble d_aspect;
-   switch (u_keyval) {
-   case GDK_KEY_h:
-      _rect_move(p_tc, -d_step, 0.0);
-      return (TRUE);
-   case GDK_KEY_l:
-      _rect_move(p_tc, d_step, 0.0);
-      return (TRUE);
-   case GDK_KEY_k:
-      _rect_move(p_tc, 0.0, -d_step);
-      return (TRUE);
-   case GDK_KEY_j:
-      _rect_move(p_tc, 0.0, d_step);
-      return (TRUE);
-   case GDK_KEY_H: /* the right edge moves left: narrower */
-      _rect_resize(p_tc, CROPRECT_HIT_RIGHT, -d_step, 0.0);
-      return (TRUE);
-   case GDK_KEY_L:
-      _rect_resize(p_tc, CROPRECT_HIT_RIGHT, d_step, 0.0);
-      return (TRUE);
-   case GDK_KEY_K: /* the bottom edge moves up: shorter */
-      _rect_resize(p_tc, CROPRECT_HIT_BOTTOM, 0.0, -d_step);
-      return (TRUE);
-   case GDK_KEY_J:
-      _rect_resize(p_tc, CROPRECT_HIT_BOTTOM, 0.0, d_step);
-      return (TRUE);
-   default:
-      break;
+   for (gsize u = 0; u < G_N_ELEMENTS(_CROP_STEPS); u++) {
+      if (_CROP_STEPS[u].e_op != e_op) {
+         continue;
+      }
+      gdouble d_dx = _CROP_STEPS[u].i_dx * d_step;
+      gdouble d_dy = _CROP_STEPS[u].i_dy * d_step;
+      if (_CROP_STEPS[u].e_edge == CROPRECT_HIT_INSIDE) {
+         _rect_move(p_tc, d_dx, d_dy);
+      } else {
+         _rect_resize(p_tc, _CROP_STEPS[u].e_edge, d_dx, d_dy);
+      }
+      return;
    }
-   if (_aspect_for_key(u_keyval, &d_aspect)) {
-      _rect_aspect(p_tc, d_aspect);
-   }
-   return (TRUE); /* _is_crop_key said so: nothing else reaches here */
 }
 
 /* TRUE iff the rectangle can be edited or committed right now: laid out on
@@ -724,8 +743,8 @@ _apply_crop(ToolCtrl *p_tc) {
    }
    _leave(p_tc);
    enhance_ctrl_set_transform(p_tc->p_ec, &t_new);
-   _status(p_tc, t_new.b_crop ? "Cropped — s saves a copy, Esc discards "
-                                "the preview"
+   _status(p_tc, t_new.b_crop ? "Cropped — s saves a copy, x reverts "
+                                "every edit"
                               : "Crop removed (the whole image)");
    return (TRUE);
 }
@@ -760,25 +779,23 @@ _nudge(ToolCtrl *p_tc, gdouble d_delta) {
                       p_tc->t_work.b_autocrop);
 }
 
-static gboolean
-_straighten_key(ToolCtrl *p_tc, guint u_keyval) {
-   switch (u_keyval) {
-   case GDK_KEY_h:
-   case GDK_KEY_minus:
-   case GDK_KEY_underscore:
-      _nudge(p_tc, -TRANSFORM_ANGLE_STEP); /* counter-clockwise */
-      return (TRUE);
-   case GDK_KEY_l:
-   case GDK_KEY_plus:
-   case GDK_KEY_equal:
-      _nudge(p_tc, TRANSFORM_ANGLE_STEP); /* clockwise */
-      return (TRUE);
-   case GDK_KEY_A:
+/* One straighten op (shortcuts.c maps h / - / _ and l / + / = to the
+ * nudges and `a` -- `A` before 6i2 -- to the auto-crop toggle). */
+static void
+_straighten_op(ToolCtrl *p_tc, GgazeKeyOp e_op) {
+   switch (e_op) {
+   case GGAZE_KEY_OP_STRAIGHTEN_CCW:
+      _nudge(p_tc, -TRANSFORM_ANGLE_STEP);
+      break;
+   case GGAZE_KEY_OP_STRAIGHTEN_CW:
+      _nudge(p_tc, TRANSFORM_ANGLE_STEP);
+      break;
+   case GGAZE_KEY_OP_STRAIGHTEN_AUTOCROP:
       _change_straighten(p_tc, p_tc->t_work.d_degrees,
                          !p_tc->t_work.b_autocrop);
-      return (TRUE);
+      break;
    default:
-      return (FALSE);
+      break; /* not a straighten op: the table scopes it to the crop tool */
    }
 }
 
@@ -806,7 +823,7 @@ _horizon_measurable(ToolCtrl *p_tc) {
  * becomes the new angle and the image levels -- provided the preview on
  * screen IS the current one (_horizon_measurable), else the END is refused
  * with a status line and the drag can be repeated once it is. An UPDATE or
- * END without a BEGIN -- the drag started before `R` was pressed, or a
+ * END without a BEGIN -- the drag started before `r` was pressed, or a
  * stale end -- has no line to level by and is ignored, the way _crop_drag
  * ignores a drag that began outside the rectangle (it used to apply
  * whatever the start coordinates last held: a lone END at (300, 200)
@@ -856,7 +873,7 @@ _apply_straighten(ToolCtrl *p_tc) {
    char *c_angle = _angle_text(p_tc->t_work.d_degrees);
 
    char *c_msg = g_strdup_printf("Straightened %s — s saves a "
-                                 "copy, Esc discards the preview",
+                                 "copy, x reverts every edit",
                                  c_angle);
    _leave(p_tc);
    _status(p_tc, c_msg);
@@ -867,40 +884,37 @@ _apply_straighten(ToolCtrl *p_tc) {
 
 /* --- keys shared by both tools -------------------------------------------- */
 
-/* Enter / Esc, and the tool keys themselves: the same tool's key cancels
- * (a toggle, like `a` for the panel), the other tool's key and the quarter
- * turns are refused until this tool is finished. */
+/* The tool keys themselves (c, r, [, ]), recognised by the GLOBAL action
+ * the table binds them to rather than by a second copy of the keys: the
+ * same tool's key cancels (a toggle, like `a` for the panel), the other
+ * tool's key and the quarter turns are refused until this tool is finished
+ * (a tool switch or a turn under a laid-out rectangle would silently move
+ * it). FALSE for any other action -- the key is not the tool's. */
 static gboolean
-_common_key(ToolCtrl *p_tc, guint u_keyval) {
-   switch (u_keyval) {
-   case GDK_KEY_Return:
-   case GDK_KEY_KP_Enter:
-      tool_ctrl_apply(p_tc);
-      return (TRUE);
-   case GDK_KEY_Escape:
-      tool_ctrl_cancel(p_tc);
-      return (TRUE);
-   case GDK_KEY_c:
-      if (p_tc->e_tool == GGAZE_TOOL_CROP) {
-         tool_ctrl_cancel(p_tc);
-      } else {
-         _status(p_tc, _FINISH_FIRST);
-      }
-      return (TRUE);
-   case GDK_KEY_R:
-      if (p_tc->e_tool == GGAZE_TOOL_STRAIGHTEN) {
-         tool_ctrl_cancel(p_tc);
-      } else {
-         _status(p_tc, _FINISH_FIRST);
-      }
-      return (TRUE);
-   case GDK_KEY_bracketleft:
-   case GDK_KEY_bracketright:
-      _status(p_tc, _FINISH_FIRST);
-      return (TRUE);
-   default:
+_tool_action_key(ToolCtrl *p_tc, const char *c_action) {
+   GgazeTool e_own = GGAZE_TOOL_NONE;
+   if (g_strcmp0(c_action, "win.crop") == 0) {
+      e_own = GGAZE_TOOL_CROP;
+   } else if (g_strcmp0(c_action, "win.straighten") == 0) {
+      e_own = GGAZE_TOOL_STRAIGHTEN;
+   } else if (g_strcmp0(c_action, "win.rotate-cw") != 0 &&
+              g_strcmp0(c_action, "win.rotate-ccw") != 0) {
       return (FALSE);
    }
+   if (e_own != GGAZE_TOOL_NONE && e_own == p_tc->e_tool) {
+      tool_ctrl_cancel(p_tc);
+   } else {
+      _status(p_tc, _FINISH_FIRST);
+   }
+   return (TRUE);
+}
+
+/* The key mode of the active tool (shortcuts.h): which rows of the table
+ * are the tool's. */
+static GgazeKeyMode
+_key_mode(ToolCtrl *p_tc) {
+   return (p_tc->e_tool == GGAZE_TOOL_CROP ? GGAZE_KEY_MODE_CROP
+                                           : GGAZE_KEY_MODE_STRAIGHTEN);
 }
 
 /* --- public API ----------------------------------------------------------- */
@@ -970,16 +984,28 @@ tool_ctrl_key(ToolCtrl *p_tc, guint u_keyval, GdkModifierType e_state) {
    if (p_tc->e_tool == GGAZE_TOOL_NONE) {
       return (FALSE);
    }
-   if ((e_state & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK)) != 0) {
-      return (FALSE); /* a chord (Ctrl+q, Ctrl+c, ...) is never ours */
-   }
-   if (_common_key(p_tc, u_keyval)) {
+   /* The table says which keys are the tool's (a chord only when a row
+    * names it: Ctrl+h shrinks a crop side, Ctrl+q is still quit). */
+   GgazeKeyOp e_op = shortcuts_mode_op(_key_mode(p_tc), u_keyval, e_state);
+   switch (e_op) {
+   case GGAZE_KEY_OP_NONE:
+      return (
+         _tool_action_key(p_tc, shortcuts_global_action(u_keyval, e_state)));
+   case GGAZE_KEY_OP_TOOL_APPLY:
+      tool_ctrl_apply(p_tc);
       return (TRUE);
+   case GGAZE_KEY_OP_TOOL_CANCEL:
+      tool_ctrl_cancel(p_tc);
+      return (TRUE);
+   default:
+      break;
    }
    if (p_tc->e_tool == GGAZE_TOOL_CROP) {
-      return (_crop_key(p_tc, u_keyval));
+      _crop_op(p_tc, e_op);
+   } else {
+      _straighten_op(p_tc, e_op);
    }
-   return (_straighten_key(p_tc, u_keyval));
+   return (TRUE);
 }
 
 /* CANCEL / REVERT (viewer.h): let go of whatever the drag held -- the crop

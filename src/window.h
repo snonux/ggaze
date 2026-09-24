@@ -22,6 +22,7 @@
 
 #include "croprect.h"    /* CropRect, for the crop-rectangle seam */
 #include "ggaze-enums.h" /* GgazeTool */
+#include "shortcuts.h"   /* GgazeKeyMode */
 #include "viewer.h"      /* GgazeViewerDragPhase */
 
 G_BEGIN_DECLS
@@ -169,20 +170,36 @@ gboolean ggaze_window_enhance_is_dirty(GgazeWindow *p_win);
  * issue 4). */
 void ggaze_window_set_hold_original(GgazeWindow *p_win, gboolean b_hold);
 
-/* --- the crop / straighten tools (c / R; docs/ui-and-interactions.md) -----
+/* --- the crop / straighten tools (c / r; docs/ui-and-interactions.md) -----
  *
  * Which interactive tool has the large view right now (always
  * GGAZE_TOOL_NONE without GEGL). */
 GgazeTool ggaze_window_get_tool(GgazeWindow *p_win);
 
-/* Offer a key press to the active tool: TRUE iff it consumed it. This is the
- * testable entry point the window's own capture-phase key controller calls
- * for every key while a tool is active (the tool keys -- h/l/j/k, H/L/J/K,
- * 1-4/0, +/-, A, Enter, Esc -- are modal and are NOT in shortcuts.c's action
- * table; that table documents them as help-only rows). Always FALSE without
- * GEGL. */
+/* Offer a key press to the active tool: TRUE iff it consumed it. The tool
+ * keys (h/j/k/l, Shift+ and Ctrl+h/j/k/l, a, -/+, Enter, Esc) are modal:
+ * shortcuts.c's rows scoped to the tool's key mode, never bound globally.
+ * The window's capture-phase edit-key router (ggaze_window_edit_key) offers
+ * every key to the tool first. Always FALSE without GEGL. */
 gboolean ggaze_window_tool_key(GgazeWindow *p_win, guint u_keyval,
                                GdkModifierType e_state);
+
+/* The whole edit-key route a real key press takes before the global
+ * shortcut table sees it (edit-mode.c): the active tool first, then --
+ * with the edit panel open -- the panel's own keys (the preset digits).
+ * TRUE iff the key was consumed. The testable entry point for "the digits
+ * do nothing with the panel closed". Always FALSE without GEGL. */
+gboolean ggaze_window_edit_key(GgazeWindow *p_win, guint u_keyval,
+                               GdkModifierType e_state);
+
+/* The editing context whose keys are live, as the key-hint bar shows it
+ * (GGAZE_KEY_MODE_NONE while browsing, and always without GEGL). */
+GgazeKeyMode ggaze_window_get_key_mode(GgazeWindow *p_win);
+
+/* The key-hint bar's text as shown now (plain text, no markup), or NULL
+ * while it is hidden. A test seam: the bar is generated from shortcuts.c's
+ * table per mode. */
+char *ggaze_window_get_hint_text(GgazeWindow *p_win);
 
 /* A pointer drag over the viewer, in viewer-widget coordinates, delivered to
  * the active tool (crop: move / resize the rectangle; straighten: draw and,

@@ -12,7 +12,7 @@
  * hold-Space compare flag, the file the preview applies to, the
  * saved-already flag, the enhance side panel and every card/picture it is
  * built of, and the Enhancer engine itself. window.c forwards only the
- * a/s/digit/Space/0/Esc/[/] actions and a few choke-point calls
+ * a/s/x/digit/Space/Esc/[/] actions and a few choke-point calls
  * (is_dirty, texture_shown, override_texture, nav_changed); the
  * interactive crop and straighten tools (tool-ctrl.c) edit the Transform
  * through enhance_ctrl_set_transform; every other enhance concern lives
@@ -22,10 +22,13 @@
  * The panel sits BESIDE the large view, inside the window's own widget tree
  * (the host hands over a slot to put it in), so the image keeps the whole
  * viewer while the presets are small cards down the side, and every window
- * key -- Space hold-compare, the digits, s, h/l, Esc -- keeps working with
- * no second GtkRoot to bind anything onto. It stays open across navigation
- * and re-previews the new image, so a folder can be worked through with
- * `a` pressed once.
+ * key -- Space hold-compare, the digits, s, x, h/l, Esc -- keeps working
+ * with no second GtkRoot to bind anything onto. It is the one home of every
+ * edit (6i2): the presets, the Transform buttons (c / r / [ / ]) and the
+ * Actions (save, revert, close), each showing its key; the panel-only keys
+ * (the digits) are routed to it by edit-mode.c while it is open. It stays
+ * open across navigation and re-previews the new image, so a folder can be
+ * worked through with `a` pressed once.
  *
  * Saving: `s` exports a copy and marks the preview SAVED; a saved preview is
  * no longer dirty, so moving on does not prompt for it. What was saved is
@@ -117,8 +120,8 @@ typedef struct {
     * present, current NULL -- still reaches the mask-reset branch rather than
     * early-returning. */
    gboolean (*has_navigator)(gpointer p_host);
-   /* The preview is about to be discarded (Esc, `0` / the Original card, a
-    * failed apply, the gate's Discard, the slideshow): end a crop /
+   /* The preview is about to be discarded (x / Revert all, a failed
+    * apply, the gate's Discard, the slideshow): end a crop /
     * straighten session over it first, without restoring anything -- the
     * discard resets the transform and a tool's override together. A tool
     * left running kept its working angle / turn and re-applied the
@@ -130,6 +133,12 @@ typedef struct {
     * out on the previous one lays out again and redraws. Called from
     * inside the window's texture choke point, before the viewer shows it. */
    void (*original_changed)(gpointer p_host);
+   /* The panel opened or closed -- by `a`, a click on Close, Esc, a tool
+    * key opening it, or the folder running empty -- so the window's key
+    * mode (and the key-hint bar showing it) follows. May be NULL. Called
+    * from enhance_ctrl_dispose too, so the host must tolerate a call
+    * during its own dispose. */
+   void (*mode_changed)(gpointer p_host);
 } EnhanceUIHostOps;
 
 /* Continuation for enhance_ctrl_save_async: b_ok is TRUE on a real write. */
@@ -296,11 +305,14 @@ void enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold);
  * with a preview thumbnail per card when b_thumbnails, label-only cards
  * otherwise; a second call closes it. A no-op if no folder is open. */
 void enhance_ctrl_toggle_open(EnhanceCtrl *p_ctrl, gboolean b_thumbnails);
-/* Esc with the panel open: close it (the preview stays). Returns TRUE iff a
- * panel was open, so the window's Esc can stop there. */
+/* Esc with the panel open: close it (the preview stays -- Esc never
+ * discards an edit). Returns TRUE iff a panel was open, so the window's
+ * Esc can stop there. */
 gboolean enhance_ctrl_close(EnhanceCtrl *p_ctrl);
-/* enhance-N (keys 1-8): toggle preset i_idx (0..7) on/off (layered), then
- * re-apply asynchronously. Out-of-range i_idx is a silent no-op. */
+/* enhance-N (keys 1-8, live only while the panel is open -- edit-mode.c
+ * routes them -- and the cards): toggle preset i_idx (0..7) on/off
+ * (layered), then re-apply asynchronously. Out-of-range i_idx is a silent
+ * no-op. */
 void enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx);
 /* `s` / Ctrl+S: export the previewed image with the enabled-preset chain to
  * a non-colliding <stem>-enhanced[-<n>].<ext>, in a worker (the full decode
@@ -335,8 +347,8 @@ gboolean enhance_ctrl_can_save(EnhanceCtrl *p_ctrl);
  * either way. */
 void enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl);
 
-/* Drop the current enhance preview and go back to the original (Esc, `0`,
- * slideshow auto-advance, the SaveGate's Discard). Ends a running tool
+/* Drop the current enhance preview and go back to the original (x / Revert
+ * all, slideshow auto-advance, the SaveGate's Discard). Ends a running tool
  * first (abandon_tool). Never touches the file on disk. */
 void enhance_ctrl_discard(EnhanceCtrl *p_ctrl);
 

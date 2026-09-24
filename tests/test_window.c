@@ -594,6 +594,28 @@ test_toggle_view_follows_card(void) {
  * crashing. Built (and run) in BOTH lanes (unlike tests/test_enhance_flow.c,
  * which is gegl-only) so the disabled behavior is actually exercised by the
  * minimal-lane CI run, not just asserted by inspection. */
+#if !GGAZE_HAVE_GEGL
+/* 6i2, minimal build: every edit key -- a, c, r, [, ], s and the new x --
+ * says "GEGL not built in" on its own (the label is cleared before each,
+ * so no earlier message can stand in for a silent one); no digit and no
+ * mode key is ever claimed, and there is no hint bar. */
+static void
+assert_edit_keys_say_no_gegl(GgazeWindow *p_win, GtkWidget *p_lbl) {
+   static const char *EDIT_ACTIONS[] = {
+      "win.enhance",    "win.crop",         "win.straighten", "win.rotate-cw",
+      "win.rotate-ccw", "win.enhance-save", "win.edit-revert"};
+   for (gsize u = 0; u < G_N_ELEMENTS(EDIT_ACTIONS); u++) {
+      gtk_label_set_text(GTK_LABEL(p_lbl), "");
+      fire(p_win, EDIT_ACTIONS[u]);
+      g_assert_nonnull(g_strstr_len(gtk_label_get_text(GTK_LABEL(p_lbl)), -1,
+                                    "GEGL not built in"));
+   }
+   g_assert_false(ggaze_window_edit_key(p_win, GDK_KEY_1, 0));
+   g_assert_cmpint(ggaze_window_get_key_mode(p_win), ==, GGAZE_KEY_MODE_NONE);
+   g_assert_null(ggaze_window_get_hint_text(p_win));
+}
+#endif
+
 static void
 test_enhance_a_is_safe_with_and_without_gegl(void) {
    const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
@@ -658,6 +680,7 @@ test_enhance_a_is_safe_with_and_without_gegl(void) {
    fire(p_win, "win.straighten");
    g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
    g_assert_false(ggaze_window_tool_key(p_win, GDK_KEY_Return, 0));
+   assert_edit_keys_say_no_gegl(p_win, p_lbl);
 #endif
    g_assert_false(ggaze_window_enhance_is_dirty(p_win));
 

@@ -32,6 +32,7 @@ static gboolean    _has_navigator(EnhanceCtrl *p_ctrl);
 
 /* Forward decls of the internal state-machine functions. */
 static void     _sync_panel(EnhanceCtrl *p_ctrl);
+static void     _sync_save_target(EnhanceCtrl *p_ctrl);
 static void     _apply_async(EnhanceCtrl *p_ctrl);
 static void     _discard(EnhanceCtrl *p_ctrl);
 static void     _destroy(EnhanceCtrl *p_ctrl);
@@ -96,12 +97,13 @@ struct EnhanceCtrl {
     * unconditionally. */
    gboolean   b_thumbnails; /* the open panel has picture cards */
    GtkWidget *p_panel;      /* the panel root, parented in the host's slot */
-   GtkWidget *p_title;      /* "Enhance <basename>" label */
+   GtkWidget *p_title;      /* "Edit <basename>" label */
    GtkWidget *p_original_pic;
    GtkWidget *p_btns[GGAZE_ENHANCE_MAX_PRESETS]; /* preset cards */
    GtkWidget *p_pics[GGAZE_ENHANCE_MAX_PRESETS]; /* their pictures */
    GtkWidget *p_state;                           /* save-state line */
    GtkWidget *p_save_btn;
+   GtkWidget *p_save_target; /* "→ <name>" the next Save writes */
 
    GCancellable *p_preview_cancel; /* thumbnail-preview batch */
    guint         u_preview_gen;    /* invalidates stale batch completions */
@@ -193,6 +195,14 @@ _update_header(EnhanceCtrl *p_ctrl) {
 static void
 _show_status(EnhanceCtrl *p_ctrl, const char *c_msg) {
    p_ctrl->p_ops->show_status(p_ctrl->p_host, c_msg);
+}
+
+/* The panel opened or closed: the host's key mode follows (optional op). */
+static void
+_mode_changed(EnhanceCtrl *p_ctrl) {
+   if (p_ctrl->p_ops->mode_changed != NULL) {
+      p_ctrl->p_ops->mode_changed(p_ctrl->p_host);
+   }
 }
 
 static void
@@ -546,6 +556,7 @@ _save_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
          p_ctrl->c_saved_name = g_file_get_basename(p_req->p_out);
          _refresh_saved(p_ctrl);
          _sync_panel(p_ctrl);
+         _sync_save_target(p_ctrl); /* that name is taken now: -1, -2 ... */
       }
    }
    if (p_req->fn_done != NULL) {
@@ -627,6 +638,25 @@ _sync_panel(EnhanceCtrl *p_ctrl) {
                                 _has_work(p_ctrl), p_ctrl->b_saved,
                                 p_ctrl->c_saved_name);
    }
+}
+
+/* Name the file the next Save would write under the Save button: the
+ * export's own non-colliding destination for the current file
+ * (enhancer_export_dest_for), so what the button promises is what `s`
+ * writes. It probes the folder for a free name, so it runs only when that
+ * can change -- the panel opening, another file, a save landing -- not on
+ * every state change. A no-op while the panel is closed. */
+static void
+_sync_save_target(EnhanceCtrl *p_ctrl) {
+   if (p_ctrl->p_save_target == NULL) {
+      return;
+   }
+   GFile *p_cur  = _current_file(p_ctrl);
+   GFile *p_dest = p_cur != NULL ? enhancer_export_dest_for(p_cur) : NULL;
+   char  *c_name = p_dest != NULL ? g_file_get_basename(p_dest) : NULL;
+   enhance_ui_set_save_target(p_ctrl->p_save_target, c_name);
+   g_free(c_name);
+   g_clear_object(&p_dest);
 }
 
 /* --- the managed original (hold-Space on a colour-managed render) -------- */
@@ -847,7 +877,7 @@ _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
 }
 
 /* Canonical "nothing to render" site -- every path that clears the state
- * (Esc/discard, the Original card, `0`, the fourth quarter turn, the
+ * (x / Revert all, the fourth quarter turn, the
  * easy-to-miss one: toggling the LAST enabled preset back off via
  * win.enhance-N or a card) and the crop tool opening over a crop-only
  * transform funnel through here. Shows the original (texturecache is fast,
@@ -917,8 +947,9 @@ _apply_async(EnhanceCtrl *p_ctrl) {
 /* Drop the current enhance preview and go back to showing the unmodified
  * original: clears the mask + cached texture and reloads the original
  * (_apply_async's mask==0 path also invalidates any in-flight apply via
- * u_enhance_gen). Used by Esc (explicit discard, no prompt), the Original
- * card / `0`, the slideshow timer, a failed apply, and after Save/Discard
+ * u_enhance_gen). Used by x / Revert all (explicit, no prompt -- Esc no
+ * longer discards, 6i2), the slideshow timer, a failed apply, and after
+ * Save/Discard
  * in the navigate-away prompt. Never touches the file on disk -- discarding
  * a preview only drops in-memory state. A crop / straighten session over
  * the preview ends FIRST (abandon_tool): the tool's working copy of the
@@ -1141,10 +1172,12 @@ _destroy(EnhanceCtrl *p_ctrl) {
    p_ctrl->p_original_pic = NULL;
    p_ctrl->p_state        = NULL;
    p_ctrl->p_save_btn     = NULL;
+   p_ctrl->p_save_target  = NULL;
    GtkWidget *p_slot      = gtk_widget_get_parent(p_panel);
    if (GTK_IS_BOX(p_slot)) {
       gtk_box_remove(GTK_BOX(p_slot), p_panel);
    }
+   _mode_changed(p_ctrl); /* the panel's keys and hint bar go with it */
 }
 
 typedef struct {
@@ -1215,7 +1248,8 @@ _start_previews(EnhanceCtrl *p_ctrl) {
  * construction lives in enhance-ui.c (enhance_ui_build_panel); this thin
  * wrapper owns the controller-side glue -- storing the built widgets into
  * p_ctrl's fields and connecting each card's "clicked" to _card_toggle,
- * which owns the mask state. */
+ * which owns the mask state. The Transform and Actions buttons need no
+ * wiring: they are actionables on the win.* actions their keys fire. */
 static GtkWidget *
 _build_panel(EnhanceCtrl *p_ctrl) {
    char  *c_basename = NULL;
@@ -1232,12 +1266,11 @@ _build_panel(EnhanceCtrl *p_ctrl) {
    p_ctrl->p_original_pic = ui.p_original_pic;
    p_ctrl->p_state        = ui.p_state;
    p_ctrl->p_save_btn     = ui.p_save_btn;
+   p_ctrl->p_save_target  = ui.p_save_target;
    for (guint i = 0; i < ui.u_n_presets; i++) {
       p_ctrl->p_btns[i] = ui.p_btns[i];
       p_ctrl->p_pics[i] = ui.p_pics[i];
    }
-   g_signal_connect_swapped(ui.p_original_btn, "clicked",
-                            G_CALLBACK(_card_toggle), p_ctrl);
    for (guint i = 0; i < ui.u_n_presets; i++) {
       g_signal_connect_swapped(ui.p_btns[i], "clicked",
                                G_CALLBACK(_card_toggle), p_ctrl);
@@ -1263,6 +1296,7 @@ _retarget_panel(EnhanceCtrl *p_ctrl) {
       }
    }
    _sync_panel(p_ctrl);
+   _sync_save_target(p_ctrl);
    _start_previews(p_ctrl);
 }
 
@@ -1288,7 +1322,9 @@ enhance_ctrl_toggle_open(EnhanceCtrl *p_ctrl, gboolean b_thumbnails) {
    gtk_box_append(GTK_BOX(p_ctrl->p_ops->panel_slot(p_ctrl->p_host)),
                   p_ctrl->p_panel);
    _sync_panel(p_ctrl); /* the save-state line has no build-time text */
+   _sync_save_target(p_ctrl);
    _start_previews(p_ctrl);
+   _mode_changed(p_ctrl); /* the digits are live now; the hint bar shows */
 }
 
 gboolean
@@ -1301,9 +1337,10 @@ enhance_ctrl_close(EnhanceCtrl *p_ctrl) {
    return (TRUE);
 }
 
-/* enhance-N (keys 1-8, always live -- not gated on the panel being open):
- * toggle preset N on/off (layered), then re-apply asynchronously. Out-of-range
- * i_idx is a silent no-op. */
+/* enhance-N (keys 1-8, routed here only while the panel is open --
+ * edit-mode.c; the action itself is also what a card click amounts to):
+ * toggle preset N on/off (layered), then re-apply asynchronously.
+ * Out-of-range i_idx is a silent no-op. */
 void
 enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx) {
    g_return_if_fail(p_ctrl != NULL);
@@ -1430,19 +1467,16 @@ enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl) {
 
 /* --- internal: card toggle (clicked handler for the built cards) --------- */
 
-/* Clicked card: idx 0..7 toggles that preset's bit; idx -1 (Original)
- * discards the whole preview. Then re-apply the (possibly empty) chain,
- * which also refreshes the highlights. Does NOT close the panel -- toggling
- * presets while comparing is the point of the layered design
- * (docs/gegl.md). */
+/* Clicked card: idx 0..7 toggles that preset's bit, then re-apply the
+ * (possibly empty) chain, which also refreshes the highlights. Does NOT
+ * close the panel -- toggling presets while comparing is the point of the
+ * layered design (docs/gegl.md). The Original is a reference, not a card:
+ * reverting everything is x / the Revert button (6i2), never a stray click
+ * on a thumbnail. */
 static void
 _card_toggle(EnhanceCtrl *p_ctrl, GtkWidget *p_btn) {
    gint i_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(p_btn), "idx"));
-   if (i_idx < 0) {
-      _discard(p_ctrl);
-      return;
-   }
-   if (i_idx < (gint)G_N_ELEMENTS(p_ctrl->p_btns)) {
+   if (i_idx >= 0 && i_idx < (gint)G_N_ELEMENTS(p_ctrl->p_btns)) {
       p_ctrl->u_enhance_mask ^= (guint8)(1u << i_idx);
    }
    _apply_async(p_ctrl);

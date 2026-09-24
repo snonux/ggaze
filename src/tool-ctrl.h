@@ -2,22 +2,25 @@
 #define GGAZE_TOOL_CTRL_H
 
 /*:*
- * ggaze — the interactive crop (c) and straighten (R) tools
+ * ggaze — the interactive crop (c) and straighten (r) tools
  *
  * A modal editing session over the large view: while a tool is active it
  * draws its overlay on the viewer (the crop rectangle with its handles and
  * thirds, or the straighten grid and the horizon line being dragged), takes
  * the pointer drag over from panning, and claims a small set of keys
  * (docs/ui-and-interactions.md "Crop, straighten & rotate tools") until
- * Enter applies or Esc cancels. Everything it edits is the EnhanceCtrl's
- * Transform: the crop tool shows the base image (the committed transform
- * with the crop switched off) through enhance_ctrl_set_preview_transform --
- * an override of what is rendered, never a commit, so a crop already
- * applied keeps counting as work (`s` exports it, navigation prompts for
- * it) while its rectangle is adjusted -- and commits a rectangle laid out
- * on it; the straighten tool pushes every nudge / horizon drag through
- * enhance_ctrl_set_transform so the image levels live (a committed crop
- * follows the changing base, transform_rebase_crop, and is kept -- with a
+ * Enter applies or Esc cancels. Which keys those are is shortcuts.c's
+ * table (the rows scoped to GGAZE_KEY_MODE_CROP / _STRAIGHTEN, each naming
+ * a GgazeKeyOp): this module switches on the op, never on a keyval, so the
+ * `?` help and the key-hint bar list exactly the keys it answers. Everything it
+ * edits is the EnhanceCtrl's Transform: the crop tool shows the base image (the
+ * committed transform with the crop switched off) through
+ * enhance_ctrl_set_preview_transform -- an override of what is rendered, never
+ * a commit, so a crop already applied keeps counting as work (`s` exports it,
+ * navigation prompts for it) while its rectangle is adjusted -- and commits a
+ * rectangle laid out on it; the straighten tool pushes every nudge / horizon
+ * drag through enhance_ctrl_set_transform so the image levels live (a committed
+ * crop follows the changing base, transform_rebase_crop, and is kept -- with a
  * status line, cropping nothing -- while the base has shrunk past it; `c`
  * over such a crop starts from the whole base, which is what is cropped in
  * effect), and cancel restores the transform the tool started from. The
@@ -73,6 +76,12 @@ typedef struct {
    void (*ensure_large_view)(gpointer p_host);
    /* The navigator's current file, NULL when none. */
    GFile *(*get_current_file)(gpointer p_host);
+   /* A tool started or ended -- by any path: a key, a click, a navigation,
+    * a discard, the view switching -- so the window's key mode (and the
+    * key-hint bar showing it) follows. May be NULL. Called during the
+    * window's dispose too (tool_ctrl_dispose), so the host must tolerate
+    * that. */
+   void (*mode_changed)(gpointer p_host);
 } ToolCtrlHostOps;
 
 /* Construct a controller editing p_ec's transform. p_ops and p_ec are
@@ -88,7 +97,7 @@ void tool_ctrl_dispose(ToolCtrl *p_tc);
 /* Which tool is active (GGAZE_TOOL_NONE when none). */
 GgazeTool tool_ctrl_get_tool(ToolCtrl *p_tc);
 
-/* `c` / `R`: start the tool, or -- pressed again while that same tool is
+/* `c` / `r`: start the tool, or -- pressed again while that same tool is
  * active -- cancel it. With the OTHER tool active the key is refused with a
  * status line (finish that one first). A no-op with a status when no file is
  * open. */
@@ -96,15 +105,17 @@ void tool_ctrl_toggle_crop(ToolCtrl *p_tc);
 void tool_ctrl_toggle_straighten(ToolCtrl *p_tc);
 
 /* Offer a key press to the active tool. TRUE iff it consumed the key (the
- * caller then stops propagation so the global shortcuts never see it):
- * crop: h/l/j/k move, H/L/J/K resize the right/bottom edge, 1-4 aspect
- * 1:1 / 3:2 / 4:3 / 16:9, 0 free; straighten: h / - counter-clockwise and
- * l / + clockwise by 0.5 degrees, A toggles auto-crop; both: Enter applies,
- * Esc cancels, and c / R / [ / ] are answered with "finish the tool first"
- * (a tool switch or a turn under a laid-out rectangle would silently move
- * it). Every other key is left alone -- also while the crop tool's base is
- * still unknown and its own keys only report "still rendering". FALSE with
- * no tool active. */
+ * caller then stops propagation so the global shortcuts never see it). The
+ * tool's keys are the table's rows for its mode (shortcuts_mode_op) --
+ * crop: h/j/k/l move, Shift+h/j/k/l grow and Ctrl+h/j/k/l shrink the side
+ * the key points at, a cycles the aspect lock; straighten: h / - counter-
+ * clockwise and l / + clockwise by 0.5 degrees, a toggles auto-crop; both:
+ * Enter applies, Esc cancels -- and the global tool keys c / r / [ / ]
+ * (shortcuts_global_action) are answered with a cancel (the same tool's
+ * key) or "finish the tool first" (a tool switch or a turn under a laid-out
+ * rectangle would silently move it). Every other key is left alone -- also
+ * while the crop tool's base is still unknown and its own keys only report
+ * "still rendering". FALSE with no tool active. */
 gboolean tool_ctrl_key(ToolCtrl *p_tc, guint u_keyval, GdkModifierType e_state);
 
 /* A pointer drag on the viewer in widget coordinates (the viewer's overlay
