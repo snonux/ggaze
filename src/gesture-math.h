@@ -10,8 +10,8 @@
  *
  *   - zoom about a point: the one "new zoom around widget point (cx, cy)"
  *     rule that the wheel, the keys and a pinch all go through, with the
- *     2 %..6400 % clamp (widened to the fit ratio, jx0 / zb2) and the
- *     non-finite guard (hx0) in exactly one place;
+ *     2 %..6400 % clamp (widened to the fit ratio, jx0 / zb2, and to the
+ *     current scale) and the non-finite guard (hx0) in exactly one place;
  *   - pinch: the zoom a pinch asks for, from the zoom it began at and
  *     GtkGestureZoom's scale factor, and the fit detent's rebased scale;
  *   - swipe: whether a one-finger touch drag was a deliberate horizontal

@@ -357,7 +357,9 @@ _current_scale(GgazeViewer *p_v) {
 /* Zoom around widget point (d_cx, d_cy), keeping that point over the same
  * image pixel -- the one zoom path the wheel, the keys and a pinch share.
  * The rule itself, the 2 %..6400 % clamp with both limits widened to the
- * fit ratio (jx0 / zb2) and the non-finite guard (hx0) are gesture-math.c's
+ * fit ratio (jx0 / zb2) and to the current scale (so a zoom a resize left
+ * outside them is never pulled back through them) and the non-finite
+ * guard (hx0) are gesture-math.c's
  * gesture_math_zoom_about; _compute_geom clamps the pan on the next draw.
  *
  * hx0 in short: a non-finite centre or zoom is rejected, not stored. CLAMP
