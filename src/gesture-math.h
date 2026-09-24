@@ -81,7 +81,10 @@ gdouble gesture_math_clamp_zoom(gdouble d_zoom, gdouble d_fit);
  * the pan (offset from centred, widget px) that achieves it. FALSE, with the
  * outputs untouched, when any input is non-finite (hx0: a NaN reaching the
  * viewer's pan made the image vanish for good) -- the caller keeps its last
- * good geometry. */
+ * good geometry. The clamp never moves the zoom against the direction
+ * asked for: a zoom already outside the limits (the window was resized
+ * since, so the fit ratio that widened them changed) stays where it is
+ * rather than being pulled back through them. */
 gboolean gesture_math_zoom_about(const GestureView *p_view, gdouble d_cx,
                                  gdouble d_cy, gdouble d_zoom, gdouble *p_zoom,
                                  gdouble *p_pan_x, gdouble *p_pan_y);

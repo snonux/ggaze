@@ -120,6 +120,41 @@ test_clamp_floor_falls_to_fit(void) {
    g_assert_cmpfloat(fabs(d_py), <, 1e-9);
 }
 
+/* A zoom left outside the limits by a resize (the fit ratio that widened
+ * them changed since) is held, never pulled back through them: zooming
+ * out from 1.83 % after the window widened to fit 3.66 % must not jump to
+ * the 2 % floor, and zooming in from 10000 % after it shrank to fit 5000 %
+ * must not drop to the 6400 % ceiling (zb2 fifth review). The ordinary
+ * direction still works from there. */
+static void
+test_zoom_about_resize_never_reverses(void) {
+   GestureView t_v = {.i_w     = 1200,
+                      .i_h     = 400,
+                      .i_tex_w = 32768,
+                      .i_tex_h = 16,
+                      .d_scale = 600.0 / 32768.0,
+                      .d_fit   = 1200.0 / 32768.0};
+   gdouble     d_z, d_px, d_py;
+   g_assert_true(gesture_math_zoom_about(&t_v, 600.0, 200.0, t_v.d_scale / 1.25,
+                                         &d_z, &d_px, &d_py));
+   g_assert_cmpfloat(d_z, ==, t_v.d_scale);
+   g_assert_true(gesture_math_zoom_about(&t_v, 600.0, 200.0, t_v.d_scale * 1.25,
+                                         &d_z, &d_px, &d_py));
+   g_assert_cmpfloat(d_z, ==, t_v.d_scale * 1.25);
+   GestureView t_big = {.i_w     = 300,
+                        .i_h     = 150,
+                        .i_tex_w = 6,
+                        .i_tex_h = 3,
+                        .d_scale = 100.0,
+                        .d_fit   = 50.0};
+   g_assert_true(
+      gesture_math_zoom_about(&t_big, 150.0, 75.0, 125.0, &d_z, &d_px, &d_py));
+   g_assert_cmpfloat(d_z, ==, 100.0);
+   g_assert_true(
+      gesture_math_zoom_about(&t_big, 150.0, 75.0, 80.0, &d_z, &d_px, &d_py));
+   g_assert_cmpfloat(d_z, ==, GGAZE_ZOOM_MAX);
+}
+
 /* A view not drawn yet (scale 0) zooms about the image's top-left instead
  * of dividing by zero. */
 static void
@@ -278,6 +313,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/gesture_math/zoom_about_clamps", test_zoom_about_clamps);
    g_test_add_func("/gesture_math/clamp_floor_falls_to_fit",
                    test_clamp_floor_falls_to_fit);
+   g_test_add_func("/gesture_math/zoom_about_resize_never_reverses",
+                   test_zoom_about_resize_never_reverses);
    g_test_add_func("/gesture_math/zoom_about_undrawn_view",
                    test_zoom_about_undrawn_view);
    g_test_add_func("/gesture_math/zoom_about_rejects_non_finite",

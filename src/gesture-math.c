@@ -48,6 +48,25 @@ _view_is_finite(const GestureView *p_view, gdouble d_cx, gdouble d_cy,
            isfinite(p_view->d_y) && isfinite(p_view->d_fit));
 }
 
+/* The clamped zoom, never moved against the direction asked for. The
+ * limits follow the CURRENT fit ratio, but the zoom in effect does not
+ * refit on a resize: a panorama zoomed out to 1.83 % in a 600 px window
+ * sits below the 2 % floor once the window widens (fit 3.66 %), and a
+ * bare clamp then turned the next zoom-out into an enlargement (zb2
+ * fifth review; the ceiling had the mirror case since jx0). Holding the
+ * current scale in that case makes the far end a no-op, as documented.
+ * A view not drawn yet (scale 0) has no direction to keep. */
+static gdouble
+_clamp_keeping_direction(const GestureView *p_view, gdouble d_zoom) {
+   gdouble d_z = gesture_math_clamp_zoom(d_zoom, p_view->d_fit);
+   gdouble d_s = p_view->d_scale;
+   if (d_s > 0.0 &&
+       ((d_zoom < d_s && d_z > d_s) || (d_zoom > d_s && d_z < d_s))) {
+      return (d_s);
+   }
+   return (d_z);
+}
+
 gboolean
 gesture_math_zoom_about(const GestureView *p_view, gdouble d_cx, gdouble d_cy,
                         gdouble d_zoom, gdouble *p_zoom, gdouble *p_pan_x,
@@ -56,7 +75,7 @@ gesture_math_zoom_about(const GestureView *p_view, gdouble d_cx, gdouble d_cy,
    if (!_view_is_finite(p_view, d_cx, d_cy, d_zoom)) {
       return (FALSE);
    }
-   gdouble d_z = gesture_math_clamp_zoom(d_zoom, p_view->d_fit);
+   gdouble d_z = _clamp_keeping_direction(p_view, d_zoom);
    /* The image pixel under the point now (0 for a view not drawn yet, so
     * a zoom there centres on the image's top-left rather than dividing by
     * zero) ... */

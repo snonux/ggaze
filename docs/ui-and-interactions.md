@@ -251,7 +251,9 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
   and the lower one falls to it — a 32768 px panorama in a 600 px window fits
   at 1.83 %, and clamping to the bare floor made zoom-out (`-`, the wheel, a
   pinch in) *enlarge* it (zb2). At either end zooming further is a no-op,
-  never a reversal.
+  never a reversal — also when a resize moved the fit ratio since the zoom
+  was set (a panorama zoomed out to 1.83 % stays there, rather than jumping
+  to 2 %, after the window widens).
 
 ## Info overlay (`i`)
 
