@@ -528,10 +528,11 @@ _rect_resize(ToolCtrl *p_tc, CropRectHit e_edge, gdouble d_dx, gdouble d_dy) {
    _redraw(p_tc);
 }
 
-/* `a`: the next aspect lock in the cycle (croprect.h), fitted around the
- * centre and said on the status line -- the hint bar names the key, only
- * the status line can name the lock now in force. "original" is the base's
- * shape at the moment it is picked.
+/* `a`: the next aspect lock in the cycle (croprect.h: free, 1:1, 3:2, 4:3,
+ * 16:9, original), fitted around the centre and said on the status line
+ * with the one after it -- the hint bar names the key, only the status
+ * line can name the lock now in force. "original" is the base's shape at
+ * the moment it is picked.
  *
  * Every lock is fitted into the SAME reference rectangle: the one the user
  * left before the run of `a` presses (any move, resize or drag since the
@@ -555,9 +556,9 @@ _rect_aspect_cycle(ToolCtrl *p_tc) {
                        p_tc->i_base_h);
    p_tc->t_aspect_out = p_tc->t_rect;
    _redraw(p_tc);
-   char *c_msg = g_strdup_printf("Crop aspect: %s (a cycles free, original, "
-                                 "1:1, 3:2, 4:3, 16:9)",
-                                 croprect_aspect_name(p_tc->e_aspect));
+   char *c_msg = g_strdup_printf(
+      "Crop aspect: %s (a: next is %s)", croprect_aspect_name(p_tc->e_aspect),
+      croprect_aspect_name(croprect_aspect_next(p_tc->e_aspect)));
    _status(p_tc, c_msg);
    g_free(c_msg);
 }

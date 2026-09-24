@@ -97,7 +97,6 @@ struct EnhanceCtrl {
     * unconditionally. */
    gboolean   b_thumbnails; /* the open panel has picture cards */
    GtkWidget *p_panel;      /* the panel root, parented in the host's slot */
-   GtkWidget *p_title;      /* "Edit <basename>" label */
    GtkWidget *p_original_pic;
    GtkWidget *p_btns[GGAZE_ENHANCE_MAX_PRESETS]; /* preset cards */
    GtkWidget *p_pics[GGAZE_ENHANCE_MAX_PRESETS]; /* their pictures */
@@ -1168,7 +1167,6 @@ _destroy(EnhanceCtrl *p_ctrl) {
       p_ctrl->p_btns[i] = NULL;
       p_ctrl->p_pics[i] = NULL;
    }
-   p_ctrl->p_title        = NULL;
    p_ctrl->p_original_pic = NULL;
    p_ctrl->p_state        = NULL;
    p_ctrl->p_save_btn     = NULL;
@@ -1252,17 +1250,10 @@ _start_previews(EnhanceCtrl *p_ctrl) {
  * wiring: they are actionables on the win.* actions their keys fire. */
 static GtkWidget *
 _build_panel(EnhanceCtrl *p_ctrl) {
-   char  *c_basename = NULL;
-   GFile *p_cur      = _current_file(p_ctrl);
-   if (p_cur != NULL) {
-      c_basename = g_file_get_basename(p_cur);
-   }
    EnhanceUIWidgets ui;
-   GtkWidget       *p_panel = enhance_ui_build_panel(
-      enhancer_get_presets(p_ctrl->p_enhancer), c_basename,
-      p_ctrl->u_enhance_mask, p_ctrl->b_thumbnails, &ui);
-   g_free(c_basename);
-   p_ctrl->p_title        = ui.p_title;
+   GtkWidget       *p_panel =
+      enhance_ui_build_panel(enhancer_get_presets(p_ctrl->p_enhancer),
+                             p_ctrl->u_enhance_mask, p_ctrl->b_thumbnails, &ui);
    p_ctrl->p_original_pic = ui.p_original_pic;
    p_ctrl->p_state        = ui.p_state;
    p_ctrl->p_save_btn     = ui.p_save_btn;
@@ -1278,15 +1269,12 @@ _build_panel(EnhanceCtrl *p_ctrl) {
    return (p_panel);
 }
 
-/* Point the open panel at the (new) current file: retitle, drop the previous
- * file's thumbnails so stale ones are never shown against a different image,
- * and start a fresh batch. Called after nav_changed cleared the mask. */
+/* Point the open panel at the (new) current file: drop the previous file's
+ * thumbnails so stale ones are never shown against a different image, name
+ * the new save target, and start a fresh batch. Called after nav_changed
+ * cleared the mask. */
 static void
 _retarget_panel(EnhanceCtrl *p_ctrl) {
-   GFile *p_cur      = _current_file(p_ctrl);
-   char  *c_basename = p_cur != NULL ? g_file_get_basename(p_cur) : NULL;
-   enhance_ui_set_title(p_ctrl->p_title, c_basename);
-   g_free(c_basename);
    if (p_ctrl->p_original_pic != NULL) {
       gtk_picture_set_paintable(GTK_PICTURE(p_ctrl->p_original_pic), NULL);
    }

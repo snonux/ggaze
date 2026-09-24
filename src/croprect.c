@@ -434,11 +434,11 @@ static const struct {
    const char *c_name;
 } _ASPECTS[CROPRECT_ASPECT_COUNT] = {
    [CROPRECT_ASPECT_FREE]     = {0.0, "free"},
-   [CROPRECT_ASPECT_ORIGINAL] = {0.0, "original"},
    [CROPRECT_ASPECT_1_1]      = {1.0, "1:1"},
    [CROPRECT_ASPECT_3_2]      = {3.0 / 2.0, "3:2"},
    [CROPRECT_ASPECT_4_3]      = {4.0 / 3.0, "4:3"},
    [CROPRECT_ASPECT_16_9]     = {16.0 / 9.0, "16:9"},
+   [CROPRECT_ASPECT_ORIGINAL] = {0.0, "original"},
 };
 
 /* TRUE iff e_aspect names a lock (not COUNT, not garbage). */

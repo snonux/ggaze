@@ -324,8 +324,10 @@ test_aspect_lock_holds_at_minimum_size(void) {
    g_assert_cmpfloat(r.d_h, ==, 2 * CROPRECT_MIN_SIZE);
 }
 
-/* The crop tool's `a` cycle: free -> original -> 1:1 -> 3:2 -> 4:3 -> 16:9
- * and round to free again, each with its ratio and status-line name. */
+/* The crop tool's `a` cycle: free -> 1:1 -> 3:2 -> 4:3 -> 16:9 -> original
+ * and round to free again, each with its ratio and status-line name. The
+ * image's own shape is last: first, it left the whole-image rectangle the
+ * tool starts on unchanged, and `a` looked dead. */
 static void
 test_aspect_cycle_ratios_and_names(void) {
    static const struct {
@@ -334,11 +336,11 @@ test_aspect_cycle_ratios_and_names(void) {
       const char    *c_name;
    } CYCLE[] = {
       {CROPRECT_ASPECT_FREE, 0.0, "free"},
-      {CROPRECT_ASPECT_ORIGINAL, 4.0 / 3.0, "original"},
       {CROPRECT_ASPECT_1_1, 1.0, "1:1"},
       {CROPRECT_ASPECT_3_2, 1.5, "3:2"},
       {CROPRECT_ASPECT_4_3, 4.0 / 3.0, "4:3"},
       {CROPRECT_ASPECT_16_9, 16.0 / 9.0, "16:9"},
+      {CROPRECT_ASPECT_ORIGINAL, 4.0 / 3.0, "original"},
    };
    CropRectAspect e = CROPRECT_ASPECT_FREE;
    for (gsize u = 0; u < G_N_ELEMENTS(CYCLE); u++) {

@@ -18,12 +18,16 @@ struct EditMode {
    EnhanceCtrl *p_ec;     /* borrowed: the panel */
    ToolCtrl    *p_tc;     /* borrowed: the tools */
 
-   GtkWidget *p_bar;     /* the hint bar root (owned by the window's tree
-                          * once packed; a ref is held until then) */
-   GtkWidget   *p_title; /* "Edit" / "Crop" / "Straighten" */
-   GtkWidget   *p_keys;  /* the mode's keys (markup) */
-   GgazeKeyMode e_shown; /* the mode whose keys the labels hold, NONE when
-                          * the bar is hidden */
+   GtkWidget *p_bar;         /* the hint bar root (owned by the window's tree
+                              * once packed; a ref is held until then) */
+   GtkWidget   *p_title;     /* "Edit" / "Crop" / "Straighten" */
+   GtkWidget   *p_keys;      /* the mode's keys (markup) */
+   GgazeKeyMode e_shown;     /* the mode whose keys the labels hold, NONE when
+                              * the bar is hidden */
+   guint    u_shown_presets; /* the preset count the labels were built for */
+   gboolean b_large;         /* the large view is up (the last sync's word):
+                              * the panel is hidden, not closed, beside the
+                              * grid, and its keys are dead there */
 };
 
 /* Build the bar: the mode's name, then its keys, on one line that wraps
@@ -73,9 +77,20 @@ edit_mode_get_hint_bar(EditMode *p_em) {
    return (p_em->p_bar);
 }
 
-GgazeKeyMode
-edit_mode_get_mode(EditMode *p_em) {
-   g_return_val_if_fail(p_em != NULL, GGAZE_KEY_MODE_NONE);
+/* TRUE iff the panel is the live key mode: open AND on screen. `t` from
+ * the large view hides the open panel with the grid (its state survives
+ * the round trip) -- its digits must not toggle presets, nor x revert, on
+ * an image that is not on screen. */
+static gboolean
+_panel_live(EditMode *p_em) {
+   return (p_em->b_large && enhance_ctrl_is_open(p_em->p_ec));
+}
+
+/* The mode for a view: a tool's (only ever up in the large view -- leaving
+ * it abandons the tool), else PANEL while the panel is open and b_large,
+ * else NONE. */
+static GgazeKeyMode
+_mode_for(EditMode *p_em, gboolean b_large) {
    switch (tool_ctrl_get_tool(p_em->p_tc)) {
    case GGAZE_TOOL_CROP:
       return (GGAZE_KEY_MODE_CROP);
@@ -84,15 +99,21 @@ edit_mode_get_mode(EditMode *p_em) {
    default:
       break;
    }
-   return (enhance_ctrl_is_open(p_em->p_ec) ? GGAZE_KEY_MODE_PANEL
-                                            : GGAZE_KEY_MODE_NONE);
+   return (b_large && enhance_ctrl_is_open(p_em->p_ec) ? GGAZE_KEY_MODE_PANEL
+                                                       : GGAZE_KEY_MODE_NONE);
+}
+
+GgazeKeyMode
+edit_mode_get_mode(EditMode *p_em) {
+   g_return_val_if_fail(p_em != NULL, GGAZE_KEY_MODE_NONE);
+   return (_mode_for(p_em, p_em->b_large));
 }
 
 /* A tool first -- its keys are the most transient thing on screen and
  * shadow the panel's (the crop tool's `a` cycles the aspect, it does not
- * close the panel) -- then, with the panel open, the panel's own rows. A
- * key a tool leaves alone still reaches the panel: a digit toggles a
- * preset under the straighten tool as it does beside it. */
+ * close the panel) -- then, with the panel open and on screen, the panel's
+ * own rows. A key a tool leaves alone still reaches the panel: a digit
+ * toggles a preset under the straighten tool as it does beside it. */
 gboolean
 edit_mode_key(EditMode *p_em, guint u_keyval, GdkModifierType e_state) {
    g_return_val_if_fail(p_em != NULL, FALSE);
@@ -100,8 +121,8 @@ edit_mode_key(EditMode *p_em, guint u_keyval, GdkModifierType e_state) {
        tool_ctrl_key(p_em->p_tc, u_keyval, e_state)) {
       return (TRUE);
    }
-   if (!enhance_ctrl_is_open(p_em->p_ec)) {
-      return (FALSE); /* the panel's keys are the panel's alone */
+   if (!_panel_live(p_em)) {
+      return (FALSE); /* the panel's keys are the visible panel's alone */
    }
    const char *c_action =
       shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, u_keyval, e_state);
@@ -112,20 +133,31 @@ edit_mode_key(EditMode *p_em, guint u_keyval, GdkModifierType e_state) {
    return (TRUE);
 }
 
+/* How many presets the digits reach: the panel's cards, at most the 8
+ * bits of the mask. */
+static guint
+_preset_count(EditMode *p_em) {
+   const GPtrArray *p_presets = enhance_ctrl_get_presets(p_em->p_ec);
+   guint            u_n       = p_presets != NULL ? p_presets->len : 0;
+   return (MIN(u_n, 8u));
+}
+
 void
 edit_mode_sync(EditMode *p_em, gboolean b_large) {
    g_return_if_fail(p_em != NULL);
-   GgazeKeyMode e_mode =
-      b_large ? edit_mode_get_mode(p_em) : GGAZE_KEY_MODE_NONE;
-   if (e_mode == p_em->e_shown) {
+   p_em->b_large       = b_large;
+   GgazeKeyMode e_mode = b_large ? _mode_for(p_em, TRUE) : GGAZE_KEY_MODE_NONE;
+   guint        u_n    = _preset_count(p_em);
+   if (e_mode == p_em->e_shown && u_n == p_em->u_shown_presets) {
       return;
    }
-   p_em->e_shown = e_mode;
+   p_em->e_shown         = e_mode;
+   p_em->u_shown_presets = u_n;
    if (e_mode == GGAZE_KEY_MODE_NONE) {
       gtk_widget_set_visible(p_em->p_bar, FALSE);
       return;
    }
-   char *c_markup = shortcuts_hint_for_mode(e_mode, TRUE);
+   char *c_markup = shortcuts_hint_for_mode(e_mode, u_n, TRUE);
    gtk_label_set_markup(GTK_LABEL(p_em->p_keys), c_markup);
    g_free(c_markup);
    gtk_label_set_text(GTK_LABEL(p_em->p_title), shortcuts_mode_title(e_mode));

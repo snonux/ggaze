@@ -98,14 +98,19 @@ const char *shortcuts_title_for_action(const char *c_action);
 char *shortcuts_keys_for_action(const char *c_action);
 /* "Title (keys)" for a button tooltip, or NULL. Caller frees. */
 char *shortcuts_tooltip_for_action(const char *c_action);
+/* The short menu label of c_action ("Crop", "Rotate left"; borrowed): the
+ * row's own short label, else its help title, else NULL. The help keeps
+ * the long description. */
+const char *shortcuts_label_for_action(const char *c_action);
 
 /* --- key modes (edit panel, crop tool, straighten tool) ------------------ */
 
 /* The win.* action a PANEL-scoped row binds u_keyval + e_state to in
  * e_mode (borrowed), or NULL. Only scoped rows are consulted: a global key
  * is the shortcut controller's. Shift is compared only for letters (it is
- * part of the keyval for `+`, `?`, ...); Caps Lock and NumLock are
- * ignored. */
+ * part of the keyval for `+`, `?`, ...); NumLock is ignored, and so is
+ * Caps Lock: a letter it upper-cased without Shift matches as the plain
+ * letter (`H` + Lock is `h`), with Shift as the Shift chord. */
 const char *shortcuts_mode_action(GgazeKeyMode e_mode, guint u_keyval,
                                   GdkModifierType e_state);
 
@@ -116,7 +121,8 @@ GgazeKeyOp shortcuts_mode_op(GgazeKeyMode e_mode, guint u_keyval,
 
 /* The GLOBAL action u_keyval + e_state is bound to (borrowed), or NULL: how
  * a tool recognises the tool keys themselves (c, r, [, ]) without a second
- * copy of them. */
+ * copy of them. Matched by the same rules as the modes (Caps Lock: `C` +
+ * Lock is `c`), so a tool and the shortcut controller agree on a key. */
 const char *shortcuts_global_action(guint u_keyval, GdkModifierType e_state);
 
 /* The key as the edit panel and the hint bar print it: lower-case letters
@@ -136,9 +142,12 @@ char *shortcuts_hint_keys(GgazeKeyMode e_mode, const char *c_hint);
 
 /* The mode's key-hint line: its rows in hint order, one "keys label"
  * segment per hint label, " · "-joined -- plain text, or Pango markup with
- * the keys in bold when b_markup. NULL for GGAZE_KEY_MODE_NONE. Caller
- * frees. */
-char *shortcuts_hint_for_mode(GgazeKeyMode e_mode, gboolean b_markup);
+ * the keys in bold when b_markup. The preset digits are listed for the
+ * u_n_presets presets that exist ("1–8 presets", "1/2 presets", "1
+ * preset", nothing for 0), never for a digit that toggles nothing. NULL
+ * for GGAZE_KEY_MODE_NONE. Caller frees. */
+char *shortcuts_hint_for_mode(GgazeKeyMode e_mode, guint u_n_presets,
+                              gboolean b_markup);
 
 /* The mode's name for the hint bar ("Edit", "Crop", "Straighten"), or NULL
  * for NONE. Borrowed. */

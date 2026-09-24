@@ -6,6 +6,8 @@
  * drift from the live keybindings. Each row carries a human-readable c_title
  * and a help c_group; entries sharing a title within a group merge into one
  * help row with a space-joined accelerator (h Left, 1 2 3 4 5 6 7 8, ...).
+ * A row may add a short c_label for the F10 menu ("Crop" where the help
+ * says "Crop tool (Enter applies, Esc cancels)").
  * Rows may also be scoped to a key mode (the edit panel, a tool) and name a
  * short hint for the modes' key-hint bars -- see shortcuts.h, "KEY MODES".
  * See docs/ui-and-interactions.md keybindings table.
@@ -35,7 +37,12 @@ typedef struct {
    guint       u_rank;       /* its place in those bars (ascending); rows
                               * that sort next to each other with the same
                               * c_hint merge into one segment */
-   GgazeKeyOp e_op;          /* a tool row's meaning (tool-ctrl.c) */
+   GgazeKeyOp  e_op;         /* a tool row's meaning (tool-ctrl.c) */
+   const char *c_label;      /* the short menu label ("Crop"); NULL: the
+                              * menu uses c_title */
+   guint u_preset;           /* a preset digit row's preset number (1-8),
+                              * 0 otherwise: the hint bar lists it only
+                              * while that many presets exist */
 } ShortcutEntry;
 
 /* Mode masks, to keep the rows below readable. */
@@ -55,10 +62,11 @@ typedef struct {
     "win.enhance-" #n,                                                         \
     "Toggle preset 1-8 (layered; panel open)",                                 \
     "Edit panel",                                                              \
-    .u_scope = _PANEL,                                                         \
-    .u_hints = _PANEL,                                                         \
-    .c_hint  = "presets",                                                      \
-    .u_rank  = 10}
+    .u_scope  = _PANEL,                                                        \
+    .u_hints  = _PANEL,                                                        \
+    .c_hint   = "presets",                                                     \
+    .u_rank   = 10,                                                            \
+    .u_preset = (n)}
 
 /* A tool key: no action -- the tool answers it by its op while it is the
  * mode on screen -- and listed in that tool's hint bar. */
@@ -175,7 +183,8 @@ static const ShortcutEntry SHORTCUTS[] = {
     * when it is closed, then act; the digits and x belong to it alone. */
    {GDK_KEY_a, 0, "win.enhance",
     "Open / close the edit panel (presets, crop, straighten, rotate, save)",
-    "Edit panel", _PANEL_HINT(SHORTCUTS_HINT_CLOSE, 90)},
+    "Edit panel", _PANEL_HINT(SHORTCUTS_HINT_CLOSE, 90),
+    .c_label = "Edit panel"},
    _PRESET_ROW(GDK_KEY_1, 1),
    _PRESET_ROW(GDK_KEY_2, 2),
    _PRESET_ROW(GDK_KEY_3, 3),
@@ -185,22 +194,22 @@ static const ShortcutEntry SHORTCUTS[] = {
    _PRESET_ROW(GDK_KEY_7, 7),
    _PRESET_ROW(GDK_KEY_8, 8),
    {GDK_KEY_c, 0, "win.crop", "Crop tool (Enter applies, Esc cancels)",
-    "Edit panel", _PANEL_HINT("crop", 20)},
+    "Edit panel", _PANEL_HINT("crop", 20), .c_label = "Crop"},
    {GDK_KEY_r, 0, "win.straighten",
     "Straighten tool (Enter applies, Esc cancels)", "Edit panel",
-    _PANEL_HINT("straighten", 21)},
+    _PANEL_HINT("straighten", 21), .c_label = "Straighten"},
    {GDK_KEY_bracketleft, 0, "win.rotate-ccw", "Rotate 90° counter-clockwise",
-    "Edit panel", _PANEL_HINT("rotate", 22)},
+    "Edit panel", _PANEL_HINT("rotate", 22), .c_label = "Rotate left"},
    {GDK_KEY_bracketright, 0, "win.rotate-cw",
     "Rotate 90° clockwise (repeat for 180 / 270)", "Edit panel",
-    _PANEL_HINT("rotate", 23)},
+    _PANEL_HINT("rotate", 23), .c_label = "Rotate right"},
    {GDK_KEY_s, 0, "win.enhance-save",
     "Save an edited copy (never the original)", "Edit panel",
-    _PANEL_HINT("save copy", 30)},
+    _PANEL_HINT("save copy", 30), .c_label = "Save edited copy"},
    {GDK_KEY_s, GDK_CONTROL_MASK, "win.enhance-save",
     "Save an edited copy (never the original)", "Edit panel"},
    {GDK_KEY_x, 0, "win.edit-revert", "Revert every edit (panel open)",
-    "Edit panel", _PANEL_HINT("revert", 31)},
+    "Edit panel", _PANEL_HINT("revert", 31), .c_label = "Revert all edits"},
    {GDK_KEY_space, 0, NULL, "Hold to compare with the original", "Edit panel",
     _PANEL_HINT("hold: original", 40)},
    /* Crop tool: modal -- answered by the tool (edit-mode.c routes the key
@@ -232,7 +241,7 @@ static const ShortcutEntry SHORTCUTS[] = {
    _TOOL_ROW(GDK_KEY_l, GDK_CONTROL_MASK, "Shrink that side inward",
              _CROP_GROUP, _CROP, "shrink", 33, GGAZE_KEY_OP_CROP_SHRINK_RIGHT),
    _TOOL_ROW(GDK_KEY_a, 0,
-             "Cycle the aspect: free, original, 1:1, 3:2, 4:3, 16:9",
+             "Cycle the aspect: free, 1:1, 3:2, 4:3, 16:9, original",
              _CROP_GROUP, _CROP, "aspect", 40, GGAZE_KEY_OP_CROP_ASPECT),
    _TOOL_ROW(GDK_KEY_Return, 0, "Apply the crop", _CROP_GROUP, _CROP, "apply",
              80, GGAZE_KEY_OP_TOOL_APPLY),
@@ -324,6 +333,18 @@ shortcuts_title_for_action(const char *c_action) {
    return (NULL);
 }
 
+const char *
+shortcuts_label_for_action(const char *c_action) {
+   g_return_val_if_fail(c_action != NULL, NULL);
+   for (gsize u_i = 0; u_i < G_N_ELEMENTS(SHORTCUTS); u_i++) {
+      if (g_strcmp0(SHORTCUTS[u_i].c_action, c_action) == 0 &&
+          SHORTCUTS[u_i].c_label != NULL) {
+         return (SHORTCUTS[u_i].c_label);
+      }
+   }
+   return (shortcuts_title_for_action(c_action));
+}
+
 char *
 shortcuts_keys_for_action(const char *c_action) {
    g_return_val_if_fail(c_action != NULL, NULL);
@@ -363,8 +384,8 @@ shortcuts_tooltip_for_action(const char *c_action) {
 /* --- key modes: matching ------------------------------------------------- */
 
 /* The modifiers a row and a key press are compared on. Shift is handled
- * apart (_shift_matches); Caps Lock, NumLock and the pointer buttons never
- * count. */
+ * apart (_shift_matches); Caps Lock (_unlocked_keyval), NumLock and the
+ * pointer buttons never count. */
 #define _CHORD_MASK (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK)
 
 /* TRUE iff u_keyval is a letter (it has two cases). */
@@ -410,12 +431,28 @@ _row_matches(const ShortcutEntry *p_row, guint u_keyval,
    return (_shift_matches(p_row, u_keyval, e_state));
 }
 
+/* Caps Lock without Shift delivers a letter upper-cased (`H` + Lock for a
+ * plain `h` press), which _letter_shifted would read as Shift+h: the crop
+ * tool's `h` grew the rectangle instead of moving it, and its `a` fell
+ * through to the global `a` and closed the panel under the tool. Such a
+ * press is the unshifted letter, so match its lower case. Shift with Caps
+ * Lock is still Shift (the modifier says so, whatever case the keyval
+ * arrives in), and the Lock bit itself never counts (_CHORD_MASK). */
+static guint
+_unlocked_keyval(guint u_keyval, GdkModifierType e_state) {
+   if ((e_state & GDK_LOCK_MASK) != 0 && (e_state & GDK_SHIFT_MASK) == 0) {
+      return (gdk_keyval_to_lower(u_keyval));
+   }
+   return (u_keyval);
+}
+
 /* The first row scoped to e_mode (0: a global row) that u_keyval + e_state
  * matches and that has an action (b_action) or an op (!b_action). */
 static const ShortcutEntry *
 _find_row(GgazeKeyMode e_mode, gboolean b_action, guint u_keyval,
           GdkModifierType e_state) {
    guint u_bit = e_mode == GGAZE_KEY_MODE_NONE ? 0 : GGAZE_KEY_MODE_BIT(e_mode);
+   u_keyval    = _unlocked_keyval(u_keyval, e_state);
    for (gsize u_i = 0; u_i < G_N_ELEMENTS(SHORTCUTS); u_i++) {
       const ShortcutEntry *p_row = &SHORTCUTS[u_i];
       gboolean             b_scoped =
@@ -578,15 +615,19 @@ _by_rank(gconstpointer p_a, gconstpointer p_b) {
 }
 
 /* The rows a hint bar lists for e_mode -- only those under c_hint when it
- * is non-NULL, only those of c_action when that is -- in hint order. */
+ * is non-NULL, only those of c_action when that is, and only the preset
+ * digits of presets that exist (u_n_presets; G_MAXUINT: all) -- in hint
+ * order. */
 static GPtrArray *
-_hint_rows(GgazeKeyMode e_mode, const char *c_hint, const char *c_action) {
+_hint_rows(GgazeKeyMode e_mode, const char *c_hint, const char *c_action,
+           guint u_n_presets) {
    GPtrArray *p_rows = g_ptr_array_new();
    guint      u_bit =
       e_mode == GGAZE_KEY_MODE_NONE ? ~0u : GGAZE_KEY_MODE_BIT(e_mode);
    for (gsize u_i = 0; u_i < G_N_ELEMENTS(SHORTCUTS); u_i++) {
       const ShortcutEntry *p_row = &SHORTCUTS[u_i];
       if ((p_row->u_hints & u_bit) == 0 || p_row->c_hint == NULL ||
+          p_row->u_preset > u_n_presets ||
           (c_hint != NULL && g_strcmp0(p_row->c_hint, c_hint) != 0) ||
           (c_action != NULL && g_strcmp0(p_row->c_action, c_action) != 0)) {
          continue;
@@ -608,7 +649,8 @@ _keys_of(GPtrArray *p_rows) {
 char *
 shortcuts_hint_keys_for_action(const char *c_action) {
    g_return_val_if_fail(c_action != NULL, NULL);
-   return (_keys_of(_hint_rows(GGAZE_KEY_MODE_NONE, NULL, c_action)));
+   return (
+      _keys_of(_hint_rows(GGAZE_KEY_MODE_NONE, NULL, c_action, G_MAXUINT)));
 }
 
 char *
@@ -617,35 +659,47 @@ shortcuts_hint_keys(GgazeKeyMode e_mode, const char *c_hint) {
    if (e_mode == GGAZE_KEY_MODE_NONE) {
       return (NULL);
    }
-   return (_keys_of(_hint_rows(e_mode, c_hint, NULL)));
+   return (_keys_of(_hint_rows(e_mode, c_hint, NULL, G_MAXUINT)));
+}
+
+/* A segment's label: the rows' c_hint -- but one preset digit alone ("1")
+ * is "preset", not "presets". */
+static const char *
+_segment_label(const GPtrArray *p_seg) {
+   const ShortcutEntry *p_first = g_ptr_array_index((GPtrArray *)p_seg, 0);
+   if (p_first->u_preset != 0 && p_seg->len == 1) {
+      return ("preset");
+   }
+   return (p_first->c_hint);
 }
 
 /* Append one "keys label" segment (keys in bold when b_markup). */
 static void
 _append_segment(GString *p_out, const GPtrArray *p_seg, gboolean b_markup) {
-   const ShortcutEntry *p_first = g_ptr_array_index((GPtrArray *)p_seg, 0);
-   char                *c_keys  = _join_keys(p_seg);
+   const char *c_label = _segment_label(p_seg);
+   char       *c_keys  = _join_keys(p_seg);
    if (p_out->len > 0) {
       g_string_append(p_out, "  ·  ");
    }
    if (b_markup) {
       char *c_k = g_markup_escape_text(c_keys, -1);
-      char *c_l = g_markup_escape_text(p_first->c_hint, -1);
+      char *c_l = g_markup_escape_text(c_label, -1);
       g_string_append_printf(p_out, "<b>%s</b> %s", c_k, c_l);
       g_free(c_k);
       g_free(c_l);
    } else {
-      g_string_append_printf(p_out, "%s %s", c_keys, p_first->c_hint);
+      g_string_append_printf(p_out, "%s %s", c_keys, c_label);
    }
    g_free(c_keys);
 }
 
 char *
-shortcuts_hint_for_mode(GgazeKeyMode e_mode, gboolean b_markup) {
+shortcuts_hint_for_mode(GgazeKeyMode e_mode, guint u_n_presets,
+                        gboolean b_markup) {
    if (e_mode == GGAZE_KEY_MODE_NONE) {
       return (NULL);
    }
-   GPtrArray *p_rows = _hint_rows(e_mode, NULL, NULL);
+   GPtrArray *p_rows = _hint_rows(e_mode, NULL, NULL, u_n_presets);
    GString   *p_out  = g_string_new(NULL);
    GPtrArray *p_seg  = g_ptr_array_new();
    for (guint u = 0; u < p_rows->len; u++) {

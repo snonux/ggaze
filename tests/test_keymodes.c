@@ -6,7 +6,8 @@
  * lookups and string building -- gdk_keyval_* need no display -- so they
  * run in every lane, the minimal one included: which key does what in
  * which mode, the modifier matching (Shift only for letters, Ctrl only
- * when a row names it, Caps Lock ignored), and the exact hint lines, so a
+ * when a row names it, Caps Lock never read as Shift), and the exact hint
+ * lines (the preset digits as many as there are presets), so a
  * table edit that changes what the bar or the panel buttons say shows up
  * here.
  *
@@ -163,29 +164,139 @@ test_key_labels(void) {
  * as a range, a shared modifier said once, a/Esc joined) and the labels. */
 static void
 test_hint_lines(void) {
-   char *c_panel = shortcuts_hint_for_mode(GGAZE_KEY_MODE_PANEL, FALSE);
+   char *c_panel = shortcuts_hint_for_mode(GGAZE_KEY_MODE_PANEL, 8, FALSE);
    g_assert_cmpstr(c_panel, ==,
                    "1–8 presets  ·  c crop  ·  r straighten  "
                    "·  [/] rotate  ·  s save copy  ·  "
                    "x revert  ·  Space hold: original  ·  "
                    "a/Esc close");
    g_free(c_panel);
-   char *c_crop = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, FALSE);
+   char *c_crop = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, 8, FALSE);
    g_assert_cmpstr(c_crop, ==,
                    "h/j/k/l move  ·  Shift+h/j/k/l grow  ·  "
                    "Ctrl+h/j/k/l shrink  ·  a aspect  ·  "
                    "Enter apply  ·  Esc cancel");
    g_free(c_crop);
-   char *c_str = shortcuts_hint_for_mode(GGAZE_KEY_MODE_STRAIGHTEN, FALSE);
+   char *c_str = shortcuts_hint_for_mode(GGAZE_KEY_MODE_STRAIGHTEN, 8, FALSE);
    g_assert_cmpstr(c_str, ==,
                    "h/l/-/+ nudge ½°  ·  a auto-crop  "
                    "·  Enter apply  ·  Esc cancel");
    g_free(c_str);
-   g_assert_null(shortcuts_hint_for_mode(GGAZE_KEY_MODE_NONE, FALSE));
+   g_assert_null(shortcuts_hint_for_mode(GGAZE_KEY_MODE_NONE, 8, FALSE));
    /* Markup: the keys in bold, the text escaped ("<" never appears raw). */
-   char *c_markup = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, TRUE);
+   char *c_markup = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, 8, TRUE);
    g_assert_true(g_str_has_prefix(c_markup, "<b>h/j/k/l</b> move"));
    g_free(c_markup);
+}
+
+/* The panel's hint line lists the digits of the presets that exist, never
+ * "1–8" over fewer: a range from three on, "1/2" for two, the singular for
+ * one, and no presets segment at all for none. */
+static void
+test_hint_preset_count(void) {
+   static const struct {
+      guint       u_n;
+      const char *c_prefix;
+   } CASES[] = {
+      {8, "1–8 presets  ·  c crop"},
+      {12, "1–8 presets  ·  c crop"}, /* the mask stops at 8 */
+      {5, "1–5 presets  ·  c crop"},
+      {3, "1–3 presets  ·  c crop"},
+      {2, "1/2 presets  ·  c crop"},
+      {1, "1 preset  ·  c crop"},
+      {0, "c crop  ·  r straighten"},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      char *c_line =
+         shortcuts_hint_for_mode(GGAZE_KEY_MODE_PANEL, CASES[u].u_n, FALSE);
+      if (!g_str_has_prefix(c_line, CASES[u].c_prefix)) {
+         g_error("%u presets: \"%s\"", CASES[u].u_n, c_line);
+      }
+      g_free(c_line);
+   }
+   /* The tools' lines have no digits to trim. */
+   char *c_a = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, 0, FALSE);
+   char *c_b = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, 8, FALSE);
+   g_assert_cmpstr(c_a, ==, c_b);
+   g_free(c_a);
+   g_free(c_b);
+}
+
+/* Caps Lock is not Shift: with it on, a plain `h` arrives as `H` + Lock
+ * and must still MOVE the crop rectangle (it used to grow it), `a` must
+ * still be the tool's (it fell through to the global `a` and closed the
+ * panel under the tool), and `c` the global crop key. Shift with Caps Lock
+ * is Shift, in whichever case the keyval arrives. */
+static void
+test_caps_lock(void) {
+   static const struct {
+      GgazeKeyMode    e_mode;
+      guint           u_key;
+      GdkModifierType e_mods;
+      GgazeKeyOp      e_op;
+   } CASES[] = {
+      {GGAZE_KEY_MODE_CROP, GDK_KEY_H, GDK_LOCK_MASK,
+       GGAZE_KEY_OP_CROP_MOVE_LEFT},
+      {GGAZE_KEY_MODE_CROP, GDK_KEY_J, GDK_LOCK_MASK,
+       GGAZE_KEY_OP_CROP_MOVE_DOWN},
+      {GGAZE_KEY_MODE_CROP, GDK_KEY_A, GDK_LOCK_MASK, GGAZE_KEY_OP_CROP_ASPECT},
+      {GGAZE_KEY_MODE_STRAIGHTEN, GDK_KEY_A, GDK_LOCK_MASK,
+       GGAZE_KEY_OP_STRAIGHTEN_AUTOCROP},
+      {GGAZE_KEY_MODE_STRAIGHTEN, GDK_KEY_L, GDK_LOCK_MASK,
+       GGAZE_KEY_OP_STRAIGHTEN_CW},
+      {GGAZE_KEY_MODE_CROP, GDK_KEY_h, GDK_SHIFT_MASK | GDK_LOCK_MASK,
+       GGAZE_KEY_OP_CROP_GROW_LEFT},
+      {GGAZE_KEY_MODE_CROP, GDK_KEY_H, GDK_SHIFT_MASK | GDK_LOCK_MASK,
+       GGAZE_KEY_OP_CROP_GROW_LEFT},
+      {GGAZE_KEY_MODE_CROP, GDK_KEY_H, GDK_CONTROL_MASK | GDK_LOCK_MASK,
+       GGAZE_KEY_OP_CROP_SHRINK_LEFT},
+      /* Shift+a is no crop key, with or without Caps Lock. */
+      {GGAZE_KEY_MODE_CROP, GDK_KEY_a, GDK_SHIFT_MASK | GDK_LOCK_MASK,
+       GGAZE_KEY_OP_NONE},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      g_assert_cmpint(
+         shortcuts_mode_op(CASES[u].e_mode, CASES[u].u_key, CASES[u].e_mods),
+         ==, CASES[u].e_op);
+   }
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_C, GDK_LOCK_MASK), ==,
+                   "win.crop");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_A, GDK_LOCK_MASK), ==,
+                   "win.enhance");
+   g_assert_cmpstr(
+      shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_1, GDK_LOCK_MASK), ==,
+      "win.enhance-1");
+   /* Shift+Lock+g is G (last image), as Shift+g is. */
+   g_assert_cmpstr(
+      shortcuts_global_action(GDK_KEY_g, GDK_SHIFT_MASK | GDK_LOCK_MASK), ==,
+      "win.last");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_G, GDK_LOCK_MASK), ==,
+                   "win.first");
+}
+
+/* The F10 menu's short labels; the help keeps the long description. */
+static void
+test_menu_labels(void) {
+   static const struct {
+      const char *c_action;
+      const char *c_label;
+   } CASES[] = {
+      {"win.enhance", "Edit panel"},
+      {"win.crop", "Crop"},
+      {"win.straighten", "Straighten"},
+      {"win.rotate-ccw", "Rotate left"},
+      {"win.rotate-cw", "Rotate right"},
+      {"win.enhance-save", "Save edited copy"},
+      {"win.edit-revert", "Revert all edits"},
+      {"win.next", "Next image"}, /* no short label: the title */
+      {"win.no-such-action", NULL},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      g_assert_cmpstr(shortcuts_label_for_action(CASES[u].c_action), ==,
+                      CASES[u].c_label);
+   }
+   g_assert_true(g_str_has_prefix(shortcuts_title_for_action("win.crop"),
+                                  "Crop tool (Enter applies"));
 }
 
 /* What the panel's buttons print, and the mode names on the bar. */
@@ -241,5 +352,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/keymodes/hint_lines", test_hint_lines);
    g_test_add_func("/keymodes/button_keys_and_titles",
                    test_button_keys_and_titles);
+   g_test_add_func("/keymodes/hint_preset_count", test_hint_preset_count);
+   g_test_add_func("/keymodes/caps_lock", test_caps_lock);
+   g_test_add_func("/keymodes/menu_labels", test_menu_labels);
    return (g_test_run());
 }

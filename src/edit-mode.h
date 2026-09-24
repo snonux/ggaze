@@ -14,7 +14,10 @@
  *
  *   1. a tool is active   -> the tool (its rows in shortcuts.c's table);
  *   2. the panel is open  -> the panel's own rows (shortcuts_mode_action),
- *                            fired as their win.* actions;
+ *      AND on screen         fired as their win.* actions (the panel is
+ *                            hidden, not closed, beside the grid: its
+ *                            digits are dead there, not aimed at an image
+ *                            that is not on screen);
  *   3. otherwise, or when neither claims the key -> nothing here: the key
  *      goes on to the global table (so `h` is win.prev again the moment the
  *      tool ends, and a digit with the panel closed does nothing).
@@ -61,16 +64,19 @@ void      edit_mode_delete(EditMode *p_em);
  * packed). */
 GtkWidget *edit_mode_get_hint_bar(EditMode *p_em);
 
-/* The key mode in effect: a tool's, else PANEL while the panel is open,
- * else NONE. */
+/* The key mode in effect: a tool's, else PANEL while the panel is open
+ * and the large view up (as of the last edit_mode_sync), else NONE. */
 GgazeKeyMode edit_mode_get_mode(EditMode *p_em);
 
 /* Route one key press (see the header). TRUE iff it was consumed. */
 gboolean edit_mode_key(EditMode *p_em, guint u_keyval, GdkModifierType e_state);
 
-/* Bring the hint bar in line with the mode: shown, with that mode's keys,
- * while b_large (the large view is up) and the mode is not NONE; hidden
- * otherwise. Cheap when nothing changed. */
+/* Record whether the large view is up (b_large: the panel's keys are live
+ * only then) and bring the hint bar in line with the mode: shown, with
+ * that mode's keys -- the preset digits for the presets that exist --
+ * while b_large and the mode is not NONE; hidden otherwise. The window
+ * calls it on every view switch, so the router always knows the view.
+ * Cheap when nothing changed. */
 void edit_mode_sync(EditMode *p_em, gboolean b_large);
 
 /* The bar's text as shown (plain, no markup), or NULL while it is hidden.

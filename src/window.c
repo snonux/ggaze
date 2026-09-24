@@ -1282,8 +1282,12 @@ _back_enhance_step(GgazeWindow *p_win) {
    }
    /* With the edit panel open, Esc closes it and keeps the edit -- and
     * says so when there is one, since the next Esc now goes on to the grid
-    * rather than dropping it. */
-   if (enhance_ctrl_close(p_win->p_enhance_ctrl)) {
+    * rather than dropping it. Only while the panel is on screen: beside the
+    * grid it is hidden (not closed, `t` brings it back), and closing an
+    * invisible panel would read as an Esc that did nothing -- there Esc
+    * goes straight on to the marks / quit chain. */
+   if (_get_view(p_win) == GGAZE_VIEW_LARGE &&
+       enhance_ctrl_close(p_win->p_enhance_ctrl)) {
       if (enhance_ctrl_is_active(p_win->p_enhance_ctrl)) {
          _show_status(p_win, "Edit panel closed — the edit is kept "
                              "(s saves a copy, a reopens the panel)");
@@ -1432,11 +1436,16 @@ static const EnhanceUIHostOps _ENHANCE_OPS = {
    .mode_changed       = _ec_mode_changed,
 };
 
-/* win.enhance (key 'a'): open the side panel beside the large view (with a
- * preview thumbnail per preset card, or label-only cards when Preferences
- * turns thumbnails off), or close it. Card clicks and hotkeys keep it open so
- * several layered presets can be compared. The widget orchestration lives in
- * the EnhanceCtrl; this just routes the action. */
+/* win.enhance (key 'a', the panel's close button, the menu): open the side
+ * panel beside the large view (with a preview thumbnail per preset card, or
+ * label-only cards when Preferences turns thumbnails off), or close it.
+ * Card clicks and hotkeys keep it open so several layered presets can be
+ * compared. The widget orchestration lives in the EnhanceCtrl; this just
+ * routes the action -- and never lets a tool outlive the panel: closing it
+ * under the crop / straighten tool cancels the tool first (as Esc would),
+ * or the tool's keys stayed live with no panel, Save or Revert on screen.
+ * A real `a` press under a tool never gets here (the tool answers it:
+ * aspect / auto-crop); the close button and the menu do. */
 static void
 _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -1444,6 +1453,10 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    if (!_require_folder(p_win)) {
       return;
+   }
+   if (enhance_ctrl_is_open(p_win->p_enhance_ctrl) &&
+       tool_ctrl_get_tool(p_win->p_tool_ctrl) != GGAZE_TOOL_NONE) {
+      tool_ctrl_cancel(p_win->p_tool_ctrl);
    }
    gboolean b_thumbnails =
       p_win->p_settings != NULL &&
@@ -1463,15 +1476,21 @@ _ensure_panel_open(GgazeWindow *p_win) {
 
 /* win.edit-revert (`x`, the panel's Revert all): drop every edit -- presets
  * and transform -- and show the original. The one key that discards (Esc
- * and `0` no longer do), so it is bound to the open panel: with the panel
- * closed it only says where it works, rather than silently dropping a
- * preview the user may not be looking at the controls of. */
+ * and `0` no longer do), so it is bound to the open panel ON SCREEN: with
+ * the panel closed, or hidden beside the grid (`a` then `t`), it only says
+ * where it works, rather than silently dropping a preview the user is not
+ * looking at. */
 static void
 _action_edit_revert(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    if (!_require_folder(p_win)) {
+      return;
+   }
+   if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
+      _show_status(p_win, "x reverts edits in the large view — open the "
+                          "image first (Enter or t)");
       return;
    }
    if (!enhance_ctrl_is_open(p_win->p_enhance_ctrl)) {
@@ -1506,7 +1525,7 @@ _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
       /* A stray digit in the grid used to yank the user into the large view
        * with a preset applied and a now-dirty preview. */
-      _show_status(p_win, "Enhance presets apply in the large view \u2014 "
+      _show_status(p_win, "Edits apply in the large view \u2014 "
                           "press Enter on the highlighted image first");
       return;
    }
@@ -2070,6 +2089,7 @@ _load_engine_lists(GgazeWindow *p_win) {
       GPtrArray *p_user = settings_get_enhance_presets(p_win->p_settings);
       enhance_ctrl_set_user_presets(p_win->p_enhance_ctrl, p_user);
       g_ptr_array_unref(p_user);
+      _sync_edit_mode(p_win); /* the hint bar lists the digits that exist */
    }
 #endif
 }
@@ -3090,8 +3110,56 @@ ggaze_window_finalize(GObject *p_obj) {
    G_OBJECT_CLASS(ggaze_window_parent_class)->finalize(p_obj);
 }
 
-/* Load the small ggaze stylesheet once (mark badge styling — the navigator's
- * mark API has no visual representation without it). */
+/* The small ggaze stylesheet: mark badges (the navigator's mark API has no
+ * visual representation without it), the status line, the drop target,
+ * the edit panel's preset rows and key badges, and the key-hint bar. */
+static const char _GGAZE_CSS[] =
+   "/* marked-thumbnail badge (multi-selection). */\n"
+   ".ggaze-marked {\n"
+   "  border: 2px solid #3584e4;\n"
+   "  border-radius: 4px;\n"
+   "  background-color: rgba(53, 132, 228, 0.15);\n"
+   "}\n"
+   "/* status line / EXIF card over the picture. */\n"
+   ".ggaze-info {\n"
+   "  background-color: rgba(0, 0, 0, 0.7);\n"
+   "  color: #ffffff;\n"
+   "  padding: 6px 10px;\n"
+   "  border-radius: 6px;\n"
+   "}\n"
+   "/* file list hovering over the window (drop target). */\n"
+   ".ggaze-drop {\n"
+   "  box-shadow: inset 0 0 0 3px #3584e4;\n"
+   "}\n"
+   "/* edit panel preset row: compact; an enabled one is\n"
+   " * highlighted AND checked (enhance-ui.c). */\n"
+   ".ggaze-enhance-card {\n"
+   "  padding: 3px 6px;\n"
+   "  font-weight: normal;\n"
+   "}\n"
+   ".ggaze-enhance-on {\n"
+   "  background-color: #3584e4;\n"
+   "  color: #ffffff;\n"
+   "  font-weight: bold;\n"
+   "}\n"
+   ".ggaze-enhance-check {\n"
+   "  opacity: 0;\n"
+   "}\n"
+   ".ggaze-enhance-on .ggaze-enhance-check {\n"
+   "  opacity: 1;\n"
+   "}\n"
+   "/* the key a panel button fires (a dim badge). */\n"
+   ".ggaze-key {\n"
+   "  font-weight: bold;\n"
+   "}\n"
+   "/* the key-hint bar under the large view (edit-mode.c). */\n"
+   ".ggaze-hint-bar {\n"
+   "  background-color: rgba(0, 0, 0, 0.85);\n"
+   "  color: #ffffff;\n"
+   "  padding: 6px 12px;\n"
+   "}\n";
+
+/* Load _GGAZE_CSS once for the display. */
 static void
 _ensure_css(void) {
    static gboolean b_done = FALSE;
@@ -3100,40 +3168,7 @@ _ensure_css(void) {
    }
    b_done                = TRUE;
    GtkCssProvider *p_css = gtk_css_provider_new();
-   gtk_css_provider_load_from_string(
-      p_css, "/* marked-thumbnail badge (multi-selection). */\n"
-             ".ggaze-marked {\n"
-             "  border: 2px solid #3584e4;\n"
-             "  border-radius: 4px;\n"
-             "  background-color: rgba(53, 132, 228, 0.15);\n"
-             "}\n"
-             "/* status line / EXIF card over the picture. */\n"
-             ".ggaze-info {\n"
-             "  background-color: rgba(0, 0, 0, 0.7);\n"
-             "  color: #ffffff;\n"
-             "  padding: 6px 10px;\n"
-             "  border-radius: 6px;\n"
-             "}\n"
-             "/* file list hovering over the window (drop target). */\n"
-             ".ggaze-drop {\n"
-             "  box-shadow: inset 0 0 0 3px #3584e4;\n"
-             "}\n"
-             "/* enabled enhance preset row highlight. */\n"
-             ".ggaze-enhance-on {\n"
-             "  background-color: #3584e4;\n"
-             "  color: #ffffff;\n"
-             "  font-weight: bold;\n"
-             "}\n"
-             "/* the key a panel button fires, right-aligned. */\n"
-             ".ggaze-key {\n"
-             "  font-family: monospace;\n"
-             "}\n"
-             "/* the key-hint bar under the large view (edit-mode.c). */\n"
-             ".ggaze-hint-bar {\n"
-             "  background-color: rgba(0, 0, 0, 0.85);\n"
-             "  color: #ffffff;\n"
-             "  padding: 6px 12px;\n"
-             "}\n");
+   gtk_css_provider_load_from_string(p_css, _GGAZE_CSS);
    GdkDisplay *p_disp = gdk_display_get_default();
    if (p_disp != NULL) {
       gtk_style_context_add_provider_for_display(
@@ -3388,10 +3423,11 @@ _header_button(const char *c_icon, const char *c_action) {
 }
 
 /* Append a menu item for c_action whose label comes from the shortcuts
- * table (with the keys in parentheses), so menu and keys cannot drift. */
+ * table -- the row's short label ("Crop"), else its help title -- with the
+ * keys in parentheses, so menu and keys cannot drift. */
 static void
 _menu_add(GMenu *p_menu, const char *c_action, const char *c_fallback) {
-   const char *c_title = shortcuts_title_for_action(c_action);
+   const char *c_title = shortcuts_label_for_action(c_action);
    char       *c_keys  = shortcuts_keys_for_action(c_action);
    const char *c_name  = c_title != NULL ? c_title : c_fallback;
    char       *c_label = NULL;
@@ -3419,8 +3455,8 @@ _build_main_menu(void) {
    _menu_add(p_edit, "win.enhance", "Edit panel");
    _menu_add(p_edit, "win.crop", "Crop");
    _menu_add(p_edit, "win.straighten", "Straighten");
-   _menu_add(p_edit, "win.rotate-cw", "Rotate 90\u00b0 clockwise");
-   _menu_add(p_edit, "win.rotate-ccw", "Rotate 90\u00b0 counter-clockwise");
+   _menu_add(p_edit, "win.rotate-ccw", "Rotate left");
+   _menu_add(p_edit, "win.rotate-cw", "Rotate right");
    _menu_add(p_edit, "win.enhance-save", "Save edited copy");
    _menu_add(p_edit, "win.edit-revert", "Revert all edits");
    GMenu *p_trash = g_menu_new();
