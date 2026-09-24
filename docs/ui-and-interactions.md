@@ -176,7 +176,8 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
   - **Pinch** — zoom around the pinch midpoint (a touchpad pinch too —
     on **Wayland only**: X11 does not deliver touchpad pinch events to
     GTK 4, so under X11 only a touchscreen pinches), through the same zoom
-    rule, 2 %–6400 % clamp and NaN guard as the wheel
+    rule, 2 %–6400 % clamp (widened to the fit ratio) and NaN guard as
+    the wheel
     (`src/gesture-math.c`, see "Zoom behavior"). The zoom is absolute from
     where the pinch began, and the picture **moves with the midpoint**:
     the image pixel under the fingers stays under them, so two fingers
@@ -184,7 +185,12 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
     viewers do. Over a **fitted** picture a two-finger move whose finger
     distance stays within 10 % keeps it fitted (it has nothing to pan, and
     fit must survive for `0`, a window resize and the swipe); pinching out
-    and back within that 10 % returns to fit. Past the 10 % the zoom picks
+    and back within that 10 % returns to fit — **where the picture is now**:
+    fit mode does not re-centre (a fitted picture may sit anywhere in its
+    letterbox, as a one-finger drag leaves it), so the position the
+    fingers gave it along the letterbox is kept rather than snapping back
+    to where the pinch began; zoom and position are both continuous
+    across the band's edge. Past the 10 % the zoom picks
     up **from the edge of that band**, not from where the fingers began:
     the first step out is still the fit size and the picture grows (or
     shrinks) smoothly from there, rather than jumping straight to 110 %
@@ -238,10 +244,13 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
   and the zoom rule itself (`gesture_math_zoom_about`, shared by the wheel,
   the keys and a pinch) refuses any non-finite input.
 - Panning clamps so the image can't drift off-screen.
-- Zoom is limited to 2 %–6400 % (`GGAZE_ZOOM_MIN`/`MAX`), except that the upper
-  limit rises to the fit-to-window ratio when that is already larger — a small
-  enough image in a large window fits above 6400 %, and clamping to the bare
-  ceiling made zoom-in *shrink* it (jx0). At the top end zoom-in is a no-op,
+- Zoom is limited to 2 %–6400 % (`GGAZE_ZOOM_MIN`/`MAX`), except that either
+  limit gives way to the fit-to-window ratio when that lies outside it: the
+  upper one rises to it — a small enough image in a large window fits above
+  6400 %, and clamping to the bare ceiling made zoom-in *shrink* it (jx0) —
+  and the lower one falls to it — a 32768 px panorama in a 600 px window fits
+  at 1.83 %, and clamping to the bare floor made zoom-out (`-`, the wheel, a
+  pinch in) *enlarge* it (zb2). At either end zooming further is a no-op,
   never a reversal.
 
 ## Info overlay (`i`)
