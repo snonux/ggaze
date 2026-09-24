@@ -45,6 +45,7 @@
 #include "viewload.h"
 #include "enhance-ctrl.h"
 #if GGAZE_HAVE_GEGL
+#include "edit-mode.h"
 #include "enhance-ui.h"
 #include "enhancer.h"
 #include "enhancer-gegl.h"
@@ -123,10 +124,13 @@ struct _GgazeWindow {
                         * queries (is_dirty, override_texture,
                         * nav_changed). NULL when GEGL is not built in. */
 #if GGAZE_HAVE_GEGL
-   ToolCtrl *p_tool_ctrl; /* the c / R interactive tools (tool-ctrl.h): the
+   ToolCtrl *p_tool_ctrl; /* the c / r interactive tools (tool-ctrl.h): the
                            * overlay session over the viewer that edits
                            * p_enhance_ctrl's transform. Created after the
                            * viewer exists (_init_tool_state). */
+   EditMode *p_edit_mode; /* the edit-key router (tool first, then the open
+                           * panel) + the key-hint bar under the large
+                           * view (edit-mode.h). Created with the tools. */
 #endif
 };
 
@@ -206,7 +210,7 @@ static gboolean _space_released_cb(GtkEventControllerKey *p_c, guint u_keyval,
                                    guint u_kc, GdkModifierType e_state,
                                    gpointer p_data);
 static void     _init_enhance_state(GgazeWindow *p_win);
-static gboolean _tool_key_cb(GtkEventControllerKey *p_c, guint u_keyval,
+static gboolean _edit_key_cb(GtkEventControllerKey *p_c, guint u_keyval,
                              guint u_kc, GdkModifierType e_state,
                              gpointer p_data);
 static void     _init_tool_state(GgazeWindow *p_win);
@@ -431,6 +435,24 @@ _get_view(GgazeWindow *p_win) {
    return (GGAZE_VIEW_EMPTY);
 }
 
+/* Bring the key-hint bar in line with the key mode (a tool, the open edit
+ * panel, neither) and the view: it is about the large view's picture, so
+ * it shows only there, like the panel. Called on every view switch and
+ * whenever a controller says its mode changed. Nothing during the
+ * window's dispose (the controllers end their sessions from there) or
+ * before the router exists (construction); nothing at all without GEGL,
+ * which has no edit modes. */
+static void
+_sync_edit_mode(GgazeWindow *p_win) {
+#if GGAZE_HAVE_GEGL
+   if (p_win->p_edit_mode != NULL && !p_win->b_disposed) {
+      edit_mode_sync(p_win->p_edit_mode, _get_view(p_win) == GGAZE_VIEW_LARGE);
+   }
+#else
+   (void)p_win;
+#endif
+}
+
 static void
 _set_view(GgazeWindow *p_win, GgazeViewMode e_view) {
 #if GGAZE_HAVE_GEGL
@@ -452,6 +474,7 @@ _set_view(GgazeWindow *p_win, GgazeViewMode e_view) {
     * beside the large view and hidden (not closed -- its state survives a
     * `t` round trip) with the grid or the empty page. */
    gtk_widget_set_visible(p_win->p_side_slot, e_view == GGAZE_VIEW_LARGE);
+   _sync_edit_mode(p_win); /* the hint bar follows the panel */
    /* The info card may be up across the switch (`i`, then `t`), and its
     * plot is about the large view's picture: leaving it for the grid or the
     * empty page must take the plot down for the rest of the card's time
@@ -953,7 +976,7 @@ _action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 /* Leave the grid for the large view on the highlighted cell (what `t` and,
- * since wb2, the c / R / [ / ] keys do from the grid): sync navigator.current
+ * since wb2, the c / r / [ / ] keys do from the grid): sync navigator.current
  * to the highlighted cell first so the large view opens the selected image.
  * Since tu0 that sync goes through _grid_select_gate, and its return value is
  * meaningful (round 2, finding c): TRUE means current really moved, in which
@@ -1155,22 +1178,15 @@ _action_zoom_out(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 /* `0`: toggle fit / 100% in the large view; reset the thumbnail size to the
- * default in the grid. */
+ * default in the grid. That is ALL it does: it used to also drop the whole
+ * edit while the panel was open (and be the crop tool's free-aspect key),
+ * so one key meant zoom, "throw my work away" and a crop setting depending
+ * on what was on screen (6i2). Reverting is x now. */
 static void
 _action_zoom_reset(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-#if GGAZE_HAVE_GEGL
-   /* `0` is the panel's "Original" hotkey (docs/gegl.md): while the panel
-    * is open it drops the preview instead of toggling the zoom -- and a
-    * straighten session with it (the controller ends the tool before it
-    * resets; the crop tool claims `0` itself as its free-aspect key). */
-   if (enhance_ctrl_is_open(p_win->p_enhance_ctrl)) {
-      enhance_ctrl_discard(p_win->p_enhance_ctrl);
-      return;
-   }
-#endif
    if (_get_view(p_win) == GGAZE_VIEW_LARGE) {
       ggaze_viewer_toggle_fit_100(GGAZE_VIEWER(p_win->p_viewer));
    } else {
@@ -1238,36 +1254,44 @@ _action_info(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 /* Esc: one contextual step per press, in this order -- stop a running
- * slideshow; cancel a crop/straighten tool; close the enhance panel; discard
- * an active enhance preview (said out loud: it used to vanish silently);
- * leave fullscreen; clear marks; large -> grid; and in the grid quit, but
- * only on a SECOND Esc within GGAZE_ESC_QUIT_WINDOW_MS (the first one says
- * so), because `Esc Esc` from the large view is a common "get me out of
- * here" reflex that must not exit the program. docs/ui-and-interactions.md
- * lists the same order. */
+ * slideshow; cancel a crop/straighten tool; close the edit panel (the edit
+ * stays on screen); leave fullscreen; clear marks; large -> grid; and in
+ * the grid quit, but only on a SECOND Esc within GGAZE_ESC_QUIT_WINDOW_MS
+ * (the first one says so), because `Esc Esc` from the large view is a
+ * common "get me out of here" reflex that must not exit the program.
+ * docs/ui-and-interactions.md lists the same order.
+ *
+ * Esc NEVER discards an edit (6i2). It used to, one press after closing
+ * the panel, with no prompt -- the most common "back out" key silently
+ * threw work away. Now the edit survives every Esc: dropping it is x
+ * (explicit, in the panel), and moving away or quitting still goes
+ * through the Save/Discard/Cancel gate. */
 #if GGAZE_HAVE_GEGL
-/* The enhance-side steps of Esc, in order: cancel a tool, close the panel,
- * discard the preview. TRUE iff one of them was the step taken. Split out
- * of _action_back to keep both under the 50-line limit. */
+/* The edit-side steps of Esc, in order: cancel a tool, close the panel.
+ * TRUE iff one of them was the step taken. Split out of _action_back to
+ * keep both under the 50-line limit. */
 static gboolean
 _back_enhance_step(GgazeWindow *p_win) {
    /* A tool overlay is the most transient thing on screen, so Esc leaves it
-    * first (a real key press never gets here -- the tool's own capture-phase
-    * controller answers Esc -- but the action path covers tests and the
-    * menu). */
+    * first (a real key press never gets here -- the tool answers Esc
+    * through the edit-key router -- but the action path covers tests and
+    * the menu). */
    if (tool_ctrl_get_tool(p_win->p_tool_ctrl) != GGAZE_TOOL_NONE) {
       tool_ctrl_cancel(p_win->p_tool_ctrl);
       return (TRUE);
    }
-   /* With the enhance panel open, Esc closes the panel and keeps the
-    * preview; the next Esc drops the preview (saved or not -- it is on
-    * screen either way). */
-   if (enhance_ctrl_close(p_win->p_enhance_ctrl)) {
-      return (TRUE);
-   }
-   if (enhance_ctrl_is_active(p_win->p_enhance_ctrl)) {
-      enhance_ctrl_discard(p_win->p_enhance_ctrl);
-      _show_status(p_win, "Enhance preview discarded");
+   /* With the edit panel open, Esc closes it and keeps the edit -- and
+    * says so when there is one, since the next Esc now goes on to the grid
+    * rather than dropping it. Only while the panel is on screen: beside the
+    * grid it is hidden (not closed, `t` brings it back), and closing an
+    * invisible panel would read as an Esc that did nothing -- there Esc
+    * goes straight on to the marks / quit chain. */
+   if (_get_view(p_win) == GGAZE_VIEW_LARGE &&
+       enhance_ctrl_close(p_win->p_enhance_ctrl)) {
+      if (enhance_ctrl_is_active(p_win->p_enhance_ctrl)) {
+         _show_status(p_win, "Edit panel closed — the edit is kept "
+                             "(s saves a copy, a reopens the panel)");
+      }
       return (TRUE);
    }
    return (FALSE);
@@ -1390,6 +1414,13 @@ _ec_original_changed(gpointer p_host) {
    }
 }
 
+/* The panel opened or closed, or a tool started or ended (both
+ * controllers' mode_changed op): the hint bar follows. */
+static void
+_ec_mode_changed(gpointer p_host) {
+   _sync_edit_mode(GGAZE_WINDOW(p_host));
+}
+
 static const EnhanceUIHostOps _ENHANCE_OPS = {
    .show_texture       = _ec_show_texture,
    .update_header      = _ec_update_header,
@@ -1402,13 +1433,19 @@ static const EnhanceUIHostOps _ENHANCE_OPS = {
    .has_navigator      = _ec_has_navigator,
    .abandon_tool       = _ec_abandon_tool,
    .original_changed   = _ec_original_changed,
+   .mode_changed       = _ec_mode_changed,
 };
 
-/* win.enhance (key 'a'): open the side panel beside the large view (with a
- * preview thumbnail per preset card, or label-only cards when Preferences
- * turns thumbnails off), or close it. Card clicks and hotkeys keep it open so
- * several layered presets can be compared. The widget orchestration lives in
- * the EnhanceCtrl; this just routes the action. */
+/* win.enhance (key 'a', the panel's close button, the menu): open the side
+ * panel beside the large view (with a preview thumbnail per preset card, or
+ * label-only cards when Preferences turns thumbnails off), or close it.
+ * Card clicks and hotkeys keep it open so several layered presets can be
+ * compared. The widget orchestration lives in the EnhanceCtrl; this just
+ * routes the action -- and never lets a tool outlive the panel: closing it
+ * under the crop / straighten tool cancels the tool first (as Esc would),
+ * or the tool's keys stayed live with no panel, Save or Revert on screen.
+ * A real `a` press under a tool never gets here (the tool answers it:
+ * aspect / auto-crop); the close button and the menu do. */
 static void
 _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -1417,16 +1454,72 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (!_require_folder(p_win)) {
       return;
    }
+   if (enhance_ctrl_is_open(p_win->p_enhance_ctrl) &&
+       _get_view(p_win) != GGAZE_VIEW_LARGE) {
+      /* The panel is only hidden with the grid. `a` means "the edit
+       * panel", so show it (as `t` would) rather than close it unseen. */
+      _enter_large_from_grid(p_win);
+      return;
+   }
+   if (enhance_ctrl_is_open(p_win->p_enhance_ctrl) &&
+       tool_ctrl_get_tool(p_win->p_tool_ctrl) != GGAZE_TOOL_NONE) {
+      tool_ctrl_cancel(p_win->p_tool_ctrl);
+   }
    gboolean b_thumbnails =
       p_win->p_settings != NULL &&
       settings_get_enhance_preview_thumbnails(p_win->p_settings);
    enhance_ctrl_toggle_open(p_win->p_enhance_ctrl, b_thumbnails);
 }
 
-/* win.enhance-N (keys 1-8, always live -- not gated on the panel being
- * open): toggle preset N on/off (layered), then re-apply asynchronously. The
- * preset index rides on the action as data (_add_enhance_actions); nothing
- * parses the action name. */
+/* Open the edit panel if it is closed (c / r / [ / ] do, before they act:
+ * every edit happens with the panel -- its keys, its Save and its Revert --
+ * in view, 6i2). Never closes it. */
+static void
+_ensure_panel_open(GgazeWindow *p_win) {
+   if (!enhance_ctrl_is_open(p_win->p_enhance_ctrl)) {
+      _action_enhance(NULL, NULL, p_win);
+   }
+}
+
+/* win.edit-revert (`x`, the panel's Revert button): drop every edit -- presets
+ * and transform -- and show the original. The one key that discards (Esc
+ * and `0` no longer do), so it is bound to the open panel ON SCREEN: with
+ * the panel closed, or hidden beside the grid (`a` then `t`), it only says
+ * where it works, rather than silently dropping a preview the user is not
+ * looking at. */
+static void
+_action_edit_revert(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (!_require_folder(p_win)) {
+      return;
+   }
+   if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
+      _show_status(p_win, "x reverts edits in the large view — open the "
+                          "image first (Enter or t)");
+      return;
+   }
+   if (!enhance_ctrl_is_open(p_win->p_enhance_ctrl)) {
+      _show_status(p_win, "x reverts edits in the edit panel — press a "
+                          "to open it");
+      return;
+   }
+   if (!enhance_ctrl_is_active(p_win->p_enhance_ctrl)) {
+      _show_status(p_win, "Nothing to revert — this is the original");
+      return;
+   }
+   enhance_ctrl_discard(p_win->p_enhance_ctrl); /* ends a tool first */
+   _show_status(p_win, "Reverted — every edit dropped, the original is "
+                       "back");
+}
+
+/* win.enhance-N: toggle preset N on/off (layered), then re-apply
+ * asynchronously. Its keys (1-8) are live only while the panel is open --
+ * they are rows scoped to the panel's key mode, routed by edit-mode.c, not
+ * global bindings -- so a digit with the panel closed does nothing; the
+ * cards are its GUI. The preset index rides on the action as data
+ * (_add_enhance_actions); nothing parses the action name. */
 static void
 _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_v;
@@ -1439,7 +1532,7 @@ _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
       /* A stray digit in the grid used to yank the user into the large view
        * with a preset applied and a now-dirty preview. */
-      _show_status(p_win, "Enhance presets apply in the large view \u2014 "
+      _show_status(p_win, "Edits apply in the large view \u2014 "
                           "press Enter on the highlighted image first");
       return;
    }
@@ -1463,7 +1556,7 @@ _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    enhance_ctrl_save_async(p_win->p_enhance_ctrl, NULL, NULL);
 }
 
-/* --- Tool controller host ops + the c / R / [ / ] actions ---------------- *
+/* --- Tool controller host ops + the c / r / [ / ] actions ---------------- *
  * The crop and straighten tools (tool-ctrl.h) reach the window for the
  * viewer they draw on, the status line, the large view and the current
  * file; three of those are the enhance controller's ops verbatim. */
@@ -1477,12 +1570,14 @@ static const ToolCtrlHostOps _TOOL_OPS = {
    .show_status       = _ec_show_status,
    .ensure_large_view = _ec_ensure_large_view,
    .get_current_file  = _ec_current_file,
+   .mode_changed      = _ec_mode_changed,
 };
 
-/* The c / R / [ / ] keys work on the image on screen; in the grid that is
- * the highlighted cell, so first open it large the way `t` does. FALSE (the
- * action stops) when no folder is open or the large view could not be
- * reached (an empty folder). */
+/* The c / r / [ / ] keys work on the image on screen; in the grid that is
+ * the highlighted cell, so first open it large the way `t` does -- and
+ * then open the edit panel if it is closed, so the tool, its Save and its
+ * Revert are on screen together. FALSE (the action stops) when no folder
+ * is open or the large view could not be reached (an empty folder). */
 static gboolean
 _ready_for_tool(GgazeWindow *p_win) {
    if (!_require_folder(p_win)) {
@@ -1491,7 +1586,11 @@ _ready_for_tool(GgazeWindow *p_win) {
    if (_get_view(p_win) == GGAZE_VIEW_GRID) {
       _enter_large_from_grid(p_win);
    }
-   return (_get_view(p_win) == GGAZE_VIEW_LARGE);
+   if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
+      return (FALSE);
+   }
+   _ensure_panel_open(p_win);
+   return (TRUE);
 }
 
 /* win.crop (`c`): start the crop tool, or cancel it when it is active. */
@@ -1505,7 +1604,7 @@ _action_crop(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    }
 }
 
-/* win.straighten (`R`): start the straighten tool, or cancel it. */
+/* win.straighten (`r`): start the straighten tool, or cancel it. */
 static void
 _action_straighten(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -1598,27 +1697,49 @@ ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
       tool_ctrl_get_crop_rect(p_win->p_tool_ctrl, p_rect, p_base_w, p_base_h));
 }
 
-/* The tools' key controller (window-level, capture phase, see
- * _init_tool_state): while a tool is active its modal keys are answered
- * here and STOPPED, so the GLOBAL-scope shortcut table (which runs later, in
- * the bubble phase at the root) never turns the crop tool's `h` into
- * win.prev. A popover with keyboard focus (the m / e / ! choosers) keeps
- * answering its own keys. Every other key propagates as usual. */
+gboolean
+ggaze_window_edit_key(GgazeWindow *p_win, guint u_keyval,
+                      GdkModifierType e_state) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (p_win->p_edit_mode != NULL &&
+           edit_mode_key(p_win->p_edit_mode, u_keyval, e_state));
+}
+
+GgazeKeyMode
+ggaze_window_get_key_mode(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), GGAZE_KEY_MODE_NONE);
+   return (p_win->p_edit_mode != NULL ? edit_mode_get_mode(p_win->p_edit_mode)
+                                      : GGAZE_KEY_MODE_NONE);
+}
+
+char *
+ggaze_window_get_hint_text(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
+   return (p_win->p_edit_mode != NULL
+              ? edit_mode_get_hint_text(p_win->p_edit_mode)
+              : NULL);
+}
+
+/* The edit keys' controller (window-level, capture phase, see
+ * _init_tool_state): the active tool's keys, then the open panel's, are
+ * answered here (edit-mode.c) and STOPPED, so the GLOBAL-scope shortcut
+ * table (which runs later, in the bubble phase at the root) never turns
+ * the crop tool's `h` into win.prev -- and, with neither on screen, a key
+ * goes on to that table untouched (a digit then does nothing). A popover
+ * with keyboard focus (the m / e / ! choosers) keeps answering its own
+ * keys: the move popup's digits must pick a destination, not a preset. */
 static gboolean
-_tool_key_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
+_edit_key_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
              GdkModifierType e_state, gpointer p_data) {
    (void)p_c;
    (void)u_kc;
-   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (tool_ctrl_get_tool(p_win->p_tool_ctrl) == GGAZE_TOOL_NONE) {
-      return (GDK_EVENT_PROPAGATE);
-   }
-   GtkWidget *p_focus = gtk_root_get_focus(GTK_ROOT(p_win));
+   GgazeWindow *p_win   = GGAZE_WINDOW(p_data);
+   GtkWidget   *p_focus = gtk_root_get_focus(GTK_ROOT(p_win));
    if (p_focus != NULL &&
        gtk_widget_get_ancestor(p_focus, GTK_TYPE_POPOVER) != NULL) {
       return (GDK_EVENT_PROPAGATE);
    }
-   return (tool_ctrl_key(p_win->p_tool_ctrl, u_keyval, e_state)
+   return (ggaze_window_edit_key(p_win, u_keyval, e_state)
               ? GDK_EVENT_STOP
               : GDK_EVENT_PROPAGATE);
 }
@@ -1671,7 +1792,14 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_v;
    _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
 }
-/* The c / R / [ / ] tools are GEGL ops too: say so, like `a`. */
+/* x reverts GEGL edits, and there are none to revert: say so, like `a`. */
+static void
+_action_edit_revert(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
+}
+/* The c / r / [ / ] tools are GEGL ops too: say so, like `a`. */
 static void
 _action_crop(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -1762,14 +1890,33 @@ _action_enhance_save(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 static void
 _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
-   /* Silent no-op: `a` above already reports "GEGL not built in", and 1-8
-    * are common keys that could be pressed incidentally -- there is no
-    * discoverable enhance UI in this build for them to react to, so
-    * repeating the message on every stray digit keypress would be noisy
-    * rather than helpful. */
+   /* Silent no-op: no key reaches it (1-8 are the open panel's keys, and
+    * there is no panel without GEGL -- `a` reports "GEGL not built in"),
+    * but the actions exist in every build so the table's rows resolve. */
    (void)p_a;
    (void)p_v;
    (void)p_data;
+}
+
+gboolean
+ggaze_window_edit_key(GgazeWindow *p_win, guint u_keyval,
+                      GdkModifierType e_state) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   (void)u_keyval;
+   (void)e_state;
+   return (FALSE); /* no panel, no tool: every key is the global table's */
+}
+
+GgazeKeyMode
+ggaze_window_get_key_mode(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), GGAZE_KEY_MODE_NONE);
+   return (GGAZE_KEY_MODE_NONE);
+}
+
+char *
+ggaze_window_get_hint_text(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), NULL);
+   return (NULL); /* no edit modes, no hint bar */
 }
 
 void
@@ -1949,6 +2096,7 @@ _load_engine_lists(GgazeWindow *p_win) {
       GPtrArray *p_user = settings_get_enhance_presets(p_win->p_settings);
       enhance_ctrl_set_user_presets(p_win->p_enhance_ctrl, p_user);
       g_ptr_array_unref(p_user);
+      _sync_edit_mode(p_win); /* the hint bar lists the digits that exist */
    }
 #endif
 }
@@ -2484,6 +2632,7 @@ static const GActionEntry ACTIONS[] = {
    {.name = "preferences", .activate = _action_preferences},
    {.name = "enhance", .activate = _action_enhance},
    {.name = "enhance-save", .activate = _action_enhance_save},
+   {.name = "edit-revert", .activate = _action_edit_revert},
    {.name = "crop", .activate = _action_crop},
    {.name = "straighten", .activate = _action_straighten},
    {.name = "rotate-cw", .activate = _action_rotate_cw},
@@ -2960,14 +3109,64 @@ ggaze_window_finalize(GObject *p_obj) {
    g_clear_pointer(&p_win->p_viewload, viewload_delete);
    g_clear_pointer(&p_win->p_info, info_overlay_delete);
 #if GGAZE_HAVE_GEGL
+   g_clear_pointer(&p_win->p_edit_mode, edit_mode_delete); /* routes to both
+                                                            * below */
    g_clear_pointer(&p_win->p_tool_ctrl, tool_ctrl_delete);
    g_clear_pointer(&p_win->p_enhance_ctrl, enhance_ctrl_delete);
 #endif
    G_OBJECT_CLASS(ggaze_window_parent_class)->finalize(p_obj);
 }
 
-/* Load the small ggaze stylesheet once (mark badge styling — the navigator's
- * mark API has no visual representation without it). */
+/* The small ggaze stylesheet: mark badges (the navigator's mark API has no
+ * visual representation without it), the status line, the drop target,
+ * the edit panel's preset rows and key badges, and the key-hint bar. */
+static const char _GGAZE_CSS[] =
+   "/* marked-thumbnail badge (multi-selection). */\n"
+   ".ggaze-marked {\n"
+   "  border: 2px solid #3584e4;\n"
+   "  border-radius: 4px;\n"
+   "  background-color: rgba(53, 132, 228, 0.15);\n"
+   "}\n"
+   "/* status line / EXIF card over the picture. */\n"
+   ".ggaze-info {\n"
+   "  background-color: rgba(0, 0, 0, 0.7);\n"
+   "  color: #ffffff;\n"
+   "  padding: 6px 10px;\n"
+   "  border-radius: 6px;\n"
+   "}\n"
+   "/* file list hovering over the window (drop target). */\n"
+   ".ggaze-drop {\n"
+   "  box-shadow: inset 0 0 0 3px #3584e4;\n"
+   "}\n"
+   "/* edit panel preset row: compact; an enabled one is\n"
+   " * highlighted AND checked (enhance-ui.c). */\n"
+   ".ggaze-enhance-card {\n"
+   "  padding: 3px 6px;\n"
+   "  font-weight: normal;\n"
+   "}\n"
+   ".ggaze-enhance-on {\n"
+   "  background-color: #3584e4;\n"
+   "  color: #ffffff;\n"
+   "  font-weight: bold;\n"
+   "}\n"
+   ".ggaze-enhance-check {\n"
+   "  opacity: 0;\n"
+   "}\n"
+   ".ggaze-enhance-on .ggaze-enhance-check {\n"
+   "  opacity: 1;\n"
+   "}\n"
+   "/* the key a panel button fires (a dim badge). */\n"
+   ".ggaze-key {\n"
+   "  font-weight: bold;\n"
+   "}\n"
+   "/* the key-hint bar under the large view (edit-mode.c). */\n"
+   ".ggaze-hint-bar {\n"
+   "  background-color: rgba(0, 0, 0, 0.85);\n"
+   "  color: #ffffff;\n"
+   "  padding: 6px 12px;\n"
+   "}\n";
+
+/* Load _GGAZE_CSS once for the display. */
 static void
 _ensure_css(void) {
    static gboolean b_done = FALSE;
@@ -2976,30 +3175,7 @@ _ensure_css(void) {
    }
    b_done                = TRUE;
    GtkCssProvider *p_css = gtk_css_provider_new();
-   gtk_css_provider_load_from_string(
-      p_css, "/* marked-thumbnail badge (multi-selection). */\n"
-             ".ggaze-marked {\n"
-             "  border: 2px solid #3584e4;\n"
-             "  border-radius: 4px;\n"
-             "  background-color: rgba(53, 132, 228, 0.15);\n"
-             "}\n"
-             "/* status line / EXIF card over the picture. */\n"
-             ".ggaze-info {\n"
-             "  background-color: rgba(0, 0, 0, 0.7);\n"
-             "  color: #ffffff;\n"
-             "  padding: 6px 10px;\n"
-             "  border-radius: 6px;\n"
-             "}\n"
-             "/* file list hovering over the window (drop target). */\n"
-             ".ggaze-drop {\n"
-             "  box-shadow: inset 0 0 0 3px #3584e4;\n"
-             "}\n"
-             "/* enabled enhance preset row highlight. */\n"
-             ".ggaze-enhance-on {\n"
-             "  background-color: #3584e4;\n"
-             "  color: #ffffff;\n"
-             "  font-weight: bold;\n"
-             "}\n");
+   gtk_css_provider_load_from_string(p_css, _GGAZE_CSS);
    GdkDisplay *p_disp = gdk_display_get_default();
    if (p_disp != NULL) {
       gtk_style_context_add_provider_for_display(
@@ -3035,15 +3211,23 @@ _init_enhance_state(GgazeWindow *p_win) {
 }
 
 /* Create the crop / straighten tool controller (it needs the viewer, so this
- * runs after _init_stack_and_viewer, unlike _init_enhance_state) and install
- * its capture-phase key controller -- see _tool_key_cb for why the tools'
- * modal keys must be claimed before the global shortcut table sees them. */
+ * runs after _init_stack_and_viewer, unlike _init_enhance_state), the
+ * edit-key router over it and the panel, and install the router's
+ * capture-phase key controller -- see _edit_key_cb for why the modes' keys
+ * must be claimed before the global shortcut table sees them. The router's
+ * key-hint bar goes under the large view, in the column _init_info_overlay
+ * built around the overlay. */
 static void
 _init_tool_state(GgazeWindow *p_win) {
    p_win->p_tool_ctrl = tool_ctrl_new(p_win->p_enhance_ctrl, &_TOOL_OPS, p_win);
+   p_win->p_edit_mode = edit_mode_new(GTK_WIDGET(p_win), p_win->p_enhance_ctrl,
+                                      p_win->p_tool_ctrl);
+   GtkWidget *p_column = gtk_widget_get_parent(p_win->p_overlay);
+   gtk_box_append(GTK_BOX(p_column),
+                  edit_mode_get_hint_bar(p_win->p_edit_mode));
    GtkEventController *p_kc = gtk_event_controller_key_new();
    gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
-   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_tool_key_cb), p_win);
+   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_edit_key_cb), p_win);
    gtk_widget_add_controller(GTK_WIDGET(p_win), p_kc);
 }
 #endif
@@ -3204,10 +3388,13 @@ _init_engines_and_settings(GgazeWindow *p_win) {
 }
 
 /* Wrap p_win->p_stack (built already) in a GtkOverlay with the auto-hiding
- * info label floating on top, put that and the enhance side-panel slot in a
- * row, and make the row the window's child. The slot is an empty box until
- * `a` appends the panel to it, so it costs no width while closed. Split out
- * of _init_stack_and_viewer to keep it under the ~30-line convention. */
+ * info label floating on top, stand it in a column (the GEGL build appends
+ * the key-hint bar under it, _init_tool_state -- below the picture rather
+ * than over it, so the bar never hides the part of the image being
+ * cropped), put that and the edit side-panel slot in a row, and make the
+ * row the window's child. The slot is an empty box until `a` appends the
+ * panel to it, so it costs no width while closed. Split out of
+ * _init_stack_and_viewer to keep it under the ~30-line convention. */
 static void
 _init_info_overlay(GgazeWindow *p_win) {
    p_win->p_overlay = gtk_overlay_new();
@@ -3215,10 +3402,13 @@ _init_info_overlay(GgazeWindow *p_win) {
    p_win->p_info = info_overlay_new(GTK_OVERLAY(p_win->p_overlay));
    gtk_widget_set_hexpand(p_win->p_overlay, TRUE);
    gtk_widget_set_vexpand(p_win->p_overlay, TRUE);
+   GtkWidget *p_column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+   gtk_widget_set_hexpand(p_column, TRUE);
+   gtk_box_append(GTK_BOX(p_column), p_win->p_overlay);
    p_win->p_side_slot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
    gtk_widget_set_vexpand(p_win->p_side_slot, TRUE);
    GtkWidget *p_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-   gtk_box_append(GTK_BOX(p_row), p_win->p_overlay);
+   gtk_box_append(GTK_BOX(p_row), p_column);
    gtk_box_append(GTK_BOX(p_row), p_win->p_side_slot);
    gtk_window_set_child(GTK_WINDOW(p_win), p_row);
 }
@@ -3240,10 +3430,11 @@ _header_button(const char *c_icon, const char *c_action) {
 }
 
 /* Append a menu item for c_action whose label comes from the shortcuts
- * table (with the keys in parentheses), so menu and keys cannot drift. */
+ * table -- the row's short label ("Crop"), else its help title -- with the
+ * keys in parentheses, so menu and keys cannot drift. */
 static void
 _menu_add(GMenu *p_menu, const char *c_action, const char *c_fallback) {
-   const char *c_title = shortcuts_title_for_action(c_action);
+   const char *c_title = shortcuts_label_for_action(c_action);
    char       *c_keys  = shortcuts_keys_for_action(c_action);
    const char *c_name  = c_title != NULL ? c_title : c_fallback;
    char       *c_label = NULL;
@@ -3268,11 +3459,13 @@ _build_main_menu(void) {
    _menu_add(p_edit, "win.move", "Move to...");
    _menu_add(p_edit, "win.open-external", "Open in...");
    _menu_add(p_edit, "win.run-script", "Run script...");
-   _menu_add(p_edit, "win.enhance", "Enhance");
+   _menu_add(p_edit, "win.enhance", "Edit panel");
    _menu_add(p_edit, "win.crop", "Crop");
    _menu_add(p_edit, "win.straighten", "Straighten");
-   _menu_add(p_edit, "win.rotate-cw", "Rotate 90\u00b0 clockwise");
-   _menu_add(p_edit, "win.rotate-ccw", "Rotate 90\u00b0 counter-clockwise");
+   _menu_add(p_edit, "win.rotate-ccw", "Rotate left");
+   _menu_add(p_edit, "win.rotate-cw", "Rotate right");
+   _menu_add(p_edit, "win.enhance-save", "Save edited copy");
+   _menu_add(p_edit, "win.edit-revert", "Revert all edits");
    GMenu *p_trash = g_menu_new();
    _menu_add(p_trash, "win.trash", "Trash");
    _menu_add(p_trash, "win.delete", "Delete permanently");

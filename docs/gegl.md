@@ -19,15 +19,23 @@ editing remains a non-goal.
 
 ## The quick-enhance feature
 
-- `a` → **enhance side panel**: a narrow column of cards *beside* the large
-  view, inside the main window (no second window, no popover). The image keeps
-  the whole viewer; the cards are the choices: `0 Original` first, then one
-  card per preset with its auto-assigned hotkey (`1`, `2`, …, capped at the
-  mask's 8 slots). By default each card carries a bounded preview thumbnail
+- `a` → **the edit panel**: a narrow column *beside* the large view,
+  inside the main window (no second window, no popover), and the one home
+  of every edit (6i2), compact enough that the eight built-in presets fit
+  a 1280x800 window without scrolling: a title row (*Edit*, close `a/Esc`),
+  *Presets* (the row cards below), *Transform* (crop `c`, straighten `r`,
+  the quarter turns `[` `]` as four icon buttons) and the save state with
+  Save copy `s` (naming the file it writes) beside Revert `x`, each button
+  showing its key from `shortcuts.c`'s table (docs/ui-and-interactions.md
+  "Quick enhance"). The image keeps the whole viewer; the cards are the
+  choices: a small, dim `Original` reference first (a picture, not a
+  button), then one row card per preset with its auto-assigned hotkey
+  (`1`, `2`, …, capped at the mask's 8 slots), highlighted and checked
+  while it is on. By default each card carries a small preview thumbnail
   of that preset applied *alone*, all generated as one cancellable background
   batch; Preferences can turn the thumbnails off, which leaves label-only
   cards (no batch at all) for slower systems. The thumbnails and the
-  Original card ignore the geometric transform (crop / straighten / rotate):
+  Original reference ignore the geometric transform (crop / straighten / rotate):
   they are per-preset colour references, rendered once per image from the
   untransformed original, and re-rendering nine of them on every nudge
   would cost more than it tells — the large view is where the composition
@@ -38,9 +46,12 @@ editing remains a non-goal.
   Auto-fix + Sharpen at once). The large view is the one place that shows
   the *combination*; the thumbnails stay per-preset references. A hotkey or
   card click does not close the panel, so combinations can be compared before
-  dismissing it (`Esc` or re-press `a`; the preview stays). `0` (or the
-  Original card) discards the whole preview outright while the panel is
-  open, and so does `Esc` once the panel is closed. Applying the chain runs
+  dismissing it (`Esc` or re-press `a`; the preview stays). The digits
+  are the panel's keys: with it closed they do nothing. `x` (or *Revert
+  all*) discards the whole preview outright while the panel is open; `Esc`
+  and `0` never discard (6i2 -- `0` is zoom only, and `Esc` once the panel
+  is closed goes on to the grid, the edit still on screen). Applying the
+  chain runs
   off the GTK main thread (a GTask worker; last-write-wins if superseded
   before it finishes).
 - **Hold `Space`** to see the original; release to see the current edit. This
@@ -52,11 +63,11 @@ editing remains a non-goal.
   comes back with the large view. Its cards are not keyboard-focusable on
   purpose: a focused button activates on Space, the compare key.
 - **How to save is spelled out** on the panel: a state line reads
-  *"No preset on"*, *"Unsaved preview — press s to save a copy"* or
+  *"No edits yet"*, *"Unsaved edits — s saves a copy"* or
   *"Saved as IMG_0001-enhanced.jpg"*, above a **Save copy** button (bound to
-  the same action as `s`) and a key hint. When a preset is applied with the
-  panel closed, a status line says it once per image: *hold Space to
-  compare, s saves a copy, a shows the presets*.
+  the same action as `s`) that names the file the next save writes
+  (*as IMG_0001-enhanced.jpg*); the key-hint bar under the image lists the
+  panel's keys.
 - `s` / `Ctrl+S` (or the panel's *Save copy* button, or menu *Save enhanced
   copy…*) writes the enhanced result to a new file, e.g.
   `IMG_0001-enhanced.jpg`, or `-enhanced-1.jpg`, `-2`, … if that name is
@@ -113,8 +124,8 @@ editing remains a non-goal.
   the case it actually covers is a forced `g_object_run_dispose()`. What stays
   uncovered is a process **exiting** under the dialog (SIGTERM, session
   logout, `^C`), where no dispose runs at all and the prompt's contexts go
-  down with the process. Toggling every preset back off, `0`, or
-  `Esc` discards directly
+  down with the process. Toggling every preset back off, or `x`
+  (panel open), discards directly
   (no prompt). Slideshow auto-advance discards a dirty preview silently
   instead of blocking on an unanswerable prompt.
 - Export format: defaults to the original extension (JPEG quality 95).
@@ -179,7 +190,7 @@ which the enhancer appends to the chain after the colour presets in decision
   (`gegl:rotate-on-center` about a non-integer centre would resample). One-
   shot, no overlay; repeat for 180°/270°; an applied crop turns with the
   image (`croprect_rotate_quarter`).
-- **`R` — straighten**: `gegl:rotate` about the image centre, then a
+- **`r` — straighten**: `gegl:rotate` about the image centre, then a
   `gegl:crop` to the analytic size `transform_straighten_size` — the largest
   inscribed rectangle inset by `TRANSFORM_AUTOCROP_INSET` (1 px) on every
   side (auto-crop on) or the rotated bounding box (`transform_rotated_size`,
@@ -320,7 +331,7 @@ overwriting whatever the user is now looking at (last-write-wins).
   `gegl:rgbe-*`, `gegl:gegl-buffer-load`/`-save`. Can augment GdkPixbuf on the
   enhance/export path (JXL/AVIF/HEIF still need their own libs).
 - **Transforms** — **crop** (`gegl:crop`), **straighten** and **rotate 90°**
-  (both `gegl:rotate`, see above) ship as the `c`/`R`/`[`/`]` tools; lens
+  (both `gegl:rotate`, see above) ship as the `c`/`r`/`[`/`]` tools; lens
   correction (`gegl:lens-distortion`), red-eye (`gegl:red-eye-removal`), and
   `gegl:scale-ratio` remain later/maybe.
 - **Tone mapping** — `gegl:reinhard-2005`, `gegl:mantiuk-2006`,
@@ -419,7 +430,7 @@ plain original meanwhile, swapping the managed one in when it lands if
 every render because it is a second full-size texture — `w × h × 4` bytes,
 about 100 MB at 24 MP and 200 MB at 50 MP — held by the controller outside
 the texture cache's cap, which most enhance sessions never look at. It is
-dropped on discard / when nothing is left to render (`0`, `Esc`, the last
+dropped on discard / when nothing is left to render (`x`, the last
 preset off), on navigation, on a rewrite of the file, and whenever the
 controller learns a new decode of the original in place of a known one (a
 rescan that finds a newer cached decode, a reload the viewer shows): it may
@@ -429,8 +440,8 @@ flight, the landing puts nothing up (`tests/test_enhance_flow.c`,
 `icc_*_mid_fetch`). While it is up the
 `i` card plots it (it stands for the current file's original at the
 window's texture choke point, `enhance_ctrl_override_texture`). For every
-unmanaged file, hold-`Space` shows the plain decode as before. Turning the preview on or off (`0`, `Esc`, the Original
-card) still switches between the plain view and the managed preview, so on
+unmanaged file, hold-`Space` shows the plain decode as before. Turning the preview on or off (a preset, `x`)
+still switches between the plain view and the managed preview, so on
 such a host that switch can show a colour shift the preset did not cause —
 the managed side is the correct one.
 

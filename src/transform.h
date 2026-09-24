@@ -4,7 +4,7 @@
 /*:*
  * ggaze — the composed geometric transform (plain C, no GTK, no GEGL)
  *
- * The non-destructive rotate-90 / straighten / crop state the `[` `]`, `R`
+ * The non-destructive rotate-90 / straighten / crop state the `[` `]`, `r`
  * and `c` tools edit and the enhancer turns into GEGL ops, in the compose
  * order of decision #35: load -> enhance (colour presets) -> rotate 90 ->
  * straighten (+ auto-crop of the rotated corners, default on) -> crop ->

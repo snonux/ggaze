@@ -177,7 +177,7 @@ src/histogram.{c,h}   RGB/luminance binner over a texture (plain C, subsampled)
 src/histogram-view.{c,h} GgazeHistogramView : GtkWidget (snapshot-drawn plot on the card)
 src/viewer.{c,h}      GgazeViewer : GtkWidget (large canvas, zoom/pan, touch gestures, tool overlay hook)
 src/gridview.{c,h}    GgazeGrid (thumbnail overview; intent signals, no window action names)
-src/shortcuts.{c,h}   the ONE key table: bindings, ? help, header tooltips, menu labels
+src/shortcuts.{c,h}   the ONE key table: bindings, ? help, header tooltips, menu labels, mode-scoped keys (panel/crop/straighten) + hint lines
 src/popup_list.{c,h}  shared hotkey list popover (e / ! / m)
 src/save-gate.{c,h}   Save/Discard/Cancel prompt gate (async Save)
 src/delete-confirm.{c,h} >1-target permanent-delete confirm
@@ -194,11 +194,12 @@ src/ggaze-enums.h     shared preference enums
 src/enhancer.{c,h}    optional GEGL presets (built-in table + user graphs), export naming, ICC-aware load/export
 src/enhancer-gegl.h   the GEGL buffer/texture/export operations (sync + async)
 src/enhance-ctrl.{c,h} optional enhance feature controller (mask, previews, side panel, saved flag, async save)
-src/enhance-ui.{c,h}  optional pure enhance side-panel widget construction
+src/enhance-ui.{c,h}  optional pure edit side-panel widget construction (presets, transform, actions)
 src/croprect.{c,h}    crop rectangle rules (move/resize/aspect/hit/drag/quarter turn), plain C
 src/gesture-math.{c,h} zoom about a point (wheel/keys/pinch) + swipe / two-finger-tap rules, plain C
 src/transform.{c,h}   rotate 90 / straighten / crop state + the sizes the tools and the chain share
-src/tool-ctrl.{c,h}   optional modal crop (c) / straighten (R) session: viewer overlay, keys, drags
+src/tool-ctrl.{c,h}   optional modal crop (c) / straighten (r) session: viewer overlay, keys, drags
+src/edit-mode.{c,h}   optional edit-key router (active tool, then the open panel, before the global table) + the key-hint bar
 src/clipboard.{c,h}   image/png (displayed texture) or file-URI content providers
 src/thumbnail.{c,h}   freedesktop TMS cache (bounded pool)
 src/texturecache.{c,h} bounded LRU of decoded GdkTextures (stamp: mtime ns, size, inode)

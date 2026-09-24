@@ -133,7 +133,7 @@ if gegl_dep.found()
    # none of it. streamread.c stays above: icc.c walks with it in every
    # build.
    ggaze_src += files('src/enhancer.c', 'src/enhance-ui.c', 'src/enhance-ctrl.c',
-      'src/tool-ctrl.c', 'src/loader/intact.c')
+      'src/tool-ctrl.c', 'src/edit-mode.c', 'src/loader/intact.c')
    ggaze_extra_deps += gegl_dep
    # lcms2 is babl's own dependency (babl-devel requires it), so a GEGL
    # build has it already. enhancer.c opens a CMYK profile with it before

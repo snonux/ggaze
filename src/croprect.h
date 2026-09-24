@@ -127,6 +127,36 @@ void croprect_rotate_quarter(CropRect *p_r, gint i_dir, gdouble d_w,
  * edges rather than the size keeps the rectangle where it was drawn). */
 void croprect_round(CropRect *p_r);
 
+/* The aspect locks the crop tool's `a` key cycles through, in cycle order:
+ * free -> 1:1 -> 3:2 -> 4:3 -> 16:9 -> the image's own shape -> free.
+ * The image's own shape comes LAST: the crop tool starts on the whole
+ * image, so as the first press it left the rectangle exactly as it was
+ * and `a` looked like it did nothing; 1:1 visibly reshapes any
+ * non-square picture. */
+typedef enum {
+   CROPRECT_ASPECT_FREE = 0,
+   CROPRECT_ASPECT_1_1,
+   CROPRECT_ASPECT_3_2,
+   CROPRECT_ASPECT_4_3,
+   CROPRECT_ASPECT_16_9,
+   CROPRECT_ASPECT_ORIGINAL, /* the shape of the image being cropped */
+   CROPRECT_ASPECT_COUNT     /* not a lock: the number of them */
+} CropRectAspect;
+
+/* The lock after e_aspect in the cycle (the last wraps to FREE; an
+ * out-of-range value restarts at FREE too). */
+CropRectAspect croprect_aspect_next(CropRectAspect e_aspect);
+
+/* The ratio (w/h) e_aspect locks to, for an image of d_w x d_h (only
+ * ORIGINAL reads it): 0 for FREE, and for ORIGINAL on a degenerate or
+ * non-finite size -- "free" to croprect_set_aspect / croprect_resize. */
+gdouble croprect_aspect_ratio(CropRectAspect e_aspect, gdouble d_w,
+                              gdouble d_h);
+
+/* Its name for the status line ("free", "original", "1:1", ...). Borrowed;
+ * "free" for an out-of-range value. */
+const char *croprect_aspect_name(CropRectAspect e_aspect);
+
 G_END_DECLS
 
 #endif /* GGAZE_CROPRECT_H */

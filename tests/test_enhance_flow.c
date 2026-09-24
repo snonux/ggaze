@@ -16,7 +16,8 @@
  *     mask changes again, so moving on does not prompt for it.
  *   - `a` opens the enhance side panel beside the viewer (inside the window,
  *     no second toplevel), which survives navigation and re-previews the
- *     new image; Esc closes it first, `0` is its Original hotkey.
+ *     new image; Esc closes it and keeps the edit, x reverts (6i2: `0`
+ *     is zoom only, the digits are the open panel's keys).
  *   - ggaze_window_set_hold_original() swaps the displayed texture to the
  *     (cached) original and back without touching u_enhance_mask.
  *   - the `i` card's histogram follows the picture (0c2, second review):
@@ -27,8 +28,10 @@
  *   - win.enhance-save exports a NEW file next to the original
  *     (<stem>-enhanced[-<n>].<ext>, collision-suffixed like mover.c), never
  *     overwriting the original or a pre-existing same-named export.
- *   - wb2: the crop (c) / straighten (R) / rotate-90 ([ ]) tools on the same
- *     preview graph -- see the "wb2" section before the registrations.
+ *   - wb2: the crop (c) / straighten (r, R before 6i2) / rotate-90 ([ ])
+ *     tools on the same preview graph -- see the "wb2" section before the
+ *     registrations; 6i2: the edit panel's modal keys and the key-hint bar
+ *     (the "6i2" section).
  *
  * The real Save/Discard/Cancel GtkAlertDialog IS driven here, button by
  * button. The older claim (inherited from tests/test_delete_safety.c) that
@@ -235,6 +238,19 @@ fire(GgazeWindow *p_win, const char *c_action) {
    gtk_widget_activate_action(GTK_WIDGET(p_win), c_action, NULL);
 }
 
+static GtkWidget *find_panel(GgazeWindow *p_win);
+
+/* Drop every edit the way a user does since 6i2: x, with the edit panel
+ * open (opened first when it is not -- x with the panel closed only says
+ * where it works). Esc no longer discards. */
+static void
+revert_edits(GgazeWindow *p_win) {
+   if (find_panel(p_win) == NULL) {
+      fire(p_win, "win.enhance");
+   }
+   fire(p_win, "win.edit-revert");
+}
+
 /* Poll until the viewer's texture pointer differs from p_before (a fresh
  * async enhance apply always builds a brand-new GdkTexture) or a generous
  * timeout elapses. */
@@ -331,6 +347,44 @@ find_card(GtkWidget *p_root, gint i_idx) {
    return (NULL);
 }
 
+/* The Original reference (GGAZE_ENHANCE_ORIGINAL_CLASS) under p_root, or
+ * NULL. Since 6i2 it is a picture to compare against, not a card: x / the
+ * Revert button is the one way to drop every edit. */
+static GtkWidget *
+find_original(GtkWidget *p_root) {
+   if (gtk_widget_has_css_class(p_root, GGAZE_ENHANCE_ORIGINAL_CLASS)) {
+      return (p_root);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
+   while (p_child != NULL) {
+      GtkWidget *p_found = find_original(p_child);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (NULL);
+}
+
+/* The first GtkButton under p_root bound to c_action, or NULL. */
+static GtkWidget *
+find_action_button(GtkWidget *p_root, const char *c_action) {
+   if (GTK_IS_BUTTON(p_root) &&
+       g_strcmp0(gtk_actionable_get_action_name(GTK_ACTIONABLE(p_root)),
+                 c_action) == 0) {
+      return (p_root);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
+   while (p_child != NULL) {
+      GtkWidget *p_found = find_action_button(p_child, c_action);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (NULL);
+}
+
 /* The first GtkLabel under p_root whose text starts with c_prefix. */
 static GtkWidget *
 find_label_prefix(GtkWidget *p_root, const char *c_prefix) {
@@ -367,12 +421,12 @@ wait_for_pictures_painted(GPtrArray *p_pics) {
    g_assert_cmpuint(u_painted, ==, p_pics->len);
 }
 
-/* Open plain.jpg alone in a presented 900x700 window with the thumbnail
+/* Open plain.jpg alone in a presented i_w x i_h window with the thumbnail
  * preference set as asked, and return the window. The caller frees c_dir /
  * c_path via the out parameters. */
 static GgazeWindow *
-open_presented(gboolean b_thumbnails, const char *c_tmpl, char **c_dir_out,
-               char **c_path_out) {
+open_presented_sized(gboolean b_thumbnails, const char *c_tmpl, gint i_w,
+                     gint i_h, char **c_dir_out, char **c_path_out) {
    Settings *p_cfg = settings_new();
    settings_set_enhance_preview_thumbnails(p_cfg, b_thumbnails);
    settings_delete(p_cfg);
@@ -385,12 +439,20 @@ open_presented(gboolean b_thumbnails, const char *c_tmpl, char **c_dir_out,
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
    g_object_unref(p_file);
-   gtk_window_set_default_size(GTK_WINDOW(p_win), 900, 700);
+   gtk_window_set_default_size(GTK_WINDOW(p_win), i_w, i_h);
    gtk_window_present(GTK_WINDOW(p_win));
    wait_for_view(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    *c_dir_out  = c_dir;
    *c_path_out = c_path;
    return (p_win);
+}
+
+/* open_presented_sized at 900x700. */
+static GgazeWindow *
+open_presented(gboolean b_thumbnails, const char *c_tmpl, char **c_dir_out,
+               char **c_path_out) {
+   return (open_presented_sized(b_thumbnails, c_tmpl, 900, 700, c_dir_out,
+                                c_path_out));
 }
 
 /* Undo open_presented: reset the preference, close the window, drop the
@@ -405,6 +467,37 @@ close_presented(GgazeWindow *p_win, char *c_dir, char *c_path) {
    g_free(c_path);
    ggtest_drain_main(300);
    ggtest_cleanup_temp_dir(c_dir);
+}
+
+/* 6i2: the panel is the one home of every edit -- the Transform and
+ * Actions buttons are there, each on its action and showing its key (from
+ * the table), none focusable (Space compares), Save names the file it will
+ * write, and the title says what is edited. */
+static void
+assert_panel_buttons(GtkWidget *p_panel) {
+   static const struct {
+      const char *c_action;
+      const char *c_key;
+   } BUTTONS[] = {
+      {"win.crop", "c"},         {"win.straighten", "r"},
+      {"win.rotate-ccw", "["},   {"win.rotate-cw", "]"},
+      {"win.enhance-save", "s"}, {"win.edit-revert", "x"},
+      {"win.enhance", "a/Esc"},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(BUTTONS); u++) {
+      GtkWidget *p_btn = find_action_button(p_panel, BUTTONS[u].c_action);
+      g_assert_nonnull(p_btn);
+      g_assert_nonnull(find_label_prefix(p_btn, BUTTONS[u].c_key));
+      g_assert_false(gtk_widget_get_can_focus(p_btn)); /* Space compares */
+   }
+   g_assert_nonnull(find_label_prefix(p_panel, "as plain-enhanced.jpg"));
+   /* The title is just "Edit": the window title already names the file. */
+   GtkWidget *p_title = find_label_prefix(p_panel, "Edit");
+   g_assert_nonnull(p_title);
+   g_assert_cmpstr(gtk_label_get_text(GTK_LABEL(p_title)), ==, "Edit");
+   /* Close is the title row's flat button, named by its tooltip. */
+   GtkWidget *p_close = find_action_button(p_panel, "win.enhance");
+   g_assert_cmpstr(gtk_widget_get_tooltip_text(p_close), ==, "Close (a/Esc)");
 }
 
 /* `a` opens the panel INSIDE the window, beside the viewer -- no second
@@ -444,19 +537,57 @@ test_panel_opens_beside_viewer_with_thumbnails(void) {
    GPtrArray *p_pics = g_ptr_array_new();
    collect_pictures(p_panel, p_pics);
    g_assert_cmpuint(p_pics->len, ==, 9);
-   g_assert_nonnull(find_card(p_panel, -1));
+   g_assert_nonnull(find_original(p_panel));
+   g_assert_null(find_card(p_panel, -1)); /* a reference, no card */
    g_assert_nonnull(find_card(p_panel, 7));
    g_assert_null(find_card(p_panel, 8));
    wait_for_pictures_painted(p_pics);
    g_ptr_array_unref(p_pics);
    /* The save state is spelled out even before anything is on. */
-   g_assert_nonnull(find_label_prefix(p_panel, "No preset on"));
+   g_assert_nonnull(find_label_prefix(p_panel, "No edits yet"));
+   assert_panel_buttons(p_panel);
 
    fire(p_win, "win.enhance"); /* close */
    g_assert_null(find_panel(p_win));
    fire(p_win, "win.enhance"); /* reopen, start another preview batch */
    fire(p_win, "win.enhance"); /* immediately close and cancel it */
    ggtest_drain_main(500);
+   close_presented(p_win, c_dir, c_path);
+}
+
+/* The panel is compact (6i2 review): in a 1280x800 window every one of the
+ * eight built-in presets is on screen without scrolling -- the card
+ * scroller's content fits its page -- and the Transform and Save rows sit
+ * inside the panel below them. The old full-width cards showed one and a
+ * half presets there. */
+static void
+test_panel_fits_eight_presets_at_1280x800(void) {
+   char        *c_dir  = NULL;
+   char        *c_path = NULL;
+   GgazeWindow *p_win  = open_presented_sized(TRUE, "ggaze-enhance-fit-XXXXXX",
+                                              1280, 800, &c_dir, &c_path);
+   fire(p_win, "win.enhance");
+   GtkWidget *p_panel = find_panel(p_win);
+   GtkWidget *p_last  = find_card(p_panel, 7);
+   GtkWidget *p_sw = gtk_widget_get_ancestor(p_last, GTK_TYPE_SCROLLED_WINDOW);
+   GtkAdjustment *p_adj =
+      gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(p_sw));
+   for (guint u = 0; u < 3000 && (gtk_widget_get_height(p_last) == 0 ||
+                                  gtk_adjustment_get_page_size(p_adj) == 0.0);
+        u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   ggtest_drain_main(200);
+   g_assert_cmpint(gtk_widget_get_height(GTK_WIDGET(p_win)), <=, 800);
+   g_assert_cmpfloat(gtk_adjustment_get_upper(p_adj), <=,
+                     gtk_adjustment_get_page_size(p_adj) + 0.5);
+   graphene_rect_t r_save, r_panel;
+   g_assert_true(gtk_widget_compute_bounds(
+      find_action_button(p_panel, "win.enhance-save"), p_panel, &r_save));
+   g_assert_true(gtk_widget_compute_bounds(p_panel, p_panel, &r_panel));
+   g_assert_cmpfloat(r_save.origin.y + r_save.size.height, <=,
+                     r_panel.size.height);
    close_presented(p_win, c_dir, c_path);
 }
 
@@ -475,7 +606,8 @@ test_panel_label_only_mode_has_no_pictures(void) {
    collect_pictures(p_panel, p_pics);
    g_assert_cmpuint(p_pics->len, ==, 0);
    g_ptr_array_unref(p_pics);
-   g_assert_nonnull(find_card(p_panel, -1));
+   g_assert_nonnull(find_original(p_panel));
+   g_assert_null(find_card(p_panel, -1)); /* a reference, no card */
    g_assert_nonnull(find_card(p_panel, 7));
    fire(p_win, "win.enhance");
    g_assert_null(find_panel(p_win));
@@ -519,7 +651,7 @@ test_panel_cards_track_mask_and_thumbnails_stay(void) {
       gtk_widget_has_css_class(find_card(p_panel, 1), "ggaze-enhance-on"));
    g_assert_true(gtk_picture_get_paintable(p_pic0) == p_thumb0);
    g_assert_true(gtk_picture_get_paintable(p_pic1) == p_thumb1);
-   g_assert_nonnull(find_label_prefix(p_panel, "Unsaved preview"));
+   g_assert_nonnull(find_label_prefix(p_panel, "Unsaved edits"));
 
    fire(p_win, "win.enhance-1");
    fire(p_win, "win.enhance-3");
@@ -527,7 +659,7 @@ test_panel_cards_track_mask_and_thumbnails_stay(void) {
    g_assert_false(ggaze_window_enhance_is_dirty(p_win));
    g_assert_false(
       gtk_widget_has_css_class(find_card(p_panel, 0), "ggaze-enhance-on"));
-   g_assert_nonnull(find_label_prefix(p_panel, "No preset on"));
+   g_assert_nonnull(find_label_prefix(p_panel, "No edits yet"));
    g_object_unref(p_orig);
    close_presented(p_win, c_dir, c_path);
 }
@@ -2687,10 +2819,12 @@ test_manual_save_clears_dirty_until_next_change(void) {
    fixture_teardown(&fx);
 }
 
-/* Esc is layered: with the panel open it closes the panel and KEEPS the
- * preview; the next Esc drops the preview. */
+/* 6i2: Esc NEVER discards an edit. With the panel open it closes the panel
+ * and keeps the preview (saying so); the next Esc goes on to the grid --
+ * still keeping it -- where it used to drop the preview without a prompt.
+ * Back in the large view the edit is on screen and dirty as before. */
 static void
-test_esc_closes_panel_before_discarding(void) {
+test_esc_never_discards_the_edit(void) {
    DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-esc-XXXXXX");
    fire(fx.p_win, "win.enhance");
@@ -2699,36 +2833,55 @@ test_esc_closes_panel_before_discarding(void) {
    g_assert_null(find_panel(fx.p_win));
    g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
    g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);
-   fire(fx.p_win, "win.back");
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Edit panel closed"));
+   fire(fx.p_win, "win.back"); /* large -> grid, nothing discarded */
    ggtest_drain_main(200);
-   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
-   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(fx.p_win)), ==,
+      "grid");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   fire(fx.p_win, "win.toggle-view"); /* back: the edit is still there */
+   ggtest_drain_main(200);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);
    fixture_teardown(&fx);
 }
 
-/* `0` is bound to win.zoom-reset window-wide; with the panel open it is the
- * panel's Original hotkey instead and drops the preview, leaving the panel
- * up for the next attempt. */
+/* 6i2: `0` is zoom and nothing else -- with the panel open it toggles fit /
+ * 100% like anywhere, the edit and the panel stay. x is the revert: with
+ * the panel closed it only says where it works; with it open it drops
+ * every edit (status line), the panel staying up for the next attempt. */
 static void
-test_zero_discards_while_panel_open(void) {
+test_zero_zooms_and_x_reverts(void) {
    DirtyFixture fx = {0};
    fixture_open(&fx, "ggaze-enhance-zero-XXXXXX");
+   fire(fx.p_win, "win.edit-revert"); /* panel closed: explains, keeps */
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "x reverts"));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
    fire(fx.p_win, "win.enhance");
    GtkWidget *p_panel = find_panel(fx.p_win);
    g_assert_nonnull(p_panel);
+   fire(fx.p_win, "win.zoom-reset"); /* a zoom toggle, nothing else */
    fire(fx.p_win, "win.zoom-reset");
    ggtest_drain_main(200);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win)); /* kept */
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);
+   fire(fx.p_win, "win.edit-revert");
+   ggtest_drain_main(200);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Reverted"));
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
    g_assert_true(find_panel(fx.p_win) == p_panel);
-   g_assert_nonnull(find_label_prefix(p_panel, "No preset on"));
+   g_assert_nonnull(find_label_prefix(p_panel, "No edits yet"));
+   fire(fx.p_win, "win.edit-revert"); /* nothing left */
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Nothing to revert"));
    fixture_teardown(&fx);
 }
 
 /* The panel outlives a navigation: after Discard it is the SAME widget,
- * retitled for the new file, with no card highlighted and a fresh batch of
- * thumbnails for the new image. It is hidden (not closed) with the grid and
- * back beside the viewer after `t` twice. */
+ * re-pointed at the new file (its Save names the new target), with no card
+ * highlighted and a fresh batch of thumbnails for the new image. It is hidden
+ * (not closed) with the grid and back beside the viewer after `t` twice. */
 static void
 test_panel_persists_across_navigation(void) {
    Settings *p_cfg = settings_new();
@@ -2738,7 +2891,7 @@ test_panel_persists_across_navigation(void) {
    fire(fx.p_win, "win.enhance");
    GtkWidget *p_panel = find_panel(fx.p_win);
    g_assert_nonnull(p_panel);
-   g_assert_nonnull(find_label_prefix(p_panel, "Enhance plain.jpg"));
+   g_assert_nonnull(find_label_prefix(p_panel, "as plain-enhanced.jpg"));
    g_assert_true(
       gtk_widget_has_css_class(find_card(p_panel, 0), "ggaze-enhance-on"));
 
@@ -2746,7 +2899,7 @@ test_panel_persists_across_navigation(void) {
    answer_prompt(&fx, "Discard");
    assert_showing(fx.p_win, "rot6.jpg");
    g_assert_true(find_panel(fx.p_win) == p_panel);
-   g_assert_nonnull(find_label_prefix(p_panel, "Enhance rot6.jpg"));
+   g_assert_nonnull(find_label_prefix(p_panel, "as rot6-enhanced.jpg"));
    g_assert_false(
       gtk_widget_has_css_class(find_card(p_panel, 0), "ggaze-enhance-on"));
    GPtrArray *p_pics = g_ptr_array_new();
@@ -2964,6 +3117,26 @@ tool_key(GgazeWindow *p_win, guint u_keyval) {
    g_assert_true(ggaze_window_tool_key(p_win, u_keyval, 0));
 }
 
+/* Crop tool, 6i2 keys: Ctrl+l moves the right side in, Ctrl+j the bottom
+ * side up, by one step (1% of the base's shorter side) -- what H / K did
+ * before the four sides became symmetric. */
+static void
+crop_shrink_right(GgazeWindow *p_win) {
+   g_assert_true(ggaze_window_tool_key(p_win, GDK_KEY_l, GDK_CONTROL_MASK));
+}
+
+static void
+crop_shrink_bottom(GgazeWindow *p_win) {
+   g_assert_true(ggaze_window_tool_key(p_win, GDK_KEY_j, GDK_CONTROL_MASK));
+}
+
+/* Crop tool: lock 1:1 (`a` once from a fresh tool: free -> 1:1), what
+ * the `1` key did before 6i2. */
+static void
+crop_square(GgazeWindow *p_win) {
+   tool_key(p_win, GDK_KEY_a);
+}
+
 /* Press a modal key that re-renders the preview, and wait for it. */
 static void
 tool_key_and_wait(GgazeWindow *p_win, guint u_keyval) {
@@ -3095,8 +3268,8 @@ test_crop_keys_then_enter_commits(void) {
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
    g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Crop"));
    for (guint u = 0; u < 10; u++) {
-      tool_key(fx.p_win, GDK_KEY_H); /* right edge in: 3 px per press */
-      tool_key(fx.p_win, GDK_KEY_K); /* bottom edge up */
+      crop_shrink_right(fx.p_win);  /* right edge in: 3 px per press */
+      crop_shrink_bottom(fx.p_win); /* bottom edge up */
    }
    /* h/l/j/k move the rectangle, so they are consumed: none of these may
     * reach win.prev / win.next / the pan actions. */
@@ -3127,7 +3300,7 @@ test_crop_esc_and_toggle_cancel(void) {
    ToolFx fx;
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.crop");
-   tool_key(fx.p_win, GDK_KEY_H);
+   crop_shrink_right(fx.p_win);
    tool_key(fx.p_win, GDK_KEY_Escape);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
@@ -3199,20 +3372,58 @@ test_crop_tool_holds_animation_first_frame(void) {
    ggtest_cleanup_temp_dir(c_dir);
 }
 
-/* 1-4 lock the aspect (largest such rectangle inside the current one,
- * centred), 0 frees it, and Enter commits that shape. */
+/* The crop rectangle as the overlay has it now (asserts it is laid out). */
+static CropRect
+crop_rect_now(GgazeWindow *p_win) {
+   CropRect r;
+   gint     i_bw, i_bh;
+   g_assert_true(ggaze_window_tool_crop_rect(p_win, &r, &i_bw, &i_bh));
+   return (r);
+}
+
+/* 6i2: `a` cycles the aspect lock -- free -> 1:1 -> 3:2 -> 4:3 -> 16:9 ->
+ * original -> free -- each the largest such rectangle, centred, inside
+ * the rectangle the user left before the run of presses (not inside the
+ * previous lock's result, which shrank it on every press), and back at
+ * "free" that rectangle again; the status line names the lock and the
+ * next one. The FIRST press visibly changes the whole-image rectangle the
+ * tool starts on (it used to pick "original", which on the whole image
+ * changed nothing and looked dead). The digits are no aspect keys any
+ * more (`0` is zoom, 1-8 the panel's presets). */
 static void
 test_crop_aspect_presets(void) {
    ToolFx fx;
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.crop");
-   tool_key(fx.p_win, GDK_KEY_1);
+   g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_1, 0));
+   g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_0, 0));
+   g_assert_cmpfloat(crop_rect_now(fx.p_win).d_w, ==, TOOL_W);
+   tool_key(fx.p_win, GDK_KEY_a); /* 1:1: a 400x300 image's width shrinks */
+   g_assert_cmpstr(status_text(fx.p_win), ==,
+                   "Crop aspect: 1:1 (a: next is 3:2)");
+   g_assert_cmpfloat(crop_rect_now(fx.p_win).d_w, ==, TOOL_H);
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    assert_texture_size(fx.p_win, TOOL_H, TOOL_H); /* 300x300 square */
    fire(fx.p_win, "win.crop"); /* re-opens on the committed rectangle ... */
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
-   tool_key(fx.p_win, GDK_KEY_4); /* ... 16:9 inside the square: 300x168 */
-   tool_key(fx.p_win, GDK_KEY_0); /* free: keeps the shape */
+   for (guint u = 0; u < 4; u++) {
+      tool_key(fx.p_win, GDK_KEY_a); /* 1:1, 3:2, 4:3, 16:9 */
+   }
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Crop aspect: 16:9"));
+   CropRect t_wide = crop_rect_now(fx.p_win); /* inside the square */
+   g_assert_cmpfloat(t_wide.d_w, ==, TOOL_H);
+   g_assert_cmpfloat_with_epsilon(t_wide.d_h, TOOL_H * 9.0 / 16.0, 1e-6);
+   tool_key(fx.p_win, GDK_KEY_a); /* original: the 4:3 image's own shape */
+   g_assert_cmpstr(status_text(fx.p_win), ==,
+                   "Crop aspect: original (a: next is free)");
+   g_assert_cmpfloat(crop_rect_now(fx.p_win).d_w, ==, TOOL_H);
+   g_assert_cmpfloat(crop_rect_now(fx.p_win).d_h, ==, TOOL_H * 3.0 / 4.0);
+   tool_key(fx.p_win, GDK_KEY_a); /* free: the square it started from */
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Crop aspect: free"));
+   g_assert_cmpfloat(crop_rect_now(fx.p_win).d_h, ==, TOOL_H);
+   for (guint u = 0; u < 4; u++) {
+      tool_key(fx.p_win, GDK_KEY_a); /* round again to 16:9 */
+   }
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    assert_texture_size(fx.p_win, TOOL_H, (gint)(TOOL_H * 9.0 / 16.0));
    tool_fx_close(&fx);
@@ -3258,9 +3469,11 @@ test_crop_drag_resizes_and_moves(void) {
    tool_fx_close(&fx);
 }
 
-/* `R`: h/l nudge by half a degree and render live with the auto-crop
- * (smaller than the image), A turns auto-crop off (the padded bounding box
- * is larger), Enter keeps it, and the title names the angle. */
+/* `r`: h/l nudge by half a degree and render live with the auto-crop
+ * (smaller than the image), `a` turns auto-crop off (the padded bounding
+ * box is larger; `A` did before 6i2 and is no tool key now), Enter keeps
+ * it, and the title names the angle. Esc outside the tool keeps the edit
+ * (6i2): only x reverts it. */
 static void
 test_straighten_nudge_and_autocrop(void) {
    ToolFx fx;
@@ -3277,7 +3490,8 @@ test_straighten_nudge_and_autocrop(void) {
    g_assert_nonnull(
       g_strstr_len(window_title(fx.p_win), -1, "straighten 1.0° CW"));
    g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Straighten 1.0"));
-   tool_key_and_wait(fx.p_win, GDK_KEY_A); /* auto-crop off */
+   g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_A, GDK_SHIFT_MASK));
+   tool_key_and_wait(fx.p_win, GDK_KEY_a); /* auto-crop off */
    p_tex = viewer_texture(fx.p_win);
    g_assert_cmpint(gdk_texture_get_width(p_tex), >, TOOL_W);
    g_assert_cmpint(gdk_texture_get_height(p_tex), >, TOOL_H);
@@ -3290,7 +3504,12 @@ test_straighten_nudge_and_autocrop(void) {
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
    g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
    g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Straightened 0.5"));
-   fire(fx.p_win, "win.back"); /* Esc outside the tool discards the preview */
+   fire(fx.p_win, "win.back"); /* Esc outside the tool: closes the panel */
+   ggtest_drain_main(100);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win)); /* kept */
+   g_assert_null(find_panel(fx.p_win));
+   fire(fx.p_win, "win.enhance");
+   fire(fx.p_win, "win.edit-revert"); /* x: the one key that reverts */
    ggtest_drain_main(100);
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
@@ -3368,7 +3587,7 @@ test_tool_refuses_switch_and_turn_while_active(void) {
    fire(fx.p_win, "win.straighten");
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Finish the"));
-   tool_key(fx.p_win, GDK_KEY_R);
+   tool_key(fx.p_win, GDK_KEY_r);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    fire(fx.p_win, "win.rotate-cw");
    tool_key(fx.p_win, GDK_KEY_bracketleft);
@@ -3381,7 +3600,7 @@ test_tool_refuses_switch_and_turn_while_active(void) {
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
    tool_key(fx.p_win, GDK_KEY_c);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
-   tool_key(fx.p_win, GDK_KEY_R); /* the same tool's key cancels it */
+   tool_key(fx.p_win, GDK_KEY_r); /* the same tool's key cancels it */
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
    tool_fx_close(&fx);
 }
@@ -3400,7 +3619,7 @@ test_crop_enter_refused_while_rendering(void) {
    g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Preview still"));
    wait_for_texture_change(fx.p_win, fx.p_orig);
    assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
-   tool_key(fx.p_win, GDK_KEY_H); /* now laid out on the turned base */
+   crop_shrink_right(fx.p_win); /* now laid out on the turned base */
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
    assert_texture_size(fx.p_win, TOOL_H - 3, TOOL_W);
@@ -3415,7 +3634,7 @@ test_crop_turns_with_the_image(void) {
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.crop");
    for (guint u = 0; u < 10; u++) {
-      tool_key(fx.p_win, GDK_KEY_H);
+      crop_shrink_right(fx.p_win);
    }
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    assert_texture_size(fx.p_win, TOOL_W - 30, TOOL_H);
@@ -3476,7 +3695,7 @@ test_reopened_crop_tool_keeps_the_crop_as_work(void) {
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.crop");
    for (guint u = 0; u < 10; u++) {
-      tool_key(fx.p_win, GDK_KEY_H);
+      crop_shrink_right(fx.p_win);
    }
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    assert_texture_size(fx.p_win, TOOL_W - 30, TOOL_H);
@@ -3516,7 +3735,7 @@ test_navigation_inside_crop_tool_prompts(void) {
    tool_fx_open_with_sibling(&fx);
    fire(fx.p_win, "win.crop");
    for (guint u = 0; u < 10; u++) {
-      tool_key(fx.p_win, GDK_KEY_K);
+      crop_shrink_bottom(fx.p_win);
    }
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    assert_texture_size(fx.p_win, TOOL_W, TOOL_H - 30);
@@ -3551,7 +3770,7 @@ test_saved_state_survives_a_tool_cancel(void) {
    ToolFx fx;
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.crop");
-   tool_key(fx.p_win, GDK_KEY_1);
+   crop_square(fx.p_win);
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    fire(fx.p_win, "win.enhance-save");
    char *c_out = g_build_filename(fx.c_dir, "tool-enhanced.png", NULL);
@@ -3560,7 +3779,7 @@ test_saved_state_survives_a_tool_cancel(void) {
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
    fire(fx.p_win, "win.crop");
    wait_for_texture_size(fx.p_win, TOOL_W, TOOL_H);
-   tool_key(fx.p_win, GDK_KEY_H);
+   crop_shrink_right(fx.p_win);
    tool_key(fx.p_win, GDK_KEY_Escape);
    wait_for_texture_size(fx.p_win, TOOL_H, TOOL_H);
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win)); /* still saved */
@@ -3585,7 +3804,7 @@ test_saved_state_survives_a_tool_cancel(void) {
    /* A different commit is new work. */
    fire(fx.p_win, "win.crop");
    ggtest_drain_main(300);
-   tool_key(fx.p_win, GDK_KEY_H);
+   crop_shrink_right(fx.p_win);
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
    g_object_unref(p_saved);
@@ -3595,7 +3814,7 @@ test_saved_state_survives_a_tool_cancel(void) {
 }
 
 /* A drag END (or UPDATE) that never had a BEGIN in the straighten tool --
- * the press happened before `R`, or the end is stale -- levels nothing: it
+ * the press happened before `r`, or the end is stale -- levels nothing: it
  * used to apply an angle computed from whatever the start coordinates last
  * held (a lone END at (300, 200) turned the image 35 degrees). */
 static void
@@ -3672,7 +3891,7 @@ test_crop_follows_straighten(void) {
    ToolFx fx;
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.crop");
-   tool_key(fx.p_win, GDK_KEY_1); /* 300x300 centred */
+   crop_square(fx.p_win); /* 300x300 centred */
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    fire(fx.p_win, "win.straighten");
    tool_key(fx.p_win, GDK_KEY_l);
@@ -3703,7 +3922,7 @@ test_crop_outside_the_view_comes_back(void) {
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.crop");
    for (guint u = 0; u < 131; u++) {
-      tool_key(fx.p_win, GDK_KEY_H); /* right edge in to the minimum ... */
+      crop_shrink_right(fx.p_win); /* right edge in to the minimum ... */
    }
    for (guint u = 0; u < 131; u++) {
       tool_key(fx.p_win, GDK_KEY_l); /* ... then slid to the right border */
@@ -3822,6 +4041,277 @@ test_tool_key_controller_claims_keys_only_while_active(void) {
    tool_fx_close(&fx);
 }
 
+/* --- 6i2: edit keys are modal to the panel --------------------------------
+ *
+ * The edit panel is the one home of every edit: the digits toggle presets
+ * only while it is open, c / r / [ / ] open it first, and a key-hint bar
+ * under the image lists the live keys of the mode on screen -- generated
+ * from shortcuts.c's table. */
+
+/* With the panel closed a digit is nobody's (the capture-phase router
+ * passes it on, the global table has no binding for it): nothing is
+ * toggled and nothing becomes dirty. With the panel open the same key
+ * press toggles preset 1 -- and a popover's own digits are not taken. */
+static void
+test_digits_are_inert_with_the_panel_closed(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   g_assert_null(find_panel(fx.p_win));
+   g_assert_false(emit_capture_key(fx.p_win, GDK_KEY_1));
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_1, 0));
+   ggtest_drain_main(200);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, 0);
+   fire(fx.p_win, "win.enhance");
+   g_assert_true(emit_capture_key(fx.p_win, GDK_KEY_1)); /* the panel's */
+   wait_for_texture_change(fx.p_win, fx.p_orig);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "Auto-fix"));
+   /* h / l / j / k are not the panel's: they navigate as before. */
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_h, 0));
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_j, 0));
+   tool_fx_close(&fx);
+}
+
+/* c / r / [ / ] open the panel first when it is closed -- from the grid
+ * too, where they first open the highlighted image large -- then act. */
+static void
+test_tool_keys_open_the_panel(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   g_assert_nonnull(find_panel(fx.p_win));
+   fire(fx.p_win, "win.back"); /* closes the panel, keeps the turn */
+   g_assert_null(find_panel(fx.p_win));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   fire(fx.p_win, "win.straighten");
+   g_assert_nonnull(find_panel(fx.p_win));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   tool_key(fx.p_win, GDK_KEY_Escape); /* the tool only: the panel stays */
+   g_assert_nonnull(find_panel(fx.p_win));
+   fire(fx.p_win, "win.back");
+   fire(fx.p_win, "win.back"); /* large -> grid */
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(fx.p_win)), ==,
+      "grid");
+   fire(fx.p_win, "win.crop");
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(fx.p_win)), ==,
+      "large");
+   g_assert_nonnull(find_panel(fx.p_win));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   tool_fx_close(&fx);
+}
+
+/* All four crop sides are symmetric: Ctrl+<key> moves the side the key
+ * points at inward by one step (1% of 300 = 3 px), Shift+<key> moves it
+ * outward again; h/j/k/l move the whole rectangle. */
+static void
+test_crop_shift_and_ctrl_move_every_side(void) {
+   static const struct {
+      guint   u_key;
+      gdouble d_dx, d_dy, d_dw, d_dh; /* after Ctrl+key, from full */
+   } SIDES[] = {
+      {GDK_KEY_h, 3, 0, -3, 0}, /* left side in */
+      {GDK_KEY_l, 0, 0, -3, 0}, /* right side in */
+      {GDK_KEY_k, 0, 3, 0, -3}, /* top side down */
+      {GDK_KEY_j, 0, 0, 0, -3}, /* bottom side up */
+   };
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.crop");
+   for (gsize u = 0; u < G_N_ELEMENTS(SIDES); u++) {
+      g_assert_true(
+         ggaze_window_tool_key(fx.p_win, SIDES[u].u_key, GDK_CONTROL_MASK));
+      CropRect r = crop_rect_now(fx.p_win);
+      g_assert_cmpfloat(r.d_x, ==, SIDES[u].d_dx);
+      g_assert_cmpfloat(r.d_y, ==, SIDES[u].d_dy);
+      g_assert_cmpfloat(r.d_w, ==, TOOL_W + SIDES[u].d_dw);
+      g_assert_cmpfloat(r.d_h, ==, TOOL_H + SIDES[u].d_dh);
+      guint u_upper = gdk_keyval_to_upper(SIDES[u].u_key); /* Shift+key */
+      g_assert_true(ggaze_window_tool_key(fx.p_win, u_upper, GDK_SHIFT_MASK));
+      r = crop_rect_now(fx.p_win);
+      g_assert_cmpfloat(r.d_x, ==, 0.0);
+      g_assert_cmpfloat(r.d_y, ==, 0.0);
+      g_assert_cmpfloat(r.d_w, ==, TOOL_W);
+      g_assert_cmpfloat(r.d_h, ==, TOOL_H);
+   }
+   crop_shrink_right(fx.p_win);
+   tool_key(fx.p_win, GDK_KEY_h); /* no room left: slides along the edge */
+   tool_key(fx.p_win, GDK_KEY_l); /* one step right */
+   CropRect r = crop_rect_now(fx.p_win);
+   g_assert_cmpfloat(r.d_x, ==, 3.0);
+   g_assert_cmpfloat(r.d_w, ==, TOOL_W - 3);
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   tool_fx_close(&fx);
+}
+
+/* The hint bar's text with its key/label joins (U+00A0) read as spaces. */
+static char *
+plain_hint(GgazeWindow *p_win) {
+   char *c_raw = ggaze_window_get_hint_text(p_win);
+   if (c_raw == NULL) {
+      return (NULL);
+   }
+   char **c_parts = g_strsplit(c_raw, "\u00a0", -1);
+   char  *c_out   = g_strjoinv(" ", c_parts);
+   g_strfreev(c_parts);
+   g_free(c_raw);
+   return (c_out);
+}
+
+/* The key-hint bar follows the key mode: hidden while browsing, the
+ * panel's keys while it is open, a tool's while that is up, back to the
+ * panel's when the tool ends, hidden in the grid and when the panel
+ * closes. Its text is the table's (shortcuts_hint_for_mode). */
+static void
+test_hint_bar_follows_the_mode(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   g_assert_null(plain_hint(fx.p_win));
+   g_assert_cmpint(ggaze_window_get_key_mode(fx.p_win), ==,
+                   GGAZE_KEY_MODE_NONE);
+   fire(fx.p_win, "win.enhance");
+   char *c_hint = plain_hint(fx.p_win);
+   g_assert_true(g_str_has_prefix(c_hint, "Edit: 1–8 presets"));
+   g_assert_nonnull(g_strstr_len(c_hint, -1, "x revert"));
+   g_assert_nonnull(g_strstr_len(c_hint, -1, "a/Esc close"));
+   g_free(c_hint);
+   fire(fx.p_win, "win.crop");
+   g_assert_cmpint(ggaze_window_get_key_mode(fx.p_win), ==,
+                   GGAZE_KEY_MODE_CROP);
+   c_hint = plain_hint(fx.p_win);
+   g_assert_true(g_str_has_prefix(c_hint, "Crop: h/j/k/l move"));
+   g_assert_nonnull(g_strstr_len(c_hint, -1, "Ctrl+h/j/k/l shrink"));
+   g_free(c_hint);
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   c_hint = plain_hint(fx.p_win);
+   g_assert_true(g_str_has_prefix(c_hint, "Edit: "));
+   g_free(c_hint);
+   fire(fx.p_win, "win.straighten");
+   c_hint = plain_hint(fx.p_win);
+   g_assert_true(g_str_has_prefix(c_hint, "Straighten: h/l/-/+ nudge"));
+   g_assert_nonnull(g_strstr_len(c_hint, -1, "a auto-crop"));
+   g_free(c_hint);
+   tool_key(fx.p_win, GDK_KEY_Return);
+   fire(fx.p_win, "win.toggle-view"); /* grid: no bar */
+   g_assert_null(plain_hint(fx.p_win));
+   fire(fx.p_win, "win.toggle-view"); /* large again: the panel's */
+   c_hint = plain_hint(fx.p_win);
+   g_assert_true(g_str_has_prefix(c_hint, "Edit: "));
+   g_free(c_hint);
+   fire(fx.p_win, "win.back"); /* closes the panel */
+   g_assert_null(plain_hint(fx.p_win));
+   tool_fx_close(&fx);
+}
+
+/* Caps Lock is not Shift (review of 6i2): with it on, a plain `l` arrives
+ * as `L` + Lock and must MOVE the crop rectangle (it grew it), Shift+h
+ * under Caps Lock still grows, and `A` + Lock is the tool's aspect key --
+ * it fell through to the global `a`, which closed the panel and left the
+ * tool running. All through the router, the path a real key press takes. */
+static void
+test_caps_lock_keys_in_the_crop_tool(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.crop");
+   crop_shrink_right(fx.p_win); /* room to move: x 0, w 397 */
+   g_assert_true(ggaze_window_edit_key(fx.p_win, GDK_KEY_L, GDK_LOCK_MASK));
+   CropRect r = crop_rect_now(fx.p_win);
+   g_assert_cmpfloat(r.d_x, ==, 3.0);        /* moved right ... */
+   g_assert_cmpfloat(r.d_w, ==, TOOL_W - 3); /* ... not grown */
+   g_assert_true(ggaze_window_edit_key(fx.p_win, GDK_KEY_h,
+                                       GDK_SHIFT_MASK | GDK_LOCK_MASK));
+   r = crop_rect_now(fx.p_win);
+   g_assert_cmpfloat(r.d_x, ==, 0.0); /* Shift+h: the left side out */
+   g_assert_cmpfloat(r.d_w, ==, TOOL_W);
+   g_assert_true(ggaze_window_edit_key(fx.p_win, GDK_KEY_A, GDK_LOCK_MASK));
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Crop aspect: 1:1"));
+   g_assert_nonnull(find_panel(fx.p_win)); /* not the global `a` */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
+   g_assert_true(
+      ggaze_window_edit_key(fx.p_win, GDK_KEY_Escape, GDK_LOCK_MASK));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   tool_fx_close(&fx);
+}
+
+/* `a` then `t` hides the open panel with the grid (not closed: `t` brings
+ * it back). While hidden it is no key mode: a digit is nobody's (it used
+ * to toggle a preset on the image that is not on screen), x only says
+ * where it works (it used to revert that image's edits), and Esc skips the
+ * invisible panel and goes on to the grid's chain (it used to "close" it,
+ * an Esc that seemed to do nothing). Back in the large view all of it is
+ * live again. */
+static void
+test_hidden_panel_in_the_grid_is_inert(void) {
+   DirtyFixture fx = {0};
+   fixture_open(&fx, "ggaze-enhance-hidden-XXXXXX");
+   fire(fx.p_win, "win.enhance");
+   GtkWidget *p_panel = find_panel(fx.p_win);
+   g_assert_nonnull(p_panel);
+   fire(fx.p_win, "win.toggle-view"); /* grid: the panel hides */
+   ggtest_drain_main(200);
+   /* The window is never presented: the slot's own flag is the one. */
+   GtkWidget *p_slot = gtk_widget_get_parent(p_panel);
+   g_assert_false(gtk_widget_get_visible(p_slot));
+   g_assert_cmpint(ggaze_window_get_key_mode(fx.p_win), ==,
+                   GGAZE_KEY_MODE_NONE);
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_2, 0));
+   fire(fx.p_win, "win.enhance-2"); /* the action itself, e.g. a script */
+   g_assert_true(
+      g_str_has_prefix(status_text(fx.p_win), "Edits apply in the large"));
+   fire(fx.p_win, "win.edit-revert");
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win),
+                                  "x reverts edits in the large view"));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win)); /* kept */
+   fire(fx.p_win, "win.back"); /* Esc: the grid's chain, not the panel */
+   g_assert_true(find_panel(fx.p_win) == p_panel);
+   g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Press Esc again"));
+   fire(fx.p_win, "win.enhance"); /* `a`: shows the panel, never closes it */
+   ggtest_drain_main(200);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(fx.p_win)), ==,
+      "large");
+   g_assert_true(find_panel(fx.p_win) == p_panel);
+   g_assert_true(gtk_widget_get_visible(p_slot));
+   g_assert_cmpint(ggaze_window_get_key_mode(fx.p_win), ==,
+                   GGAZE_KEY_MODE_PANEL);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_mod);
+   fire(fx.p_win, "win.back"); /* now Esc closes it, keeping the edit */
+   g_assert_null(find_panel(fx.p_win));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   fixture_teardown(&fx);
+}
+
+/* No tool outlives the panel: closing it under a tool -- its close button,
+ * or win.enhance from the menu (a real `a` is the tool's own key) --
+ * cancels the tool first, restoring what it started from, then closes. It
+ * used to leave the crop tool running, its h/j/k/l live, with no panel,
+ * Save or Revert on screen. */
+static void
+test_closing_the_panel_cancels_the_tool(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop");
+   crop_shrink_right(fx.p_win);
+   ggtest_click_button(find_action_button(find_panel(fx.p_win), "win.enhance"));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_null(find_panel(fx.p_win));
+   g_assert_cmpint(ggaze_window_get_key_mode(fx.p_win), ==,
+                   GGAZE_KEY_MODE_NONE);
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_h, 0)); /* global */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));       /* no crop */
+   fire(fx.p_win, "win.straighten");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   fire(fx.p_win, "win.enhance"); /* the menu's "Edit panel" */
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_null(find_panel(fx.p_win));
+   g_assert_null(ggaze_window_get_hint_text(fx.p_win));
+   tool_fx_close(&fx);
+}
+
 /* --- touch swipe (zb2) ---------------------------------------------------- */
 
 /* The window's GgazeViewer (its stack's "large" child), borrowed. */
@@ -3895,7 +4385,7 @@ viewer_drag_gesture(GgazeViewer *p_v) {
 }
 
 /* A second finger landing while the first draws a horizon in the straighten
- * tool (`R`) makes a pinch, and the line is dropped: the viewer sends a
+ * tool (`r`) makes a pinch, and the line is dropped: the viewer sends a
  * CANCEL, not an END (viewer.h), so the first finger's (1, 1) px jitter --
  * a 45 degree line -- levels nothing: no render, no angle in the title,
  * and the tool stays up. The rest of that drag reaches the tool neither.
@@ -4084,8 +4574,9 @@ test_cancel_without_texture_lets_go_of_the_rect(void) {
 }
 
 /* A discard while a tool is up ends the tool BEFORE the transform is reset
- * -- the Original card and `0` with the panel open both go through it --
- * so the straighten session's working angle cannot come back: afterwards
+ * -- the panel's Revert button and x (6i2; the Original card and `0` did
+ * before) both go through it -- so the straighten session's working angle
+ * cannot come back: afterwards
  * `l` is not a tool key any more (no tool, so no overlay either) and the
  * title stays without an angle. Before this hook tool-ctrl kept its
  * t_work / t_saved across the discard and the next nudge re-applied the
@@ -4094,7 +4585,7 @@ static void
 test_discard_ends_the_straighten_tool(void) {
    ToolFx fx;
    tool_fx_open(&fx, FALSE);
-   fire(fx.p_win, "win.enhance"); /* the panel: the Original card and `0` */
+   fire(fx.p_win, "win.enhance"); /* the panel: its Revert button and x */
    GtkWidget *p_panel = find_panel(fx.p_win);
    g_assert_nonnull(p_panel);
    fire(fx.p_win, "win.straighten");
@@ -4102,7 +4593,7 @@ test_discard_ends_the_straighten_tool(void) {
    tool_key_and_wait(fx.p_win, GDK_KEY_l);
    g_assert_nonnull(
       g_strstr_len(window_title(fx.p_win), -1, "straighten 1.0° CW"));
-   ggtest_click_button(find_card(p_panel, -1)); /* Original */
+   ggtest_click_button(find_action_button(p_panel, "win.edit-revert"));
    ggtest_drain_main(300);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
@@ -4111,11 +4602,13 @@ test_discard_ends_the_straighten_tool(void) {
    ggtest_drain_main(300);
    g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
-   /* `0` with the panel open is the same discard. */
+   /* x is the same discard; `0` under the tool is only a zoom now. */
    fire(fx.p_win, "win.straighten");
    tool_key_and_wait(fx.p_win, GDK_KEY_h);
    g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
    fire(fx.p_win, "win.zoom-reset");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   fire(fx.p_win, "win.edit-revert");
    ggtest_drain_main(300);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
    g_assert_false(ggaze_window_tool_key(fx.p_win, GDK_KEY_l, 0));
@@ -4136,13 +4629,12 @@ test_discard_ends_the_crop_tool_and_its_turn(void) {
    tool_fx_open(&fx, FALSE);
    fire_and_wait(fx.p_win, "win.rotate-cw");
    assert_texture_size(fx.p_win, TOOL_H, TOOL_W);
-   fire(fx.p_win, "win.enhance");
-   GtkWidget *p_panel = find_panel(fx.p_win);
+   GtkWidget *p_panel = find_panel(fx.p_win); /* `]` opened it (6i2) */
    g_assert_nonnull(p_panel);
    fire(fx.p_win, "win.crop");
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
-   tool_key(fx.p_win, GDK_KEY_H); /* some work in the tool */
-   ggtest_click_button(find_card(p_panel, -1));
+   crop_shrink_right(fx.p_win); /* some work in the tool */
+   ggtest_click_button(find_action_button(p_panel, "win.edit-revert"));
    ggtest_drain_main(300);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
@@ -4178,7 +4670,7 @@ test_crop_tool_passes_foreign_keys_while_base_unknown(void) {
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    g_assert_true(emit_capture_key(fx.p_win, GDK_KEY_h)); /* ours: stopped */
    g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Preview still"));
-   g_assert_true(ggaze_window_tool_key(fx.p_win, GDK_KEY_1, 0));
+   g_assert_true(ggaze_window_tool_key(fx.p_win, GDK_KEY_a, 0));
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    g_assert_true(ggaze_window_tool_key(fx.p_win, GDK_KEY_Return, 0));
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
@@ -4456,7 +4948,7 @@ test_slideshow_discard_ends_the_tool(void) {
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.crop");
    for (guint u = 0; u < 10; u++) {
-      tool_key(fx.p_win, GDK_KEY_H);
+      crop_shrink_right(fx.p_win);
    }
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    fire(fx.p_win, "win.straighten");
@@ -4625,7 +5117,7 @@ test_crop_tool_over_an_outside_crop_starts_full(void) {
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.crop");
    for (guint u = 0; u < 131; u++) {
-      tool_key(fx.p_win, GDK_KEY_H); /* right edge in to the minimum ... */
+      crop_shrink_right(fx.p_win); /* right edge in to the minimum ... */
    }
    for (guint u = 0; u < 131; u++) {
       tool_key(fx.p_win, GDK_KEY_l); /* ... then slid to the right border */
@@ -4678,7 +5170,7 @@ test_rewritten_file_rebases_the_crop_tool(void) {
    ToolFx fx;
    tool_fx_open(&fx, FALSE);
    fire_and_wait(fx.p_win, "win.enhance-1"); /* the decode says 400x300 */
-   fire(fx.p_win, "win.back");               /* Esc: discarded, original */
+   revert_edits(fx.p_win);                   /* x: discarded, original */
    ggtest_drain_main(100);
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
    rewrite_as_200x150(fx.c_path);
@@ -4686,7 +5178,7 @@ test_rewritten_file_rebases_the_crop_tool(void) {
    g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "tool.png"));
    fire(fx.p_win, "win.crop");
    for (guint u = 0; u < 10; u++) {
-      tool_key(fx.p_win, GDK_KEY_H);
+      crop_shrink_right(fx.p_win);
    }
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    assert_texture_size(fx.p_win, 190, 150);
@@ -4712,8 +5204,8 @@ test_reload_refreshes_the_original_identity(void) {
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
    fire_and_wait(fx.p_win, "win.enhance-1");
    GdkTexture *p_render = ref_viewer_texture(fx.p_win);
-   touch_file(fx.c_path);      /* the cache entry is stale now */
-   fire(fx.p_win, "win.back"); /* Esc: discarded -> the restore reloads */
+   touch_file(fx.c_path);  /* the cache entry is stale now */
+   revert_edits(fx.p_win); /* x: discarded -> the restore reloads */
    wait_for_fresh_texture(fx.p_win, p_render, fx.p_orig);
    g_object_unref(p_render);
    assert_texture_size(fx.p_win, TOOL_W, TOOL_H);
@@ -4819,7 +5311,7 @@ test_crop_tool_relays_out_on_the_rewritten_base(void) {
    g_assert_cmpint(i_bh, ==, 150);
    g_assert_true(croprect_is_full(&t_rect, 200.0, 150.0));
    for (guint u = 0; u < 10; u++) {
-      tool_key(fx.p_win, GDK_KEY_H);
+      crop_shrink_right(fx.p_win);
    }
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    assert_texture_size(fx.p_win, 190, 150);
@@ -5075,7 +5567,7 @@ test_crop_tool_follows_a_render_of_another_size(void) {
    g_assert_cmpint(i_bh, ==, 150);
    g_assert_true(croprect_is_full(&t_rect, 200.0, 150.0));
    for (guint u = 0; u < 10; u++) {
-      tool_key(fx.p_win, GDK_KEY_H);
+      crop_shrink_right(fx.p_win);
    }
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    assert_texture_size(fx.p_win, 190, 150);
@@ -5116,7 +5608,7 @@ test_same_second_same_size_rewrite_shows_the_new_picture(void) {
    g_assert_cmpint(i_bh, ==, 150);
    g_assert_true(croprect_is_full(&t_rect, 200.0, 150.0));
    for (guint u = 0; u < 10; u++) {
-      tool_key(fx.p_win, GDK_KEY_H);
+      crop_shrink_right(fx.p_win);
    }
    tool_key_and_wait(fx.p_win, GDK_KEY_Return);
    assert_texture_size(fx.p_win, 190, 150);
@@ -5136,7 +5628,7 @@ test_first_rescan_after_an_open_is_a_same_file_event(void) {
    tool_fx_open(&fx, TRUE);
    fire(fx.p_win, "win.crop");
    for (guint u = 0; u < 10; u++) {
-      tool_key(fx.p_win, GDK_KEY_H);
+      crop_shrink_right(fx.p_win);
    }
    CropRect t_rect;
    gint     i_bw, i_bh;
@@ -5211,6 +5703,20 @@ add_tool_review_tests(void) {
                    test_crop_follows_straighten);
    g_test_add_func("/enhance_flow/crop_outside_the_view_comes_back",
                    test_crop_outside_the_view_comes_back);
+   g_test_add_func("/enhance_flow/digits_are_inert_with_the_panel_closed",
+                   test_digits_are_inert_with_the_panel_closed);
+   g_test_add_func("/enhance_flow/tool_keys_open_the_panel",
+                   test_tool_keys_open_the_panel);
+   g_test_add_func("/enhance_flow/crop_shift_and_ctrl_move_every_side",
+                   test_crop_shift_and_ctrl_move_every_side);
+   g_test_add_func("/enhance_flow/hint_bar_follows_the_mode",
+                   test_hint_bar_follows_the_mode);
+   g_test_add_func("/enhance_flow/caps_lock_keys_in_the_crop_tool",
+                   test_caps_lock_keys_in_the_crop_tool);
+   g_test_add_func("/enhance_flow/hidden_panel_in_the_grid_is_inert",
+                   test_hidden_panel_in_the_grid_is_inert);
+   g_test_add_func("/enhance_flow/closing_the_panel_cancels_the_tool",
+                   test_closing_the_panel_cancels_the_tool);
    g_test_add_func("/enhance_flow/tool_key_controller_claims_keys_only_active",
                    test_tool_key_controller_claims_keys_only_while_active);
    /* zb2: the touch swipe goes through the same gate and tool rules. */
@@ -5253,16 +5759,18 @@ static void
 add_feature_tests(void) {
    g_test_add_func("/enhance_flow/panel_opens_beside_viewer_with_thumbnails",
                    test_panel_opens_beside_viewer_with_thumbnails);
+   g_test_add_func("/enhance_flow/panel_fits_eight_presets_at_1280x800",
+                   test_panel_fits_eight_presets_at_1280x800);
    g_test_add_func("/enhance_flow/panel_label_only_mode_has_no_pictures",
                    test_panel_label_only_mode_has_no_pictures);
    g_test_add_func("/enhance_flow/panel_cards_track_mask_and_thumbnails_stay",
                    test_panel_cards_track_mask_and_thumbnails_stay);
    g_test_add_func("/enhance_flow/manual_save_clears_dirty_until_next_change",
                    test_manual_save_clears_dirty_until_next_change);
-   g_test_add_func("/enhance_flow/esc_closes_panel_before_discarding",
-                   test_esc_closes_panel_before_discarding);
-   g_test_add_func("/enhance_flow/zero_discards_while_panel_open",
-                   test_zero_discards_while_panel_open);
+   g_test_add_func("/enhance_flow/esc_never_discards_the_edit",
+                   test_esc_never_discards_the_edit);
+   g_test_add_func("/enhance_flow/zero_zooms_and_x_reverts",
+                   test_zero_zooms_and_x_reverts);
    g_test_add_func("/enhance_flow/panel_persists_across_navigation",
                    test_panel_persists_across_navigation);
    g_test_add_func("/enhance_flow/apply_is_async_and_original_untouched",
@@ -5472,7 +5980,7 @@ test_failed_reload_under_the_crop_tool_says_so(void) {
    tool_key(fx.p_win, GDK_KEY_h);
    g_assert_true(
       g_str_has_prefix(status_text(fx.p_win), "No picture on screen"));
-   tool_key(fx.p_win, GDK_KEY_1);
+   tool_key(fx.p_win, GDK_KEY_a);
    g_assert_true(
       g_str_has_prefix(status_text(fx.p_win), "No picture on screen"));
    tool_key(fx.p_win, GDK_KEY_Return);
@@ -5664,7 +6172,7 @@ check_hold_on(const char *c_name, const ManagedLook *p_look) {
       assert_hold_shows_the_managed_original(p_win, p_orig, p_prev, p_look);
    g_object_unref(p_prev);
 
-   fire(p_win, "win.back"); /* Esc: discard */
+   revert_edits(p_win); /* x: discard (Esc keeps it since 6i2) */
    ggtest_drain_main(100);
    GdkTexture *p_orig2 = ref_viewer_texture(p_win);
    fire(p_win, "win.enhance-3");
@@ -5823,7 +6331,7 @@ test_icc_discard_mid_fetch(void) {
    icc_fx_open(&fx, NULL);
    ggaze_window_set_hold_original(fx.p_win, TRUE);
    ggaze_window_set_hold_original(fx.p_win, FALSE);
-   fire(fx.p_win, "win.back"); /* Esc: discard */
+   revert_edits(fx.p_win); /* x: discard (Esc keeps it since 6i2) */
    pump_ms(300);
    g_assert_false(ggaze_window_enhance_has_managed_original(fx.p_win));
    GdkTexture *p_plain = ref_viewer_texture(fx.p_win);
@@ -5938,7 +6446,8 @@ test_open_many_re_points_the_panel_once(void) {
    static const char *const c_two[] = {"plain.jpg", "rot6.jpg", NULL};
    fixture_open_clean(&fx, "ggaze-open-many-a-XXXXXX", c_two);
    fire(fx.p_win, "win.enhance");
-   g_assert_nonnull(find_label_prefix(find_panel(fx.p_win), "Enhance plain"));
+   g_assert_nonnull(
+      find_label_prefix(find_panel(fx.p_win), "as plain-enhanced"));
    g_assert_cmpuint(ggaze_window_enhance_preview_count(fx.p_win), ==, 1);
    guint u_loads = ggaze_window_load_count(fx.p_win);
 
@@ -5959,7 +6468,8 @@ test_open_many_re_points_the_panel_once(void) {
    g_assert_cmpstr(
       gtk_stack_get_visible_child_name(ggaze_window_get_stack(fx.p_win)), ==,
       "grid");
-   g_assert_nonnull(find_label_prefix(find_panel(fx.p_win), "Enhance rot6"));
+   g_assert_nonnull(
+      find_label_prefix(find_panel(fx.p_win), "as rot6-enhanced"));
    wait_for_texture_size(fx.p_win, 4, 8); /* the start file's own decode */
    g_assert_cmpuint(ggaze_window_load_count(fx.p_win), ==, u_loads + 1);
    g_assert_cmpuint(ggaze_window_enhance_preview_count(fx.p_win), ==, 2);

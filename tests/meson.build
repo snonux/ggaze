@@ -293,6 +293,19 @@ test_croprect = executable(
 )
 test('croprect', test_croprect, suite : 'unit', env : fixtures_env)
 
+# 6i2: the key table's modes (panel / crop / straighten) and the hint bars
+# it generates are pure lookups and string building (gdk_keyval_* need no
+# display), so they run in every lane, the minimal one included.
+test_keymodes = executable(
+   'test_keymodes',
+   ['test_keymodes.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : ggaze_deps,
+   link_with : ggaze_lib,
+   install : false,
+)
+test('keymodes', test_keymodes, suite : 'unit', env : fixtures_env)
+
 # zb2: the zoom / touch-gesture math is plain C (no GTK), so it runs in
 # every lane, the minimal one included.
 test_gesture_math = executable(

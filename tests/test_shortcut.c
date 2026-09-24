@@ -322,6 +322,27 @@ test_shortcut_keypath_toggle_and_back(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* 6i2: the preset digits are the open edit panel's keys -- rows scoped to
+ * GGAZE_KEY_MODE_PANEL, answered by the edit-key router, never bound on
+ * this controller -- so a digit with the panel closed does nothing; `r`
+ * is straighten now and `R` is free. */
+static void
+assert_edit_keys_rebound(GtkShortcutController *p_sc) {
+   static const char *PANEL_ONLY[] = {
+      "win.enhance-1", "win.enhance-2", "win.enhance-3", "win.enhance-4",
+      "win.enhance-5", "win.enhance-6", "win.enhance-7", "win.enhance-8",
+   };
+   for (gsize i = 0; i < G_N_ELEMENTS(PANEL_ONLY); i++) {
+      g_assert_null(find_shortcut_by_action(p_sc, PANEL_ONLY[i]));
+   }
+   GtkShortcut *p_r = find_shortcut_by_key(p_sc, GDK_KEY_r, 0);
+   g_assert_nonnull(p_r);
+   g_assert_cmpstr(shortcut_action_name(p_r), ==, "win.straighten");
+   g_object_unref(p_r);
+   g_assert_null(find_shortcut_by_key(p_sc, GDK_KEY_R, GDK_SHIFT_MASK));
+   g_assert_null(find_shortcut_by_key(p_sc, GDK_KEY_1, 0));
+}
+
 /* Preserve existing action behavior: assert the FULL set of win.* actions
  * from src/shortcuts.c SHORTCUTS[] is registered on the controller. Guards
  * against a future table/registration regression where a binding is dropped
@@ -343,11 +364,8 @@ test_shortcut_full_table_registered(void) {
       "win.copy",         "win.shortcuts",     "win.zoom-in",
       "win.zoom-out",     "win.fullscreen",    "win.slideshow",
       "win.info",         "win.back",          "win.enhance",
-      "win.enhance-save", "win.enhance-1",     "win.enhance-2",
-      "win.enhance-3",    "win.enhance-4",     "win.enhance-5",
-      "win.enhance-6",    "win.enhance-7",     "win.enhance-8",
-      "win.crop",         "win.straighten",    "win.rotate-cw",
-      "win.rotate-ccw",
+      "win.enhance-save", "win.edit-revert",   "win.crop",
+      "win.straighten",   "win.rotate-cw",     "win.rotate-ccw",
    };
    GgazeWindow           *p_win = new_window();
    GtkShortcutController *p_sc  = find_shortcut_controller(GTK_WIDGET(p_win));
@@ -357,6 +375,7 @@ test_shortcut_full_table_registered(void) {
       g_assert_nonnull(p_s);
       g_object_unref(p_s);
    }
+   assert_edit_keys_rebound(p_sc);
    static const struct {
       guint       u_keyval;
       const char *c_action;
@@ -375,9 +394,11 @@ test_shortcut_full_table_registered(void) {
    /* Every SHORTCUTS[] row with an action registers one shortcut; most
     * actions appear at least twice (a vi-style key and a traditional one:
     * h/Left/PageUp, g/Home, d/Delete, s/Ctrl+S, ...). The help-only rows
-    * (hold-Space, the modal crop/straighten tool keys) do not. Keep this in
-    * step with the table: 70 before wb2 + c / R / ] / [ = 74. */
-   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 74);
+    * (hold-Space) and the mode-scoped rows (the panel's digits, the modal
+    * crop/straighten tool keys) do not. Keep this in step with the table:
+    * 70 before wb2 + c / R / ] / [ = 74; 6i2 moved the eight digits to the
+    * panel (-8) and added x (+1) = 67. */
+   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 67);
    g_object_unref(p_sc);
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(200);
@@ -413,10 +434,13 @@ test_help_window_from_table(void) {
    /* Merged rows: the SHORTCUTS[] rows collapse by shared title within a
     * group (each action's vi-style and traditional keys, and enhance 1..8,
     * become one row each), plus the help-only rows (hold-Space and the
-    * modal tool keys). Keep in step with the table: 38 before wb2 + the
-    * Tools group's 11 merged rows (c, R, ], [, crop move / resize / aspect,
-    * straighten nudge / auto-crop, Enter, Esc) = 49. */
-   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 49);
+    * modal tool keys). Keep in step with the table: 38 before wb2 (the
+    * Enhance group's a, 1-8, s, Space among them) + 6i2's regrouping: the
+    * Edit panel group gains c, r, [, ], x (+5), the Crop tool group has
+    * move / grow / shrink / aspect / apply / cancel (6) and the
+    * Straighten tool group ccw / cw / auto-crop / apply / cancel (5)
+    * = 54. */
+   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 54);
    gtk_window_destroy(GTK_WINDOW(p_w));
    drain_main(200);
 }

@@ -46,7 +46,7 @@ typedef enum {
 typedef enum {
    GGAZE_TOOL_NONE = 0,
    GGAZE_TOOL_CROP,      /* `c`: the crop rectangle overlay */
-   GGAZE_TOOL_STRAIGHTEN /* `R`: the horizon / angle overlay */
+   GGAZE_TOOL_STRAIGHTEN /* `r`: the horizon / angle overlay */
 } GgazeTool;
 
 #endif /* GGAZE_ENUMS_H */

@@ -324,6 +324,50 @@ test_aspect_lock_holds_at_minimum_size(void) {
    g_assert_cmpfloat(r.d_h, ==, 2 * CROPRECT_MIN_SIZE);
 }
 
+/* The crop tool's `a` cycle: free -> 1:1 -> 3:2 -> 4:3 -> 16:9 -> original
+ * and round to free again, each with its ratio and status-line name. The
+ * image's own shape is last: first, it left the whole-image rectangle the
+ * tool starts on unchanged, and `a` looked dead. */
+static void
+test_aspect_cycle_ratios_and_names(void) {
+   static const struct {
+      CropRectAspect e_aspect;
+      gdouble        d_ratio; /* on a 400x300 image */
+      const char    *c_name;
+   } CYCLE[] = {
+      {CROPRECT_ASPECT_FREE, 0.0, "free"},
+      {CROPRECT_ASPECT_1_1, 1.0, "1:1"},
+      {CROPRECT_ASPECT_3_2, 1.5, "3:2"},
+      {CROPRECT_ASPECT_4_3, 4.0 / 3.0, "4:3"},
+      {CROPRECT_ASPECT_16_9, 16.0 / 9.0, "16:9"},
+      {CROPRECT_ASPECT_ORIGINAL, 4.0 / 3.0, "original"},
+   };
+   CropRectAspect e = CROPRECT_ASPECT_FREE;
+   for (gsize u = 0; u < G_N_ELEMENTS(CYCLE); u++) {
+      g_assert_cmpint(e, ==, CYCLE[u].e_aspect);
+      g_assert_cmpfloat_with_epsilon(croprect_aspect_ratio(e, 400.0, 300.0),
+                                     CYCLE[u].d_ratio, 1e-9);
+      g_assert_cmpstr(croprect_aspect_name(e), ==, CYCLE[u].c_name);
+      e = croprect_aspect_next(e);
+   }
+   g_assert_cmpint(e, ==, CROPRECT_ASPECT_FREE); /* wrapped round */
+   /* Garbage restarts the cycle and locks nothing. */
+   g_assert_cmpint(croprect_aspect_next(CROPRECT_ASPECT_COUNT), ==,
+                   CROPRECT_ASPECT_FREE);
+   g_assert_cmpfloat(croprect_aspect_ratio(CROPRECT_ASPECT_COUNT, 4, 3), ==,
+                     0.0);
+   g_assert_cmpstr(croprect_aspect_name(CROPRECT_ASPECT_COUNT), ==, "free");
+   /* "original" of a degenerate or non-finite image is free. */
+   g_assert_cmpfloat(croprect_aspect_ratio(CROPRECT_ASPECT_ORIGINAL, 0, 3), ==,
+                     0.0);
+   g_assert_cmpfloat(
+      croprect_aspect_ratio(CROPRECT_ASPECT_ORIGINAL, 400.0, NAN), ==, 0.0);
+   /* A portrait original keeps its portrait shape. */
+   g_assert_cmpfloat_with_epsilon(
+      croprect_aspect_ratio(CROPRECT_ASPECT_ORIGINAL, 300.0, 400.0), 0.75,
+      1e-9);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -358,5 +402,7 @@ main(int i_argc, char **c_argv) {
                    test_zero_image_and_outside_rect);
    g_test_add_func("/croprect/aspect_lock_holds_at_minimum_size",
                    test_aspect_lock_holds_at_minimum_size);
+   g_test_add_func("/croprect/aspect_cycle_ratios_and_names",
+                   test_aspect_cycle_ratios_and_names);
    return (g_test_run());
 }
