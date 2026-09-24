@@ -8,7 +8,10 @@
  * previous picture on screen; a texture rewritten in place is decoded
  * afresh (cache staleness); dispose mid-load never calls the host again;
  * a JPEG's low-res partial reaches the host through show_partial, never
- * show_texture, and a PNG shows no partial at all.
+ * show_texture, and a PNG shows no partial at all; and every host call is
+ * made on the main thread, from a main-loop dispatch -- a partial never
+ * arrives while the main thread is not iterating (fe2), nor at all once
+ * its load was superseded, even by a load of the same file (fe2 review).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -37,10 +40,22 @@ typedef struct {
    gboolean b_dead;        /* set after dispose: any call is a bug */
 } FakeHost;
 
+/* The test's main thread (set first thing in main()). The window's host
+ * ops touch GTK widgets, so the pipeline may call the host from this
+ * thread only; every fake op asserts it (fe2). */
+static GThread *p_main_thread;
+
+/* Every host op's entry check: on the main thread, not after dispose. */
+static void
+_fh_check(const FakeHost *p_h) {
+   g_assert_true(g_thread_self() == p_main_thread);
+   g_assert_false(p_h->b_dead);
+}
+
 static void
 _fh_show_texture(gpointer p_host, GdkTexture *p_tex) {
    FakeHost *p_h = (FakeHost *)p_host;
-   g_assert_false(p_h->b_dead);
+   _fh_check(p_h);
    g_set_object(&p_h->p_shown, p_tex);
    p_h->u_shows++;
    if (p_tex == NULL) {
@@ -57,7 +72,7 @@ _fh_show_texture(gpointer p_host, GdkTexture *p_tex) {
 static void
 _fh_show_partial(gpointer p_host, GdkTexture *p_tex) {
    FakeHost *p_h = (FakeHost *)p_host;
-   g_assert_false(p_h->b_dead);
+   _fh_check(p_h);
    g_assert_nonnull(p_tex);
    p_h->u_partials++;
 }
@@ -65,14 +80,14 @@ _fh_show_partial(gpointer p_host, GdkTexture *p_tex) {
 static void
 _fh_update_header(gpointer p_host) {
    FakeHost *p_h = (FakeHost *)p_host;
-   g_assert_false(p_h->b_dead);
+   _fh_check(p_h);
    p_h->u_headers++;
 }
 
 static void
 _fh_show_status(gpointer p_host, const char *c_msg) {
    FakeHost *p_h = (FakeHost *)p_host;
-   g_assert_false(p_h->b_dead);
+   _fh_check(p_h);
    g_free(p_h->c_status);
    p_h->c_status = g_strdup(c_msg);
 }
@@ -240,6 +255,169 @@ test_png_shows_no_partial(void) {
    g_object_unref(p_dir);
    cleanup_temp_dir(c_dir);
 }
+
+/* fe2: the decode thread's partial reaches the host only when the main
+ * thread dispatches it, never from the decode thread itself. The main
+ * thread here sleeps WITHOUT iterating -- the default context is then
+ * owned by nobody, which is exactly when g_main_context_invoke() (the old
+ * hop) ran the callback on the calling decode thread. Nothing may reach
+ * the host during the sleep (and the fake host's main-thread assertion
+ * catches a call from elsewhere); once the loop runs, the partial and the
+ * full decode land as usual. The sleep is far longer than a 6x3 JPEG
+ * decode on an idle machine; a machine too loaded to finish it in time
+ * makes the check vacuous, never a false failure. */
+static void
+test_partial_waits_for_main_loop(void) {
+   char      *c_dir = make_folder();
+   GFile     *p_dir = g_file_new_for_path(c_dir);
+   Navigator *p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, FALSE, TRUE);
+   FakeHost   st_h  = {0};
+   ViewLoad  *p_vl  = viewload_new(&FAKE_OPS, &st_h, 4);
+   viewload_set_navigator(p_vl, p_nav);
+
+   viewload_load_current(p_vl); /* a.jpg: a miss, decoding on a worker */
+   for (guint u = 0; u < 300; u++) {
+      g_usleep(1000); /* no g_main_context_iteration() */
+      g_assert_cmpuint(st_h.u_partials, ==, 0);
+      g_assert_cmpuint(st_h.u_shows, ==, 0);
+   }
+   pump_until_cached(p_vl, navigator_get_current(p_nav));
+#if GGAZE_HAVE_JPEG
+   g_assert_cmpuint(st_h.u_partials, >=, 1);
+#endif
+   g_assert_nonnull(st_h.p_shown);
+   pump(100); /* the neighbour prefetch */
+
+   viewload_delete(p_vl);
+   fake_host_clear(&st_h);
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   cleanup_temp_dir(c_dir);
+}
+
+#if GGAZE_HAVE_JPEG /* partials exist only with the direct JPEG backend */
+
+/* Start the visible load of the current file with p_ctx as the thread's
+ * default main context, so that load's partials and finish are queued on
+ * p_ctx and nowhere else: the test then decides exactly when they
+ * dispatch, independently of everything on the default context. */
+static void
+load_current_on(ViewLoad *p_vl, GMainContext *p_ctx) {
+   g_main_context_push_thread_default(p_ctx);
+   viewload_load_current(p_vl);
+   g_main_context_pop_thread_default(p_ctx);
+}
+
+/* Wait (5 s max), WITHOUT dispatching, until something is queued on p_ctx.
+ * For a JPEG load the first thing queued is its partial: the backend emits
+ * it before the full decode even starts. */
+static void
+wait_pending(GMainContext *p_ctx) {
+   for (guint u = 0; u < 5000 && !g_main_context_pending(p_ctx); u++) {
+      g_usleep(1000);
+   }
+   g_assert_true(g_main_context_pending(p_ctx));
+}
+
+/* Dispatch whatever p_ctx holds until it stayed empty for 500 ms (5 s
+ * max). The superseded load is cancelled or long done by the time this
+ * runs, so its finish is queued well within the quiet period; dispatching
+ * it matters, as it frees the load's context (a leak under ASan if not). */
+static void
+drain(GMainContext *p_ctx) {
+   guint u_quiet = 0;
+   for (guint u = 0; u < 5000 && u_quiet < 500; u++) {
+      gboolean b_any = FALSE;
+      while (g_main_context_iteration(p_ctx, FALSE)) {
+         b_any = TRUE;
+      }
+      u_quiet = b_any ? 0 : u_quiet + 1;
+      g_usleep(1000);
+   }
+}
+
+/* fe2 review: A's load queued a partial, then the user went
+ * A -> B -> A and A came back from the cache, full size. The stale
+ * partial still passes the file check (A is current again), so it may
+ * reach the host only if the check also asks whether ITS LOAD was
+ * superseded -- which the cache hit did. The fake host records partials
+ * only, so any partial here is the stale one. */
+static void
+test_stale_partial_after_cache_hit(void) {
+   char         *c_dir = make_folder();
+   GFile        *p_dir = g_file_new_for_path(c_dir);
+   Navigator    *p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, FALSE, TRUE);
+   FakeHost      st_h  = {0};
+   ViewLoad     *p_vl  = viewload_new(&FAKE_OPS, &st_h, 4);
+   GMainContext *p_old = g_main_context_new();
+   viewload_set_navigator(p_vl, p_nav);
+
+   load_current_on(p_vl, p_old); /* a.jpg: the soon-stale load */
+   wait_pending(p_old);          /* its partial is queued, undispatched */
+   g_assert_true(navigator_next(p_nav)); /* b.png, a PNG: no partials */
+   viewload_load_current(p_vl);
+   GFile *p_a = navigator_get_file(p_nav, 0);
+   pump_until_cached(p_vl, p_a); /* b shown, then a prefetched */
+   g_assert_nonnull(viewload_get_cached(p_vl, p_a));
+   g_assert_true(navigator_prev(p_nav)); /* back to a.jpg */
+   viewload_load_current(p_vl);          /* a cache hit */
+   GdkTexture *p_full = viewload_get_cached(p_vl, p_a);
+   g_assert_true(st_h.p_shown == p_full);
+   g_assert_cmpuint(st_h.u_partials, ==, 0);
+
+   drain(p_old); /* the stale partial dispatches now */
+   g_assert_cmpuint(st_h.u_partials, ==, 0);
+   g_assert_true(st_h.p_shown == viewload_get_cached(p_vl, p_a));
+
+   viewload_delete(p_vl);
+   drain(p_old);
+   g_main_context_unref(p_old);
+   fake_host_clear(&st_h);
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   cleanup_temp_dir(c_dir);
+}
+
+/* fe2 review: a reload of the SAME file supersedes the load
+ * that already queued a partial. The new load's own partials and texture
+ * go to the default context, which is not iterated until the old one's
+ * queue is drained, so any partial seen here is the old load's. */
+static void
+test_stale_partial_after_same_file_reload(void) {
+   char         *c_dir = make_folder();
+   GFile        *p_dir = g_file_new_for_path(c_dir);
+   Navigator    *p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, FALSE, TRUE);
+   FakeHost      st_h  = {0};
+   ViewLoad     *p_vl  = viewload_new(&FAKE_OPS, &st_h, 4);
+   GMainContext *p_old = g_main_context_new();
+   viewload_set_navigator(p_vl, p_nav);
+
+   load_current_on(p_vl, p_old); /* a.jpg, the soon-stale load */
+   wait_pending(p_old);
+   viewload_load_current(p_vl); /* a.jpg again: still a miss, new load */
+   guint u_shows = st_h.u_shows;
+   drain(p_old); /* its partial AND its full result are both superseded */
+   g_assert_cmpuint(st_h.u_partials, ==, 0);
+   g_assert_cmpuint(st_h.u_shows, ==, u_shows);
+
+   /* The new load itself still shows its partial and then the full
+    * decode, which is what ends up on screen. */
+   pump_until_cached(p_vl, navigator_get_current(p_nav));
+   g_assert_cmpuint(st_h.u_partials, >=, 1);
+   g_assert_true(st_h.p_shown ==
+                 viewload_get_cached(p_vl, navigator_get_current(p_nav)));
+   pump(100); /* the neighbour prefetch */
+
+   viewload_delete(p_vl);
+   drain(p_old);
+   g_main_context_unref(p_old);
+   fake_host_clear(&st_h);
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   cleanup_temp_dir(c_dir);
+}
+
+#endif /* GGAZE_HAVE_JPEG */
 
 /* The result of a superseded load must never reach the viewer. */
 static void
@@ -414,11 +592,20 @@ test_animation_rides_with_the_texture(void) {
 
 int
 main(int i_argc, char **c_argv) {
+   p_main_thread = g_thread_self();
    g_test_init(&i_argc, &c_argv, NULL);
    g_test_add_func("/viewload/miss_then_hit", test_miss_then_hit);
    g_test_add_func("/viewload/animation_rides_with_the_texture",
                    test_animation_rides_with_the_texture);
    g_test_add_func("/viewload/png_shows_no_partial", test_png_shows_no_partial);
+   g_test_add_func("/viewload/partial_waits_for_main_loop",
+                   test_partial_waits_for_main_loop);
+#if GGAZE_HAVE_JPEG
+   g_test_add_func("/viewload/stale_partial_after_cache_hit",
+                   test_stale_partial_after_cache_hit);
+   g_test_add_func("/viewload/stale_partial_after_same_file_reload",
+                   test_stale_partial_after_same_file_reload);
+#endif
    g_test_add_func("/viewload/last_write_wins", test_last_write_wins);
    g_test_add_func("/viewload/failure_clears_and_reports",
                    test_failure_clears_and_reports);
