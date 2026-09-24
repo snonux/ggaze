@@ -8,7 +8,9 @@
  * previous picture on screen; a texture rewritten in place is decoded
  * afresh (cache staleness); dispose mid-load never calls the host again;
  * a JPEG's low-res partial reaches the host through show_partial, never
- * show_texture, and a PNG shows no partial at all.
+ * show_texture, and a PNG shows no partial at all; and every host call is
+ * made on the main thread, from a main-loop dispatch -- a partial never
+ * arrives while the main thread is not iterating (fe2).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -37,10 +39,22 @@ typedef struct {
    gboolean b_dead;        /* set after dispose: any call is a bug */
 } FakeHost;
 
+/* The test's main thread (set first thing in main()). The window's host
+ * ops touch GTK widgets, so the pipeline may call the host from this
+ * thread only; every fake op asserts it (fe2). */
+static GThread *p_main_thread;
+
+/* Every host op's entry check: on the main thread, not after dispose. */
+static void
+_fh_check(const FakeHost *p_h) {
+   g_assert_true(g_thread_self() == p_main_thread);
+   g_assert_false(p_h->b_dead);
+}
+
 static void
 _fh_show_texture(gpointer p_host, GdkTexture *p_tex) {
    FakeHost *p_h = (FakeHost *)p_host;
-   g_assert_false(p_h->b_dead);
+   _fh_check(p_h);
    g_set_object(&p_h->p_shown, p_tex);
    p_h->u_shows++;
    if (p_tex == NULL) {
@@ -57,7 +71,7 @@ _fh_show_texture(gpointer p_host, GdkTexture *p_tex) {
 static void
 _fh_show_partial(gpointer p_host, GdkTexture *p_tex) {
    FakeHost *p_h = (FakeHost *)p_host;
-   g_assert_false(p_h->b_dead);
+   _fh_check(p_h);
    g_assert_nonnull(p_tex);
    p_h->u_partials++;
 }
@@ -65,14 +79,14 @@ _fh_show_partial(gpointer p_host, GdkTexture *p_tex) {
 static void
 _fh_update_header(gpointer p_host) {
    FakeHost *p_h = (FakeHost *)p_host;
-   g_assert_false(p_h->b_dead);
+   _fh_check(p_h);
    p_h->u_headers++;
 }
 
 static void
 _fh_show_status(gpointer p_host, const char *c_msg) {
    FakeHost *p_h = (FakeHost *)p_host;
-   g_assert_false(p_h->b_dead);
+   _fh_check(p_h);
    g_free(p_h->c_status);
    p_h->c_status = g_strdup(c_msg);
 }
@@ -233,6 +247,45 @@ test_png_shows_no_partial(void) {
                  viewload_get_cached(p_vl, navigator_get_current(p_nav)));
    pump(100); /* the neighbour prefetch: no partials from it either */
    g_assert_cmpuint(st_h.u_partials, ==, 0);
+
+   viewload_delete(p_vl);
+   fake_host_clear(&st_h);
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   cleanup_temp_dir(c_dir);
+}
+
+/* fe2: the decode thread's partial reaches the host only when the main
+ * thread dispatches it, never from the decode thread itself. The main
+ * thread here sleeps WITHOUT iterating -- the default context is then
+ * owned by nobody, which is exactly when g_main_context_invoke() (the old
+ * hop) ran the callback on the calling decode thread. Nothing may reach
+ * the host during the sleep (and the fake host's main-thread assertion
+ * catches a call from elsewhere); once the loop runs, the partial and the
+ * full decode land as usual. The sleep is far longer than a 6x3 JPEG
+ * decode on an idle machine; a machine too loaded to finish it in time
+ * makes the check vacuous, never a false failure. */
+static void
+test_partial_waits_for_main_loop(void) {
+   char      *c_dir = make_folder();
+   GFile     *p_dir = g_file_new_for_path(c_dir);
+   Navigator *p_nav = navigator_new(p_dir, GGAZE_SORT_NAME, FALSE, TRUE);
+   FakeHost   st_h  = {0};
+   ViewLoad  *p_vl  = viewload_new(&FAKE_OPS, &st_h, 4);
+   viewload_set_navigator(p_vl, p_nav);
+
+   viewload_load_current(p_vl); /* a.jpg: a miss, decoding on a worker */
+   for (guint u = 0; u < 300; u++) {
+      g_usleep(1000); /* no g_main_context_iteration() */
+      g_assert_cmpuint(st_h.u_partials, ==, 0);
+      g_assert_cmpuint(st_h.u_shows, ==, 0);
+   }
+   pump_until_cached(p_vl, navigator_get_current(p_nav));
+#if GGAZE_HAVE_JPEG
+   g_assert_cmpuint(st_h.u_partials, >=, 1);
+#endif
+   g_assert_nonnull(st_h.p_shown);
+   pump(100); /* the neighbour prefetch */
 
    viewload_delete(p_vl);
    fake_host_clear(&st_h);
@@ -414,11 +467,14 @@ test_animation_rides_with_the_texture(void) {
 
 int
 main(int i_argc, char **c_argv) {
+   p_main_thread = g_thread_self();
    g_test_init(&i_argc, &c_argv, NULL);
    g_test_add_func("/viewload/miss_then_hit", test_miss_then_hit);
    g_test_add_func("/viewload/animation_rides_with_the_texture",
                    test_animation_rides_with_the_texture);
    g_test_add_func("/viewload/png_shows_no_partial", test_png_shows_no_partial);
+   g_test_add_func("/viewload/partial_waits_for_main_loop",
+                   test_partial_waits_for_main_loop);
    g_test_add_func("/viewload/last_write_wins", test_last_write_wins);
    g_test_add_func("/viewload/failure_clears_and_reports",
                    test_failure_clears_and_reports);

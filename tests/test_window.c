@@ -509,7 +509,12 @@ test_info_no_plot_while_loading(void) {
 
    ggaze_window_clear_texture_cache(p_win); /* B must decode async */
    fire(p_win, "win.next");
-   g_assert_true(viewer_texture(p_win) == p_a); /* A still up: the race */
+   /* A still up: the interval this test is about. Deterministic, no race
+    * the test wins -- nothing has iterated the main loop since `next`, and
+    * B's decode reaches the viewer only through the main loop, its JPEG
+    * partial included (fe2: that one used to be handed over on the decode
+    * thread whenever the loop was idle, and replaced A inside `next`). */
+   g_assert_true(viewer_texture(p_win) == p_a);
    fire(p_win, "win.info");
    /* The card's text and B's decode both land within milliseconds and in
     * either order, so the assertion is the invariant, not an instant: from

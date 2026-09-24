@@ -35,12 +35,16 @@ struct ViewLoad {
  * miss read it, BEFORE the decode started: the finished texture is cached
  * under that stamp, so a rewrite that lands mid-decode makes the next get
  * miss instead of stamping the old pixels as the new file (texturecache.h
- * texturecache_put_stamped). The GTask always invokes the finish callback
- * (even on cancellation), which is the sole owner that frees the ctx. */
+ * texturecache_put_stamped). And it carries the main context the load was
+ * started from, which the decode thread queues its partials on (see
+ * _load_progress_cb). The GTask always invokes the finish callback (even
+ * on cancellation, and after the last progress callback), which is the
+ * sole owner that frees the ctx (_load_ctx_free). */
 typedef struct {
-   ViewLoad    *p_vl;    /* ref'd; outlives the load */
-   GFile       *p_file;  /* ref'd; the file being loaded */
-   TextureStamp t_stamp; /* p_file's state before the decode began */
+   ViewLoad     *p_vl;    /* ref'd; outlives the load */
+   GFile        *p_file;  /* ref'd; the file being loaded */
+   TextureStamp  t_stamp; /* p_file's state before the decode began */
+   GMainContext *p_main;  /* ref'd; the starting thread's main context */
 } LoadCtx;
 
 /* A partial texture hopping from the decode thread to the main thread. */
@@ -69,14 +73,26 @@ _unref(ViewLoad *p_vl) {
 }
 
 /* A LoadCtx for p_file, owning refs on p_vl and p_file; p_stamp is the
- * miss stamp texturecache_lookup() read (the one query this load costs). */
+ * miss stamp texturecache_lookup() read (the one query this load costs).
+ * Built on the main thread, so the context it captures is the same one the
+ * GTask returns its result to. */
 static LoadCtx *
 _load_ctx_new(ViewLoad *p_vl, GFile *p_file, const TextureStamp *p_stamp) {
    LoadCtx *p_ctx = g_new(LoadCtx, 1);
    p_ctx->p_vl    = _ref(p_vl);
    p_ctx->p_file  = (GFile *)g_object_ref(p_file);
    p_ctx->t_stamp = *p_stamp;
+   p_ctx->p_main  = g_main_context_ref_thread_default();
    return (p_ctx);
+}
+
+/* Release everything a LoadCtx owns (each finish callback's last step). */
+static void
+_load_ctx_free(LoadCtx *p_ctx) {
+   g_object_unref(p_ctx->p_file);
+   g_main_context_unref(p_ctx->p_main);
+   _unref(p_ctx->p_vl);
+   g_free(p_ctx);
 }
 
 /* TRUE iff p_file is still navigator.current (last-write-wins). */
@@ -144,9 +160,7 @@ _prefetch_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       g_clear_error(&p_err); /* a neighbour that fails to decode is not
                               * worth a message; the visible load reports */
    }
-   g_object_unref(p_ctx->p_file);
-   _unref(p_ctx->p_vl);
-   g_free(p_ctx);
+   _load_ctx_free(p_ctx);
 }
 
 /* Prefetch the next/previous images into the cache (not shown). Cancels the
@@ -211,7 +225,19 @@ _on_progress_main(gpointer p_data) {
    return (G_SOURCE_REMOVE);
 }
 
-/* Decode-thread progress callback: hop to the main thread. */
+/* Decode-thread progress callback: hop to the main thread, ALWAYS through
+ * an idle source on the load's main context. Not g_main_context_invoke():
+ * that runs the function right here, on the decode thread, whenever it can
+ * acquire the context -- i.e. whenever no thread owns it at that instant.
+ * g_application_run() owns the default context for its whole run, so the
+ * app itself never hit that; but a caller that iterates the context by
+ * hand (every integration test's drain loop) leaves it unowned between
+ * iterations, and a partial then reached the viewer from the decode
+ * thread: a GTK call off the main thread (AGENTS.md), and a picture change
+ * the main thread never iterated for (task fe2: in
+ * /window/info_no_plot_while_loading B's partial replaced A in the middle
+ * of the synchronous `win.next`). Queued, a partial lands only when the
+ * main thread dispatches it. */
 static void
 _load_progress_cb(GdkTexture *p_partial, gpointer p_data) {
    LoadCtx        *p_ctx = (LoadCtx *)p_data;
@@ -219,8 +245,12 @@ _load_progress_cb(GdkTexture *p_partial, gpointer p_data) {
    p_pi->p_vl            = _ref(p_ctx->p_vl);
    p_pi->p_file          = (GFile *)g_object_ref(p_ctx->p_file);
    p_pi->p_tex           = (GdkTexture *)g_object_ref(p_partial);
-   g_main_context_invoke_full(NULL, G_PRIORITY_DEFAULT, _on_progress_main, p_pi,
-                              NULL);
+   GSource *p_src        = g_idle_source_new();
+   g_source_set_priority(p_src, G_PRIORITY_DEFAULT);
+   g_source_set_callback(p_src, _on_progress_main, p_pi, NULL);
+   g_source_set_static_name(p_src, "[ggaze] viewload partial");
+   g_source_attach(p_src, p_ctx->p_main);
+   g_source_unref(p_src);
 }
 
 /* The visible load of a still-current file failed: clear the canvas and say
@@ -269,9 +299,7 @@ _load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       }
       g_object_unref(p_tex);
    }
-   g_object_unref(p_ctx->p_file);
-   _unref(p_vl);
-   g_free(p_ctx);
+   _load_ctx_free(p_ctx);
 }
 
 /* Cancel the previous visible load and hand out a fresh cancellable. */
