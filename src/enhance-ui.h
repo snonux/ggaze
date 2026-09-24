@@ -20,7 +20,9 @@
  *   Transform  one row of four icon buttons: crop, straighten, rotate
  *              left, rotate right, each with its key badge and a tooltip;
  *   actions    a one-line save state, then Save copy (naming the file it
- *              will write, "as <name>") and Revert side by side.
+ *              will write, "as <name>") and Revert side by side, and
+ *              under them Undo and Redo (7i2) -- insensitive while there
+ *              is nothing to undo / redo (the controller's call).
  *
  * Every button shows its key, read from shortcuts.c's table
  * (shortcuts_hint_keys_for_action), and every panel key has a button, so
@@ -91,6 +93,9 @@ typedef struct {
    GtkWidget *p_state;        /* save-state line ("Unsaved edits ...") */
    GtkWidget *p_save_btn;     /* Save button, bound to win.enhance-save */
    GtkWidget *p_save_target;  /* the file Save would write, under it */
+   GtkWidget *p_undo_btn;     /* Undo, bound to win.edit-undo (the caller
+                               * keeps it insensitive with nothing to undo) */
+   GtkWidget *p_redo_btn;     /* Redo, bound to win.edit-redo (likewise) */
 } EnhanceUIWidgets;
 
 /* Build the side panel (see the header) and return its root, filling

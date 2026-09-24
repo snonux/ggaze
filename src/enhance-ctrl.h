@@ -39,6 +39,20 @@
  * prompt therefore only ever asks about work that has not been written
  * anywhere.
  *
+ * Undo / redo (7i2): every EDIT STEP -- a preset toggled (key or card), a
+ * quarter turn, a crop or straighten applied (the tool reports it,
+ * enhance_ctrl_record_tool_step), every edit reverted (x) -- is recorded
+ * in an EditHistory (edit-history.h) as the whole edit state before and
+ * after it, and enhance_ctrl_undo / _redo put such a state back through
+ * the same render path a toggle takes (last-write-wins, the saved/dirty
+ * re-derivation, the title, the panel). The history belongs to the image:
+ * it is cleared when another file becomes current and on every discard
+ * that is not x itself (the gate's Discard, the slideshow, a failed
+ * render). While a tool runs, the steps record the transform the tool
+ * started from (enhance_ctrl_set_step_base), not its live working copy,
+ * so a preset toggled under the straighten tool never brings back an
+ * angle that was never applied.
+ *
  * Two transforms: the COMMITTED one (enhance_ctrl_set_transform) is what
  * `s` exports, what the title names and what dirty/active are judged on;
  * a tool may additionally set a PREVIEW override
@@ -76,8 +90,9 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
-#include "enhancer.h"  /* Enhancer, EnhancerPreset, GPtrArray of presets */
-#include "transform.h" /* the rotate/straighten/crop state (decision #35) */
+#include "edit-history.h" /* EditStepKind: what an undoable step was */
+#include "enhancer.h"     /* Enhancer, EnhancerPreset, GPtrArray of presets */
+#include "transform.h"    /* the rotate/straighten/crop state (decision #35) */
 
 G_BEGIN_DECLS
 
@@ -347,10 +362,41 @@ gboolean enhance_ctrl_can_save(EnhanceCtrl *p_ctrl);
  * either way. */
 void enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl);
 
-/* Drop the current enhance preview and go back to the original (x / Revert
- * all, slideshow auto-advance, the SaveGate's Discard). Ends a running tool
- * first (abandon_tool). Never touches the file on disk. */
+/* Drop the current enhance preview and go back to the original (slideshow
+ * auto-advance, the SaveGate's Discard), forgetting the undo history: the
+ * edit is thrown away, not stepped back from. Ends a running tool first
+ * (abandon_tool). Never touches the file on disk. */
 void enhance_ctrl_discard(EnhanceCtrl *p_ctrl);
+
+/* x / the Revert button: enhance_ctrl_discard as an UNDOABLE edit step --
+ * `u` brings every edit back. */
+void enhance_ctrl_revert_all(EnhanceCtrl *p_ctrl);
+
+/* --- undo / redo of edit steps (7i2) ------------------------------------ */
+/* `u` / Ctrl+z and `U` / Ctrl+Shift+Z with the panel open (the window
+ * refuses them under a tool): put back the state before the newest step,
+ * or after the step undone last, re-render it and say so on the status
+ * line ("Undid: Auto-fix on", "Redid: crop"; "Nothing to undo" when there
+ * is none -- then FALSE). */
+gboolean enhance_ctrl_undo(EnhanceCtrl *p_ctrl);
+gboolean enhance_ctrl_redo(EnhanceCtrl *p_ctrl);
+/* TRUE iff undo / redo would do something (the panel's buttons). */
+gboolean enhance_ctrl_can_undo(EnhanceCtrl *p_ctrl);
+gboolean enhance_ctrl_can_redo(EnhanceCtrl *p_ctrl);
+
+/* A tool session (tool-ctrl.c): while p_base is set, an edit step taken
+ * meanwhile (a preset toggled under the tool) records p_base as the
+ * transform, not the tool's live working state -- what an undo of it must
+ * come back to is the image as it was, not an angle never applied. NULL
+ * ends the session. */
+void enhance_ctrl_set_step_base(EnhanceCtrl *p_ctrl, const Transform *p_base);
+
+/* A tool applied (Enter): record the step from p_before (the transform the
+ * tool started from) to the committed state, named c_label ("crop",
+ * "straighten 2.5°"). Nothing is recorded when the tool changed nothing. */
+void enhance_ctrl_record_tool_step(EnhanceCtrl *p_ctrl, EditStepKind e_kind,
+                                   const char      *c_label,
+                                   const Transform *p_before);
 
 G_END_DECLS
 

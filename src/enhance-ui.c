@@ -249,9 +249,28 @@ _build_save(EnhanceUIWidgets *p_out) {
    return (p_btn);
 }
 
+/* Undo and Redo (7i2) side by side, the same width, each with its key.
+ * Built insensitive: a fresh panel's controller says when there is
+ * something to step through. */
+static GtkWidget *
+_build_history(EnhanceUIWidgets *p_out) {
+   GtkWidget *p_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+   gtk_box_set_homogeneous(GTK_BOX(p_row), TRUE);
+   p_out->p_undo_btn =
+      _action_button("edit-undo-symbolic", "Undo", "win.edit-undo");
+   p_out->p_redo_btn =
+      _action_button("edit-redo-symbolic", "Redo", "win.edit-redo");
+   gtk_widget_set_sensitive(p_out->p_undo_btn, FALSE);
+   gtk_widget_set_sensitive(p_out->p_redo_btn, FALSE);
+   gtk_box_append(GTK_BOX(p_row), p_out->p_undo_btn);
+   gtk_box_append(GTK_BOX(p_row), p_out->p_redo_btn);
+   return (p_row);
+}
+
 /* The Actions: the one-line save state, then Save copy and Revert side by
- * side. Pinned below the card scroller: "how do I keep (or drop) this"
- * must never be what scrolled away. */
+ * side, then Undo / Redo. Pinned below the card scroller: "how do I keep
+ * (or drop, or step back from) this" must never be what scrolled away.
+ * Revert shows a "revert" icon now that the undo arrow is Undo's. */
 static void
 _build_actions(GtkWidget *p_box, EnhanceUIWidgets *p_out) {
    GtkWidget *p_state = _line_label(NULL, PANGO_ELLIPSIZE_MIDDLE);
@@ -260,9 +279,10 @@ _build_actions(GtkWidget *p_box, EnhanceUIWidgets *p_out) {
    p_out->p_state   = p_state;
    GtkWidget *p_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
    gtk_box_append(GTK_BOX(p_row), _build_save(p_out));
-   gtk_box_append(GTK_BOX(p_row), _action_button("edit-undo-symbolic", "Revert",
-                                                 "win.edit-revert"));
+   gtk_box_append(GTK_BOX(p_row), _action_button("document-revert-symbolic",
+                                                 "Revert", "win.edit-revert"));
    gtk_box_append(GTK_BOX(p_box), p_row);
+   gtk_box_append(GTK_BOX(p_box), _build_history(p_out));
 }
 
 /* The title row: "Edit" (the window title already names the file) and the

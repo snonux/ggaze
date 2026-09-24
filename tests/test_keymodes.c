@@ -31,13 +31,50 @@ test_panel_keys_are_scoped(void) {
    g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_9, 0));
    g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_NONE, GDK_KEY_1, 0));
    g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_CROP, GDK_KEY_1, 0));
-   /* h / l / j / k stay free in the panel (navigation now, strength later),
-    * and so does u (undo later). */
+   /* h / l / j / k stay free in the panel (navigation now, strength
+    * later). */
    g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_h, 0));
-   g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_u, 0));
    /* A chord is not the digit. */
    g_assert_null(
       shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_1, GDK_CONTROL_MASK));
+}
+
+/* 7i2: u / Ctrl+z undo and U / Ctrl+Shift+Z redo an edit step -- in the
+ * panel's mode alone. Everywhere else u and Ctrl+z are the global file
+ * undo, and U / Ctrl+Shift+Z nothing; a tool's mode does not take them
+ * either (the router offers a key the tool leaves alone to the panel, and
+ * the window refuses it there under a tool). */
+static void
+test_edit_undo_keys(void) {
+   static const struct {
+      guint           u_key;
+      GdkModifierType e_mods;
+      const char     *c_action;
+   } CASES[] = {
+      {GDK_KEY_u, 0, "win.edit-undo"},
+      {GDK_KEY_z, GDK_CONTROL_MASK, "win.edit-undo"},
+      {GDK_KEY_U, GDK_SHIFT_MASK, "win.edit-redo"},
+      {GDK_KEY_u, GDK_SHIFT_MASK, "win.edit-redo"},
+      {GDK_KEY_Z, GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.edit-redo"},
+      {GDK_KEY_z, GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.edit-redo"},
+      {GDK_KEY_z, 0, NULL}, /* z alone is nothing */
+      {GDK_KEY_u, GDK_CONTROL_MASK, NULL},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      g_assert_cmpstr(shortcuts_mode_action(GGAZE_KEY_MODE_PANEL,
+                                            CASES[u].u_key, CASES[u].e_mods),
+                      ==, CASES[u].c_action);
+      g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_CROP, CASES[u].u_key,
+                                          CASES[u].e_mods));
+      g_assert_cmpint(shortcuts_mode_op(GGAZE_KEY_MODE_STRAIGHTEN,
+                                        CASES[u].u_key, CASES[u].e_mods),
+                      ==, GGAZE_KEY_OP_NONE);
+   }
+   /* Outside the panel the file undo keeps its keys. */
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_u, 0), ==, "win.undo");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_z, GDK_CONTROL_MASK), ==,
+                   "win.undo");
+   g_assert_null(shortcuts_global_action(GDK_KEY_U, GDK_SHIFT_MASK));
 }
 
 /* The digits and `0` are no longer global: only the panel binds 1-8, and
@@ -194,8 +231,8 @@ test_hint_lines(void) {
    g_assert_cmpstr(c_panel, ==,
                    "1–8 presets  ·  c crop  ·  r straighten  "
                    "·  [/] rotate  ·  s save copy  ·  "
-                   "x revert  ·  Space hold: original  ·  "
-                   "a/Esc close");
+                   "x revert  ·  u/Shift+u undo/redo  ·  "
+                   "Space hold: original  ·  a/Esc close");
    g_free(c_panel);
    char *c_crop = hint(GGAZE_KEY_MODE_CROP, 8, FALSE);
    g_assert_cmpstr(c_crop, ==,
@@ -297,6 +334,23 @@ test_caps_lock(void) {
       "win.last");
    g_assert_cmpstr(shortcuts_global_action(GDK_KEY_G, GDK_LOCK_MASK), ==,
                    "win.first");
+   /* 7i2: `u` with Caps Lock (`U` + Lock) is undo, not redo; Shift+u under
+    * Caps Lock is redo in whichever case it arrives; Ctrl+z + Lock is
+    * undo. */
+   g_assert_cmpstr(
+      shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_U, GDK_LOCK_MASK), ==,
+      "win.edit-undo");
+   g_assert_cmpstr(shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_U,
+                                         GDK_SHIFT_MASK | GDK_LOCK_MASK),
+                   ==, "win.edit-redo");
+   g_assert_cmpstr(shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_u,
+                                         GDK_SHIFT_MASK | GDK_LOCK_MASK),
+                   ==, "win.edit-redo");
+   g_assert_cmpstr(shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_Z,
+                                         GDK_CONTROL_MASK | GDK_LOCK_MASK),
+                   ==, "win.edit-undo");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_U, GDK_LOCK_MASK), ==,
+                   "win.undo");
 }
 
 /* The F10 menu's short labels; the help keeps the long description. */
@@ -313,6 +367,8 @@ test_menu_labels(void) {
       {"win.rotate-cw", "Rotate right"},
       {"win.enhance-save", "Save edited copy"},
       {"win.edit-revert", "Revert all edits"},
+      {"win.edit-undo", "Undo edit"},
+      {"win.edit-redo", "Redo edit"},
       {"win.next", "Next image"}, /* no short label: the title */
       {"win.no-such-action", NULL},
    };
@@ -337,6 +393,8 @@ test_button_keys_and_titles(void) {
       {"win.rotate-cw", "]"},
       {"win.enhance-save", "s"},
       {"win.edit-revert", "x"},
+      {"win.edit-undo", "u"}, /* the bar lists u; Ctrl+z is the help's */
+      {"win.edit-redo", "Shift+u"},
       {"win.enhance-3", "3"},
       {"win.enhance", "a"},
       {"win.no-such-action", NULL},
@@ -371,6 +429,7 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/keymodes/panel_keys_are_scoped",
                    test_panel_keys_are_scoped);
    g_test_add_func("/keymodes/global_keys", test_global_keys);
+   g_test_add_func("/keymodes/edit_undo_keys", test_edit_undo_keys);
    g_test_add_func("/keymodes/crop_ops", test_crop_ops);
    g_test_add_func("/keymodes/straighten_ops", test_straighten_ops);
    g_test_add_func("/keymodes/key_labels", test_key_labels);
