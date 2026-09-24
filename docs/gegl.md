@@ -482,12 +482,38 @@ cleanly, so a file reaches them only through:
   - **`para` types 1 and 2** (the CIE 122 / IEC 61966-3 forms) are refused:
     `babl_trc_formula_cie` packs four parameters into `float[4]` and babl
     then reads a fifth as the curve's x0 — an out-of-bounds read whose
-    garbage decides the assertion above. Type 0 (a gamma) needs no bound:
-    babl clamps a negative one and asserts nothing.
+    garbage decides the assertion above;
+  - **`para` parameters out of any real range** (review 5): babl names a
+    formula curve after its seven parameters (`"%i.%06i …"`), a space after
+    its primaries and three curves' names, and each of the space's formats
+    `"<encoding>-<space>"` in a 256-byte buffer. A curve with g = −32767
+    (the review's `[-32767, -1.31, -1.7, 0.768, 0.038, 0.604, 1.10]`) named
+    its space in 238 characters, so format names were cut short, two
+    formats shared a name, and babl's fish search between them **spun
+    forever** inside an uncancellable GEGL decode. g and a must lie in
+    (0, 10], every other parameter within ±10 (`ICC_PARA_MAX`) — real curves
+    use a gamma of 1.8–2.6, a ≈ 1, offsets under 0.1 — and the enhancer
+    also checks the name babl built (below);
+  - **curves babl cannot invert** (review 5): babl builds the conversion to
+    each format by searching candidate paths until one converts its test
+    pixels closely enough; for a flat or falling curve none does, the search
+    runs into its deepest candidates, and one of those
+    (`babl_conversion_planar_process`) overflows a buffer — glibc's fortify
+    check **aborted the JPEG export** (`s`) of files whose profile had a
+    constant `curv` (`[0, 0]`, `[30000, 30000]`, `[65535, 65535]`), a table
+    of 1139 points with one spike, or a `para` type 4 with c = d = 0 and
+    e, f > 1 (never inside [0, 1]). So every tone curve must be shaped like
+    one: sampled over [0, 1] (a table at its points, a formula at 1024) and
+    clamped to [0, 1], it never falls, rises by at least half the output
+    range from first to last sample, and is flat (steps under half a u16
+    step) over less than half its domain. That also refuses a zero or huge
+    gamma and a `para` that falls at its break point (babl would have taken
+    both). Every corpus curve (4096- and 1024-point tables, sRGB `para`
+    curves, a u8Fixed8 gamma of 2.2) and Rec. 709's pass with room to spare.
   Unit-tested with mutated profiles, profiles built for each case
   (`tests/helpers/icc_build.c`) and a seeded 20 000-profile fuzz
   (`tests/test_icc.c`, also under ASan); the 106 profiled files of the
-  local corpus and the system's colord profiles all pass. Three babl
+  local corpus and the system's colord profiles all pass. The babl
   hazards the bytes alone do not show are handled in `enhancer.c`:
   - a **CMYK profile** goes to LCMS inside babl, which keeps whatever
     transform LCMS returns — NULL included — and crashes on the first
@@ -515,9 +541,40 @@ cleanly, so a file reaches them only through:
     declined one may have added curves), **unless** babl answered with a
     space it already had (sRGB, or an earlier slot's) and the profile
     carries no curve that space does not use — a kTRC on an RGB profile, an
-    rTRC on a grey one, costs a slot even then. So the tables stay under 36
-    spaces and 69 curves, while camera files whose sRGB profiles differ
-    only in their bytes cost nothing. Verdicts are kept by SHA-256 — for
+    rTRC on a grey one, costs a slot even then. So what the enhancer hands
+    babl leaves the tables under 36 spaces and 69 curves, while camera
+    files whose sRGB profiles differ only in their bytes cost nothing.
+    GEGL's own loaders are held to the same bound by seeing only files
+    whose vetted profile they will actually use: `gegl:png-load` falls back
+    to a space it builds from gAMA / cHRM whenever libpng drops the iCCP,
+    and libpng drops one babl takes — a rendering intent ≥ 0xFFFF, a v4
+    profile whose length is no multiple of 4, one over libpng's length
+    limit (review 5: 110 such PNGs, each with its own gAMA, filled babl's
+    tables past the cap and the next profile crashed
+    `babl_space_from_icc`). So a PNG is managed only when libpng 1.6's
+    fatal iCCP rules hold — one iCCP, before PLTE, its CRC right, a header
+    passing `png_icc_check_length` / `_header` / `_tag_table` (1.6.40 on
+    fedora:40 and 1.6.58 agree on those), at most 8 000 000 bytes (upstream's
+    `PNG_USER_CHUNK_MALLOC_MAX`; Fedora 44 builds a larger one) — **and**
+    the file carries no gAMA, cHRM or sRGB chunk GEGL could use instead
+    (`icc_png_applied_profile`; the corpus's profiled PNGs carry none).
+    Any other PNG takes the loader path, which never gets near babl. The
+    bound then has one way past it, the file-swap window below;
+  - a space babl builds may be **unusable by name** (review 5), and babl
+    and GEGL find a space's formats by its name. Too long a name gets the
+    formats cut short (above: a 238-character one spun); a name another
+    space already has makes `babl_format_with_space` hand back the FIRST
+    space's formats, so the file silently converts with the wrong profile
+    — and babl names spaces only partly by content: every table curve is
+    `lut-trc`, so all grey table-curve spaces are `space-gray-lut-trc` and
+    RGB table-curve spaces of the same primaries share a name too. The
+    enhancer declines a space whose name is over 220 characters (the true
+    limit is 254 − 1 − 24, the longest encoding babl and GEGL register
+    being `CIE LCH(ab) alpha double`; a Rec. 709 `para` curve on all three
+    channels needs 208) or for which `babl_space(name)` is another space.
+    babl has kept that space by then, so it costs its slot. (Primaries
+    that differ only past the four printed decimals do not collide: babl
+    matches such a profile to the earlier space itself.) Verdicts are kept by SHA-256 — for
     good for the slots, up to 64 slot-free ones
     (`GGAZE_ENHANCER_MAX_FREE_VERDICTS`, oldest dropped: asking babl again
     about one adds nothing) — so a file seen again costs a checksum and
@@ -530,9 +587,18 @@ cleanly, so a file reaches them only through:
   round with fresh tables, until its slots are spent) in
   `tests/test_enhancer_icc.c`: the seeds include `para` 0 / 3 / 4 and long
   `curv` curves, half the edits land inside a tag (a parameter at one of
-  babl's edges, the function type, a reserved byte, a count), and every
-  profile that gets through has its space built, pixels converted through
-  it both ways and its profile copied out;
+  babl's edges or bounds, the function type, a reserved byte, a count, a
+  table made constant or spiked), and every profile that gets through has
+  its space built, pixels converted through it both ways in u8 and in
+  float (values past both ends of [0, 1] included; float into the image's
+  space is the direction babl aborted in) and its profile copied out. The
+  rounds set `BABL_PATH_LENGTH=1`, which makes babl convert through its
+  reference fish instead of timing candidate paths (~1 s per new space) —
+  and so also skips the deep path search where the review-5 abort lived;
+  that hazard is pinned outside the fuzz with babl's full search (a JPEG
+  export of each uninvertible curve, `uninvertible_curves_are_declined`).
+  The review-5 cases that spend slots run in fresh subprocesses, so they
+  do not eat into the cap the later cases and the corpus count on;
 
 - the loader's own sniff (`loader_read_header` + `loader_sniff_bytes`) and
   the shared dimension caps;
@@ -592,7 +658,18 @@ loaders take a path, not a descriptor, so the window cannot be closed from
 here; it is kept short (the stored size comes from the completeness walk, so
 no separate header peek opens the file), and the same race exists for
 gdk-pixbuf's path-taking calls on the loader path (tech-stack.md "The
-decode gate").
+decode gate"). The window is also the one way a profile reaches babl
+**unvetted**: a file swapped in after the profile walk gets its iCCP / APP2
+(or, for a PNG, its gAMA / cHRM) read by GEGL's loader and handed to
+`babl_space_from_icc` / `babl_space_from_chromaticities` without
+`icc_profile_is_sane`, the name checks or the slot cap — so a crafted
+profile can still crash babl, and each swap can add a space and curves
+outside the 36 / 69 bound. That residual risk needs someone racing a
+viewer they already have write access to the folder of. Nothing cheap
+narrows it further: re-reading the profile after GEGL's decode would only
+report the damage after babl had taken it, and comparing mtime / size /
+inode before and after the decode would not stop a swap-and-back within the
+window; closing it needs a GEGL loader that takes a descriptor.
 
 **Unsupported ops degrade, never fail.** Without `gegl:png-load` /
 `gegl:jpg-load` installed that format keeps the loader path (sRGB); without
