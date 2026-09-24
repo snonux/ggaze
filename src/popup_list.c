@@ -192,6 +192,56 @@ popup_list_popup(PopupList *p_list) {
    gtk_popover_popup(GTK_POPOVER(p_list->p_pop));
 }
 
+/* TRUE iff p_root's focus widget is p_pop or inside it. */
+static gboolean
+_focus_is_inside(GtkRoot *p_root, GtkWidget *p_pop) {
+   GtkWidget *p_focus = gtk_root_get_focus(p_root);
+   return (p_focus != NULL &&
+           (p_focus == p_pop || gtk_widget_is_ancestor(p_focus, p_pop)));
+}
+
+/* Hand the window's keyboard focus out of p_pop BEFORE it is unparented,
+ * the way GTK itself would -- only synchronously.
+ *
+ * Why (gg2): a popped-up popover holds the root's focus widget (its first
+ * row, see "POPOVER KEYBOARD FOCUS" in window.c). Unparenting it then makes
+ * GtkWindow park a REF on the popover (priv->move_focus_widget) and move the
+ * focus in its next frame's after-paint phase. Until that frame the popover
+ * is unrealized -- no GdkSurface -- yet alive. GTK 4.14 (fedora:40, CI) does
+ * not detach the tooltip machinery from a popover on unmap (later GTKs call
+ * gtk_tooltip_unset_surface() in gtk_popover_unmap), so a tooltip timeout
+ * that fires in that gap calls gdk_surface_get_device_position(NULL):
+ * a critical. On a window that is never painted (every never-presented
+ * toplevel in the integration suites, under Xvfb's pointer) that frame never
+ * comes and the gap lasts until the window is disposed.
+ *
+ * Moving the focus first mirrors GtkWindow's own deferred fallback (focus
+ * the nearest visible ancestor that takes it, else the window's first
+ * focusable widget), so the popover's last reference goes with the
+ * unparent, it is finalized at once and the tooltip's weak reference to it
+ * is cleared. A focus outside the popover is left alone. */
+static void
+_release_focus(GtkWidget *p_pop) {
+   GtkRoot *p_root = gtk_widget_get_root(p_pop);
+   if (p_root == NULL || !_focus_is_inside(p_root, p_pop)) {
+      return;
+   }
+   for (GtkWidget *p_w = gtk_widget_get_parent(p_pop); p_w != NULL;
+        p_w            = gtk_widget_get_parent(p_w)) {
+      if (gtk_widget_get_visible(p_w) && gtk_widget_grab_focus(p_w)) {
+         break;
+      }
+   }
+   if (_focus_is_inside(p_root, p_pop)) {
+      gtk_widget_child_focus(GTK_WIDGET(p_root), GTK_DIR_TAB_FORWARD);
+   }
+   /* Whatever the fallback found, the focus must not stay in the popover
+    * (a focus chain may lead back into it): no focus beats a parked ref. */
+   if (_focus_is_inside(p_root, p_pop)) {
+      gtk_root_set_focus(p_root, NULL);
+   }
+}
+
 void
 popup_list_delete(PopupList **pp_storage) {
    g_return_if_fail(pp_storage != NULL);
@@ -200,6 +250,7 @@ popup_list_delete(PopupList **pp_storage) {
       return;
    }
    *pp_storage = NULL; /* first, so a re-entrant "closed" is a no-op */
+   _release_focus(p_list->p_pop);
    gtk_widget_unparent(p_list->p_pop);
    g_free(p_list);
 }

@@ -576,6 +576,19 @@ test_open_external_popup_really_maps(void) {
    g_assert_cmphex((guintptr)gtk_root_get_focus(GTK_ROOT(p_win)), ==,
                    (guintptr)popover_button(p_pop, 0));
 
+   /* Closing a popover that holds the focus releases it AT ONCE (gg2).
+    * With the focus inside, a bare unparent makes GtkWindow keep a ref on
+    * the unrealized popover until its next after-paint; on GTK 4.14 a
+    * tooltip timeout in that gap passes the popover's NULL surface to
+    * gdk_surface_get_device_position() -- the critical that failed CI's
+    * fedora:40 lane in popup_structure and enhance_flow. popup_list_delete()
+    * moves the focus out first, so the popover must be finalized before
+    * the main loop runs again. */
+   g_object_add_weak_pointer(G_OBJECT(p_pop), (gpointer *)&p_pop);
+   fire(p_win, "win.open-external"); /* toggle closed, no iteration */
+   g_assert_null(p_pop);
+   g_assert_null(find_open_external_popover(p_win));
+
    g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
