@@ -18,15 +18,18 @@ matrix:
     - LANE: minimal
       MESON_OPTS: "-Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled -Djpeg=disabled"
       RUN_COVERAGE: "yes"
-      ENV: ""
+      G_DEBUG: ""
+      ASAN_OPTIONS: ""
     - LANE: gegl
       MESON_OPTS: "-Dgegl=enabled"
       RUN_COVERAGE: "no"
-      ENV: ""
+      G_DEBUG: ""
+      ASAN_OPTIONS: ""
     - LANE: asan
       MESON_OPTS: "-Dgegl=disabled -Djxl=disabled -Davif=disabled -Dheif=disabled -Djpeg=disabled -Db_sanitize=address,undefined"
       RUN_COVERAGE: "no"
-      ENV: "G_DEBUG=gc-friendly ASAN_OPTIONS=detect_leaks=1:abort_on_error=1"
+      G_DEBUG: "gc-friendly"
+      ASAN_OPTIONS: "detect_leaks=1:abort_on_error=1"
 
 when:
   - event: [push, pull_request, manual]
@@ -34,7 +37,12 @@ when:
 steps:
   build-and-test:
     image: fedora:40
-    environment: ${ENV}
+    # One map entry per variable: Woodpecker substitutes matrix values as
+    # text, so a single "VAR=value VAR=value" matrix string would make
+    # `environment` a string, not the map it must be. Empty outside asan.
+    environment:
+      G_DEBUG: "${G_DEBUG}"
+      ASAN_OPTIONS: "${ASAN_OPTIONS}"
     commands:
       # fedora:40 package names (verified in a fedora:40 container, gg2):
       # clang-format ships in clang-tools-extra; libexif-devel is the
