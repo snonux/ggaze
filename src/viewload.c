@@ -318,6 +318,15 @@ _load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    ViewLoad   *p_vl  = p_ctx->p_vl;
    GError     *p_err = NULL;
    GdkTexture *p_tex = loader_load_finish(p_res, &p_err);
+   /* GTask's default check-cancellable already turns a result that lost
+    * the race with a cancel into CANCELLED; checking the load's own
+    * cancellable too keeps a superseded same-file load's older pixels off
+    * the screen and out of the cache even if that default ever changes. */
+   if (p_tex != NULL && g_cancellable_is_cancelled(p_ctx->p_cancel)) {
+      g_clear_object(&p_tex);
+      p_err =
+         g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, "superseded");
+   }
    if (p_tex == NULL) {
       if (!g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED) &&
           _is_current(p_vl, p_ctx->p_file)) {
@@ -375,9 +384,10 @@ viewload_load_current(ViewLoad *p_vl) {
       return;
    }
    /* Cache miss: one active load -- cancel the previous, start a new one.
-    * Last-write-wins is enforced in the progress and finish callbacks via
-    * the LoadCtx's source GFile, and for partials also via the load's own
-    * cancellable, which the cancel here marks superseded. */
+    * Last-write-wins is enforced in the progress and finish callbacks by
+    * both the LoadCtx's source GFile and the load's own cancellable, which
+    * the cancel here marks superseded (a same-file reload keeps the file
+    * current, so only the cancellable tells the old load apart). */
    _restart_visible_cancel(p_vl);
    LoadCtx *p_ctx = _load_ctx_new(p_vl, p_cur, &t_stamp, p_vl->p_cancel);
    loader_load_async(p_cur, p_vl->p_cancel, _load_progress_cb, p_ctx,

@@ -395,8 +395,10 @@ test_stale_partial_after_same_file_reload(void) {
    load_current_on(p_vl, p_old); /* a.jpg, the soon-stale load */
    wait_pending(p_old);
    viewload_load_current(p_vl); /* a.jpg again: still a miss, new load */
-   drain(p_old);
+   guint u_shows = st_h.u_shows;
+   drain(p_old); /* its partial AND its full result are both superseded */
    g_assert_cmpuint(st_h.u_partials, ==, 0);
+   g_assert_cmpuint(st_h.u_shows, ==, u_shows);
 
    /* The new load itself still shows its partial and then the full
     * decode, which is what ends up on screen. */
