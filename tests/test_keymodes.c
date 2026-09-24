@@ -334,9 +334,13 @@ test_caps_lock(void) {
       "win.last");
    g_assert_cmpstr(shortcuts_global_action(GDK_KEY_G, GDK_LOCK_MASK), ==,
                    "win.first");
-   /* 7i2: `u` with Caps Lock (`U` + Lock) is undo, not redo; Shift+u under
-    * Caps Lock is redo in whichever case it arrives; Ctrl+z + Lock is
-    * undo. */
+}
+
+/* 7i2: `u` with Caps Lock (`U` + Lock) is undo, not redo; Shift+u under
+ * Caps Lock is redo in whichever case it arrives; Ctrl+z + Lock is undo;
+ * outside the panel `U` + Lock is the file undo. */
+static void
+test_caps_lock_edit_undo(void) {
    g_assert_cmpstr(
       shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_U, GDK_LOCK_MASK), ==,
       "win.edit-undo");
@@ -439,6 +443,7 @@ main(int i_argc, char **c_argv) {
                    test_button_keys_and_titles);
    g_test_add_func("/keymodes/hint_preset_count", test_hint_preset_count);
    g_test_add_func("/keymodes/caps_lock", test_caps_lock);
+   g_test_add_func("/keymodes/caps_lock_edit_undo", test_caps_lock_edit_undo);
    g_test_add_func("/keymodes/menu_labels", test_menu_labels);
    return (g_test_run());
 }

@@ -6057,6 +6057,30 @@ add_tool_tests(void) {
                    test_tool_abandoned_on_navigation_and_view_change);
 }
 
+/* 7i2: undo / redo of edit steps in the open panel. */
+static void
+add_edit_undo_tests(void) {
+   g_test_add_func("/enhance_flow/undo_redo_a_preset", test_undo_redo_a_preset);
+   g_test_add_func("/enhance_flow/undo_redo_chords_buttons_and_cards",
+                   test_undo_redo_chords_buttons_and_cards);
+   g_test_add_func("/enhance_flow/undo_redo_a_quarter_turn",
+                   test_undo_redo_a_quarter_turn);
+   g_test_add_func("/enhance_flow/undo_redo_a_crop", test_undo_redo_a_crop);
+   g_test_add_func("/enhance_flow/undo_redo_a_straighten",
+                   test_undo_redo_a_straighten);
+   g_test_add_func("/enhance_flow/undo_under_a_tool", test_undo_under_a_tool);
+   g_test_add_func("/enhance_flow/undo_brings_back_a_revert",
+                   test_undo_brings_back_a_revert);
+   g_test_add_func("/enhance_flow/undo_to_the_saved_state_is_clean",
+                   test_undo_to_the_saved_state_is_clean);
+   g_test_add_func("/enhance_flow/navigation_clears_the_history",
+                   test_navigation_clears_the_history);
+   g_test_add_func("/enhance_flow/discard_clears_the_history",
+                   test_discard_clears_the_history);
+   g_test_add_func("/enhance_flow/u_outside_the_panel_undoes_a_trash",
+                   test_u_outside_the_panel_undoes_a_trash);
+}
+
 /* wb2 review round: the crop tool's preview override, the saved pair, the
  * drag guard, render coalescing, a crop following the base, and the tools'
  * capture-phase key controller. */
@@ -6090,26 +6114,6 @@ add_tool_review_tests(void) {
                    test_hidden_panel_in_the_grid_is_inert);
    g_test_add_func("/enhance_flow/closing_the_panel_cancels_the_tool",
                    test_closing_the_panel_cancels_the_tool);
-   /* 7i2: undo / redo of edit steps in the open panel. */
-   g_test_add_func("/enhance_flow/undo_redo_a_preset", test_undo_redo_a_preset);
-   g_test_add_func("/enhance_flow/undo_redo_chords_buttons_and_cards",
-                   test_undo_redo_chords_buttons_and_cards);
-   g_test_add_func("/enhance_flow/undo_redo_a_quarter_turn",
-                   test_undo_redo_a_quarter_turn);
-   g_test_add_func("/enhance_flow/undo_redo_a_crop", test_undo_redo_a_crop);
-   g_test_add_func("/enhance_flow/undo_redo_a_straighten",
-                   test_undo_redo_a_straighten);
-   g_test_add_func("/enhance_flow/undo_under_a_tool", test_undo_under_a_tool);
-   g_test_add_func("/enhance_flow/undo_brings_back_a_revert",
-                   test_undo_brings_back_a_revert);
-   g_test_add_func("/enhance_flow/undo_to_the_saved_state_is_clean",
-                   test_undo_to_the_saved_state_is_clean);
-   g_test_add_func("/enhance_flow/navigation_clears_the_history",
-                   test_navigation_clears_the_history);
-   g_test_add_func("/enhance_flow/discard_clears_the_history",
-                   test_discard_clears_the_history);
-   g_test_add_func("/enhance_flow/u_outside_the_panel_undoes_a_trash",
-                   test_u_outside_the_panel_undoes_a_trash);
    g_test_add_func("/enhance_flow/tool_key_controller_claims_keys_only_active",
                    test_tool_key_controller_claims_keys_only_while_active);
    /* zb2: the touch swipe goes through the same gate and tool rules. */
@@ -6914,6 +6918,7 @@ main(int i_argc, char **c_argv) {
    add_dispose_prompt_tests();
    add_tool_tests();
    add_tool_review_tests();
+   add_edit_undo_tests();
    add_tool_review2_tests();
    add_tool_review3_tests();
    add_tool_review4_tests();
