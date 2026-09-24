@@ -160,31 +160,57 @@ test_key_labels(void) {
    }
 }
 
+/* A hint line with its key/label joins (U+00A0, so a wrapped bar never
+ * splits a key from its label) read as plain spaces, for comparing whole
+ * lines; test_hint_nbsp checks the joins themselves. */
+static char *
+hint(GgazeKeyMode e_mode, guint u_n, gboolean b_markup) {
+   char *c_raw = shortcuts_hint_for_mode(e_mode, u_n, b_markup);
+   if (c_raw == NULL) {
+      return (NULL);
+   }
+   char **c_parts = g_strsplit(c_raw, "\u00a0", -1);
+   char  *c_out   = g_strjoinv(" ", c_parts);
+   g_strfreev(c_parts);
+   g_free(c_raw);
+   return (c_out);
+}
+
+/* Every key is glued to its label by a no-break space, and only there: the
+ * " · " separators stay breakable. */
+static void
+test_hint_nbsp(void) {
+   char *c_raw = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, 8, FALSE);
+   g_assert_true(g_str_has_prefix(c_raw, "h/j/k/l\u00a0move  ·  "));
+   g_assert_nonnull(g_strstr_len(c_raw, -1, "Esc\u00a0cancel"));
+   g_free(c_raw);
+}
+
 /* The three hint bars, word for word: the order, the merging (a digit run
  * as a range, a shared modifier said once, a/Esc joined) and the labels. */
 static void
 test_hint_lines(void) {
-   char *c_panel = shortcuts_hint_for_mode(GGAZE_KEY_MODE_PANEL, 8, FALSE);
+   char *c_panel = hint(GGAZE_KEY_MODE_PANEL, 8, FALSE);
    g_assert_cmpstr(c_panel, ==,
                    "1–8 presets  ·  c crop  ·  r straighten  "
                    "·  [/] rotate  ·  s save copy  ·  "
                    "x revert  ·  Space hold: original  ·  "
                    "a/Esc close");
    g_free(c_panel);
-   char *c_crop = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, 8, FALSE);
+   char *c_crop = hint(GGAZE_KEY_MODE_CROP, 8, FALSE);
    g_assert_cmpstr(c_crop, ==,
                    "h/j/k/l move  ·  Shift+h/j/k/l grow  ·  "
                    "Ctrl+h/j/k/l shrink  ·  a aspect  ·  "
                    "Enter apply  ·  Esc cancel");
    g_free(c_crop);
-   char *c_str = shortcuts_hint_for_mode(GGAZE_KEY_MODE_STRAIGHTEN, 8, FALSE);
+   char *c_str = hint(GGAZE_KEY_MODE_STRAIGHTEN, 8, FALSE);
    g_assert_cmpstr(c_str, ==,
                    "h/l/-/+ nudge ½°  ·  a auto-crop  "
                    "·  Enter apply  ·  Esc cancel");
    g_free(c_str);
-   g_assert_null(shortcuts_hint_for_mode(GGAZE_KEY_MODE_NONE, 8, FALSE));
+   g_assert_null(hint(GGAZE_KEY_MODE_NONE, 8, FALSE));
    /* Markup: the keys in bold, the text escaped ("<" never appears raw). */
-   char *c_markup = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, 8, TRUE);
+   char *c_markup = hint(GGAZE_KEY_MODE_CROP, 8, TRUE);
    g_assert_true(g_str_has_prefix(c_markup, "<b>h/j/k/l</b> move"));
    g_free(c_markup);
 }
@@ -207,16 +233,15 @@ test_hint_preset_count(void) {
       {0, "c crop  ·  r straighten"},
    };
    for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
-      char *c_line =
-         shortcuts_hint_for_mode(GGAZE_KEY_MODE_PANEL, CASES[u].u_n, FALSE);
+      char *c_line = hint(GGAZE_KEY_MODE_PANEL, CASES[u].u_n, FALSE);
       if (!g_str_has_prefix(c_line, CASES[u].c_prefix)) {
          g_error("%u presets: \"%s\"", CASES[u].u_n, c_line);
       }
       g_free(c_line);
    }
    /* The tools' lines have no digits to trim. */
-   char *c_a = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, 0, FALSE);
-   char *c_b = shortcuts_hint_for_mode(GGAZE_KEY_MODE_CROP, 8, FALSE);
+   char *c_a = hint(GGAZE_KEY_MODE_CROP, 0, FALSE);
+   char *c_b = hint(GGAZE_KEY_MODE_CROP, 8, FALSE);
    g_assert_cmpstr(c_a, ==, c_b);
    g_free(c_a);
    g_free(c_b);
@@ -349,6 +374,7 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/keymodes/crop_ops", test_crop_ops);
    g_test_add_func("/keymodes/straighten_ops", test_straighten_ops);
    g_test_add_func("/keymodes/key_labels", test_key_labels);
+   g_test_add_func("/keymodes/hint_nbsp", test_hint_nbsp);
    g_test_add_func("/keymodes/hint_lines", test_hint_lines);
    g_test_add_func("/keymodes/button_keys_and_titles",
                    test_button_keys_and_titles);

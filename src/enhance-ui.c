@@ -371,5 +371,7 @@ enhance_ui_set_save_target(GtkWidget *p_target, const char *c_name) {
    char *c_text =
       c_name != NULL ? g_strdup_printf("as %s", c_name) : g_strdup("");
    gtk_label_set_text(GTK_LABEL(p_target), c_text);
+   /* The label middle-ellipsizes a long name; the tooltip has all of it. */
+   gtk_widget_set_tooltip_text(p_target, c_name);
    g_free(c_text);
 }

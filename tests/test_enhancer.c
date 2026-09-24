@@ -1073,7 +1073,7 @@ test_user_graph_presets(void) {
 
    /* The title suffix names the enabled presets, capped at the 8-bit mask. */
    char *c_desc = enhancer_describe_mask(p_presets, 0x03);
-   g_assert_cmpstr(c_desc, ==, "Auto-fix,Brightness");
+   g_assert_cmpstr(c_desc, ==, "Auto-fix, Brightness");
    g_free(c_desc);
    g_assert_null(enhancer_describe_mask(p_presets, 0));
 

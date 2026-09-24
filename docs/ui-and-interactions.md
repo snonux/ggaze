@@ -142,7 +142,7 @@ drift from the live bindings.
 | `m`            | move marks (or current) → destination popup |
 | `e`            | open current image in an external program → popup |
 | `!`            | run a shell script → popup (e.g. `usbimport`) |
-| `a`            | open / close the **edit panel** beside the image (GEGL) — presets, crop, straighten, rotate, save, revert |
+| `a`            | open / close the **edit panel** beside the image (GEGL) — presets, crop, straighten, rotate, save, revert; in the grid, where an open panel is hidden, `a` goes back to the large view and shows it (it never closes a panel you cannot see) |
 | `1`–`8`        | toggle preset N (layered) — **only while the edit panel is open and on screen** (large view); with it closed, or hidden beside the grid, a digit does nothing |
 | `c`            | crop tool (GEGL; opens the edit panel first): rectangle overlay; `Enter` applies, `Esc` cancels — see "Crop, straighten & rotate tools" |
 | `r`            | straighten tool (GEGL; opens the edit panel first): horizon drag / `h` `l` nudge ±0.5°, `a` auto-crop; `Enter` / `Esc` |

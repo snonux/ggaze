@@ -233,7 +233,7 @@ enhancer_describe_mask(const GPtrArray *p_presets, guint8 u_mask) {
       }
       const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_presets, u);
       if (p_str->len > 0) {
-         g_string_append_c(p_str, ',');
+         g_string_append(p_str, ", ");
       }
       g_string_append(p_str, p_pr->c_name);
    }

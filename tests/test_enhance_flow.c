@@ -4147,6 +4147,20 @@ test_crop_shift_and_ctrl_move_every_side(void) {
    tool_fx_close(&fx);
 }
 
+/* The hint bar's text with its key/label joins (U+00A0) read as spaces. */
+static char *
+plain_hint(GgazeWindow *p_win) {
+   char *c_raw = ggaze_window_get_hint_text(p_win);
+   if (c_raw == NULL) {
+      return (NULL);
+   }
+   char **c_parts = g_strsplit(c_raw, "\u00a0", -1);
+   char  *c_out   = g_strjoinv(" ", c_parts);
+   g_strfreev(c_parts);
+   g_free(c_raw);
+   return (c_out);
+}
+
 /* The key-hint bar follows the key mode: hidden while browsing, the
  * panel's keys while it is open, a tool's while that is up, back to the
  * panel's when the tool ends, hidden in the grid and when the panel
@@ -4155,11 +4169,11 @@ static void
 test_hint_bar_follows_the_mode(void) {
    ToolFx fx;
    tool_fx_open(&fx, FALSE);
-   g_assert_null(ggaze_window_get_hint_text(fx.p_win));
+   g_assert_null(plain_hint(fx.p_win));
    g_assert_cmpint(ggaze_window_get_key_mode(fx.p_win), ==,
                    GGAZE_KEY_MODE_NONE);
    fire(fx.p_win, "win.enhance");
-   char *c_hint = ggaze_window_get_hint_text(fx.p_win);
+   char *c_hint = plain_hint(fx.p_win);
    g_assert_true(g_str_has_prefix(c_hint, "Edit: 1–8 presets"));
    g_assert_nonnull(g_strstr_len(c_hint, -1, "x revert"));
    g_assert_nonnull(g_strstr_len(c_hint, -1, "a/Esc close"));
@@ -4167,28 +4181,28 @@ test_hint_bar_follows_the_mode(void) {
    fire(fx.p_win, "win.crop");
    g_assert_cmpint(ggaze_window_get_key_mode(fx.p_win), ==,
                    GGAZE_KEY_MODE_CROP);
-   c_hint = ggaze_window_get_hint_text(fx.p_win);
+   c_hint = plain_hint(fx.p_win);
    g_assert_true(g_str_has_prefix(c_hint, "Crop: h/j/k/l move"));
    g_assert_nonnull(g_strstr_len(c_hint, -1, "Ctrl+h/j/k/l shrink"));
    g_free(c_hint);
    tool_key(fx.p_win, GDK_KEY_Escape);
-   c_hint = ggaze_window_get_hint_text(fx.p_win);
+   c_hint = plain_hint(fx.p_win);
    g_assert_true(g_str_has_prefix(c_hint, "Edit: "));
    g_free(c_hint);
    fire(fx.p_win, "win.straighten");
-   c_hint = ggaze_window_get_hint_text(fx.p_win);
+   c_hint = plain_hint(fx.p_win);
    g_assert_true(g_str_has_prefix(c_hint, "Straighten: h/l/-/+ nudge"));
    g_assert_nonnull(g_strstr_len(c_hint, -1, "a auto-crop"));
    g_free(c_hint);
    tool_key(fx.p_win, GDK_KEY_Return);
    fire(fx.p_win, "win.toggle-view"); /* grid: no bar */
-   g_assert_null(ggaze_window_get_hint_text(fx.p_win));
+   g_assert_null(plain_hint(fx.p_win));
    fire(fx.p_win, "win.toggle-view"); /* large again: the panel's */
-   c_hint = ggaze_window_get_hint_text(fx.p_win);
+   c_hint = plain_hint(fx.p_win);
    g_assert_true(g_str_has_prefix(c_hint, "Edit: "));
    g_free(c_hint);
    fire(fx.p_win, "win.back"); /* closes the panel */
-   g_assert_null(ggaze_window_get_hint_text(fx.p_win));
+   g_assert_null(plain_hint(fx.p_win));
    tool_fx_close(&fx);
 }
 
@@ -4254,8 +4268,12 @@ test_hidden_panel_in_the_grid_is_inert(void) {
    fire(fx.p_win, "win.back"); /* Esc: the grid's chain, not the panel */
    g_assert_true(find_panel(fx.p_win) == p_panel);
    g_assert_true(g_str_has_prefix(status_text(fx.p_win), "Press Esc again"));
-   fire(fx.p_win, "win.toggle-view"); /* large again: the panel is back */
+   fire(fx.p_win, "win.enhance"); /* `a`: shows the panel, never closes it */
    ggtest_drain_main(200);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(fx.p_win)), ==,
+      "large");
+   g_assert_true(find_panel(fx.p_win) == p_panel);
    g_assert_true(gtk_widget_get_visible(p_slot));
    g_assert_cmpint(ggaze_window_get_key_mode(fx.p_win), ==,
                    GGAZE_KEY_MODE_PANEL);

@@ -684,11 +684,11 @@ _append_segment(GString *p_out, const GPtrArray *p_seg, gboolean b_markup) {
    if (b_markup) {
       char *c_k = g_markup_escape_text(c_keys, -1);
       char *c_l = g_markup_escape_text(c_label, -1);
-      g_string_append_printf(p_out, "<b>%s</b> %s", c_k, c_l);
+      g_string_append_printf(p_out, "<b>%s</b>\u00a0%s", c_k, c_l);
       g_free(c_k);
       g_free(c_l);
    } else {
-      g_string_append_printf(p_out, "%s %s", c_keys, c_label);
+      g_string_append_printf(p_out, "%s\u00a0%s", c_keys, c_label);
    }
    g_free(c_keys);
 }

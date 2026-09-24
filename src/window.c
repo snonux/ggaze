@@ -1455,6 +1455,13 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       return;
    }
    if (enhance_ctrl_is_open(p_win->p_enhance_ctrl) &&
+       _get_view(p_win) != GGAZE_VIEW_LARGE) {
+      /* The panel is only hidden with the grid. `a` means "the edit
+       * panel", so show it (as `t` would) rather than close it unseen. */
+      _enter_large_from_grid(p_win);
+      return;
+   }
+   if (enhance_ctrl_is_open(p_win->p_enhance_ctrl) &&
        tool_ctrl_get_tool(p_win->p_tool_ctrl) != GGAZE_TOOL_NONE) {
       tool_ctrl_cancel(p_win->p_tool_ctrl);
    }
