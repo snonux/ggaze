@@ -49,7 +49,7 @@
 14. **Copy to clipboard.** `Ctrl+c` copies the current image (pixels, PNG) —
     or, with marks, the marked files (URIs) — to the clipboard, so it can be
     pasted into other apps (Katogram, GIMP, file managers) like gthumb.
-15. **Crop, straighten & rotate.** `c`, `R`, and `[`/`]` are non-destructive
+15. **Crop, straighten & rotate.** `c`, `r`, and `[`/`]` are non-destructive
     GEGL tools for cropping, leveling the horizon, and 90° rotation; `s`
     exports the result, the original is never modified. GEGL is optional.
 16. **Compare before/after.** Hold `Space` to flash the original image;

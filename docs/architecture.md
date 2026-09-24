@@ -80,8 +80,11 @@ ggaze
   navigator cursor in sync so switching grid↔large preserves position. Tracks
   the enhance "dirty" flag and gates navigation on it (prompt
   Save/Discard/Cancel when an un-exported enhance preview is active). Routes
-  the `c`/`R`/`[`/`]` tool actions to `tool-ctrl` / `enhance-ctrl` and claims
-  a tool's modal keys ahead of the global shortcut table. Has a
+  the `c`/`r`/`[`/`]` tool actions to `tool-ctrl` / `enhance-ctrl` (opening
+  the edit panel first) and hands every key press to `edit-mode` first,
+  which offers it to the active tool, then to the open panel, ahead of the
+  global shortcut table (the modal edit keys, decision #49); it packs
+  `edit-mode`'s key-hint bar under the large view. Has a
   `GtkDropTarget` accepting dropped files/folders (open them).
 - **viewer** — the *large* view. Pure display widget. Takes a `GdkTexture`
   (or `GtkSnapshot` paintable). Owns zoom level, pan offset, fit mode. Draws
