@@ -65,7 +65,8 @@ env -u WAYLAND_DISPLAY XDG_RUNTIME_DIR=$(mktemp -d) \
 
 **Use that form for day-to-day local runs, not just for reproducing CI.**
 Several suites present real toplevels — `test_grid_select_gate`,
-`test_settings_ui`, `test_delete_safety`, `test_enhance_flow` (5 sites) and
+`test_settings_ui`, `test_delete_safety`, `test_enhance_flow` (several
+sites), `test_gestures` (every fixture) and
 `/open_external/popup_really_maps` (`grep -rn gtk_window_present tests/` for
 the current list) — so a run against your live session steals focus and pops
 windows over whatever you are doing.

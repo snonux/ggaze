@@ -184,7 +184,11 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
     viewers do. Over a **fitted** picture a two-finger move whose finger
     distance stays within 10 % keeps it fitted (it has nothing to pan, and
     fit must survive for `0`, a window resize and the swipe); pinching out
-    and back within that 10 % returns to fit. A pinch that starts while
+    and back within that 10 % returns to fit. Past the 10 % the zoom picks
+    up **from the edge of that band**, not from where the fingers began:
+    the first step out is still the fit size and the picture grows (or
+    shrinks) smoothly from there, rather than jumping straight to 110 %
+    (90 %) of fit. A pinch that starts while
     one finger is already dragging takes that drag away where the finger
     is — a pan stops; a crop tool lets go and keeps the rectangle as far as it was dragged; a straighten
     tool drops its horizon line **without levelling** (the line was never
@@ -198,7 +202,12 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
     first. It is **refused** while the picture is zoomed wider than the
     window (the same finger is panning it — zoom out or `0` first) and
     while a crop / straighten tool is up (the tool owns every drag, and a
-    navigation would abandon it). Touch only: a mouse drag still only pans.
+    navigation would abandon it). A flick whose finger was already down
+    when a running slideshow stepped to the next picture turns **no** page
+    when it lands (it was aimed at the picture the slideshow replaced;
+    turning again would skip one); the slideshow keeps running, and the
+    next flick navigates and stops it as usual. Touch only: a mouse drag
+    still only pans.
   - **Two-finger tap** — toggle the info card (`i`). Both fingers down and
     the first one up within 250 ms, the midpoint moving ≤ 20 px and the
     finger distance changing ≤ 10 %; whatever tiny zoom the fingers caused
@@ -211,7 +220,9 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
     A new picture on screen mid-pinch (the slideshow, a preview render) ends
     the pinch: the rest of it neither zooms nor taps; a new picture or
     leaving the large view mid-drag ends that drag the same way (a tool
-    lets go as on a pinch).
+    lets go as on a pinch) — also when the new "picture" is none at all
+    (the view blanked between files): the tool still lets go of the line
+    or the rectangle it held.
 
 ## Zoom behavior
 
