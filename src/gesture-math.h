@@ -13,7 +13,7 @@
  *     2 %..6400 % clamp (raised to the fit ratio, jx0) and the non-finite
  *     guard (hx0) in exactly one place;
  *   - pinch: the zoom a pinch asks for, from the zoom it began at and
- *     GtkGestureZoom's scale factor;
+ *     GtkGestureZoom's scale factor, and the fit detent's rebased scale;
  *   - swipe: whether a one-finger touch drag was a deliberate horizontal
  *     flick, and which way;
  *   - two-finger tap: whether a two-touch gesture was a short tap rather
@@ -89,6 +89,18 @@ gboolean gesture_math_zoom_about(const GestureView *p_view, gdouble d_cx,
  * gesture_math_zoom_about does that. */
 gboolean gesture_math_pinch_zoom(gdouble d_start_zoom, gdouble d_scale,
                                  gdouble *p_zoom);
+
+/* The fit detent (zb2): a pinch that began over a FITTED picture holds it
+ * at fit while |d_scale - 1| <= GESTURE_TAP_MAX_SCALE_DEV (a two-finger
+ * pan reports such scales). Outside that band it zooms by the scale
+ * measured from the band edge it crossed -- d_scale / (1 + band) out,
+ * d_scale / (1 - band) in -- so the first zoom past the edge is the fit
+ * zoom itself and the zoom is continuous, rather than jumping straight to
+ * 1.1x fit. Returns that scale for the caller to hand to
+ * gesture_math_pinch_zoom: 1.0 inside the band, and d_scale unchanged
+ * when it is non-finite (pinch_zoom refuses it, and a zero or negative
+ * scale stays zero or negative, refused alike). */
+gdouble gesture_math_detent_scale(gdouble d_scale);
 
 /* Classify a finished one-finger touch drag that moved (d_dx, d_dy) px and
  * ended at velocity (d_vx, d_vy) px/s: +1 for a leftward flick (the next

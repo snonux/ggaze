@@ -664,7 +664,8 @@ _crop_revert(ToolCtrl *p_tc) {
  * land. It re-derives nothing, since its point is the last UPDATE's. A
  * REVERT after it (the pinch was a two-finger tap, so the drag was only
  * its first finger's jitter) puts back the rectangle the drag grabbed
- * (_crop_revert). */
+ * (_crop_revert). CANCEL and REVERT read neither p_g nor the point: they
+ * arrive with p_g NULL (_drag_release) when the viewer has no picture. */
 static void
 _crop_drag(ToolCtrl *p_tc, const GgazeViewerGeom *p_g,
            GgazeViewerDragPhase e_phase, gdouble d_ix, gdouble d_iy) {
@@ -980,11 +981,32 @@ tool_ctrl_key(ToolCtrl *p_tc, guint u_keyval, GdkModifierType e_state) {
    return (_straighten_key(p_tc, u_keyval));
 }
 
+/* CANCEL / REVERT (viewer.h): let go of whatever the drag held -- the crop
+ * grab (and, on REVERT, the rectangle it grabbed), the straighten line.
+ * Neither reads a point or the geometry, so they are handled before the
+ * geometry guard in tool_ctrl_drag: the viewer CANCELs a drag when a new
+ * texture is set, which may be NULL (nothing to map the point through),
+ * and a CANCEL dropped there left the straighten line or the crop grab
+ * live for a stray END / UPDATE to act on. */
+static void
+_drag_release(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase) {
+   if (p_tc->e_tool == GGAZE_TOOL_CROP) {
+      _crop_drag(p_tc, NULL, e_phase, 0.0, 0.0);
+   } else {
+      _straighten_drag(p_tc, e_phase, 0.0, 0.0);
+   }
+}
+
 void
 tool_ctrl_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_x,
                gdouble d_y) {
    g_return_if_fail(p_tc != NULL);
    if (p_tc->e_tool == GGAZE_TOOL_NONE) {
+      return;
+   }
+   if (e_phase == GGAZE_VIEWER_DRAG_CANCEL ||
+       e_phase == GGAZE_VIEWER_DRAG_REVERT) {
+      _drag_release(p_tc, e_phase);
       return;
    }
    GgazeViewer    *p_v = _viewer(p_tc);

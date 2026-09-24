@@ -1773,6 +1773,12 @@ _slideshow_tick(gpointer p_data) {
          enhance_ctrl_discard(p_win->p_enhance_ctrl);
       }
 #endif
+      /* A flick in progress was aimed at the picture being replaced: when
+       * it lands it must not turn the page again from the next one, which
+       * would skip an image (viewer.h ggaze_viewer_spoil_swipe). The
+       * slideshow keeps running; a swipe that starts after this tick
+       * navigates -- and stops it -- as ever. */
+      ggaze_viewer_spoil_swipe(GGAZE_VIEWER(p_win->p_viewer));
       navigator_next(p_win->p_nav);
    }
    return (G_SOURCE_CONTINUE);

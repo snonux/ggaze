@@ -26,8 +26,11 @@
  * swallows the rest of either; a leftward swipe shows the next image and a
  * rightward one the previous, while a vertical, tiny or zero-velocity
  * swipe, a swipe over a zoomed-in picture, a swipe with a tool overlay
- * installed and a swipe a pinch spoiled navigate nowhere; a swipe or a
+ * installed and a swipe a pinch or a slideshow step spoiled navigate
+ * nowhere; a swipe or a
  * navigate-mode wheel notch stops a running slideshow, as l / h do; a
+ * pinch over a fitted picture holds it at fit within the tap's wobble and
+ * zooms on continuously (no jump) past that band; a
  * two-finger tap toggles the info card and leaves the view as it was
  * before its first finger went down, a long or moving one, a touchpad
  * pinch and one cut short by a new texture or an unmap do not. The
@@ -45,6 +48,7 @@
 
 #include "gesture-math.h"
 #include "gtk_helpers.h"
+#include "settings.h"
 #include "temp_dir.h"
 #include "viewer.h"
 #include "wait_until.h"
@@ -61,6 +65,11 @@
 #define A_H 800
 #define B_W 1000
 #define B_H 800
+
+/* The zoom factor a pinch that began over a FITTED picture ends up at for
+ * a GtkGestureZoom scale d_s past the fit detent's upper edge: measured
+ * from that edge (gesture_math_detent_scale), not from 1. */
+#define DETENT_OUT(d_s) ((d_s) / (1.0 + GESTURE_TAP_MAX_SCALE_DEV))
 
 /* 2 s (scaled) for a card or a navigation to land. */
 #define WAIT_US (2 * G_TIME_SPAN_SECOND)
@@ -149,10 +158,11 @@ controller_of(GgazeViewer *p_v, GType p_type) {
 
 /* --- pinch --------------------------------------------------------------- */
 
-/* A pinch at an off-centre midpoint doubles the scale and keeps the image
- * pixel under the midpoint where it was (cursor-centred like the wheel,
+/* A pinch at an off-centre midpoint zooms and keeps the image pixel under
+ * the midpoint where it was (cursor-centred like the wheel,
  * docs/ui-and-interactions.md "Zoom behavior"); the update is absolute
- * from the begin scale, and a moved midpoint zooms about the new one. */
+ * from the begin scale (measured from the fit detent's edge, as the pinch
+ * began fitted), and a moved midpoint zooms about the new one. */
 static void
 test_pinch_zooms_about_the_midpoint(void) {
    GestureFx fx;
@@ -163,8 +173,9 @@ test_pinch_zooms_about_the_midpoint(void) {
    ggaze_viewer_pinch_begin(fx.p_viewer, 150.0, 120.0, FALSE);
    ggaze_viewer_pinch_update(fx.p_viewer, 1.5, 150.0, 120.0);
    ggaze_viewer_pinch_update(fx.p_viewer, 2.0, 150.0, 120.0);
-   g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.0 * d_fit), <,
-                     1e-9);
+   g_assert_cmpfloat(
+      fabs(ggaze_viewer_get_scale(fx.p_viewer) - DETENT_OUT(2.0) * d_fit), <,
+      1e-9);
    image_point_at(fx.p_viewer, 150.0, 120.0, &d_ix1, &d_iy1);
    g_assert_cmpfloat(fabs(d_ix1 - d_ix0), <, 1e-6);
    g_assert_cmpfloat(fabs(d_iy1 - d_iy0), <, 1e-6);
@@ -176,8 +187,9 @@ test_pinch_zooms_about_the_midpoint(void) {
    g_assert_cmpfloat(fabs(d_iy1 - d_iy0), <, 1e-6);
    /* A real pinch, not a tap: no info card toggle, the zoom stays. */
    g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
-   g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.5 * d_fit), <,
-                     1e-9);
+   g_assert_cmpfloat(
+      fabs(ggaze_viewer_get_scale(fx.p_viewer) - DETENT_OUT(2.5) * d_fit), <,
+      1e-9);
    fx_close(&fx);
 }
 
@@ -236,6 +248,52 @@ test_two_finger_pan_keeps_fit(void) {
    g_assert_cmpint(ggaze_viewer_swipe(fx.p_viewer, -200.0, 10.0, -900.0, 0.0),
                    ==, 1);
    GGTEST_WAIT_FOR_TEXTURE(fx.p_win, B_W, B_H);
+   fx_close(&fx);
+}
+
+/* Leaving the fit detent is continuous (zb2 third review): the first
+ * frame just past either edge of the band is the fit zoom itself, not
+ * 1.1x (or 0.9x) fit, and further out the zoom grows from that edge.
+ * Pinching back into the band snaps to fit, seamlessly. */
+static void
+test_leaving_the_fit_detent_does_not_jump(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   gdouble       d_fit  = ggaze_viewer_get_scale(fx.p_viewer);
+   const gdouble d_edge = 1.0 + GESTURE_TAP_MAX_SCALE_DEV;
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, d_edge + 1e-6, 300.0, 200.0);
+   gdouble d_first = ggaze_viewer_get_scale(fx.p_viewer);
+   g_assert_cmpfloat(d_first, >, d_fit);
+   g_assert_cmpfloat(fabs(d_first / d_fit - 1.0), <, 1e-5);
+   ggaze_viewer_pinch_update(fx.p_viewer, 2.0 * d_edge, 300.0, 200.0);
+   g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.0 * d_fit), <,
+                     1e-9);
+   ggaze_viewer_pinch_update(fx.p_viewer, d_edge - 1e-6, 300.0, 200.0);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, d_fit);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   /* Pinching in: the lower edge, symmetrically. */
+   const gdouble d_low = 1.0 - GESTURE_TAP_MAX_SCALE_DEV;
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, d_low - 1e-6, 300.0, 200.0);
+   d_first = ggaze_viewer_get_scale(fx.p_viewer);
+   g_assert_cmpfloat(d_first, <, d_fit);
+   g_assert_cmpfloat(fabs(d_first / d_fit - 1.0), <, 1e-5);
+   ggaze_viewer_pinch_update(fx.p_viewer, 0.5 * d_low, 300.0, 200.0);
+   g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 0.5 * d_fit), <,
+                     1e-9);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   /* Negative: a pinch that began zoomed (not fitted) has no detent and
+    * zooms by the raw scale from its first frame. At 0.5x fit now:
+    * the first toggle fits, the second goes to 100 %. */
+   ggaze_viewer_toggle_fit_100(fx.p_viewer);
+   ggaze_viewer_toggle_fit_100(fx.p_viewer);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, 1.0);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.05, 300.0, 200.0);
+   g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 1.05), <, 1e-9);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.5, 300.0, 200.0); /* no tap */
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
    fx_close(&fx);
 }
 
@@ -333,23 +391,26 @@ test_zoom_controller_drives_the_pinch(void) {
    image_point_at(fx.p_viewer, d_mx, d_my, &d_ix0, &d_iy0);
    g_signal_emit_by_name(p_zoom, "begin", NULL);
    g_signal_emit_by_name(p_zoom, "scale-changed", 2.0);
-   g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.0 * d_fit), <,
-                     1e-9);
+   g_assert_cmpfloat(
+      fabs(ggaze_viewer_get_scale(fx.p_viewer) - DETENT_OUT(2.0) * d_fit), <,
+      1e-9);
    image_point_at(fx.p_viewer, d_mx, d_my, &d_ix1, &d_iy1);
    g_assert_cmpfloat(fabs(d_ix1 - d_ix0), <, 1e-6);
    g_assert_cmpfloat(fabs(d_iy1 - d_iy0), <, 1e-6);
    g_signal_emit_by_name(p_zoom, "end", NULL);
    g_signal_emit_by_name(p_zoom, "scale-changed", 3.0);
-   g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.0 * d_fit), <,
-                     1e-9);
+   g_assert_cmpfloat(
+      fabs(ggaze_viewer_get_scale(fx.p_viewer) - DETENT_OUT(2.0) * d_fit), <,
+      1e-9);
    ggtest_drain_main(100);
    g_assert_false(info_visible(fx.p_win));
    /* A tap through the handlers: on, and the zoom stays what it was. */
    g_signal_emit_by_name(p_zoom, "begin", NULL);
    g_signal_emit_by_name(p_zoom, "end", NULL);
    g_assert_true(ggtest_wait_until(info_visible, fx.p_win, WAIT_US));
-   g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 2.0 * d_fit), <,
-                     1e-9);
+   g_assert_cmpfloat(
+      fabs(ggaze_viewer_get_scale(fx.p_viewer) - DETENT_OUT(2.0) * d_fit), <,
+      1e-9);
    /* Cancelled: no tap, the card stays on. */
    g_signal_emit_by_name(p_zoom, "begin", NULL);
    g_signal_emit_by_name(p_zoom, "cancel", NULL);
@@ -775,6 +836,49 @@ test_swipe_and_wheel_stop_the_slideshow(void) {
    fx_close(&fx);
 }
 
+static void
+count_navigate_cb(GgazeViewer *p_v, gint i_dir, gpointer p_data) {
+   (void)p_v;
+   (void)i_dir;
+   (*(guint *)p_data)++;
+}
+
+/* A slideshow step while a finger is down spoils that swipe (zb2 third
+ * review): the flick was aimed at a.png, and letting it turn the page
+ * again from b.png, which the slideshow put up under it, would skip an
+ * image. The spoil is per touch: the next finger swipes as ever. */
+static void
+test_slideshow_step_spoils_a_swipe(void) {
+   Settings *p_s = settings_new();
+   settings_set_slideshow_delay(p_s, 0.3);
+   GestureFx fx;
+   fx_open(&fx);
+   GtkEventController *p_swipe =
+      controller_of(fx.p_viewer, GTK_TYPE_GESTURE_SWIPE);
+   guint  u_nav = 0;
+   gulong u_id  = g_signal_connect(fx.p_viewer, "navigate",
+                                   G_CALLBACK(count_navigate_cb), &u_nav);
+   ggaze_viewer_swipe_track(fx.p_viewer, TRUE, 400.0, 200.0); /* on a.png */
+   gtk_widget_activate_action(GTK_WIDGET(fx.p_win), "win.slideshow", NULL);
+   GGTEST_WAIT_FOR_TEXTURE(fx.p_win, B_W, B_H); /* the slideshow stepped */
+   gtk_widget_activate_action(GTK_WIDGET(fx.p_win), "win.slideshow", NULL);
+   g_assert_true(status_has(fx.p_win, "Slideshow stopped"));
+   ggaze_viewer_swipe_track(fx.p_viewer, FALSE, 150.0, 205.0);
+   g_signal_emit_by_name(p_swipe, "swipe", -900.0, 0.0);
+   ggtest_drain_main(200);
+   g_assert_cmpuint(u_nav, ==, 0);
+   /* Negative: a fresh finger (a rightward flick) navigates. */
+   ggaze_viewer_swipe_track(fx.p_viewer, TRUE, 150.0, 200.0);
+   ggaze_viewer_swipe_track(fx.p_viewer, FALSE, 400.0, 205.0);
+   g_signal_emit_by_name(p_swipe, "swipe", 900.0, 0.0);
+   g_assert_cmpuint(u_nav, ==, 1);
+   ggtest_drain_main(300);
+   g_signal_handler_disconnect(fx.p_viewer, u_id);
+   fx_close(&fx);
+   g_settings_reset(settings_get_gsettings(p_s), "slideshow-delay");
+   settings_delete(p_s);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -793,6 +897,8 @@ main(int i_argc, char **c_argv) {
                    test_pinch_pans_with_the_midpoint);
    g_test_add_func("/gestures/two_finger_pan_keeps_fit",
                    test_two_finger_pan_keeps_fit);
+   g_test_add_func("/gestures/leaving_the_fit_detent_does_not_jump",
+                   test_leaving_the_fit_detent_does_not_jump);
    g_test_add_func("/gestures/pinch_at_max_zoom_still_pans",
                    test_pinch_at_max_zoom_still_pans);
    g_test_add_func("/gestures/zoom_controller_drives_the_pinch",
@@ -819,5 +925,7 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/gestures/swipe_and_wheel_stop_the_slideshow",
                    test_swipe_and_wheel_stop_the_slideshow);
    g_test_add_func("/gestures/swipe_refusals", test_swipe_refusals);
+   g_test_add_func("/gestures/slideshow_step_spoils_a_swipe",
+                   test_slideshow_step_spoils_a_swipe);
    return (g_test_run());
 }

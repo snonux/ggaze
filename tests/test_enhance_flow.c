@@ -3998,6 +3998,88 @@ test_pinch_in_crop_keeps_the_dragged_rect(void) {
    tool_fx_close(&fx);
 }
 
+/* Take the viewer's picture away and put the same one back: the viewer
+ * CANCELs a drag in progress at the set_texture(NULL), with no geometry
+ * to map a point through. */
+static void
+blank_and_restore_viewer(GgazeViewer *p_v) {
+   GdkTexture *p_shown = g_object_ref(ggaze_viewer_get_texture(p_v));
+   ggaze_viewer_set_texture(p_v, NULL);
+   ggaze_viewer_set_texture(p_v, p_shown);
+   g_object_unref(p_shown);
+}
+
+/* A CANCEL that reaches the straighten tool while the viewer has no
+ * texture still drops the line (zb2 third review: the geometry guard used
+ * to swallow it, so a stray END afterwards levelled by the finger's
+ * jitter). Here the line is (50,100) -> (51,101) in image px when the
+ * picture goes; an END with no BEGIN after it levels nothing. */
+static void
+test_cancel_without_texture_drops_the_line(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.straighten");
+   GgazeViewer    *p_v = large_viewer(fx.p_win);
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   GtkEventController *p_drag   = viewer_drag_gesture(p_v);
+   guint               u_before = ggaze_window_enhance_render_count(fx.p_win);
+   gdouble             d_x0     = g.d_x + 50 * g.d_scale;
+   gdouble             d_y0     = g.d_y + 100 * g.d_scale;
+   g_signal_emit_by_name(p_drag, "drag-begin", d_x0, d_y0);
+   g_signal_emit_by_name(p_drag, "drag-update", g.d_scale, g.d_scale);
+   blank_and_restore_viewer(p_v);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, d_x0 + g.d_scale,
+                          d_y0 + g.d_scale);
+   g_signal_emit_by_name(p_drag, "drag-end", g.d_scale, g.d_scale);
+   ggtest_drain_main(300);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, u_before);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "straighten"));
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   tool_fx_close(&fx);
+}
+
+/* The crop tool on a CANCEL and a REVERT that arrive while the viewer has
+ * no texture: the CANCEL lets go of the corner it grabbed and the REVERT
+ * puts the rectangle back -- so neither the jitter nor a stray UPDATE
+ * afterwards (which, with the grab kept, resized the rectangle) is left on
+ * it (zb2 third review). */
+static void
+test_cancel_without_texture_lets_go_of_the_rect(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.crop");
+   GgazeViewer    *p_v = large_viewer(fx.p_win);
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &g));
+   CropRect t_before, t_after;
+   gint     i_bw, i_bh;
+   g_assert_true(
+      ggaze_window_tool_crop_rect(fx.p_win, &t_before, &i_bw, &i_bh));
+   GtkEventController *p_drag = viewer_drag_gesture(p_v);
+   gdouble             d_cx   = g.d_x + TOOL_W * g.d_scale;
+   gdouble             d_cy   = g.d_y + TOOL_H * g.d_scale;
+   g_signal_emit_by_name(p_drag, "drag-begin", d_cx, d_cy);
+   g_signal_emit_by_name(p_drag, "drag-update", -6.0, -4.0); /* jitter */
+   GdkTexture *p_shown = g_object_ref(ggaze_viewer_get_texture(p_v));
+   ggaze_viewer_set_texture(p_v, NULL); /* the CANCEL */
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_REVERT, d_cx - 6.0,
+                          d_cy - 4.0);
+   ggaze_viewer_set_texture(p_v, p_shown);
+   g_object_unref(p_shown);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_UPDATE, d_cx - 100.0,
+                          d_cy - 80.0);
+   g_signal_emit_by_name(p_drag, "drag-end", -6.0, -4.0);
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_after, &i_bw, &i_bh));
+   g_assert_cmpfloat(t_after.d_x, ==, t_before.d_x);
+   g_assert_cmpfloat(t_after.d_y, ==, t_before.d_y);
+   g_assert_cmpfloat(t_after.d_w, ==, t_before.d_w);
+   g_assert_cmpfloat(t_after.d_h, ==, t_before.d_h);
+   tool_key(fx.p_win, GDK_KEY_Escape);
+   tool_fx_close(&fx);
+}
+
 /* A discard while a tool is up ends the tool BEFORE the transform is reset
  * -- the Original card and `0` with the panel open both go through it --
  * so the straighten session's working angle cannot come back: afterwards
@@ -5140,6 +5222,11 @@ add_tool_review_tests(void) {
                    test_pinch_in_crop_keeps_the_dragged_rect);
    g_test_add_func("/enhance_flow/tap_in_crop_leaves_the_rect",
                    test_tap_in_crop_leaves_the_rect);
+   /* zb2 third review: CANCEL / REVERT reach a tool with no texture. */
+   g_test_add_func("/enhance_flow/cancel_without_texture_drops_the_line",
+                   test_cancel_without_texture_drops_the_line);
+   g_test_add_func("/enhance_flow/cancel_without_texture_lets_go_of_the_rect",
+                   test_cancel_without_texture_lets_go_of_the_rect);
 }
 
 /* wb2 second review round: a discard ends the tool first, the crop tool

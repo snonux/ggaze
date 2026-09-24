@@ -149,6 +149,29 @@ test_pinch_zoom(void) {
    g_assert_false(gesture_math_pinch_zoom(G_MAXDOUBLE, 4.0, &d_z));
 }
 
+/* The fit detent's rebased scale: 1 inside the band, continuous at both
+ * edges (no jump to 1.1x fit), proportional beyond; non-finite passes
+ * through for pinch_zoom to refuse, zero / negative stay refusable. */
+static void
+test_detent_scale(void) {
+   const gdouble d_b = GESTURE_TAP_MAX_SCALE_DEV;
+   g_assert_cmpfloat(gesture_math_detent_scale(1.0), ==, 1.0);
+   g_assert_cmpfloat(gesture_math_detent_scale(1.0 + d_b), ==, 1.0);
+   g_assert_cmpfloat(gesture_math_detent_scale(1.0 - d_b), ==, 1.0);
+   g_assert_cmpfloat(fabs(gesture_math_detent_scale(1.0 + d_b + 1e-9) - 1.0), <,
+                     1e-8);
+   g_assert_cmpfloat(fabs(gesture_math_detent_scale(1.0 - d_b - 1e-9) - 1.0), <,
+                     1e-8);
+   g_assert_cmpfloat(fabs(gesture_math_detent_scale(2.0 * (1.0 + d_b)) - 2.0),
+                     <, 1e-12);
+   g_assert_cmpfloat(fabs(gesture_math_detent_scale(0.5 * (1.0 - d_b)) - 0.5),
+                     <, 1e-12);
+   g_assert_true(isnan(gesture_math_detent_scale(NAN)));
+   g_assert_true(isinf(gesture_math_detent_scale(INFINITY)));
+   g_assert_cmpfloat(gesture_math_detent_scale(0.0), ==, 0.0);
+   g_assert_cmpfloat(gesture_math_detent_scale(-1.0), <, 0.0);
+}
+
 static void
 test_swipe_directions(void) {
    /* Leftward flick = next, rightward = previous. */
@@ -219,6 +242,7 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/gesture_math/zoom_about_rejects_non_finite",
                    test_zoom_about_rejects_non_finite);
    g_test_add_func("/gesture_math/pinch_zoom", test_pinch_zoom);
+   g_test_add_func("/gesture_math/detent_scale", test_detent_scale);
    g_test_add_func("/gesture_math/swipe_directions", test_swipe_directions);
    g_test_add_func("/gesture_math/swipe_rejects", test_swipe_rejects);
    g_test_add_func("/gesture_math/two_finger_tap", test_two_finger_tap);

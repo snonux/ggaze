@@ -75,6 +75,21 @@ gesture_math_pinch_zoom(gdouble d_start_zoom, gdouble d_scale,
    return (isfinite(*p_zoom));
 }
 
+gdouble
+gesture_math_detent_scale(gdouble d_scale) {
+   const gdouble d_band = GESTURE_TAP_MAX_SCALE_DEV;
+   if (!isfinite(d_scale)) {
+      return (d_scale);
+   }
+   if (d_scale > 1.0 + d_band) {
+      return (d_scale / (1.0 + d_band));
+   }
+   if (d_scale < 1.0 - d_band) {
+      return (d_scale / (1.0 - d_band));
+   }
+   return (1.0); /* inside the detent: fit */
+}
+
 gint
 gesture_math_swipe_direction(gdouble d_dx, gdouble d_dy, gdouble d_vx,
                              gdouble d_vy) {

@@ -145,11 +145,12 @@ struct _GgazeViewer {
    ViewState t_pre;    /* the view before the tap's first finger went down
                         * (_snapshot_view), put back after a tap */
    /* Swipe (zb2): where the finger went down and where it is now. */
-   gboolean b_swipe_spoiled; /* a pinch happened during this swipe */
-   gdouble  d_swipe_x0;
-   gdouble  d_swipe_y0;
-   gdouble  d_swipe_x;
-   gdouble  d_swipe_y;
+   gboolean b_swipe_spoiled; /* a pinch or a slideshow step happened
+                              * during this swipe */
+   gdouble d_swipe_x0;
+   gdouble d_swipe_y0;
+   gdouble d_swipe_x;
+   gdouble d_swipe_y;
 };
 
 G_DEFINE_TYPE(GgazeViewer, ggaze_viewer, GTK_TYPE_WIDGET)
@@ -437,8 +438,13 @@ static void _drag_abandon(GgazeViewer *p_v);
  * still reports until its own end -- is ignored (b_drag_dead), since its
  * pan origin and its tap time / wander belong to the old picture or the
  * old mapping, and a pinch that follows starts afresh rather than "from
- * the drag". Safe at window teardown: the window drops the overlay
- * (tool_ctrl_dispose) before its children are unmapped. */
+ * the drag". Safe at window teardown too, and for the opposite reason
+ * one might guess: on GTK 4.22 gtk_window_destroy unmaps the children
+ * FIRST (this runs from ggaze_viewer_unmap) and only then disposes the
+ * window (ggaze_window_dispose -> tool_ctrl_dispose drops the overlay).
+ * So a tool that was mid-drag is still alive and installed at the unmap
+ * and gets its CANCEL like any other; by the time it is torn down the
+ * viewer holds no drag of it. */
 static void
 _gestures_reset(GgazeViewer *p_v) {
    _drag_abandon(p_v);
@@ -676,8 +682,25 @@ _drag_end_cb(GtkGestureDrag *p_gesture, gdouble d_dx, gdouble d_dy,
 }
 
 /* The zoom centre for a scroll event: the pointer position translated into
- * widget space when the event carries one (finite), else the widget centre.
- * See the hx0 note in _scroll_cb for why the fallback is mandatory. */
+ * widget space when the event carries a usable one, else the widget centre.
+ *
+ * hx0: the return value of gdk_event_get_position() is NOT optional here.
+ * A scroll event frequently has no position at all -- on X11 it reports
+ * none for ordinary wheel events -- and GDK then writes NAN to BOTH
+ * out-parameters rather than leaving them untouched. Ignoring the result
+ * therefore did not "keep the centre default": it replaced it with NaN,
+ * which flowed through _zoom_at into d_pan_x/d_pan_y, made _compute_geom
+ * hand ggaze_viewer_snapshot a NaN rect, and left the texture undrawn --
+ * the picture vanished on the FIRST wheel notch. Worse, the NaN persisted
+ * in the pan fields, so every later zoom recomputed NaN from NaN and even
+ * the keyboard could not bring the image back.
+ *
+ * The position, when there is one, is in the SURFACE coordinate space, so
+ * it must be translated into widget space -- otherwise the header bar's
+ * height alone offsets every cursor-centred zoom. The isfinite() check
+ * guards the translated result too: it is the invariant the pan/zoom state
+ * depends on, and it is cheaper to enforce here than to reason about every
+ * arithmetic path downstream. */
 static void
 _event_zoom_centre(GgazeViewer *p_v, GtkEventController *p_ctrl, gdouble *p_cx,
                    gdouble *p_cy) {
@@ -700,38 +723,11 @@ _event_zoom_centre(GgazeViewer *p_v, GtkEventController *p_ctrl, gdouble *p_cx,
    }
 }
 
+/* What one vertical wheel step d_dy does under the configured scroll
+ * behaviour (e_scroll), zooming about (d_cx, d_cy) in zoom mode. TRUE when
+ * the viewer consumed the event. */
 static gboolean
-_scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
-           gpointer p_data) {
-   GgazeViewer *p_v = GGAZE_VIEWER(p_data);
-   if (p_v->p_texture == NULL) {
-      return (FALSE);
-   }
-   (void)d_dx;
-
-   /* Zoom centre: the pointer if the event carries a usable position, else the
-    * widget centre.
-    *
-    * hx0: the return value of gdk_event_get_position() is NOT optional here.
-    * A scroll event frequently has no position at all -- on X11 it reports
-    * none for ordinary wheel events -- and GDK then writes NAN to BOTH
-    * out-parameters rather than leaving them untouched. Ignoring the result
-    * therefore did not "keep the centre default": it replaced it with NaN,
-    * which flowed through _zoom_at into d_pan_x/d_pan_y, made _compute_geom
-    * hand ggaze_viewer_snapshot a NaN rect, and left the texture undrawn --
-    * the picture vanished on the FIRST wheel notch. Worse, the NaN persisted
-    * in the pan fields, so every later zoom recomputed NaN from NaN and even
-    * the keyboard could not bring the image back.
-    *
-    * The position, when there is one, is in the SURFACE coordinate space, so
-    * it must be translated into widget space -- otherwise the header bar's
-    * height alone offsets every cursor-centred zoom. The isfinite() check
-    * guards the translated result too: it is the invariant the pan/zoom state
-    * depends on, and it is cheaper to enforce here than to reason about every
-    * arithmetic path downstream. */
-   gdouble d_cx, d_cy;
-   _event_zoom_centre(p_v, GTK_EVENT_CONTROLLER(p_scroll), &d_cx, &d_cy);
-
+_scroll_dispatch(GgazeViewer *p_v, gdouble d_dy, gdouble d_cx, gdouble d_cy) {
    switch (p_v->e_scroll) {
    case GGAZE_SCROLL_PAN_WHEN_ZOOMED:
       /* Only pan when zoomed in; at fit-to-window the wheel is a no-op so the
@@ -754,6 +750,22 @@ _scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
       (d_dy < 0.0) ? GGAZE_ZOOM_FACTOR : 1.0 / GGAZE_ZOOM_FACTOR;
    _zoom_at(p_v, d_cx, d_cy, _current_scale(p_v) * d_factor);
    return (TRUE);
+}
+
+/* The scroll controller's handler: nothing to do without a picture; else
+ * the zoom centre (_event_zoom_centre, the hx0 rules) and the configured
+ * behaviour (_scroll_dispatch). */
+static gboolean
+_scroll_cb(GtkEventControllerScroll *p_scroll, gdouble d_dx, gdouble d_dy,
+           gpointer p_data) {
+   GgazeViewer *p_v = GGAZE_VIEWER(p_data);
+   (void)d_dx;
+   if (p_v->p_texture == NULL) {
+      return (FALSE);
+   }
+   gdouble d_cx, d_cy;
+   _event_zoom_centre(p_v, GTK_EVENT_CONTROLLER(p_scroll), &d_cx, &d_cy);
+   return (_scroll_dispatch(p_v, d_dy, d_cx, d_cy));
 }
 
 /* --- touch gestures (zb2) ------------------------------------------------ */
@@ -845,7 +857,8 @@ _swipe_update_cb(GtkGesture *p_g, GdkEventSequence *p_seq, gpointer p_data) {
 }
 
 /* The finger lifted with velocity (d_vx, d_vy): judge the whole path --
- * unless a pinch began while it was down (the finger was half of it). */
+ * unless a pinch began while it was down (the finger was half of it) or a
+ * slideshow step changed the picture under it (ggaze_viewer_spoil_swipe). */
 static void
 _swipe_cb(GtkGestureSwipe *p_g, gdouble d_vx, gdouble d_vy, gpointer p_data) {
    GgazeViewer *p_v = GGAZE_VIEWER(p_data);
@@ -1159,7 +1172,8 @@ _pinch_follow(GgazeViewer *p_v, gdouble d_cx, gdouble d_cy) {
 /* TRUE while a pinch that began over a fitted picture has zoomed it by no
  * more than a two-finger tap may wobble (GESTURE_TAP_MAX_SCALE_DEV): the
  * fit detent. A non-finite scale is outside it (and then refused by the
- * zoom, as ever). */
+ * zoom, as ever). Past it the zoom is measured from the band's edge
+ * (gesture_math_detent_scale), so leaving the detent is continuous. */
 static gboolean
 _pinch_in_fit_detent(const GgazeViewer *p_v, gdouble d_scale) {
    return (p_v->t_pinch0.b_fit &&
@@ -1191,12 +1205,19 @@ ggaze_viewer_pinch_update(GgazeViewer *p_viewer, gdouble d_scale, gdouble d_cx,
        * scale a little off 1 on every move, and zooming by it would turn
        * fit off for good (`0`, a resize refit, a swipe all read b_fit).
        * The picture fits: it has nothing to pan, so it stays as the pinch
-       * found it -- also after a pinch out and back. The midpoint is
-       * still tracked, so a real zoom that follows starts from here. */
+       * found it -- also after a pinch out and back into the band, which
+       * snaps back to fit (seamlessly: at the band's edge the rebased
+       * zoom below IS the fit zoom). The midpoint is still tracked, so a
+       * real zoom that follows starts from here. */
       _view_restore(p_viewer, &p_viewer->t_pinch0);
       p_viewer->d_pinch_last_cx = d_cx;
       p_viewer->d_pinch_last_cy = d_cy;
       return;
+   }
+   /* Out of the detent: zoom from its edge, not from 1, or the first
+    * frame outside it would jump from fit straight to 1.1x fit. */
+   if (p_viewer->t_pinch0.b_fit) {
+      d_scale = gesture_math_detent_scale(d_scale);
    }
    gdouble d_zoom;
    if (gesture_math_pinch_zoom(p_viewer->d_pinch_zoom0, d_scale, &d_zoom)) {
@@ -1252,6 +1273,13 @@ ggaze_viewer_swipe_track(GgazeViewer *p_viewer, gboolean b_down, gdouble d_x,
    }
    p_viewer->d_swipe_x = d_x;
    p_viewer->d_swipe_y = d_y;
+}
+
+void
+ggaze_viewer_spoil_swipe(GgazeViewer *p_viewer) {
+   g_return_if_fail(GGAZE_IS_VIEWER(p_viewer));
+   /* ggaze_viewer_swipe_track resets it on the next finger down. */
+   p_viewer->b_swipe_spoiled = TRUE;
 }
 
 /* TRUE when a one-finger horizontal drag pans the picture: zoomed in past

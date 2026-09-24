@@ -230,9 +230,22 @@ gboolean ggaze_viewer_pinch_end(GgazeViewer *p_viewer);
  * in widget px. The GtkGestureSwipe "begin" / "update" handlers call this
  * with the gesture's point; its "swipe" handler then judges the path with
  * ggaze_viewer_swipe below -- unless a pinch began since the finger went
- * down (the finger was half of it). */
+ * down (the finger was half of it) or the swipe was spoiled since
+ * (ggaze_viewer_spoil_swipe: a slideshow step). */
 void ggaze_viewer_swipe_track(GgazeViewer *p_viewer, gboolean b_down,
                               gdouble d_x, gdouble d_y);
+
+/* Spoil the swipe in progress, if any: when its finger lifts it navigates
+ * nowhere; the next finger down starts a fresh one. The window calls this
+ * as the slideshow advances (window.c _slideshow_tick): a flick that began
+ * over one picture must not turn the page again from the picture the
+ * slideshow put up under it, which would skip an image. A set_texture does
+ * not do this itself (unlike a pinch or drag, _gestures_reset): the new
+ * texture of a slideshow step lands only after its decode, so a flick
+ * ending in between would still get through; and textures change for
+ * reasons that are no page turn (an enhance preview render, a reload),
+ * which must not swallow a real swipe. */
+void ggaze_viewer_spoil_swipe(GgazeViewer *p_viewer);
 
 /* Swipe: a finished one-finger touch drag that moved (d_dx, d_dy) px and
  * ended at (d_vx, d_vy) px/s. Emits "navigate" (+1 for a leftward flick =
@@ -240,7 +253,8 @@ void ggaze_viewer_swipe_track(GgazeViewer *p_viewer, gboolean b_down,
  * and emits nothing: not a swipe (gesture_math_swipe_direction), no
  * texture, a tool overlay installed (the crop / straighten tool owns the
  * drag), or the picture zoomed wider than the widget (the finger was
- * panning). A swipe during which a pinch began never gets here. */
+ * panning). A swipe during which a pinch began, or that was spoiled, never
+ * gets here. */
 gint ggaze_viewer_swipe(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy,
                         gdouble d_vx, gdouble d_vy);
 
