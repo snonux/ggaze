@@ -4653,6 +4653,31 @@ test_discard_clears_the_history(void) {
    fixture_teardown(&fx);
 }
 
+/* The slideshow's silent discard throws the history away too. A one-file
+ * folder: the tick's navigator_next is a no-op, so nothing but the
+ * discard could have cleared it (the gate's Discard above is followed by
+ * a navigation that clears it anyway). */
+static void
+test_slideshow_discard_clears_the_history(void) {
+   Settings *p_s = settings_new();
+   settings_set_slideshow_delay(p_s, 0.2);
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   edit_key_and_wait(fx.p_win, GDK_KEY_1, 0);
+   assert_history_buttons(fx.p_win, TRUE, FALSE);
+   fire(fx.p_win, "win.slideshow");
+   ggtest_drain_main(600);          /* at least one tick */
+   fire(fx.p_win, "win.slideshow"); /* stop it */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   assert_history_buttons(fx.p_win, FALSE, FALSE);
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Nothing to undo");
+   g_settings_reset(settings_get_gsettings(p_s), "slideshow-delay");
+   settings_delete(p_s);
+   tool_fx_close(&fx);
+}
+
 /* Outside the panel u is the file undo, exactly as before 7i2: the router
  * leaves it to the global table (win.undo) with the panel closed, while
  * with it open the same key is the edit undo and never restores a trashed
@@ -6077,6 +6102,8 @@ add_edit_undo_tests(void) {
                    test_navigation_clears_the_history);
    g_test_add_func("/enhance_flow/discard_clears_the_history",
                    test_discard_clears_the_history);
+   g_test_add_func("/enhance_flow/slideshow_discard_clears_the_history",
+                   test_slideshow_discard_clears_the_history);
    g_test_add_func("/enhance_flow/u_outside_the_panel_undoes_a_trash",
                    test_u_outside_the_panel_undoes_a_trash);
 }
