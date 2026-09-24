@@ -21,6 +21,8 @@
 
 #if GGAZE_HAVE_GEGL
 #include <gegl.h>
+
+#include "enhancer-gegl.h"
 #endif
 
 struct _GgazeApp {
@@ -50,8 +52,11 @@ ggaze_app_startup(GApplication *p_app) {
    G_APPLICATION_CLASS(ggaze_app_parent_class)->startup(p_app);
 #if GGAZE_HAVE_GEGL
    /* Init GEGL once before any window is created (before the first enhance
-    * call). Idempotent if already initialised. */
+    * call). Idempotent if already initialised. The enhancer reads babl's
+    * tables right after, on this thread, while no GEGL worker can be
+    * writing them (enhancer_babl_ready). */
    gegl_init(NULL, NULL);
+   enhancer_babl_ready();
 #endif
 }
 

@@ -597,7 +597,12 @@ cleanly, so a file reaches them only through:
     encoding in babl's format table, read from babl
     (`enhancer_max_space_name`: 229 with babl's and GEGL's own formats,
     the longest being `CIE LCH(ab) alpha double`; review 7, was a fixed
-    220 that declined smooth type-4 curves on babl 0.1.112). A Rec. 709
+    220 that declined smooth type-4 curves on babl 0.1.112). It is read
+    once, by `enhancer_babl_ready()` right after `gegl_init()` on the main
+    thread (app.c), not per verdict (review 8): babl walks that table
+    without its own lock while a GEGL worker converting in a new space
+    inserts formats into it, and formats registered later reuse existing
+    encodings, so no verdict depends on when it was asked. A Rec. 709
     `para` curve on all three channels names its space in ~220 characters
     with the tests' primaries, a few more in babl 0.1.112 (two spaces
     after a curve's gamma) than in 0.1.128, and the exact length depends
@@ -616,13 +621,26 @@ cleanly, so a file reaches them only through:
     type 3 profile asked after a type 4 one with the same gamma and
     e = f = 0.005 got the type 4 curve, and with the same primaries its
     very space (black converted to 0.005 linear). After the name checks,
-    the enhancer converts 0, 0.02, 0.1, 0.5 and 1 through the space,
-    `R'G'B' float` → `RGB float` (grey: `Y' float` → `Y float`), and
-    compares each channel with the profile's own formula curve
-    (`icc_formula_curve_at`, which mirrors babl's deliberate swaps: a
-    gamma within 0.01 of 1 is linear, a `para` within 0.01 of sRGB's
-    parameters is babl's sRGB curve); off by more than half an 8-bit step
-    anywhere, the profile is declined at the cost of its slot. Table
+    the enhancer converts 64 inputs evenly over [0, 1] plus 1/1024 either
+    side of each channel's own knee (`d` of a type 3 / 4 `para`,
+    `icc_formula_curve_knee`) through the space, `R'G'B' float` →
+    `RGB float` (grey: `Y' float` → `Y float`), and compares each channel
+    with the profile's own formula curve (`icc_formula_curve_at`, which
+    mirrors babl's deliberate swaps: a gamma within 0.01 of 1 is linear, a
+    `para` within 0.01 of sRGB's parameters is babl's sRGB curve); off by
+    more than 4e-4 linear plus 0.1 % of the value at any of those inputs,
+    the profile is declined at the cost of its slot. Review 7's check (five
+    inputs, half an 8-bit step of linear light) missed curves differing
+    only between two knees and offsets under 0.002 — up to ~16 and ~6
+    steps of an 8-bit sRGB display near black (review 8). The tolerance is
+    measured, identically on babl 0.1.112 and 0.1.128: babl's own
+    approximation of a real formula curve is off by at most 3.1e-4 (a type
+    3 `para` of `d` 0 and gamma 1.1–1.2, at black only) and by 7e-5 or less
+    elsewhere; 4e-4 is about one 8-bit sRGB display step at black and finer
+    above, so a swapped curve closer than that still passes, off by at most
+    about that. A curve babl itself approximates worse — a to-linear gamma
+    under 1 with `d` 0, 0.0053 off at black for 0.45 — is declined on any
+    babl. Table
     curves are not checked — babl tells tables apart byte for byte and
     swaps in a formula for a table within its own tolerance of it (up to
     0.015 for linear) by design — nor is babl's own sRGB answer, which is

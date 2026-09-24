@@ -64,6 +64,7 @@
  *:*/
 
 #include "croprect.h"
+#include "enhancer-gegl.h"
 #include "enhance-ui.h"
 #include "file_stamp.h"
 #include "ggaze-config.h"
@@ -5987,6 +5988,7 @@ main(int i_argc, char **c_argv) {
     * registry is uninitialized and gegl_node_new_child() aborts, as
     * discovered by this suite's first real run. */
    gegl_init(&i_argc, &c_argv);
+   enhancer_babl_ready(); /* as app.c, right after gegl_init() */
    g_test_init(&i_argc, &c_argv, NULL);
    g_log_set_always_fatal(G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL);
 

@@ -1105,11 +1105,6 @@ _keep_verdict(char *c_key, const Babl *p_space, gboolean b_slot) {
    }
 }
 
-/* babl_format_class_for_each() is exported by every babl this builds
- * with (0.1.112 to 0.1.128 at least) but not declared in its public
- * header. */
-int babl_format_class_for_each(int (*p_each)(Babl *, void *), void *p_data);
-
 /* Keep the longest format encoding (the name a format has in the default
  * space) in *(gsize *)p_data. */
 static int
@@ -1124,25 +1119,48 @@ _longest_encoding(Babl *p_format, void *p_data) {
 
 static guint u_max_space_name = 0; /* test seam; 0: babl's own limit */
 
-/* The longest space name a managed space may have, now: babl names each
+/* babl's own limit (_space_name_limit), from its format table as it is
+ * now. babl_format_class_for_each() walks that table without babl's own
+ * lock, while a GEGL worker converting in a new space inserts formats
+ * into it (a realloc under the walk): so it runs once, g_once, on the
+ * thread that calls it first -- enhancer_babl_ready(), right after
+ * gegl_init() on the main thread (app.c) and before any GEGL worker
+ * exists. babl's and GEGL's own formats (and every GEGL plugin's) are
+ * registered by then; formats a managed space adds later reuse their
+ * encodings, so the limit holds for them, and no verdict depends on when
+ * it was asked for. */
+static gpointer
+_babl_name_limit(gpointer p_unused) {
+   (void)p_unused;
+   gsize u_enc = 0;
+   babl_format_class_for_each(_longest_encoding, &u_enc);
+   guint u_max = u_enc + 1 < GGAZE_ENHANCER_FORMAT_NAME_MAX
+                    ? (guint)(GGAZE_ENHANCER_FORMAT_NAME_MAX - 1 - u_enc)
+                    : 0;
+   return (GUINT_TO_POINTER(u_max + 1)); /* never NULL: g_once's "unset" */
+}
+
+static GOnce t_name_limit_once = G_ONCE_INIT;
+
+void
+enhancer_babl_ready(void) {
+   (void)g_once(&t_name_limit_once, _babl_name_limit, NULL);
+}
+
+/* The longest space name a managed space may have: babl names each
  * format of a space "<encoding>-<space name>" in a 256-byte buffer, at
  * most GGAZE_ENHANCER_FORMAT_NAME_MAX characters (enhancer-gegl.h), so a
  * space name longer than that less the dash and the longest encoding
- * babl has registered would cut some format's name short. Read from
- * babl's format table on every new verdict (a few thousand formats, a
- * walk of microseconds next to babl's own parse), so a format GEGL or a
- * plugin registers later is counted too; 229 with babl's and GEGL's own
- * formats ("CIE LCH(ab) alpha double", 24 characters). */
+ * babl has registered would cut some format's name short: 229 with
+ * babl's and GEGL's own formats ("CIE LCH(ab) alpha double", 24
+ * characters). Computed once (_babl_name_limit), or the test seam's. */
 static guint
 _space_name_limit(void) {
    if (u_max_space_name > 0) {
       return (u_max_space_name);
    }
-   gsize u_enc = 0;
-   babl_format_class_for_each(_longest_encoding, &u_enc);
-   return (u_enc + 1 < GGAZE_ENHANCER_FORMAT_NAME_MAX
-              ? (guint)(GGAZE_ENHANCER_FORMAT_NAME_MAX - 1 - u_enc)
-              : 0);
+   gpointer p_max = g_once(&t_name_limit_once, _babl_name_limit, NULL);
+   return (GPOINTER_TO_UINT(p_max) - 1);
 }
 
 guint
@@ -1179,31 +1197,109 @@ _space_name_ok(const Babl *p_space) {
 }
 
 /* The inputs _space_curves_ok() converts, and how far babl may be off
- * the profile's curve at them: half an 8-bit step, finer than any
- * difference an 8-bit preview or export could show, and ~20 times what
- * babl's own polynomial approximation of a formula curve is off by. The
- * inputs take in the linear segment of a piecewise curve (0, 0.02), its
- * knee and its power segment. */
-static const double TRC_PROBES[] = {0.0, 0.02, 0.1, 0.5, 1.0};
-#define TRC_TOLERANCE (0.5 / 255.0)
-#define TRC_NPROBES G_N_ELEMENTS(TRC_PROBES)
+ * the profile's curve at them (xb2 review 8).
+ *
+ * Inputs: TRC_NDENSE points evenly over [0, 1] in the encoded domain, a
+ * step of 1/63, plus TRC_KNEE_STEP either side of each channel's own knee
+ * (icc_formula_curve_knee). Two curves babl < 0.1.114 confuses share
+ * their type and gamma; where their linear segments or knees differ they
+ * differ over a whole interval, which the even points find once it is
+ * wider than a step and the knee points find down to TRC_KNEE_STEP (a
+ * knee inside the other curve's power segment, or the reverse).
+ *
+ * Tolerance, in linear light: TRC_ABS_TOLERANCE plus TRC_REL_TOLERANCE of
+ * the profile's value. Measured over 4097 inputs, identically on babl
+ * 0.1.112 (fedora:40) and 0.1.128, for sRGB (type 3 and 4), Adobe RGB and
+ * ProPhoto ('curv' gamma and type 0), ROMM, Rec. 709 / 2020, grey and
+ * linear curves, gamma 1.02 to 3.0: babl's own polynomial approximation
+ * of a formula curve is off by at most 3.1e-4, for a type 3 'para' of d 0
+ * and gamma 1.1 to 1.2 at black alone, and by 7e-5 or less everywhere
+ * else. The absolute term sits just above that worst case -- a relative
+ * one cannot cover it, the profile's value there being 0 -- and near
+ * black it is about one step of an 8-bit sRGB display (sRGB encodes
+ * linear light 12.92 times steeper there), finer than that above. So a
+ * curve babl swapped in that differs by more is caught: an offset of
+ * 0.0019 (a Rec. 709 type 4 'para' with e = f = 0.0019 against the plain
+ * type 3, ~6 sRGB steps at black), a knee at 0.025 against one at 0.095
+ * (0.0047 apart at 0.095, ~16 steps against ~3). A swapped curve closer
+ * than that passes, off by at most about one display step near black. A
+ * curve babl approximates worse than the tolerance on its own -- a to-
+ * linear gamma under 1 of d 0, 0.0053 off at black for 0.45 -- is
+ * declined on any babl. The relative term keeps float rounding of values
+ * near 1 from ever tipping a verdict. */
+#define TRC_NDENSE 64u
+#define TRC_KNEE_STEP (1.0 / 1024.0)
+#define TRC_NMAX (TRC_NDENSE + 3u * 2u) /* three knees at most */
+#define TRC_ABS_TOLERANCE 4e-4
+#define TRC_REL_TOLERANCE 1e-3
 
-/* babl's linear values for TRC_PROBES through p_space's curves, into
+/* The probe inputs for p_icc (grey: kTRC only, else rTRC gTRC bTRC). */
+typedef struct {
+   double f_x[TRC_NMAX];
+   guint  u_n;
+} TrcProbes;
+
+static const char *const TRC_SIGS[] = {"rTRC", "gTRC", "bTRC"};
+
+/* The tag of channel u_c (of 3, or kTRC alone for grey). */
+static const char *
+_trc_sig(gboolean b_gray, guint u_c) {
+   return (b_gray ? "kTRC" : TRC_SIGS[u_c]);
+}
+
+/* TRC_NDENSE even inputs, then TRC_KNEE_STEP either side of each
+ * channel's knee that leaves both inside [0, 1]. */
+static void
+_trc_probes(GBytes *p_icc, gboolean b_gray, TrcProbes *p_pr) {
+   for (guint u = 0; u < TRC_NDENSE; u++) {
+      p_pr->f_x[u] = u / (double)(TRC_NDENSE - 1);
+   }
+   p_pr->u_n = TRC_NDENSE;
+   for (guint u_c = 0; u_c < (b_gray ? 1u : 3u); u_c++) {
+      double f_d = 0;
+      if (icc_formula_curve_knee(p_icc, _trc_sig(b_gray, u_c), &f_d) &&
+          f_d - TRC_KNEE_STEP >= 0 && f_d + TRC_KNEE_STEP <= 1) {
+         p_pr->f_x[p_pr->u_n++] = f_d - TRC_KNEE_STEP;
+         p_pr->f_x[p_pr->u_n++] = f_d + TRC_KNEE_STEP;
+      }
+   }
+}
+
+/* babl's linear values for p_pr's inputs through p_space's curves, into
  * f_out (u_comps values per probe: 3, or 1 for a grey space):
  * "R'G'B' float" (grey: "Y' float") converted to its linear twin in the
  * same space, which is the curves and nothing else. */
 static void
-_space_curves_at(const Babl *p_space, gboolean b_gray, float *f_out) {
+_space_curves_at(const Babl *p_space, gboolean b_gray, const TrcProbes *p_pr,
+                 float *f_out) {
    guint u_comps = b_gray ? 1 : 3;
-   float f_in[TRC_NPROBES * 3];
-   for (guint u = 0; u < TRC_NPROBES * u_comps; u++) {
-      f_in[u] = (float)TRC_PROBES[u / u_comps];
+   float f_in[TRC_NMAX * 3];
+   for (guint u = 0; u < p_pr->u_n * u_comps; u++) {
+      f_in[u] = (float)p_pr->f_x[u / u_comps];
    }
    const Babl *p_from =
       babl_format_with_space(b_gray ? "Y' float" : "R'G'B' float", p_space);
    const Babl *p_to =
       babl_format_with_space(b_gray ? "Y float" : "RGB float", p_space);
-   babl_process(babl_fish(p_from, p_to), f_in, f_out, TRC_NPROBES);
+   babl_process(babl_fish(p_from, p_to), f_in, f_out, p_pr->u_n);
+}
+
+/* Whether babl's values f_got (every u_comps-th, from channel u_c's) are
+ * the profile's f_want at p_pr's inputs, within the tolerance above. */
+static gboolean
+_curve_matches(const float *f_got, guint u_comps, guint u_c,
+               const double *f_want, const TrcProbes *p_pr) {
+   for (guint u = 0; u < p_pr->u_n; u++) {
+      double f_g   = f_got[u * u_comps + u_c];
+      double f_tol = TRC_ABS_TOLERANCE + TRC_REL_TOLERANCE * fabs(f_want[u]);
+      if (!(fabs(f_g - f_want[u]) <= f_tol)) {
+         g_debug("enhancer: not managed, babl's curve %u gives %g at %g, "
+                 "the profile's %g",
+                 u_c, f_g, p_pr->f_x[u], f_want[u]);
+         return (FALSE);
+      }
+   }
+   return (TRUE);
 }
 
 /* Whether the space p_space babl answered with for p_icc (kind e_kind)
@@ -1213,33 +1309,30 @@ _space_curves_at(const Babl *p_space, gboolean b_gray, float *f_out) {
  * gets the earlier one's curve -- and, with the same primaries, its very
  * space (icc.c, "the curve babl builds"; fedora:40 ships 0.1.112). Each
  * channel's curve is read back through babl (_space_curves_at) and
- * compared with icc_formula_curve_at(). Table curves are not checked:
+ * compared with icc_formula_curve_at(). The same check declines a curve
+ * babl approximates too coarsely on any version (a type 3 'para' of
+ * gamma 0.45 and d 0: 0.0053 at black). Table curves are not checked:
  * babl tells those apart byte for byte. A CMYK space has no curves of its
  * own (LCMS). */
 static gboolean
 _space_curves_ok(const Babl *p_space, IccBablKind e_kind, GBytes *p_icc) {
-   static const char *C_SIGS[] = {"rTRC", "gTRC", "bTRC"};
-   gboolean           b_gray   = e_kind == ICC_BABL_GRAY;
-   guint              u_comps  = b_gray ? 1 : 3;
-   float              f_out[TRC_NPROBES * 3];
+   gboolean  b_gray  = e_kind == ICC_BABL_GRAY;
+   guint     u_comps = b_gray ? 1 : 3;
+   TrcProbes t_pr;
+   float     f_out[TRC_NMAX * 3];
    if (e_kind == ICC_BABL_CMYK) {
       return (TRUE);
    }
-   _space_curves_at(p_space, b_gray, f_out);
+   _trc_probes(p_icc, b_gray, &t_pr);
+   _space_curves_at(p_space, b_gray, &t_pr, f_out);
    for (guint u_c = 0; u_c < u_comps; u_c++) {
-      double f_want[TRC_NPROBES];
-      if (!icc_formula_curve_at(p_icc, b_gray ? "kTRC" : C_SIGS[u_c],
-                                TRC_PROBES, f_want, TRC_NPROBES)) {
+      double f_want[TRC_NMAX];
+      if (!icc_formula_curve_at(p_icc, _trc_sig(b_gray, u_c), t_pr.f_x, f_want,
+                                t_pr.u_n)) {
          continue; /* a table curve */
       }
-      for (guint u = 0; u < TRC_NPROBES; u++) {
-         double f_got = f_out[u * u_comps + u_c];
-         if (!(fabs(f_got - f_want[u]) <= TRC_TOLERANCE)) {
-            g_debug("enhancer: not managed, babl's curve %u gives %g at %g, "
-                    "the profile's %g",
-                    u_c, f_got, TRC_PROBES[u], f_want[u]);
-            return (FALSE);
-         }
+      if (!_curve_matches(f_out, u_comps, u_c, f_want, &t_pr)) {
+         return (FALSE);
       }
    }
    return (TRUE);

@@ -33,6 +33,7 @@
 
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1459,10 +1460,9 @@ run_fresh(gconstpointer p_path) {
    g_test_trap_assert_passed();
 }
 
-/* Every format babl has (babl_format_class_for_each is exported by babl
- * but not declared in its public header): a space GEGL builds adds its
- * formats, so the count shows babl's tables growing. */
-int babl_format_class_for_each(int (*p_each)(Babl *, void *), void *p_data);
+/* Every format babl has (babl_format_class_for_each, declared in
+ * enhancer-gegl.h): a space GEGL builds adds its formats, so the count
+ * shows babl's tables growing. */
 
 static int
 count_format(Babl *p_babl, void *p_data) {
@@ -1593,10 +1593,10 @@ test_space_name_limit_is_babls(void) {
                     GGAZE_ENHANCER_FORMAT_NAME_MAX - 1 - u_enc);
 }
 
-/* babl's linear value for 0 in the first channel of p_space's curves. */
+/* babl's linear value for f_x in the first channel of p_space's curves. */
 static float
-black_through(const Babl *p_space) {
-   const float F_IN[3] = {0, 0, 0};
+linear_through(const Babl *p_space, float f_x) {
+   const float F_IN[3] = {f_x, f_x, f_x};
    float       f_out[3];
    babl_process(babl_fish(babl_format_with_space("R'G'B' float", p_space),
                           babl_format_with_space("RGB float", p_space)),
@@ -1604,40 +1604,229 @@ black_through(const Babl *p_space) {
    return (f_out[0]);
 }
 
-/* Two 'para' profiles of one gamma and the same primaries (review 7):
- * Rec. 709 as type 4 with e = f = 0.005, then plain as type 3. babl <
- * 0.1.114 keeps one formula curve per type and gamma, so it hands the
- * second the first one's curve and space (black to 0.005 linear): the
- * second is declined, its slot charged, and its file takes the loader
- * path. A babl that tells them apart manages each with its own curve. */
+/* Whether this babl keeps one formula curve per type and gamma (< 0.1.114,
+ * fedora:40's 0.1.112), handing a second profile of one gamma the first
+ * one's curve (review 7). */
+static gboolean
+babl_shares_formula_curves(void) {
+   int i_maj = 0, i_min = 0, i_mic = 0;
+   babl_get_version(&i_maj, &i_min, &i_mic);
+   g_test_message("babl %d.%d.%d", i_maj, i_min, i_mic);
+   return (i_maj == 0 && i_min == 1 && i_mic < 114);
+}
+
+/* Two 'para' profiles p_a then p_b (taken) of one type and gamma and the
+ * same primaries, whose curves differ at f_x (p_a's own value there
+ * f_a, p_b's f_b). babl < 0.1.114 hands the second the first one's curve
+ * and space: p_b is declined, its slot charged, and its file takes the
+ * loader path. A babl that tells them apart manages each with its own
+ * curve. Run fresh (add_fresh): no earlier curve of their gamma. */
 static void
-test_para_sharing_a_gamma(void) {
-   const double R709[7] = {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5,
-                           0.081,    0.005,     0.005};
-   GBytes      *p_a     = rgb_of("para4 e f", icc_build_para(4, R709, 7));
-   GBytes      *p_b     = rgb_of("para3", icc_build_para(3, R709, 5));
-   const Babl  *p_sa    = enhancer_test_profile_space(p_a);
+assert_second_of_a_gamma(GBytes *p_a, GBytes *p_b, float f_x, double f_a,
+                         double f_b) {
+   const Babl *p_sa = enhancer_test_profile_space(p_a);
    g_assert_nonnull(p_sa);
-   g_assert_cmpfloat_with_epsilon(black_through(p_sa), 0.005, 1e-4);
+   g_assert_cmpfloat_with_epsilon(linear_through(p_sa, f_x), f_a, 1e-4);
    guint       u_slots = enhancer_test_profile_slots();
    const Babl *p_sb    = enhancer_test_profile_space(p_b);
-   int         i_maj = 0, i_min = 0, i_mic = 0;
-   babl_get_version(&i_maj, &i_min, &i_mic);
-   g_test_message("babl %d.%d.%d: the type 3 profile is %s", i_maj, i_min,
-                  i_mic, p_sb != NULL ? "managed" : "declined");
-   if (i_maj == 0 && i_min == 1 && i_mic < 114) {
+   g_test_message("the second profile is %s",
+                  p_sb != NULL ? "managed" : "declined");
+   if (babl_shares_formula_curves()) {
       g_assert_null(p_sb);
       g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
       GByteArray *p_png = png_with_profile(p_b);
-      assert_profile_declined("para3.png", p_png);
+      assert_profile_declined("secondgamma.png", p_png);
       g_byte_array_unref(p_png);
    } else {
       g_assert_nonnull(p_sb);
       g_assert_true(p_sb != p_sa);
-      g_assert_cmpfloat_with_epsilon(black_through(p_sb), 0.0, 1e-4);
+      g_assert_cmpfloat_with_epsilon(linear_through(p_sb, f_x), f_b, 1e-4);
    }
    g_bytes_unref(p_a);
    g_bytes_unref(p_b);
+}
+
+/* Rec. 709 as type 4 with e = f = 0.005, then plain as type 3 (review 7):
+ * on babl < 0.1.114 the second would convert black to 0.005 linear. */
+static void
+test_para_sharing_a_gamma(void) {
+   const double R709[7] = {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5,
+                           0.081,    0.005,     0.005};
+   assert_second_of_a_gamma(rgb_of("para4 e f", icc_build_para(4, R709, 7)),
+                            rgb_of("para3", icc_build_para(3, R709, 5)), 0,
+                            0.005, 0);
+}
+
+/* The same with e = f = 0.0019 (review 8): black 0.0019 linear apart,
+ * ~6 steps of an 8-bit sRGB display, under the half 8-bit step of linear
+ * light review 7's check allowed. */
+static void
+test_para_offset_under_a_half_step(void) {
+   const double R709[7] = {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5,
+                           0.081,    0.0019,    0.0019};
+   assert_second_of_a_gamma(rgb_of("para4 small", icc_build_para(4, R709, 7)),
+                            rgb_of("para3 plain", icc_build_para(3, R709, 5)),
+                            0, 0.0019, 0);
+}
+
+/* Two type 3 curves of gamma 2.2 whose knees are at 0.025 and 0.095
+ * (review 8): they differ only between the knees -- 0.0047 linear at
+ * 0.095, 16 against 3 steps of an 8-bit sRGB display -- which review 7's
+ * five inputs (0, 0.02, 0.1, 0.5, 1) never hit. Then two of gamma 2.3
+ * with knees at 0.05 and 0.06, between two of the 64 even inputs (3/63
+ * and 4/63): only the inputs either side of the second one's own knee
+ * find those (0.0011 linear apart at 0.055). */
+static void
+test_para_knees_between_the_old_probes(void) {
+   const double A[5] = {2.2, 1, 0, 0.01, 0.025};
+   const double B[5] = {2.2, 1, 0, 0.01, 0.095};
+   assert_second_of_a_gamma(rgb_of("knee a", icc_build_para(3, A, 5)),
+                            rgb_of("knee b", icc_build_para(3, B, 5)), 0.08f,
+                            pow(0.08, 2.2), 0.01 * 0.08);
+   const double C[5] = {2.3, 1, 0, 0.01, 0.05};
+   const double D[5] = {2.3, 1, 0, 0.01, 0.06};
+   assert_second_of_a_gamma(rgb_of("knee c", icc_build_para(3, C, 5)),
+                            rgb_of("knee d", icc_build_para(3, D, 5)), 0.055f,
+                            pow(0.055, 2.3), 0.01 * 0.055);
+}
+
+/* A curve babl itself approximates too coarsely, on every babl (review
+ * 8): a type 3 'para' of gamma 0.45 and d 0, which babl's polynomial
+ * takes to 0.0053 linear at black, is declined with its slot charged --
+ * and asked about again costs nothing more. */
+static void
+test_coarse_babl_curve_is_declined(void) {
+   const double P[5]    = {0.45, 1, 0, 0, 0};
+   GBytes      *p_icc   = rgb_of("coarse", icc_build_para(3, P, 5));
+   guint        u_slots = enhancer_test_profile_slots();
+   g_assert_false(enhancer_test_profile_is_managed(p_icc));
+   g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
+   g_assert_false(enhancer_test_profile_is_managed(p_icc));
+   g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
+   GByteArray *p_png = png_with_profile(p_icc);
+   assert_profile_declined("coarse.png", p_png);
+   g_byte_array_unref(p_png);
+   g_bytes_unref(p_icc);
+}
+
+/* A 'curv' of u_n points sampling CIE L* to linear (the L* TRC of
+ * eciRGB v2 and the like). */
+static GBytes *
+lstar_curv(guint32 u_n) {
+   GByteArray *p_a = g_byte_array_new();
+   guint8      c_w[4];
+   g_byte_array_append(p_a, (const guint8 *)"curv\0\0\0\0", 8);
+   put32(c_w, u_n);
+   g_byte_array_append(p_a, c_w, 4);
+   for (guint32 u = 0; u < u_n; u++) {
+      double f_l = u / (double)(u_n - 1);
+      double f_y = f_l > 0.08 ? pow((f_l + 0.16) / 1.16, 3) : f_l / 9.033;
+      guint  u_v = (guint)lround(f_y * 65535);
+      c_w[0]     = (guint8)(u_v >> 8);
+      c_w[1]     = (guint8)u_v;
+      g_byte_array_append(p_a, c_w, 2);
+   }
+   return (g_byte_array_free_to_bytes(p_a));
+}
+
+/* The RGB formula curves real profiles carry, each managed on every babl
+ * (review 8: the curve check must not decline what babl merely
+ * approximates): sRGB as type 3 and 4, Adobe RGB and ProPhoto as a
+ * 'curv' gamma and a type 0, ROMM, Rec. 2020 and Rec. 709 as type 3,
+ * linear, gamma 2.6, and type 3 of d 0 at gamma 1.2 (babl's coarsest,
+ * 3e-4 at black), 2.2 and 2.4. Run fresh: a slot each, of one process's
+ * sixteen. */
+static void
+test_real_formula_curves_are_managed(void) {
+   static const struct {
+      const char *c_what;
+      guint16     u_fn;
+      double      f_p[7];
+      gsize       u_n;
+   } PARAS[] = {
+      {"sRGB type 3",
+       3,
+       {2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045},
+       5},
+      {"sRGB type 4",
+       4,
+       {2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045},
+       7},
+      {"Adobe RGB type 0", 0, {2.19921875}, 1},
+      {"ProPhoto type 0", 0, {1.8}, 1},
+      {"ROMM", 3, {1.8, 1, 0, 1 / 16.0, 0.03125}, 5},
+      {"Rec. 2020",
+       3,
+       {1 / 0.45, 1 / 1.0993, 0.0993 / 1.0993, 1 / 4.5, 0.08145},
+       5},
+      {"Rec. 709", 3, {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5, 0.081}, 5},
+      {"linear type 0", 0, {1.0}, 1},
+      {"gamma 2.6", 0, {2.6}, 1},
+      {"type 3 d 0 gamma 1.2", 3, {1.2, 1, 0, 1, 0}, 5},
+      {"type 3 d 0 gamma 2.2", 3, {2.2, 1, 0, 1, 0}, 5},
+      {"type 3 d 0 gamma 2.4", 3, {2.4, 1, 0, 1, 0}, 5},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(PARAS); u++) {
+      GBytes *p_trc = icc_build_para(PARAS[u].u_fn, PARAS[u].f_p, PARAS[u].u_n);
+      assert_built_profile_managed(PARAS[u].c_what,
+                                   rgb_of(PARAS[u].c_what, p_trc));
+   }
+   assert_built_profile_managed("Adobe RGB curv",
+                                rgb_of("adobe", icc_build_curv(1, 2.2)));
+   assert_built_profile_managed("ProPhoto curv",
+                                rgb_of("prophoto", icc_build_curv(1, 1.8)));
+   assert_built_profile_managed("linear curv",
+                                rgb_of("linear", icc_build_curv(0, 1.0)));
+}
+
+/* Grey formula curves (a 'curv' and a type 0 gamma 2.2, sRGB's type 3)
+ * and table curves (L* in 256 and 1024 points, 4096 points of gamma
+ * 2.2), each managed on every babl. The RGB tables get primaries of
+ * their own (nudge_red: babl names every table curve alike). */
+static void
+test_real_grey_and_table_curves_are_managed(void) {
+   const double G22[1]  = {2.2};
+   const double SRGB[5] = {2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045};
+   GBytes      *GREYS[] = {icc_build_curv(1, 2.2), icc_build_para(0, G22, 1),
+                           icc_build_para(3, SRGB, 5), lstar_curv(256)};
+   for (gsize u = 0; u < G_N_ELEMENTS(GREYS); u++) {
+      char c_desc[32];
+      g_snprintf(c_desc, sizeof(c_desc), "grey %" G_GSIZE_FORMAT, u);
+      g_test_message("managed: %s", c_desc);
+      GBytes *p_icc = icc_build_gray(c_desc, GREYS[u]);
+      g_assert_true(enhancer_test_profile_is_managed(p_icc));
+      g_bytes_unref(p_icc);
+      g_bytes_unref(GREYS[u]);
+   }
+   assert_built_profile_managed(
+      "L* 1024", nudge_red(rgb_of("lstar", lstar_curv(1024)), 6007));
+   assert_built_profile_managed(
+      "4096-point gamma 2.2",
+      nudge_red(rgb_of("g4096", icc_build_curv(4096, 2.2)), 7001));
+}
+
+/* babl's name limit is read once, right after gegl_init()
+ * (enhancer_babl_ready, review 8): a format registered later -- here one
+ * with an encoding longer than any of babl's own -- changes the walk's
+ * answer but not the limit, so no verdict depends on when it was asked
+ * for, and the walk never races a GEGL worker adding formats. Run fresh:
+ * the format stays in babl's table. */
+static void
+test_space_name_limit_is_read_once(void) {
+   guint u_before = enhancer_max_space_name();
+   gsize u_enc    = 0;
+   babl_format_class_for_each(longest_encoding, &u_enc);
+   char *c_long = g_strnfill(u_enc + 20, 'x');
+   g_assert_nonnull(babl_format_new(
+      "name", c_long, babl_model("RGB"), babl_type("float"),
+      babl_component("R"), babl_component("G"), babl_component("B"), NULL));
+   gsize u_now = 0;
+   babl_format_class_for_each(longest_encoding, &u_now);
+   g_assert_cmpuint(u_now, ==, u_enc + 20);
+   g_assert_cmpuint(enhancer_max_space_name(), ==, u_before);
+   enhancer_babl_ready(); /* idempotent: still the first reading */
+   g_assert_cmpuint(enhancer_max_space_name(), ==, u_before);
+   g_free(c_long);
 }
 
 /* c_fixture with its iCCP chunk carrying p_icc instead. */
@@ -2488,7 +2677,19 @@ add_profile_tests(void) {
              test_spaces_sharing_a_name_are_declined);
    g_test_add_func("/enhancer_icc/space_name_limit_is_babls",
                    test_space_name_limit_is_babls);
+   add_fresh("/enhancer_icc/space_name_limit_is_read_once",
+             test_space_name_limit_is_read_once);
+   add_fresh("/enhancer_icc/real_formula_curves_are_managed",
+             test_real_formula_curves_are_managed);
+   add_fresh("/enhancer_icc/real_grey_and_table_curves_are_managed",
+             test_real_grey_and_table_curves_are_managed);
    add_fresh("/enhancer_icc/para_sharing_a_gamma", test_para_sharing_a_gamma);
+   add_fresh("/enhancer_icc/para_offset_under_a_half_step",
+             test_para_offset_under_a_half_step);
+   add_fresh("/enhancer_icc/para_knees_between_the_old_probes",
+             test_para_knees_between_the_old_probes);
+   add_fresh("/enhancer_icc/coarse_babl_curve_is_declined",
+             test_coarse_babl_curve_is_declined);
    add_fresh("/enhancer_icc/png_iccp_libpng_drops_is_declined",
              test_png_iccp_libpng_drops_is_declined);
    g_test_add_func("/enhancer_icc/verdicts_are_bounded",
@@ -2508,6 +2709,7 @@ add_profile_tests(void) {
 int
 main(int argc, char **argv) {
    gegl_init(&argc, &argv);
+   enhancer_babl_ready(); /* as app.c, right after gegl_init() */
    g_test_init(&argc, &argv, NULL);
    c_dir = g_dir_make_tmp("ggaze-enhicc-XXXXXX", NULL);
    g_assert_nonnull(c_dir);

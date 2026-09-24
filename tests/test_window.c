@@ -58,6 +58,8 @@
 
 #if GGAZE_HAVE_GEGL
 #include <gegl.h>
+
+#include "enhancer-gegl.h"
 #endif
 
 #include <gio/gio.h>
@@ -725,6 +727,7 @@ main(int i_argc, char **c_argv) {
     * gegl_operations_update_visible() abort on a NULL hash table, off the main
     * thread and with no hint that the registry was the problem. */
    gegl_init(&i_argc, &c_argv);
+   enhancer_babl_ready(); /* as app.c, right after gegl_init() */
 #endif
    g_test_init(&i_argc, &c_argv, NULL);
 

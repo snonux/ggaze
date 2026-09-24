@@ -226,11 +226,25 @@ guint enhancer_test_loader_decodes(void);
  * holds (a formula curve is named by the first profile that made it). */
 #define GGAZE_ENHANCER_FORMAT_NAME_MAX 254u
 
-/* The longest space name a managed space may have right now: the test
- * seam's limit when one is set, else GGAZE_ENHANCER_FORMAT_NAME_MAX - 1 -
- * the longest encoding in babl's format table (24, "CIE LCH(ab) alpha
- * double", with babl's and GEGL's own formats: 229). */
+/* The longest space name a managed space may have: the test seam's limit
+ * when one is set, else GGAZE_ENHANCER_FORMAT_NAME_MAX - 1 - the longest
+ * encoding in babl's format table (24, "CIE LCH(ab) alpha double", with
+ * babl's and GEGL's own formats: 229) as enhancer_babl_ready() read it. */
 guint enhancer_max_space_name(void);
+
+/* Read what the managed path needs from babl's tables once, now: call it
+ * right after gegl_init(), on the same thread, before any GEGL work (app.c
+ * does; so do the suites that init GEGL). babl's format table is walked
+ * without babl's lock, which is safe only while no GEGL worker can add
+ * formats to it. Idempotent. Should it never be called, the first verdict
+ * reads the table instead, from whichever thread asks. */
+void enhancer_babl_ready(void);
+
+/* babl's walk over its format table (babl-internal.h). Every babl this
+ * builds with exports it (0.1.112 to 0.1.128 at least) but its public
+ * header does not declare it; p_each returns 0 to go on. The one
+ * declaration, for enhancer.c and the suites. */
+void babl_format_class_for_each(int (*p_each)(Babl *, void *), void *p_data);
 
 /* How many slot-free verdicts (above) are kept, the oldest dropped first:
  * with the slots' own, the verdict table never holds more than

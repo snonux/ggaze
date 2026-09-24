@@ -1377,7 +1377,8 @@ test_png_applied_chunk_rules(void) {
  * gAMA / cHRM space, when each is single, well-formed and of values
  * libpng 1.6.40 takes. Anything 1.6.40 invalidates the colour space for
  * -- and so drops the iCCP -- is refused, and so is what libpng merely
- * ignores (bad CRC, out of place, wrong length): never looser than it. */
+ * ignores (bad CRC, out of place, wrong length): never looser than it.
+ * The cHRM refusals are test_png_applied_chrm_rules'. */
 static void
 test_png_applied_gamut_rules(void) {
    GBytes *p_icc = read_fixture_profile("swapped.png");
@@ -1404,7 +1405,15 @@ test_png_applied_gamut_rules(void) {
    g_assert_false(applied(2, p_icc, "IHDR gAMA! iCCP IDAT IEND"));
    g_assert_false(applied(2, p_icc, "IHDR iCCP PLTE gAMA IDAT IEND"));
    g_assert_false(applied(2, p_icc, "IHDR gAMA+ iCCP IDAT IEND"));
-   /* cHRM: likewise, and chromaticities 1.6.40 cannot invert */
+   g_bytes_unref(p_icc);
+}
+
+/* cHRM beside the iCCP refused like gAMA above -- duplicate, damaged,
+ * misplaced, sized -- and chromaticities libpng 1.6.40 cannot invert or
+ * round-trip, which make it drop the iCCP. */
+static void
+test_png_applied_chrm_rules(void) {
+   GBytes *p_icc = read_fixture_profile("swapped.png");
    g_assert_false(applied(2, p_icc, "IHDR cHRM iCCP cHRM IDAT IEND"));
    g_assert_false(applied(2, p_icc, "IHDR iCCP cHRM! IDAT IEND"));
    g_assert_false(applied(2, p_icc, "IHDR iCCP PLTE cHRM IDAT IEND"));
@@ -1646,6 +1655,44 @@ test_formula_curve_at_declines(void) {
    g_assert_cmpfloat(f_y[0], ==, -7);
 }
 
+/* icc_formula_curve_knee(): d of a type 3 or 4 'para' (as s15Fixed16
+ * keeps it), sRGB's 0.04045 for one babl swaps its sRGB curve in for;
+ * no knee, *pf_d untouched, for a type 0, a 'curv' gamma or identity, a
+ * table, a missing tag, NULL arguments and a profile it refuses. */
+static void
+test_formula_curve_knee(void) {
+   const double R709[7] = {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5,
+                           0.081,    0.005,     0.005};
+   const double NEAR[5] = {2.4, 0.955, 0.05, 0.07, 0.04};
+   const double G[1]    = {1.8};
+   double       f_d     = -7;
+   GBytes      *p_icc   = rgb_of(icc_build_para(4, R709, 7));
+   g_assert_true(icc_formula_curve_knee(p_icc, "gTRC", &f_d));
+   g_assert_cmpfloat_with_epsilon(f_d, 0.081, 1e-4);
+   g_assert_false(icc_formula_curve_knee(p_icc, "kTRC", &f_d));
+   g_assert_false(icc_formula_curve_knee(p_icc, NULL, &f_d));
+   g_assert_false(icc_formula_curve_knee(p_icc, "rTRC", NULL));
+   g_bytes_unref(p_icc);
+   p_icc = rgb_of(icc_build_para(3, NEAR, 5));
+   g_assert_true(icc_formula_curve_knee(p_icc, "rTRC", &f_d));
+   g_assert_cmpfloat(f_d, ==, 0.04045);
+   g_bytes_unref(p_icc);
+   f_d            = -7;
+   GBytes *NONE[] = {
+      rgb_of(icc_build_para(0, G, 1)), rgb_of(icc_build_curv(1, 1.8)),
+      rgb_of(icc_build_curv(0, 1.0)), rgb_of(icc_build_curv(1024, 1.8))};
+   for (gsize u = 0; u < G_N_ELEMENTS(NONE); u++) {
+      g_assert_false(icc_formula_curve_knee(NONE[u], "rTRC", &f_d));
+      g_bytes_unref(NONE[u]);
+   }
+   const double BAD[5] = {2.4, 0.947, 0.052, 0.077, 1.5}; /* d past babl's */
+   GBytes      *p_bad  = rgb_of(icc_build_para(3, BAD, 5));
+   g_assert_false(icc_formula_curve_knee(p_bad, "rTRC", &f_d));
+   g_bytes_unref(p_bad);
+   g_assert_false(icc_formula_curve_knee(NULL, "rTRC", &f_d));
+   g_assert_cmpfloat(f_d, ==, -7);
+}
+
 /* The container walks and the description. */
 static void
 add_read_tests(void) {
@@ -1705,9 +1752,11 @@ add_gate_tests(void) {
                    test_formula_curve_at_mirrors_babl);
    g_test_add_func("/icc/formula_curve_at_declines",
                    test_formula_curve_at_declines);
+   g_test_add_func("/icc/formula_curve_knee", test_formula_curve_knee);
    g_test_add_func("/icc/sane_fuzz", test_sane_fuzz);
    g_test_add_func("/icc/png_applied_gamut_rules",
                    test_png_applied_gamut_rules);
+   g_test_add_func("/icc/png_applied_chrm_rules", test_png_applied_chrm_rules);
    g_test_add_func("/icc/png_applied_chunk_rules",
                    test_png_applied_chunk_rules);
    g_test_add_func("/icc/png_applied_header_rules",

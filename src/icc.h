@@ -160,6 +160,15 @@ guint icc_babl_curve_tags(GBytes *p_icc);
 gboolean icc_formula_curve_at(GBytes *p_icc, const char *c_sig,
                               const double *pf_x, double *pf_y, guint u_n);
 
+/* Where p_icc's formula tone curve c_sig switches from its linear segment
+ * to its power one, into *pf_d: d of a type 3 / 4 'para' (0.04045, sRGB's,
+ * for one babl swaps its sRGB curve in for, as icc_formula_curve_at()).
+ * FALSE, *pf_d untouched, for any curve without such a knee -- a 'para'
+ * of type 0, a 'curv' -- and whenever icc_formula_curve_at() would be.
+ * The enhancer probes either side of it: two profiles' curves differing
+ * only between their knees (xb2 review 8) differ nowhere else. */
+gboolean icc_formula_curve_knee(GBytes *p_icc, const char *c_sig, double *pf_d);
+
 /* The profile's description ('desc' tag) as UTF-8, caller frees: the ASCII
  * text of a v2 textDescriptionType or, for a v4 multiLocalizedUnicodeType,
  * the English record when there is one and the first record otherwise.

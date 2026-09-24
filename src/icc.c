@@ -1204,12 +1204,13 @@ _formula_at(const guint8 *p_tag, double f_x) {
    return (fabs(f_g - 1.0) < 0.01 ? f_x : _gamma_at(f_x, f_g));
 }
 
-gboolean
-icc_formula_curve_at(GBytes *p_icc, const char *c_sig, const double *pf_x,
-                     double *pf_y, guint u_n) {
-   if (c_sig == NULL || pf_x == NULL || pf_y == NULL ||
-       !icc_profile_is_sane(p_icc)) {
-      return (FALSE);
+/* The formula tone curve c_sig of p_icc (icc_formula_curve_at's), or NULL
+ * when there is none: not a profile icc_profile_is_sane() takes, no such
+ * tag, or a table (a 'curv' of 2+ points). */
+static const guint8 *
+_formula_tag(GBytes *p_icc, const char *c_sig) {
+   if (c_sig == NULL || !icc_profile_is_sane(p_icc)) {
+      return (NULL);
    }
    gsize         u_len  = 0;
    const guint8 *p      = g_bytes_get_data(p_icc, &u_len);
@@ -1217,11 +1218,33 @@ icc_formula_curve_at(GBytes *p_icc, const char *c_sig, const double *pf_x,
    gsize         u_size = 0;
    if (!_find_tag(p, u_len, c_sig, &p_tag, &u_size) ||
        (memcmp(p_tag, "curv", 4) == 0 && _be32(p_tag + 8) >= 2)) {
+      return (NULL);
+   }
+   return (p_tag);
+}
+
+gboolean
+icc_formula_curve_at(GBytes *p_icc, const char *c_sig, const double *pf_x,
+                     double *pf_y, guint u_n) {
+   const guint8 *p_tag = _formula_tag(p_icc, c_sig);
+   if (p_tag == NULL || pf_x == NULL || pf_y == NULL) {
       return (FALSE);
    }
    for (guint u = 0; u < u_n; u++) {
       pf_y[u] = _formula_at(p_tag, pf_x[u]);
    }
+   return (TRUE);
+}
+
+gboolean
+icc_formula_curve_knee(GBytes *p_icc, const char *c_sig, double *pf_d) {
+   const guint8 *p_tag = _formula_tag(p_icc, c_sig);
+   if (p_tag == NULL || pf_d == NULL || memcmp(p_tag, "para", 4) != 0 ||
+       p_tag[9] == 0) {
+      return (FALSE);
+   }
+   /* babl's sRGB curve bends where sRGB's does, not at the tag's d. */
+   *pf_d = _para_is_babl_srgb(p_tag) ? 0.04045 : _s15f16(p_tag + 12 + 4 * 4);
    return (TRUE);
 }
 
