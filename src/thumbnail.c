@@ -487,6 +487,7 @@ thumbnail_new(void) {
    gint i_max =
       MAX(1, MIN(g_get_num_processors() / 2, GGAZE_THUMB_MAX_WORKERS));
    GError *p_err = NULL;
+
    p_t->p_pool = g_thread_pool_new_full(_thumb_pool_func, NULL,
                                         _thumb_item_drop, i_max, FALSE, &p_err);
    if (p_err != NULL) {

@@ -321,6 +321,16 @@ _save_dialog_cb(GObject *p_dlg, GAsyncResult *p_res, gpointer p_data) {
                                     * proceed -- but still free the ctx */
 }
 
+/* TRUE iff p_req continues into the host's quit: the prompt then ends the
+ * app (b_prompt_quits). A helper rather than an inline && so the aligned
+ * assignment run in _save_prompt_show() holds no continuation line, which
+ * clang-format 18 (CI) and 22 align differently. */
+static gboolean
+_is_quit_request(const SaveGate *p_gate, const _Request *p_req) {
+   return (p_gate->p_ops->quit_continuation != NULL &&
+           p_req->fn == p_gate->p_ops->quit_continuation);
+}
+
 /* Build and show the modal Save/Discard/Cancel prompt, handing the request
  * over to _save_dialog_cb. Split out of save_gate_maybe_save_then to keep both
  * under the ~30-line convention.
@@ -399,8 +409,7 @@ _save_prompt_show(SaveGate *p_gate, const _Request *p_req) {
    g_clear_object(&p_gate->p_prompt_cancel);
    p_gate->p_prompt_cancel = (GCancellable *)g_object_ref(p_ctx->p_cancel);
    p_gate->b_save_prompt   = TRUE;
-   p_gate->b_prompt_quits  = (p_gate->p_ops->quit_continuation != NULL &&
-                              p_req->fn == p_gate->p_ops->quit_continuation);
+   p_gate->b_prompt_quits  = _is_quit_request(p_gate, p_req);
    gtk_alert_dialog_choose(p_dlg, GTK_WINDOW(p_gate->p_host), p_ctx->p_cancel,
                            _save_dialog_cb, p_ctx);
    p_ctx->p_dlg_window =

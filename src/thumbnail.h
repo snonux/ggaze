@@ -62,6 +62,7 @@ void thumbnail_delete(Thumbnail *p_t);
 void thumbnail_get_async(Thumbnail *p_t, GFile *p_file, int i_size,
                          GCancellable *p_cancel, GAsyncReadyCallback p_cb,
                          gpointer p_data);
+
 GdkTexture *thumbnail_get_finish(GAsyncResult *p_res, GError **p_err);
 
 /* Absolute path of the on-disk cache entry ggaze uses for p_file at ~i_size px

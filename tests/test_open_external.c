@@ -451,6 +451,25 @@ present_and_map(GgazeWindow *p_win) {
    return (FALSE);
 }
 
+/* Iterate the main loop until it has dispatched a G_PRIORITY_DEFAULT idle
+ * queued now: i.e. everything of higher priority that is ready runs first,
+ * and nothing that waits for the default priority (a GTK tooltip timeout,
+ * say) has run yet when this returns. */
+static gboolean
+_set_flag(gpointer p_flag) {
+   *(gboolean *)p_flag = TRUE;
+   return (G_SOURCE_REMOVE);
+}
+
+static void
+run_until_default_priority(void) {
+   gboolean b_ran = FALSE;
+   g_idle_add_full(G_PRIORITY_DEFAULT, _set_flag, &b_ran, NULL);
+   while (!b_ran) {
+      g_main_context_iteration(g_main_context_default(), TRUE);
+   }
+}
+
 /* Wait until p_win's open-external popover reports itself mapped. Returns
  * FALSE on timeout so the caller can assert with a useful message. */
 static gboolean
@@ -489,16 +508,15 @@ wait_for_popover_mapped(GgazeWindow *p_win) {
  * presents and asserts that the popover MAPS. It needs no backend-conditional
  * assertion: with a mapped parent the popover maps on Wayland and X11 alike.
  *
- * SCOPE, so this is not read as more than it is. Mapping is the only one of
- * the four presentation aspects (mapping, positioning, autohide/grab
- * behaviour, dismissal) that anything in the tree asserts; positioning and
- * real dismissal are unasserted on BOTH backends -- popup_structure's
- * toggle-close fires win.open-external a second time, which is the action
- * path, not the "closed" -> _open_ext_closed_cb -> _open_ext_destroy path.
- * And this covers the `e` builder only: `a`, `!` and `m` in src/window.c
- * build their popovers independently, so a regression confined to one of
- * them would leave that popover unmapped with nothing failing anywhere. See
- * tests/helpers/gtk_helpers.h, "window focus", for the full residual.
+ * SCOPE, so this is not read as more than it is. Of the four presentation
+ * aspects (mapping, positioning, autohide/grab behaviour, dismissal) this
+ * asserts mapping; GTK's own dismissal -- "closed" -> popup_list.c's
+ * _on_closed() -> popup_list_delete() -- is driven by gtk_popdown_frees_safely
+ * and tall_list_closes_cleanly below (gg2); positioning is unasserted on
+ * BOTH backends. And this covers the `e` builder only: `a`, `!` and `m` in
+ * src/window.c build their popovers independently, so a regression confined to
+ * one of them would leave that popover unmapped with nothing failing anywhere.
+ * See tests/helpers/gtk_helpers.h, "window focus", for the full residual.
  *
  * WHAT THIS SUBTEST DOES AND DOES NOT BUY YOU, measured by replacing the
  * g_assert_true(present_and_map(p_win)) call below with `(void)
@@ -576,12 +594,237 @@ test_open_external_popup_really_maps(void) {
    g_assert_cmphex((guintptr)gtk_root_get_focus(GTK_ROOT(p_win)), ==,
                    (guintptr)popover_button(p_pop, 0));
 
+   /* Closing a popover that holds the focus releases it AT ONCE (gg2).
+    * With the focus inside, a bare unparent makes GtkWindow keep a ref on
+    * the unrealized popover until its next after-paint; on GTK 4.14 a
+    * tooltip timeout in that gap passes the popover's NULL surface to
+    * gdk_surface_get_device_position() -- the critical that failed CI's
+    * fedora:40 lane in popup_structure and enhance_flow. popup_list_delete()
+    * moves the focus out first, so no such ref is parked; its own ref (held
+    * so a close from inside gtk_popover_popdown() cannot free the popover
+    * under GTK) is dropped in a G_PRIORITY_HIGH idle, which runs before any
+    * default-priority tooltip timeout. So by the time the main loop first
+    * dispatches a G_PRIORITY_DEFAULT source after the close, the popover
+    * must be finalized. */
+   g_object_add_weak_pointer(G_OBJECT(p_pop), (gpointer *)&p_pop);
+   fire(p_win, "win.open-external"); /* toggle closed */
+   run_until_default_priority();
+   g_assert_null(p_pop);
+   g_assert_null(find_open_external_popover(p_win));
+
    g_object_unref(p_file);
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(300);
    g_free(c_path);
    cleanup_temp_dir(c_dir);
    reset_editors();
+}
+
+/* --- closing: popover lifetime and where the focus goes (gg2) ----------- */
+
+/* A presented window on a temp copy of plain.jpg with u_editors editors
+ * configured, for the subtests below that close a MAPPED popover whose first
+ * row holds the focus. Presented (like popup_really_maps) so the popover maps
+ * and takes the focus on Wayland as well as on X11. */
+typedef struct {
+   char        *c_dir;
+   GFile       *p_file;
+   GgazeWindow *p_win;
+} MappedFixture;
+
+static void
+mapped_fixture_open(MappedFixture *p_fx, guint u_editors) {
+   reset_editors();
+   set_named_editors(u_editors);
+   GError *p_err = NULL;
+   p_fx->c_dir   = g_dir_make_tmp("ggaze-oe-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(p_fx->c_dir, "plain.jpg", "plain.jpg");
+   char *c_path = g_build_filename(p_fx->c_dir, "plain.jpg", NULL);
+   p_fx->p_file = g_file_new_for_path(c_path);
+   g_free(c_path);
+   p_fx->p_win = new_window();
+   ggaze_window_open(p_fx->p_win, p_fx->p_file);
+   drain_main(200);
+   g_assert_true(present_and_map(p_fx->p_win));
+}
+
+static void
+mapped_fixture_close(MappedFixture *p_fx) {
+   g_object_unref(p_fx->p_file);
+   gtk_window_destroy(GTK_WINDOW(p_fx->p_win));
+   drain_main(300);
+   cleanup_temp_dir(p_fx->c_dir);
+   reset_editors();
+}
+
+/* Pop up the `e` popover, wait for it to map with its first row focused, and
+ * return it with a weak pointer installed at *pp_pop (so the caller can see
+ * it finalized). */
+static void
+open_mapped_popover(GgazeWindow *p_win, GtkPopover **pp_pop) {
+   fire(p_win, "win.open-external");
+   g_assert_true(wait_for_popover_mapped(p_win));
+   *pp_pop = find_open_external_popover(p_win);
+   g_assert_nonnull(*pp_pop);
+   g_assert_cmphex((guintptr)gtk_root_get_focus(GTK_ROOT(p_win)), ==,
+                   (guintptr)popover_button(*pp_pop, 0));
+   g_object_add_weak_pointer(G_OBJECT(*pp_pop), (gpointer *)pp_pop);
+}
+
+/* After a close: the popover is finalized before the main loop dispatches
+ * anything at G_PRIORITY_DEFAULT -- a tooltip timeout, say (the teardown's
+ * reference is dropped in a G_PRIORITY_HIGH idle, see popup_list.c) --, no
+ * popover is left on the stack, and the keyboard focus is
+ * back on the viewer -- where it was when the popover opened -- and not on
+ * a header button, where Enter/Space would activate it. */
+static void
+assert_closed_to_viewer(GgazeWindow *p_win, GtkPopover **pp_pop) {
+   run_until_default_priority();
+   g_assert_null(*pp_pop);
+   g_assert_null(find_open_external_popover(p_win));
+   g_assert_cmphex((guintptr)gtk_root_get_focus(GTK_ROOT(p_win)), ==,
+                   (guintptr)ggtest_viewer_of(p_win));
+}
+
+/* Deliver u_keyval to p_pop's key controller as a key press. */
+static void
+press_key(GtkPopover *p_pop, guint u_keyval) {
+   GListModel *p_ctrls = gtk_widget_observe_controllers(GTK_WIDGET(p_pop));
+   gboolean    b_sent  = FALSE;
+   for (guint i = 0; i < g_list_model_get_n_items(p_ctrls) && !b_sent; i++) {
+      GObject *p_obj = g_list_model_get_item(p_ctrls, i);
+      if (GTK_IS_EVENT_CONTROLLER_KEY(p_obj)) {
+         gboolean b_ret = FALSE;
+         g_signal_emit_by_name(p_obj, "key-pressed", u_keyval, 0,
+                               (GdkModifierType)0, &b_ret);
+         g_assert_true(b_ret); /* the popover consumed it */
+         b_sent = TRUE;
+      }
+      g_object_unref(p_obj);
+   }
+   g_object_unref(p_ctrls);
+   g_assert_true(b_sent);
+}
+
+/* Every way the user closes a mapped chooser -- the toggle key, Escape, a
+ * row picked by hotkey or by click -- frees the popover promptly and returns
+ * the focus to the viewer (GTK hiding it on its own: the next subtest). */
+static void
+test_open_external_close_paths_restore_focus(void) {
+   MappedFixture s_fx;
+   mapped_fixture_open(&s_fx, 3);
+   GtkPopover *p_pop = NULL;
+
+   open_mapped_popover(s_fx.p_win, &p_pop);
+   fire(s_fx.p_win, "win.open-external"); /* toggle */
+   assert_closed_to_viewer(s_fx.p_win, &p_pop);
+
+   open_mapped_popover(s_fx.p_win, &p_pop);
+   press_key(p_pop, GDK_KEY_Escape);
+   assert_closed_to_viewer(s_fx.p_win, &p_pop);
+
+   open_mapped_popover(s_fx.p_win, &p_pop);
+   press_key(p_pop, GDK_KEY_1); /* launches `true <file>`: harmless */
+   assert_closed_to_viewer(s_fx.p_win, &p_pop);
+
+   open_mapped_popover(s_fx.p_win, &p_pop);
+   ggtest_click_button(popover_button(p_pop, 1));
+   assert_closed_to_viewer(s_fx.p_win, &p_pop);
+
+   mapped_fixture_close(&s_fx);
+}
+
+/* The first GtkButton in p_w's subtree (depth first) that takes the focus
+ * -- which it then has --, or NULL. */
+static GtkWidget *
+focus_first_button_in(GtkWidget *p_w) {
+   if (GTK_IS_BUTTON(p_w) && gtk_widget_grab_focus(p_w)) {
+      return (p_w);
+   }
+   for (GtkWidget *p_c = gtk_widget_get_first_child(p_w); p_c != NULL;
+        p_c            = gtk_widget_get_next_sibling(p_c)) {
+      GtkWidget *p_b = focus_first_button_in(p_c);
+      if (p_b != NULL) {
+         return (p_b);
+      }
+   }
+   return (NULL);
+}
+
+/* Closing returns the focus to wherever it was when the chooser opened, not
+ * to a fixed widget: opened from a focused header button, Escape puts the
+ * focus back on that button. And with no focus at all when it opened, the
+ * close falls back to the stack's visible page -- the viewer -- rather than
+ * the window's first focusable widget (the header's "Previous image"). */
+static void
+test_open_external_close_restores_prior_focus(void) {
+   MappedFixture s_fx;
+   mapped_fixture_open(&s_fx, 3);
+   GtkWidget *p_hdr_btn =
+      focus_first_button_in(gtk_window_get_titlebar(GTK_WINDOW(s_fx.p_win)));
+   g_assert_nonnull(p_hdr_btn);
+   GtkPopover *p_pop = NULL;
+   open_mapped_popover(s_fx.p_win, &p_pop);
+   press_key(p_pop, GDK_KEY_Escape);
+   run_until_default_priority();
+   g_assert_null(p_pop);
+   g_assert_cmphex((guintptr)gtk_root_get_focus(GTK_ROOT(s_fx.p_win)), ==,
+                   (guintptr)p_hdr_btn);
+
+   gtk_root_set_focus(GTK_ROOT(s_fx.p_win), NULL);
+   open_mapped_popover(s_fx.p_win, &p_pop);
+   press_key(p_pop, GDK_KEY_Escape);
+   assert_closed_to_viewer(s_fx.p_win, &p_pop);
+   mapped_fixture_close(&s_fx);
+}
+
+/* GTK hiding a mapped chooser on its own (gtk_popover_popdown(), what
+ * GtkPopover does itself when it loses its grab or cannot be placed) frees
+ * it safely and returns the focus to the viewer.
+ *
+ * This is the gg2 use-after-free: "closed" fires INSIDE
+ * gtk_popover_popdown(), the teardown unparents the popover there, and
+ * gtk_popover_popdown() then touches it again (cascade_popdown). Unless the
+ * teardown holds a reference across that, the last one goes with the
+ * unparent and GTK reads freed memory -- an ASan report, or the
+ * Gtk-CRITICAL "gtk_popover_get_autohide: assertion 'GTK_IS_POPOVER
+ * (popover)' failed" on the dead instance. */
+static void
+test_open_external_gtk_popdown_frees_safely(void) {
+   MappedFixture s_fx;
+   mapped_fixture_open(&s_fx, 3);
+   GtkPopover *p_pop = NULL;
+   open_mapped_popover(s_fx.p_win, &p_pop);
+   gtk_popover_popdown(p_pop);
+   assert_closed_to_viewer(s_fx.p_win, &p_pop);
+   mapped_fixture_close(&s_fx);
+}
+
+/* The full 36-row chooser (every hotkey in use) on a small window: taller
+ * than the room above its anchor, which is where GTK hides a popover by
+ * itself -- the path that first showed the gg2 use-after-free. Whether GTK
+ * keeps it open depends on the display, so the subtest lets the popover
+ * settle, closes it by the toggle key if it is still up, and asserts the
+ * same outcome either way: no crash, no popover left, focus on the viewer. */
+static void
+test_open_external_tall_list_closes_cleanly(void) {
+   MappedFixture s_fx;
+   mapped_fixture_open(&s_fx, 36);
+   fire(s_fx.p_win, "win.open-external");
+   GtkPopover *p_pop = find_open_external_popover(s_fx.p_win);
+   g_assert_nonnull(p_pop);
+   g_assert_cmpint(popover_button_count(p_pop), ==, 36);
+   g_object_add_weak_pointer(G_OBJECT(p_pop), (gpointer *)&p_pop);
+   drain_main(300);
+   if (p_pop != NULL) {
+      g_test_message("GTK kept the 36-row popover open: toggling it closed");
+      fire(s_fx.p_win, "win.open-external");
+   } else {
+      g_test_message("GTK hid the 36-row popover itself");
+   }
+   assert_closed_to_viewer(s_fx.p_win, &p_pop);
+   mapped_fixture_close(&s_fx);
 }
 
 /* Preferences edits to the editors list apply live: with the popover's
@@ -662,6 +905,14 @@ main(int i_argc, char **c_argv) {
                    test_open_external_popup_empty_message);
    g_test_add_func("/open_external/popup_really_maps",
                    test_open_external_popup_really_maps);
+   g_test_add_func("/open_external/close_paths_restore_focus",
+                   test_open_external_close_paths_restore_focus);
+   g_test_add_func("/open_external/close_restores_prior_focus",
+                   test_open_external_close_restores_prior_focus);
+   g_test_add_func("/open_external/gtk_popdown_frees_safely",
+                   test_open_external_gtk_popdown_frees_safely);
+   g_test_add_func("/open_external/tall_list_closes_cleanly",
+                   test_open_external_tall_list_closes_cleanly);
    g_test_add_func("/open_external/prefs_apply_live",
                    test_open_external_prefs_apply_live);
    return (g_test_run());

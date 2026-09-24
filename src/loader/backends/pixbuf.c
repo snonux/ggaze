@@ -208,10 +208,13 @@ _pixbuf_load(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
    }
    const guchar  *p_buf = (const guchar *)c_buf;
    GgazeAnimProbe st_probe;
-   GdkTexture    *p_tex =
-      _pixbuf_playable_animation(p_buf, u_len, &st_probe)
-         ? _pixbuf_decode_animation(p_buf, u_len, &st_probe, p_cancel, p_err)
-         : _pixbuf_decode_still(p_buf, u_len, p_err);
+   GdkTexture    *p_tex = NULL;
+   if (_pixbuf_playable_animation(p_buf, u_len, &st_probe)) {
+      p_tex =
+         _pixbuf_decode_animation(p_buf, u_len, &st_probe, p_cancel, p_err);
+   } else {
+      p_tex = _pixbuf_decode_still(p_buf, u_len, p_err);
+   }
    g_free(c_buf);
    return (p_tex);
 }

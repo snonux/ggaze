@@ -497,44 +497,44 @@ _build_general_page(GSettings *p_gs) {
  * configuring presets that can never run was a trap. */
 static void
 _init_lists(PrefsLists *p_l, Settings *p_s) {
-   ListSpec *p_d  = &p_l->t_specs[p_l->u_n++];
-   *p_d           = (ListSpec){.p_s            = p_s,
-                               .c_title        = "Move destinations",
-                               .c_description  = "Folders the m key offers",
-                               .c_placeholder  = "Absolute folder path "
-                                                 "(e.g. /home/me/Photos/keep)",
-                               .b_require_path = TRUE,
-                               .get            = settings_get_destinations,
-                               .set            = settings_set_destinations};
-   ListSpec *p_e  = &p_l->t_specs[p_l->u_n++];
-   *p_e           = (ListSpec){.p_s           = p_s,
-                               .c_title       = "External editors",
-                               .c_description = "Programs the e key offers; "
-                                                "%f is the image path",
-                               .c_placeholder = "Command (e.g. gimp %f)",
-                               .get           = settings_get_editors,
-                               .set           = settings_set_editors};
-   ListSpec *p_sc = &p_l->t_specs[p_l->u_n++];
-   *p_sc          = (ListSpec){.p_s           = p_s,
-                               .c_title       = "Shell scripts",
-                               .c_description = "Run with the ! key via "
-                                                "/bin/sh; %f is the image, "
-                                                "%d its folder",
-                               .c_placeholder = "Shell command (e.g. "
-                                                "exiftool -P %f > %d/meta.txt)",
-                               .get           = settings_get_scripts,
-                               .set           = settings_set_scripts};
+   p_l->t_specs[p_l->u_n++] =
+      (ListSpec){.p_s            = p_s,
+                 .c_title        = "Move destinations",
+                 .c_description  = "Folders the m key offers",
+                 .c_placeholder  = "Absolute folder path "
+                                   "(e.g. /home/me/Photos/keep)",
+                 .b_require_path = TRUE,
+                 .get            = settings_get_destinations,
+                 .set            = settings_set_destinations};
+   p_l->t_specs[p_l->u_n++] =
+      (ListSpec){.p_s           = p_s,
+                 .c_title       = "External editors",
+                 .c_description = "Programs the e key offers; "
+                                  "%f is the image path",
+                 .c_placeholder = "Command (e.g. gimp %f)",
+                 .get           = settings_get_editors,
+                 .set           = settings_set_editors};
+   p_l->t_specs[p_l->u_n++] =
+      (ListSpec){.p_s           = p_s,
+                 .c_title       = "Shell scripts",
+                 .c_description = "Run with the ! key via "
+                                  "/bin/sh; %f is the image, "
+                                  "%d its folder",
+                 .c_placeholder = "Shell command (e.g. "
+                                  "exiftool -P %f > %d/meta.txt)",
+                 .get           = settings_get_scripts,
+                 .set           = settings_set_scripts};
 #if GGAZE_HAVE_GEGL
-   ListSpec *p_p = &p_l->t_specs[p_l->u_n++];
-   *p_p          = (ListSpec){.p_s           = p_s,
-                              .c_title       = "Enhance presets",
-                              .c_description = "Extra presets for the a "
-                                               "chooser: GEGL operations with "
-                                               "prop=value settings, in order",
-                              .c_placeholder = "e.g. gegl:saturation scale=1.3 "
-                                               "gegl:unsharp-mask std-dev=1.5",
-                              .get           = settings_get_enhance_presets,
-                              .set           = settings_set_enhance_presets};
+   p_l->t_specs[p_l->u_n++] =
+      (ListSpec){.p_s           = p_s,
+                 .c_title       = "Enhance presets",
+                 .c_description = "Extra presets for the a "
+                                  "chooser: GEGL operations with "
+                                  "prop=value settings, in order",
+                 .c_placeholder = "e.g. gegl:saturation scale=1.3 "
+                                  "gegl:unsharp-mask std-dev=1.5",
+                 .get           = settings_get_enhance_presets,
+                 .set           = settings_set_enhance_presets};
 #endif
 }
 

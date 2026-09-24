@@ -42,6 +42,9 @@ GtkFlowBox *ggtest_find_flow_box(GtkWidget *p_w);
  * flowbox and the cell exist. */
 void ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx);
 
+/* The GgazeViewer on p_win's stack (its "large" page). Asserts it exists. */
+GgazeViewer *ggtest_viewer_of(GgazeWindow *p_win);
+
 /* --- window focus ---------------------------------------------------------
  *
  * Grab keyboard focus into p_win's GgazeViewer (its stack's "large" child),
@@ -91,7 +94,7 @@ void ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx);
  * WHAT HAS SINCE BEEN CLOSED, AND WHAT HAS NOT (cw0, commit 9aeb902 -- whose
  * subject says "bw0", the deleted duplicate filing of the same task).
  *
- * Exactly ONE subtest presents: /open_external/popup_really_maps in
+ * One subtest presents to assert mapping: /open_external/popup_really_maps in
  * tests/test_open_external.c calls gtk_window_present(), waits for the
  * toplevel to map, fires win.open-external and asserts the popover is mapped.
  * With a mapped parent the popover maps on Wayland and on X11 alike, so it
@@ -102,12 +105,11 @@ void ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx);
  *
  * The residual, stated here so nobody has to re-derive it:
  *
- *   - MAPPING is the only one of the four presentation aspects listed above
- *     that anything asserts. Positioning is unasserted on both backends, and
- *     so is real dismissal: the popover's "closed" -> _open_ext_closed_cb ->
- *     _open_ext_destroy path is never driven, because popup_structure's
- *     toggle-close fires win.open-external a second time, which is the ACTION
- *     path, not the dismissal path.
+ *   - Of the four presentation aspects listed above, MAPPING and real
+ *     dismissal are asserted: the popover's "closed" -> popup_list.c's
+ *     _on_closed() -> popup_list_delete() path is driven by
+ *     /open_external/gtk_popdown_frees_safely and tall_list_closes_cleanly
+ *     (gg2), which present too. Positioning is unasserted on both backends.
  *   - Only ONE of the four popover builders in src/window.c is covered, the
  *     `e` one (_action_open_external). `a` (_enhance_build_rows /
  *     _enhance_build_box), `!` (_action_run_script) and `m` (_move_build_box)

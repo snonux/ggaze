@@ -53,8 +53,8 @@ void navigator_delete(Navigator *p_nav);
 /* --- listing ------------------------------------------------------------- */
 GFile *navigator_get_dir(Navigator *p_nav); /* (transfer none) */
 guint  navigator_get_count(Navigator *p_nav);
-GFile *navigator_get_file(Navigator *p_nav,
-                          guint      u_index);        /* (transfer none) */
+/* navigator_get_file: (transfer none) */
+GFile *navigator_get_file(Navigator *p_nav, guint u_index);
 gint   navigator_get_current_index(Navigator *p_nav); /* -1 if empty */
 GFile *navigator_get_current(Navigator *p_nav);       /* (transfer none) */
 guint
