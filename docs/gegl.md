@@ -780,5 +780,8 @@ WebP/AVIF/HEIF/JXL, a managed plain view, and non-sRGB displays.
 ## Dependencies (Fedora)
 
 ```
-gegl-devel   babl-devel
+gegl04-devel   babl-devel
 ```
+
+(`gegl04-devel` is the GEGL 0.4 package on Fedora; there is no
+`gegl-devel` on fedora:40, which CI's gegl lane runs on.)

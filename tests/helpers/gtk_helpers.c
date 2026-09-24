@@ -40,11 +40,11 @@ ggtest_activate_cell(GgazeGrid *p_grid, gint i_idx) {
 
 /* --- window focus --------------------------------------------------------- */
 
-/* The viewer on p_win's stack. Asserted rather than returned NULL, so a
- * window without a "large" page fails here by name instead of as a NULL
+/* See gtk_helpers.h. Asserted rather than returned NULL, so a window
+ * without a "large" page fails here by name instead of as a NULL
  * dereference inside whichever wait or grab asked for it. */
-static GgazeViewer *
-_viewer_of(GgazeWindow *p_win) {
+GgazeViewer *
+ggtest_viewer_of(GgazeWindow *p_win) {
    GtkStack *p_stack = ggaze_window_get_stack(p_win);
    g_assert_nonnull(p_stack);
    GtkWidget *p_large = gtk_stack_get_child_by_name(p_stack, "large");
@@ -55,7 +55,7 @@ _viewer_of(GgazeWindow *p_win) {
 
 void
 ggtest_focus_viewer(GgazeWindow *p_win) {
-   GtkWidget *p_large = GTK_WIDGET(_viewer_of(p_win));
+   GtkWidget *p_large = GTK_WIDGET(ggtest_viewer_of(p_win));
    /* GgazeViewer calls gtk_widget_set_focusable(TRUE) in its init, so the
     * grab succeeds on an unmapped, never-presented window too. Asserted
     * rather than ignored: if the viewer ever stops being focusable, the
@@ -317,7 +317,7 @@ _view_ready(gpointer p_data) {
 static GgazeViewer *
 _wait_view(const char *c_loc, GgazeWindow *p_win, int i_tex_w, int i_tex_h,
            gboolean b_settle) {
-   ViewWait  s_w     = {.p_v      = _viewer_of(p_win),
+   ViewWait  s_w     = {.p_v      = ggtest_viewer_of(p_win),
                         .i_want_w = i_tex_w,
                         .i_want_h = i_tex_h,
                         .b_settle = b_settle};

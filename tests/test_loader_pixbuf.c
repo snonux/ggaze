@@ -59,6 +59,7 @@
 #include "loader/detect.h"
 #include "mem_file.h"
 #include "open_counter.h"
+#include "pixbuf_modules.h"
 #include "tiny_images.h"
 
 static GdkTexture *
@@ -336,21 +337,6 @@ test_garbage_jxl_fails_fast(void) {
    }
 }
 
-/* TRUE iff the gdk-pixbuf module c_module ("webp", "tiff", ...) is
- * installed on this machine. */
-static gboolean
-_pixbuf_module_available(const char *c_module) {
-   GSList  *p_formats = gdk_pixbuf_get_formats();
-   gboolean b_found   = FALSE;
-   for (GSList *p_l = p_formats; p_l != NULL; p_l = p_l->next) {
-      gchar *c_name = gdk_pixbuf_format_get_name((GdkPixbufFormat *)p_l->data);
-      b_found       = b_found || g_strcmp0(c_name, c_module) == 0;
-      g_free(c_name);
-   }
-   g_slist_free(p_formats);
-   return (b_found);
-}
-
 /* The modules gdk-pixbuf2 itself ships on CI's fedora:40 (and on any
  * desktop worth the name): a test that needs one of these and finds it
  * missing has found a broken test machine, not an optional feature, and
@@ -370,7 +356,7 @@ _pixbuf_module_is_core(const char *c_module) {
  * unless the opt-out variable is set, in which case it is skipped too. */
 static gboolean
 _pixbuf_module_usable(const char *c_module) {
-   if (_pixbuf_module_available(c_module)) {
+   if (ggtest_pixbuf_module_available(c_module)) {
       return (TRUE);
    }
    if (_pixbuf_module_is_core(c_module) &&

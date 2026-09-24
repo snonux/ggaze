@@ -8,6 +8,9 @@ URL:     https://codeberg.org/snonux/ggaze
 Source0: %{url}/archive/%{version}.tar.gz
 
 BuildRequires: meson ninja-build gcc
+# update-desktop-database, which data/meson.build's gnome.post_install()
+# looks up at configure time:
+BuildRequires: desktop-file-utils
 BuildRequires: gtk4-devel glib2-devel libadwaita-devel gdk-pixbuf2-devel
 BuildRequires: libexif-devel libjpeg-turbo-devel
 # Optional (built if available):
