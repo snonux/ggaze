@@ -36,14 +36,19 @@ steps:
     image: fedora:40
     environment: ${ENV}
     commands:
+      # fedora:40 package names (verified in a fedora:40 container, gg2):
+      # clang-format ships in clang-tools-extra; libexif-devel is the
+      # mandatory EXIF dependency (meson.build); desktop-file-utils provides
+      # update-desktop-database for data/meson.build's gnome.post_install();
+      # GEGL 0.4 is gegl04-devel (there is no gegl-devel on fedora:40).
       - dnf install -y --setopt=install_weak_deps=False
-          meson ninja-build gcc clang clang-format git
+          meson ninja-build gcc clang clang-tools-extra git
           pkgconf-pkg-config xorg-x11-server-Xvfb
-          gtk4-devel glib2-devel libadwaita-devel
-          libasan libubsan
+          gtk4-devel glib2-devel libadwaita-devel libexif-devel
+          desktop-file-utils libasan libubsan
       - |
         if [ "$LANE" = "gegl" ]; then
-          dnf install -y --setopt=install_weak_deps=False gegl-devel babl-devel
+          dnf install -y --setopt=install_weak_deps=False gegl04-devel babl-devel
         fi
       - meson setup build $MESON_OPTS
       - ninja -C build

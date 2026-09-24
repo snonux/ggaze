@@ -112,10 +112,12 @@ ninja -C build-cov coverage     # needs lcov + genhtml
 ## Dependencies (Fedora)
 
 ```
-meson ninja-build gcc pkgconf-pkg-config
-gtk4-devel glib2-devel libadwaita-devel
+meson ninja-build gcc pkgconf-pkg-config desktop-file-utils
+gtk4-devel glib2-devel libadwaita-devel libexif-devel
 # optional:
-gegl-devel babl-devel   libjxl-devel   libavif-devel   libheif-devel
+gegl04-devel babl-devel   libjpeg-turbo-devel
+libjxl-devel   libavif-devel   libheif-devel
+# checks (CI): clang-tools-extra (clang-format) xorg-x11-server-Xvfb
 ```
 
 ## Documentation
