@@ -145,10 +145,10 @@ void tool_ctrl_cancel(ToolCtrl *p_tc);
  * large view up (a no-op while it still is). */
 void tool_ctrl_abandon(ToolCtrl *p_tc);
 
-/* The preview under the tool is being discarded (Esc outside the tool, `0`
- * / the Original card with the panel open, a failed render, the gate's
- * Discard, the slideshow): leave WITHOUT restoring or committing anything
- * -- the discard resets the transform and a crop tool's override together.
+/* The preview under the tool is being discarded (x / Revert all, a failed
+ * render, the gate's Discard, the slideshow): leave WITHOUT restoring or
+ * committing anything -- the discard resets the transform and a crop
+ * tool's override together.
  * The enhance controller calls this through its host ops before it resets,
  * so no tool can outlive the state it was editing and re-apply it. */
 void tool_ctrl_discarded(ToolCtrl *p_tc);

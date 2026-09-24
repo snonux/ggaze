@@ -63,7 +63,7 @@ editing remains a non-goal.
   *"No edits yet"*, *"Unsaved edits — s saves a copy"* or
   *"Saved as IMG_0001-enhanced.jpg"*, above a **Save copy** button (bound to
   the same action as `s`) that names the file the next save writes
-  (*→ IMG_0001-enhanced.jpg*); the key-hint bar under the image lists the
+  (*as IMG_0001-enhanced.jpg*); the key-hint bar under the image lists the
   panel's keys.
 - `s` / `Ctrl+S` (or the panel's *Save copy* button, or menu *Save enhanced
   copy…*) writes the enhanced result to a new file, e.g.

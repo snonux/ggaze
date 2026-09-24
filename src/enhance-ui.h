@@ -116,8 +116,11 @@ void enhance_ui_set_save_state(GtkWidget *p_state, GtkWidget *p_save_btn,
                                gboolean b_active, gboolean b_saved,
                                const char *c_saved);
 
-/* Name the file the next Save writes under the Save button ("→ <name>"),
- * or clear it (c_name NULL: no file open, or no free name). */
+/* Name the file the next Save writes under the Save button ("as <name>"),
+ * or clear it (c_name NULL: no file open, or no free name). Plain ASCII
+ * around the name on purpose: an arrow glyph the UI font lacks sent pango
+ * to a fallback font, and fontconfig leaks the charset it builds for that
+ * font's coverage (caught by the ASan lane). */
 void enhance_ui_set_save_target(GtkWidget *p_target, const char *c_name);
 
 G_END_DECLS

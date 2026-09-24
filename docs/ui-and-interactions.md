@@ -465,7 +465,7 @@ image's histogram.
   - **Transform** — *Crop* `c`, *Straighten* `r`, and the two quarter turns
     `[` / `]` as buttons (the same actions as the keys).
   - **Actions** — a state line that says whether the edit is unsaved,
-    **Save copy** `s` naming the file it will write (`→
+    **Save copy** `s` naming the file it will write (`as
     IMG_0001-enhanced.jpg`), **Revert all** `x`, and **Close** `a/Esc`.
 
   Example:
@@ -483,7 +483,7 @@ image's histogram.
   ACTIONS
   Unsaved edits — s saves a copy (the original is never modified).
    [ Save copy     s ]
-     → IMG_0001-enhanced.jpg
+     as IMG_0001-enhanced.jpg
    [ Revert all    x ]
    [ Close     a/Esc ]
   ```

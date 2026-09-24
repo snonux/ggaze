@@ -422,7 +422,7 @@ _append_quarter_turn(GeglNode *p_graph, GeglNode *p_prev, gint i_quarter) {
    return (p_rot);
 }
 
-/* `R`: the straighten angle about the image centre, then a crop to the size
+/* `r`: the straighten angle about the image centre, then a crop to the size
  * transform_straighten_size promises -- the inset inscribed rectangle
  * (auto-crop) or the rotated bounding box -- about that same centre, so the
  * output is exactly transform_base_size and every auto-cropped pixel is

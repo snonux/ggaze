@@ -16,7 +16,8 @@
  *     mask changes again, so moving on does not prompt for it.
  *   - `a` opens the enhance side panel beside the viewer (inside the window,
  *     no second toplevel), which survives navigation and re-previews the
- *     new image; Esc closes it first, `0` is its Original hotkey.
+ *     new image; Esc closes it and keeps the edit, x reverts (6i2: `0`
+ *     is zoom only, the digits are the open panel's keys).
  *   - ggaze_window_set_hold_original() swaps the displayed texture to the
  *     (cached) original and back without touching u_enhance_mask.
  *   - the `i` card's histogram follows the picture (0c2, second review):
@@ -27,8 +28,10 @@
  *   - win.enhance-save exports a NEW file next to the original
  *     (<stem>-enhanced[-<n>].<ext>, collision-suffixed like mover.c), never
  *     overwriting the original or a pre-existing same-named export.
- *   - wb2: the crop (c) / straighten (R) / rotate-90 ([ ]) tools on the same
- *     preview graph -- see the "wb2" section before the registrations.
+ *   - wb2: the crop (c) / straighten (r, R before 6i2) / rotate-90 ([ ])
+ *     tools on the same preview graph -- see the "wb2" section before the
+ *     registrations; 6i2: the edit panel's modal keys and the key-hint bar
+ *     (the "6i2" section).
  *
  * The real Save/Discard/Cancel GtkAlertDialog IS driven here, button by
  * button. The older claim (inherited from tests/test_delete_safety.c) that
@@ -479,7 +482,7 @@ assert_panel_buttons(GtkWidget *p_panel) {
       g_assert_nonnull(find_label_prefix(p_btn, BUTTONS[u].c_key));
       g_assert_false(gtk_widget_get_can_focus(p_btn)); /* Space compares */
    }
-   g_assert_nonnull(find_label_prefix(p_panel, "→ plain-enhanced.jpg"));
+   g_assert_nonnull(find_label_prefix(p_panel, "as plain-enhanced.jpg"));
    g_assert_nonnull(find_label_prefix(p_panel, "Edit plain.jpg"));
 }
 
@@ -3755,7 +3758,7 @@ test_saved_state_survives_a_tool_cancel(void) {
 }
 
 /* A drag END (or UPDATE) that never had a BEGIN in the straighten tool --
- * the press happened before `R`, or the end is stale -- levels nothing: it
+ * the press happened before `r`, or the end is stale -- levels nothing: it
  * used to apply an angle computed from whatever the start coordinates last
  * held (a lone END at (300, 200) turned the image 35 degrees). */
 static void
@@ -4206,7 +4209,7 @@ viewer_drag_gesture(GgazeViewer *p_v) {
 }
 
 /* A second finger landing while the first draws a horizon in the straighten
- * tool (`R`) makes a pinch, and the line is dropped: the viewer sends a
+ * tool (`r`) makes a pinch, and the line is dropped: the viewer sends a
  * CANCEL, not an END (viewer.h), so the first finger's (1, 1) px jitter --
  * a 45 degree line -- levels nothing: no render, no angle in the title,
  * and the tool stays up. The rest of that drag reaches the tool neither.

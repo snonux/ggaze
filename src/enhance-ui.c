@@ -327,7 +327,7 @@ void
 enhance_ui_set_save_target(GtkWidget *p_target, const char *c_name) {
    g_return_if_fail(GTK_IS_LABEL(p_target));
    char *c_text =
-      c_name != NULL ? g_strdup_printf("→ %s", c_name) : g_strdup("");
+      c_name != NULL ? g_strdup_printf("as %s", c_name) : g_strdup("");
    gtk_label_set_text(GTK_LABEL(p_target), c_text);
    g_free(c_text);
 }

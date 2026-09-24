@@ -103,7 +103,7 @@ struct EnhanceCtrl {
    GtkWidget *p_pics[GGAZE_ENHANCE_MAX_PRESETS]; /* their pictures */
    GtkWidget *p_state;                           /* save-state line */
    GtkWidget *p_save_btn;
-   GtkWidget *p_save_target; /* "→ <name>" the next Save writes */
+   GtkWidget *p_save_target; /* "as <name>" the next Save writes */
 
    GCancellable *p_preview_cancel; /* thumbnail-preview batch */
    guint         u_preview_gen;    /* invalidates stale batch completions */

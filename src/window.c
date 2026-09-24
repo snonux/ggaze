@@ -976,7 +976,7 @@ _action_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 }
 
 /* Leave the grid for the large view on the highlighted cell (what `t` and,
- * since wb2, the c / R / [ / ] keys do from the grid): sync navigator.current
+ * since wb2, the c / r / [ / ] keys do from the grid): sync navigator.current
  * to the highlighted cell first so the large view opens the selected image.
  * Since tu0 that sync goes through _grid_select_gate, and its return value is
  * meaningful (round 2, finding c): TRUE means current really moved, in which
