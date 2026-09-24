@@ -25,7 +25,8 @@ ggaze
 ├── save-gate.{c,h}       # Save/Discard/Cancel prompt gate every discarding continuation funnels through
 ├── delete-confirm.{c,h}  # >1-target permanent-delete confirm (captured targets, folder re-check)
 ├── dialog-util.{c,h}     # alert-dialog toplevel lookup shared by the two dialog modules
-├── enhance-ctrl.{c,h}    # (optional) enhance feature controller: mask, previews, side panel, saved flag, async save
+├── enhance-ctrl.{c,h}    # (optional) enhance feature controller: mask, previews, side panel, saved flag, async save, edit undo/redo
+├── edit-history.{c,h}    # bounded undo/redo of edit steps over whole edit snapshots (mask + transform), with runs, plain C
 ├── enhance-ui.{c,h}      # (optional) pure enhance side-panel widget construction
 ├── popup_list.{c,h}      # shared hotkey list popover (e / ! / m)
 ├── undo.{c,h}            # which of trash/move `u` undoes
