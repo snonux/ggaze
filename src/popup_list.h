@@ -62,12 +62,15 @@ PopupList *popup_list_new(GtkWidget *p_parent, PopupList **pp_storage,
 /* Pop the popover up (gtk_popover_popup). */
 void popup_list_popup(PopupList *p_list);
 
-/* Synchronously tear the popover down: clear *pp_storage first (so a re-
- * entrant "closed" is a no-op), move the window's keyboard focus out of the
- * popover if it is inside (so no GtkWindow ref keeps the unrealized popover
- * alive -- the GTK 4.14 tooltip critical of gg2, see popup_list.c), unparent
- * the popover, free the PopupList. Idempotent: a no-op when *pp_storage is
- * NULL. */
+/* Synchronously tear the list down: clear *pp_storage first (so a re-
+ * entrant "closed" is a no-op), unparent the popover and free the PopupList.
+ * If the focus was inside the popover it is cleared before the unparent (so
+ * no GtkWindow ref keeps the unrealized popover alive -- the GTK 4.14
+ * tooltip critical of gg2) and then returned to the widget that had it when
+ * the list opened, else to the parent's first focusable descendant (the
+ * viewer). The popover itself is released from a G_PRIORITY_HIGH idle, so
+ * this is safe to reach from inside gtk_popover_popdown() ("closed") -- see
+ * popup_list.c, _detach(). Idempotent: a no-op when *pp_storage is NULL. */
 void popup_list_delete(PopupList **pp_storage);
 
 /* Auto-assigned hotkey character for row index u_idx, in list order: 1..9,

@@ -579,11 +579,12 @@ test('temp_dir', test_temp_dir, suite : 'unit')
 # failed 60 times out of 72; the same lane with --num-processes 1 was green.
 # The grab is taken by gdk_x11_surface_present_popup(), so the race is X11-only
 # to begin with -- and on Wayland there was additionally nothing to contend
-# for, because every popover subtest but one builds a toplevel it never
+# for, because every popover subtest but a few builds a toplevel it never
 # presents and a popup whose parent surface is unrealized never presents there
-# either (see gtk_helpers.h). That "but one" is /open_external/popup_really_maps
-# (cw0), which does present; it lives in a suite that is is_parallel : false
-# below, so it cannot reintroduce contention. Either way, only the X11 lane
+# either (see gtk_helpers.h). Those few are /open_external/popup_really_maps
+# (cw0) and the close/focus subtests after it (gg2), which do present; they
+# live in a suite that is is_parallel : false below, so they cannot
+# reintroduce contention. Either way, only the X11 lane
 # ever showed the race.
 #
 # is_parallel : false says exactly what is true -- these tests need exclusive
