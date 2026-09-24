@@ -120,39 +120,43 @@ test_clamp_floor_falls_to_fit(void) {
    g_assert_cmpfloat(fabs(d_py), <, 1e-9);
 }
 
+/* Zoom via zoom_about from scale d_s to d_zoom; the zoom it settles on. */
+static gdouble
+zoom_from(GestureView t_v, gdouble d_s, gdouble d_zoom) {
+   gdouble d_z = -1.0, d_px, d_py;
+   t_v.d_scale = d_s;
+   g_assert_true(gesture_math_zoom_about(&t_v, t_v.i_w / 2.0, t_v.i_h / 2.0,
+                                         d_zoom, &d_z, &d_px, &d_py));
+   return (d_z);
+}
+
 /* A zoom left outside the limits by a resize (the fit ratio that widened
- * them changed since) is held, never pulled back through them: zooming
- * out from 1.83 % after the window widened to fit 3.66 % must not jump to
- * the 2 % floor, and zooming in from 10000 % after it shrank to fit 5000 %
- * must not drop to the 6400 % ceiling (zb2 fifth review). The ordinary
- * direction still works from there. */
+ * them changed since) is never pulled back through them (zb2 fifth /
+ * sixth review): from 1.83 % after the window widened to fit 3.66 %, a
+ * zoom-out stays put instead of snapping to the 2 % floor, a same-zoom or
+ * wobbling pinch request (scale 1, 1.001) goes only as far as asked, and
+ * a zoom-in works normally; the mirror at the ceiling (100x after the fit
+ * shrank to 50x, bare ceiling 64x) likewise. */
 static void
 test_zoom_about_resize_never_reverses(void) {
-   GestureView t_v = {.i_w     = 1200,
-                      .i_h     = 400,
-                      .i_tex_w = 32768,
-                      .i_tex_h = 16,
-                      .d_scale = 600.0 / 32768.0,
-                      .d_fit   = 1200.0 / 32768.0};
-   gdouble     d_z, d_px, d_py;
-   g_assert_true(gesture_math_zoom_about(&t_v, 600.0, 200.0, t_v.d_scale / 1.25,
-                                         &d_z, &d_px, &d_py));
-   g_assert_cmpfloat(d_z, ==, t_v.d_scale);
-   g_assert_true(gesture_math_zoom_about(&t_v, 600.0, 200.0, t_v.d_scale * 1.25,
-                                         &d_z, &d_px, &d_py));
-   g_assert_cmpfloat(d_z, ==, t_v.d_scale * 1.25);
-   GestureView t_big = {.i_w     = 300,
-                        .i_h     = 150,
-                        .i_tex_w = 6,
-                        .i_tex_h = 3,
-                        .d_scale = 100.0,
-                        .d_fit   = 50.0};
-   g_assert_true(
-      gesture_math_zoom_about(&t_big, 150.0, 75.0, 125.0, &d_z, &d_px, &d_py));
-   g_assert_cmpfloat(d_z, ==, 100.0);
-   g_assert_true(
-      gesture_math_zoom_about(&t_big, 150.0, 75.0, 80.0, &d_z, &d_px, &d_py));
-   g_assert_cmpfloat(d_z, ==, GGAZE_ZOOM_MAX);
+   GestureView t_pano = {.i_w     = 1200,
+                         .i_h     = 400,
+                         .i_tex_w = 32768,
+                         .i_tex_h = 16,
+                         .d_fit   = 1200.0 / 32768.0};
+   gdouble     d_s    = 600.0 / 32768.0;
+   g_assert_cmpfloat(zoom_from(t_pano, d_s, d_s / 1.25), ==, d_s);
+   g_assert_cmpfloat(zoom_from(t_pano, d_s, d_s), ==, d_s);
+   g_assert_cmpfloat(zoom_from(t_pano, d_s, d_s * 1.001), ==, d_s * 1.001);
+   g_assert_cmpfloat(zoom_from(t_pano, d_s, d_s * 1.25), ==, d_s * 1.25);
+   GestureView t_big = {
+      .i_w = 300, .i_h = 150, .i_tex_w = 6, .i_tex_h = 3, .d_fit = 50.0};
+   g_assert_cmpfloat(zoom_from(t_big, 100.0, 125.0), ==, 100.0);
+   g_assert_cmpfloat(zoom_from(t_big, 100.0, 100.0), ==, 100.0);
+   g_assert_cmpfloat(zoom_from(t_big, 100.0, 99.9), ==, 99.9);
+   g_assert_cmpfloat(zoom_from(t_big, 100.0, 80.0), ==, 80.0);
+   /* Inside the limits nothing changed: the bare limits still apply. */
+   g_assert_cmpfloat(zoom_from(t_big, 50.0, 125.0), ==, GGAZE_ZOOM_MAX);
 }
 
 /* A view not drawn yet (scale 0) zooms about the image's top-left instead
