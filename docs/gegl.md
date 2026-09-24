@@ -255,11 +255,21 @@ beside the preset mask; `croprect.{c,h}` and `transform.{c,h}` are the
 GEGL-free geometry those tools and the chain share, `tool-ctrl.{c,h}` the
 interactive crop/straighten session over the viewer.
 
-`enhancer_load` does NOT use `gegl:load` (which ignores EXIF Orientation):
-it loads through ggaze's own orientation-aware loader (`loader_load`, every
-backend honors Orientation per decision #26) and copies the upright RGBA8
-pixels into a `GeglBuffer`, so the live preview and the A-menu per-preset
-preview thumbnails render upright for portrait phone JPEGs etc.
+`enhancer_load` does NOT use `gegl:load` (which ignores EXIF Orientation).
+A local PNG or JPEG whose embedded ICC profile is not sRGB decodes through
+`gegl:png-load` / `gegl:jpg-load` for their ICC awareness (see "Color
+management" below) with the Orientation applied by the enhancer itself
+(pixbuf-util's permutation, the one every backend uses); every other file
+(an untagged or sRGB-profiled PNG/JPEG included) loads through ggaze's own
+orientation-aware loader
+(`loader_load`, every backend honors Orientation per decision #26) and its
+upright RGBA8 pixels are copied into an sRGB-tagged `GeglBuffer` — read
+through a `GdkTextureDownloader` in an explicit `R8G8B8A8` layout since
+xb2 (before it, `gdk_texture_download()` handed back premultiplied
+`B8G8R8A8`, so every enhance preview and export had red and blue swapped
+and premultiplied pixels: a visible change with xb2, see decision #45). Either way
+the live preview and the per-preset preview thumbnails render upright for
+portrait phone JPEGs etc.
 
 ```c
 const GPtrArray *enhancer_get_presets(Enhancer *p_e);
@@ -272,17 +282,27 @@ gboolean         enhancer_export_chain(GeglBuffer *p_in,
                                        GError **p_err);
 
 /* Async: load + apply_chain + buffer_to_texture in a GTask worker; finish
- * also reports the original's upright size (the crop tool's base). */
+ * also reports the original's upright size (the crop tool's base) and
+ * whether the decode was colour-managed. */
 void       enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
                                       guint8 u_mask, const Transform *p_xf,
                                       GCancellable *p_cancel,
                                       GAsyncReadyCallback p_cb, gpointer p_data);
 GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, gint *p_orig_w,
-                                        gint *p_orig_h, GError **p_err);
+                                        gint *p_orig_h, gboolean *pb_managed,
+                                        GError **p_err);
+/* Async: the managed original for hold-Space, fetched on the first press. */
+void        enhancer_managed_original_async(GFile *p_file,
+                                            GCancellable *p_cancel,
+                                            GAsyncReadyCallback p_cb,
+                                            gpointer p_data);
+GdkTexture *enhancer_managed_original_finish(GAsyncResult *p_res,
+                                             GError **p_err);
 ```
 
 Viewer integration: when a preset is active, the decoded pixels are imported
-into a `GeglBuffer` (via the orientation-aware loader + babl; see
+into a `GeglBuffer` (GEGL's ICC-aware loader for a PNG/JPEG with a
+non-sRGB profile, the orientation-aware loader otherwise; see
 `enhancer_load` above), the enhancer processes
 it, and the output buffer is rendered back to a `GdkTexture` for display.
 This path is heavier, so it is strictly on-demand and off the main thread;
@@ -292,10 +312,9 @@ overwriting whatever the user is now looking at (last-write-wins).
 
 ## What else GEGL gives ggaze
 
-- **Color management** — `gegl:icc-file-loader`, `gegl:lcms-from-profile`,
-  `gegl:cast-color-space`, `gegl:convert-color-space`, plus ICC-aware savers.
-  Closes open question **G** (color management) via babl + LCMS, no separate
-  wiring.
+- **Color management** — shipped on the enhance/export path (xb2, decision
+  #45); see the section below. Closes open question **G** via babl, with no
+  separate lcms2 wiring.
 - **Format load/save** — `gegl:jpg-load`/`-save`, `gegl:png-load`/`-save`,
   `gegl:tiff-load`/`-save`, `gegl:webp-load`/`-save`, `gegl:ppm-*`,
   `gegl:rgbe-*`, `gegl:gegl-buffer-load`/`-save`. Can augment GdkPixbuf on the
@@ -310,6 +329,464 @@ overwriting whatever the user is now looking at (last-write-wins).
   `gegl:oilify`, `gegl:cartoon`, `gegl:photocopy`.
 - **Batch** — drive the `gegl` CLI via the `!` runner for bulk enhance/export
   without building it into ggaze's UI.
+
+## Color management (decision #45)
+
+Scope: the enhance preview, its hold-`Space` compare and the `s` export,
+with GEGL. The plain large view (GdkPixbuf + the direct backends) is not
+managed by ggaze: it shows what the decoder delivers and assumes sRGB (a
+glycin desktop happens to convert PNG/JPEG to sRGB itself; fedora:40's
+native loaders do not).
+
+Op names, measured on gegl 0.4.72 / babl 0.1.128. The names in earlier
+drafts of this page — `gegl:icc-file-loader`, `gegl:cast-color-space`,
+`gegl:convert-color-space` — do not exist. What exists: `gegl:icc-load` /
+`gegl:icc-save`, `gegl:cast-space`, `gegl:convert-space`,
+`gegl:lcms-from-profile`, and the format loaders/savers. Of those, ggaze
+needs only the PNG/JPEG loaders and savers:
+
+1. **Decode** (`enhancer_load`). `gegl:png-load` / `gegl:jpg-load` read the
+   embedded profile (PNG iCCP, JPEG APP2) and **tag** the buffer's babl
+   format with the space babl builds from it (`babl_space_from_icc`); no
+   pixel is converted. Only a local PNG/JPEG whose profile the managed path
+   vouches for (below: "The profile is vetted before babl sees it") and
+   babl parses to a space **other than sRGB** takes this path (`icc.c` reads
+   the bytes, the enhancer makes the same `babl_space_from_icc` call GEGL's
+   loader will):
+   an untagged file, an iCCP/APP2 holding no profile, a profile babl cannot
+   use, and an **sRGB profile** (babl folds an equivalent profile onto its
+   own sRGB space) all keep the loader path — faster, and byte for byte
+   what the same file decodes to with no profile at all (a test compares an
+   sRGB-profiled PNG and JPEG with the same files stripped of their
+   profile). That is NOT byte for byte what they decoded to on main before
+   xb2: main's enhancer copied the loader's texture with
+   `gdk_texture_download()`, i.e. premultiplied `B8G8R8A8`, into an
+   `R'G'B'A u8` buffer, so every enhance preview and export had red and
+   blue swapped (and premultiplied alpha). xb2 reads the texture in an
+   explicit `R8G8B8A8` layout — a visible fix for every file on the enhance
+   path, untagged ones included. A matrix/TRC RGB, a grey TRC and —
+   through the lcms2 babl links against — a CMYK profile are managed, as
+   long as the profile is for the image's number of colour components (a
+   grey profile on an RGB JPEG, or an RGB one on a CMYK file, cannot
+   describe the pixels and is declined: `IntactSize.u_comps`). The loader path (tag sRGB) is not used for a managed file
+   because gdk-pixbuf may or may not have converted the pixels already, and
+   tagging converted pixels would manage them twice.
+2. **Working space.** The pixels are copied to `R'G'B'A u8` *in the image's
+   own space* (`babl_format_with_space`), so presets, crop and rotation run
+   in the source gamut and the export loses nothing. A CMYK or grey profile
+   has no meaning in an RGB format, so such a buffer is converted to sRGB at
+   this step (babl, colorimetric) and edited as sRGB. The EXIF Orientation
+   is applied here (pixbuf-util's permutation), since GEGL's loaders do not.
+3. **Preview** (`enhancer_buffer_to_texture`). It asks for `R'G'B'A u8`
+   without a space — sRGB — so babl performs the image-space → sRGB
+   conversion; that is what makes a wide-gamut preview look right on an sRGB
+   display. For an sRGB buffer it is the plain copy it always was.
+4. **Export.** `gegl:png-save` and `gegl:jpg-save` embed the buffer space's
+   ICC profile — the bytes babl keeps for that space. That is the source's
+   profile when babl made the space from it, but **not necessarily byte for
+   byte**: babl answers a profile *equivalent* to one it already has (the
+   same curves, primaries within 0.001 — `babl_space_match_trc_matrix`)
+   with the earlier space, which keeps the earlier profile's bytes, and on
+   its grey path it re-copies the latest profile onto a known grey space.
+   So the copy carries *an equivalent profile*: the source's own when it
+   was the first of its kind this process met (what the tests compare byte
+   for byte), possibly an earlier file's otherwise — same colours, maybe
+   another description. `gegl:webp-save` embeds nothing and needs no
+   conversion node either: it reads the buffer as space-less `R'G'B'A u8`,
+   i.e. sRGB, so babl converts on the way out (a test with
+   `gegl:convert-space` hidden proves it), and an untagged WebP is what every
+   viewer reads as sRGB. An sRGB buffer exports exactly as before.
+
+**Hold-`Space` compares managed against managed.** The plain view is not
+managed, so on a host whose decoder leaves the pixels alone (fedora:40's
+native loaders) a profiled image's plain view and its enhance preview differ
+in colour before any preset has changed a pixel. So hold-`Space` over a
+managed preview does not put the plain decode back: it shows the file's
+**identity chain through the same managed decode** (converted to sRGB like
+the preview) — the compare shows exactly what the presets did. "Managed"
+is what the render reports (`enhancer_apply_chain_finish`'s `pb_managed`:
+the profile was applied), not the buffer's space, so the CMYK and grey
+files — whose chain runs in sRGB — compare managed too.
+
+The managed original is built **lazily**: on the first `Space` press over a
+managed render the controller asks `enhancer_managed_original_async` for it
+(a second decode in a worker through the render's managed path alone: a
+decline — the file rewritten into one with nothing to manage, gone, past
+the profile cap — is "no managed original", never a plain decode the
+viewer already has) and shows the
+plain original meanwhile, swapping the managed one in when it lands if
+`Space` is still held; later presses show it at once. It is not built with
+every render because it is a second full-size texture — `w × h × 4` bytes,
+about 100 MB at 24 MP and 200 MB at 50 MP — held by the controller outside
+the texture cache's cap, which most enhance sessions never look at. It is
+dropped on discard / when nothing is left to render (`0`, `Esc`, the last
+preset off), on navigation, on a rewrite of the file, and whenever the
+controller learns a new decode of the original in place of a known one (a
+rescan that finds a newer cached decode, a reload the viewer shows): it may
+come from contents that are gone, and the next press fetches it again.
+Released, navigated away, discarded or rewritten while the fetch is in
+flight, the landing puts nothing up (`tests/test_enhance_flow.c`,
+`icc_*_mid_fetch`). While it is up the
+`i` card plots it (it stands for the current file's original at the
+window's texture choke point, `enhance_ctrl_override_texture`). For every
+unmanaged file, hold-`Space` shows the plain decode as before. Turning the preview on or off (`0`, `Esc`, the Original
+card) still switches between the plain view and the managed preview, so on
+such a host that switch can show a colour shift the preset did not cause —
+the managed side is the correct one.
+
+**The managed path never gives a verdict of its own.** It either yields a
+buffer it can vouch for or *declines*, and a declined file takes the loader
+path, which decodes it — or refuses it with its usual error — exactly as
+before xb2. "Vouch or decline" covers the embedded profile as much as the
+pixel data: babl and GEGL's loaders fail badly where the loader fails
+cleanly, so a file reaches them only through:
+
+- **the profile check, before babl sees a byte** (xb2 review 3). babl
+  0.1.128's `babl_space_from_icc` trusts the tag data it reads: a `curv`
+  count is a loop bound and an allocation size never held against the tag
+  (a gTRC count of `0x01000000` in a 520-byte profile segfaults it; a count
+  that goes negative as an `int` makes `babl_fatal` exit the process), and
+  its tag lookup loops over a count taken from the file. Pressing `i` on
+  such a file used to kill the viewer, since the card asks the same
+  question. `icc_profile_is_sane` (`icc.c`, plain C) now vouches first: the
+  header's size field is the byte count (babl insists too), at most 1024
+  tags whose table fits, every tag after the table and inside the profile
+  with room for its type header (tags may share data, as r/g/bTRC often
+  do), and every tag babl reads of the type and size it reads it as —
+  `XYZ ` tags (r/g/bXYZ, wtpt) of ≥ 20 bytes, `chrm` ≥ 36, `chad` ≥ 44, a
+  `curv` TRC with `12 + 2·count ≤ size`, a `para` TRC with all its
+  parameters; a TRC of any other type is refused (babl would read it as a
+  `curv` count). Review 4 found well-formed curves that crash or abort babl
+  all the same, each reproduced against 0.1.128, and the check holds them
+  back too:
+  - a `para` whose **reserved word is not zero**: babl tells `para` from
+    `curv` with `strcmp(data, "para")`, so a nonzero byte 4 makes it a
+    `curv` whose "count" is the function type and padding (up to 0x4FFFF
+    points), and the space's profile copy below overruns (SIGSEGV). The
+    reserved word must be zero (a `curv` needs no such rule: babl reads
+    anything that is not `para` as one);
+  - **long curves**: babl writes the profile of every new RGB space into a
+    `char icc[65536]` on its stack (`babl_space_to_icc_rgb`) — ~560 bytes of
+    header and tags, and each curve at `12 + 2·points` bytes, once when r,
+    g and b are the same babl curve, three times otherwise — and copies out
+    what it wrote past 64 KiB too (a shared 65536-point curve: SIGSEGV;
+    32768 points or three distinct 11000-point curves overrun silently). A
+    curve may have at most **4096** points (`ICC_MAX_CURVE_POINTS`), the
+    most real profiles use: three of them fit with room to spare, whatever
+    they share (a static assert in `icc.c` keeps the arithmetic);
+  - **`para` break points**: babl approximates a type 3 / 4 curve from x0 =
+    `d` and x0 = `c·d` and **asserts** `0 ≤ x0 < 254.5/255` for both
+    (`babl_polynomial_approximate_gamma`): `d = 1.0`, `d < 0`, a negative
+    `c` aborted the process. Both must lie in `[0, 0.998)` (computed in
+    float, as babl does; s15Fixed16 values are always finite);
+  - **`para` types 1 and 2** (the CIE 122 / IEC 61966-3 forms) are refused:
+    `babl_trc_formula_cie` packs four parameters into `float[4]` and babl
+    then reads a fifth as the curve's x0 — an out-of-bounds read whose
+    garbage decides the assertion above;
+  - **`para` parameters out of any real range** (review 5): babl names a
+    formula curve after its seven parameters (`"%i.%06i …"`), a space after
+    its primaries and three curves' names, and each of the space's formats
+    `"<encoding>-<space>"` in a 256-byte buffer. A curve with g = −32767
+    (the review's `[-32767, -1.31, -1.7, 0.768, 0.038, 0.604, 1.10]`) named
+    its space in 238 characters, so format names were cut short, two
+    formats shared a name, and babl's fish search between them **spun
+    forever** inside an uncancellable GEGL decode. g and a must lie in
+    (0, 10], every other parameter within ±10 (`ICC_PARA_MAX`) — real curves
+    use a gamma of 1.8–2.6, a ≈ 1, offsets under 0.1 — and the enhancer
+    also checks the name babl built (below);
+  - **curves babl cannot invert** (review 5): babl builds the conversion to
+    each format by searching candidate paths until one converts its test
+    pixels closely enough; for a flat or falling curve none does, the search
+    runs into its deepest candidates, and one of those
+    (`babl_conversion_planar_process`) overflows a buffer — glibc's fortify
+    check **aborted the JPEG export** (`s`) of files whose profile had a
+    constant `curv` (`[0, 0]`, `[30000, 30000]`, `[65535, 65535]`), a table
+    of 1139 points with one spike, or a `para` type 4 with c = d = 0 and
+    e, f > 1 (never inside [0, 1]). So every tone curve must be shaped like
+    one: sampled over [0, 1] (a table at its points, a formula at 1024) and
+    clamped to [0, 1], it never falls, rises by at least half the output
+    range from first to last sample, and is flat (steps under half a u16
+    step) over less than half its domain. That also refuses a zero or huge
+    gamma and a `para` that falls at its break point (babl would have taken
+    both). Every corpus curve (4096- and 1024-point tables, sRGB `para`
+    curves, a u8Fixed8 gamma of 2.2) and Rec. 709's pass with room to spare.
+  Unit-tested with mutated profiles, profiles built for each case
+  (`tests/helpers/icc_build.c`) and a seeded 20 000-profile fuzz
+  (`tests/test_icc.c`, also under ASan); the 106 profiled files of the
+  local corpus and the system's colord profiles all pass. The babl
+  hazards the bytes alone do not show are handled in `enhancer.c`:
+  - a **CMYK profile** goes to LCMS inside babl, which keeps whatever
+    transform LCMS returns — NULL included — and crashes on the first
+    conversion through it (a one-byte change to `cmyk-icc.jpg`'s lut8
+    header did it). So the enhancer builds that transform (CMYKA double →
+    babl's scRGB, relative colorimetric, black-point compensation) with
+    lcms2 first and declines a profile it fails for. Only that direction is
+    required: the reverse is used only to convert INTO the CMYK space,
+    which never happens (the chain runs in sRGB), and an input-only
+    profile cannot give it. lcms2 is babl's own dependency (`babl-devel`
+    requires it), so a GEGL build has it already;
+  - a profile babl **declines outright** — a class other than display /
+    input, a PCS other than XYZ, both A2B0 and B2A0, no curves or no
+    primaries, Argyll's swapped matrix beside a CLUT — is never handed to
+    it (`icc_babl_kind`, mirroring `babl_space_from_icc`'s own checks): some
+    of those checks come after babl has parsed and kept the curves;
+  - babl's **space and tone-curve tables** are fixed arrays of 100 entries,
+    never freed (babl fills ~20 spaces and ~5 curves itself), and a full
+    space table makes the next `babl_space_from_icc` dereference NULL. babl
+    parses rTRC, gTRC, bTRC **and** kTRC of every profile it gets past its
+    early checks, whatever the colour space, so a profile may add a space
+    and four curves. At most 16 profiles per process
+    (`GGAZE_ENHANCER_MAX_PROFILES`) that may grow those tables are handed to
+    babl: one costs its slot when babl is asked, whatever the answer (a
+    declined one may have added curves), **unless** babl answered with a
+    space it already had (sRGB, or an earlier slot's) and the profile
+    carries no curve that space does not use — a kTRC on an RGB profile, an
+    rTRC on a grey one, costs a slot even then. So what the enhancer hands
+    babl leaves the tables under 36 spaces and 69 curves, while camera
+    files whose sRGB profiles differ only in their bytes cost nothing.
+    GEGL's own loaders are held to the same bound by seeing only files
+    whose vetted profile they will actually use. `gegl:png-load` (0.4.58
+    and 0.4.72 alike) takes the iCCP when libpng kept one — and then
+    nothing else, even if babl declines it — else sRGB for an sRGB chunk,
+    else a space it builds from gAMA / cHRM, and libpng drops iCCPs babl
+    takes — a rendering intent ≥ 0xFFFF, a v4 profile whose length is no
+    multiple of 4, one over libpng's length limit (review 5: 110 such
+    PNGs, each with its own gAMA, filled babl's tables past the cap and
+    the next profile crashed `babl_space_from_icc`). So a PNG is managed
+    only when libpng 1.6's fatal iCCP rules hold — one iCCP, before PLTE,
+    its CRC right, a header passing `png_icc_check_length` / `_header` /
+    `_tag_table` (1.6.40 on fedora:40 and 1.6.58 agree on those), at most
+    8 000 000 bytes (upstream's `PNG_USER_CHUNK_MALLOC_MAX`; Fedora 44
+    builds a larger one) — **and** nothing beside it makes libpng 1.6.40
+    drop it: no sRGB chunk (stricter than needed, review 7: in 1.6.40 an
+    sRGB before the iCCP makes it refuse the iCCP and invalidate the
+    colour space, while one after a non-sRGB iCCP is taken beside it and
+    the iCCP kept; 1.6.58 keeps both — a file tagged sRGB is not worth
+    managing anyway; likewise a second iCCP, which 1.6.40 lets replace
+    the first and 1.6.58 drops as a duplicate, is refused), and any
+    gAMA / cHRM single, before PLTE, of its exact length, its CRC right,
+    and of values 1.6.40 takes — a gamma of 16 to 625 000 000, and
+    chromaticities its fixed-point xy → XYZ → xy round trip passes, which
+    `icc.c` ports (a duplicate or rejected one invalidates the colour
+    space there too; 1.6.58 checks neither at read time). Review 6:
+    until then any gAMA / cHRM was refused, but `gegl:png-save` writes both
+    beside the iCCP (so do GIMP and ImageMagick), so ggaze's own PNG
+    exports reloaded unmanaged — on gdk-pixbuf 2.42 as plain sRGB, and a
+    re-export baked the shift in. A gAMA / cHRM that passes never reaches
+    babl: the kept iCCP wins in `gegl_png_space`. Checked against the real
+    libraries: a generator of random chunk layouts, gAMA values and
+    chromaticities read with libpng exactly as `gegl:png-load` reads them
+    (benign errors on, `PNG_SKIP_sRGB_CHECK_PROFILE`) found no file ggaze
+    vouches for whose iCCP libpng 1.6.40 or 1.6.58 did not keep, byte for
+    byte (`icc_png_applied_profile`), besides files libpng refuses outright
+    (a damaged or second PLTE: the load fails, and the completeness walk
+    and the extent check hand those to the loader), and no in-range cHRM or
+    gAMA on which the port and 1.6.40 disagree. Any other PNG takes the loader
+    path, which never gets near babl. The bound then has one way past it,
+    the file-swap window below;
+  - a space babl builds may be **unusable by name** (review 5), and babl
+    and GEGL find a space's formats by its name. Too long a name gets the
+    formats cut short (above: a 238-character one spun); a name another
+    space already has makes `babl_format_with_space` hand back the FIRST
+    space's formats, so the file silently converts with the wrong profile
+    — and babl names spaces only partly by content: every table curve is
+    `lut-trc`, so all grey table-curve spaces are `space-gray-lut-trc` and
+    RGB table-curve spaces of the same primaries share a name too. The
+    enhancer declines a space whose name is longer than babl's format
+    names leave room for — 254 characters, less the dash and the longest
+    encoding in babl's format table, read from babl
+    (`enhancer_max_space_name`: 229 with babl's and GEGL's own formats,
+    the longest being `CIE LCH(ab) alpha double`; review 7, was a fixed
+    220 that declined smooth type-4 curves on babl 0.1.112). It is read
+    once, by `enhancer_babl_ready()` right after `gegl_init()` on the main
+    thread (app.c), not per verdict (review 8): babl walks that table
+    without its own lock while a GEGL worker converting in a new space
+    inserts formats into it, and formats registered later reuse existing
+    encodings, so no verdict depends on when it was asked. A Rec. 709
+    `para` curve on all three channels names its space in ~220 characters
+    with the tests' primaries, a few more in babl 0.1.112 (two spaces
+    after a curve's gamma) than in 0.1.128, and the exact length depends
+    on which curves babl already holds (next item: in 0.1.112 a formula
+    curve is named by the first profile that made it), so the tests put
+    the limit at babl's own length for a name, through a seam, rather
+    than rely on a fixed curve's name. It also declines a space for which
+    `babl_space(name)` is another space. babl has kept that space by
+    then, so it costs its slot. (Primaries
+    that differ only past the four printed decimals do not collide: babl
+    matches such a profile to the earlier space itself.)
+    A space babl answers with may also convert through **another profile's
+    curve** (review 7): babl < 0.1.114 — fedora:40 ships 0.1.112 — keeps
+    one formula curve per type and gamma (`babl_trc_new` compares type,
+    table size and gamma, not the other `para` parameters), so a Rec. 709
+    type 3 profile asked after a type 4 one with the same gamma and
+    e = f = 0.005 got the type 4 curve, and with the same primaries its
+    very space (black converted to 0.005 linear). After the name checks,
+    the enhancer converts 64 inputs evenly over [0, 1] plus 1/1024 either
+    side of each channel's own knee (`d` of a type 3 / 4 `para`,
+    `icc_formula_curve_knee`) through the space, `R'G'B' float` →
+    `RGB float` (grey: `Y' float` → `Y float`), and compares each channel
+    with the profile's own formula curve (`icc_formula_curve_at`, which
+    mirrors babl's deliberate swaps: a gamma within 0.01 of 1 is linear, a
+    `para` within 0.01 of sRGB's parameters is babl's sRGB curve); off by
+    more than 4e-4 linear plus 0.1 % of the value at any of those inputs,
+    the profile is declined at the cost of its slot. Review 7's check (five
+    inputs, half an 8-bit step of linear light) missed curves differing
+    only between two knees and offsets under 0.002 — up to ~16 and ~6
+    steps of an 8-bit sRGB display near black (review 8). The tolerance is
+    measured, identically on babl 0.1.112 and 0.1.128: babl's own
+    approximation of a real formula curve is off by at most 3.1e-4 (a type
+    3 `para` of `d` 0 and gamma 1.1–1.2, at black only) and by 7e-5 or less
+    elsewhere; 4e-4 is about one 8-bit sRGB display step at black and finer
+    above, so a swapped curve closer than that at the probes still passes:
+    off by about that at them, and by up to ~3 steps between black and the
+    first even probe (1/63), at input codes of about 1 to 5, where only the
+    profile's own knee is probed (review 9). A curve babl itself approximates worse — a to-linear gamma
+    under 1 with `d` 0, 0.0053 off at black for 0.45 — is declined on any
+    babl. Table
+    curves are not checked — babl tells tables apart byte for byte and
+    swaps in a formula for a table within its own tolerance of it (up to
+    0.015 for linear) by design — nor is babl's own sRGB answer, which is
+    never managed. Verdicts are kept by SHA-256 — for
+    good for the slots, up to 64 slot-free ones
+    (`GGAZE_ENHANCER_MAX_FREE_VERDICTS`, oldest dropped: asking babl again
+    about one adds nothing) — so a file seen again costs a checksum and
+    the table is bounded. Past the cap a new profile is declined, and its
+    file decodes on the loader path, sRGB. The `i` card asks through the
+    same table as the render: whichever meets a profile first pays its
+    slot, once — the cap counts distinct profiles, not files or paths. The
+    corpus has 15 distinct profiles, most of them sRGB, and costs 2 slots.
+  A fuzz of this whole gate together with babl runs in subprocesses (each
+  round with fresh tables, until its slots are spent) in
+  `tests/test_enhancer_icc.c`: the seeds include `para` 0 / 3 / 4 and long
+  `curv` curves, half the edits land inside a tag (a parameter at one of
+  babl's edges or bounds, the function type, a reserved byte, a count, a
+  table made constant or spiked), and every profile that gets through has
+  its space built, pixels converted through it both ways in u8 and in
+  float (values past both ends of [0, 1] included; float into the image's
+  space is the direction babl aborted in) and its profile copied out. The
+  rounds set `BABL_PATH_LENGTH=1`, which makes babl convert through its
+  reference fish instead of timing candidate paths (~1 s per new space) —
+  and so also skips the deep path search where the review-5 abort lived;
+  that hazard is pinned outside the fuzz with babl's full search (a JPEG
+  export of each uninvertible curve, `uninvertible_curves_are_declined`).
+  The review-5 cases that spend slots run in fresh subprocesses, so they
+  do not eat into the cap the later cases and the corpus count on;
+
+- the loader's own sniff (`loader_read_header` + `loader_sniff_bytes`) and
+  the shared dimension caps;
+- `loader/intact.c`, which walks the whole container and reads the stored
+  size on the way (PNG IHDR; the JPEG's first SOF wherever it lies — a Pixel
+  photo's SOF sits past 64 KiB of EXIF/XMP, a CMYK file's behind a 187 KB
+  press profile, where a bounded header peek gave up and refused them):
+  - **truncated** files: `gegl:png-load` / `gegl:jpg-load` restart the file
+    on a premature EOF (libpng then reports a duplicate iCCP, libjpeg a second
+    SOI / SOF) and **never return** — or, for a JPEG, **exit the process**
+    — so a PNG must reach IEND and a JPEG must decode to its EOI without
+    reading past the end of the file (the libjpeg pass below, whose EOF is
+    fatal). A byte scan for FF D9 after SOS, which xb2 first used, is not
+    enough: a progressive JPEG cut right after a COM / APPn / DQT / DHT
+    segment between two scans that holds the bytes FF D9 passed it, and so
+    did libjpeg's own stdio source, which inserts a fake EOI at EOF;
+  - **oversized** PNGs: IHDR's size is held against the loader's caps as
+    soon as IHDR is read, before any image data is inflated (a small file
+    declaring a huge image is a zlib bomb for the row check below);
+  - **corrupt PNG image data**: libpng's error inside `gegl:png-load` is
+    logged as "failed to open file" and the op yields a header-sized black or
+    partial buffer, no error. So the walk checks the critical chunks' CRCs,
+    inflates the IDAT stream (into a scratch buffer) to the rows IHDR promises
+    (Adam7 included) and checks every row's filter byte. The IDAT data is
+    one run of consecutive IDAT chunks, as libpng reads it: any other chunk
+    after an IDAT while rows are still missing ends it short ("Not enough
+    image data"), even if a later IDAT would complete it;
+  - **JPEGs libjpeg gives up on**: `gegl:jpg-load` installs `jpeg_std_error()`
+    with no longjmp handler, so libjpeg's fatal errors (two SOF markers, a
+    bogus Huffman table, ...) **exit the process**. The file is decoded once
+    by the same libjpeg at 1/8 scale under a longjmp handler first
+    (`intact_jpeg_decodes`), through a source manager whose EOF raises a
+    fatal error (`JERR_INPUT_EOF`) the way GEGL's restart ends in one; a
+    build without the `jpeg` feature has no libjpeg to do that with and
+    keeps every JPEG on the loader path (CI's gegl lane installs
+    `libjpeg-turbo-devel` so it tests the managed JPEG path, and builds
+    `-Djpeg=disabled` a second time for its unit suite, so the tests hold
+    in both builds). The whole-file passes (the PNG inflate, the libjpeg
+    pass) take the worker's `GCancellable` and stop between blocks. A load
+    whose checks the cancellation cut short returns `G_IO_ERROR_CANCELLED`
+    **without** falling through to the loader (a whole decode for a result
+    nobody takes), GEGL's own decode is not started once the cancellable
+    has fired, and the loader path's decode takes the same cancellable;
+  - padding between JPEG segments is skipped as libjpeg skips it
+    (`streamread_jpeg_marker`), not refused;
+- after the decode, the op's bounding box and the buffer must match the
+  stored size (a header libjpeg rejects gives an empty extent, not an error).
+
+**The file-swap window.** The managed path opens the file several times —
+the sniff, the profile walk, the completeness walk, the libjpeg pass, GEGL's
+own open, and libexif for the orientation — and only the walks before
+GEGL's open vouch for the bytes GEGL reads. A file *replaced* between the last
+walk and that open by a truncated one can still spin GEGL's loader in a
+worker that cannot be cancelled (GEGL processing never can), and one
+replaced by a JPEG libjpeg gives up on can still exit the process. GEGL's
+loaders take a path, not a descriptor, so the window cannot be closed from
+here; it is kept short (the stored size comes from the completeness walk, so
+no separate header peek opens the file), and the same race exists for
+gdk-pixbuf's path-taking calls on the loader path (tech-stack.md "The
+decode gate"). The window is also the one way a profile reaches babl
+**unvetted**: a file swapped in after the profile walk gets its iCCP / APP2
+(or, for a PNG, its gAMA / cHRM) read by GEGL's loader and handed to
+`babl_space_from_icc` / `babl_space_from_chromaticities` without
+`icc_profile_is_sane`, the name checks or the slot cap — so a crafted
+profile can still crash babl, and each swap can add a space and curves
+outside the 36 / 69 bound. That residual risk needs someone racing a
+viewer they already have write access to the folder of. Nothing cheap
+narrows it further: re-reading the profile after GEGL's decode would only
+report the damage after babl had taken it, and comparing mtime / size /
+inode before and after the decode would not stop a swap-and-back within the
+window; closing it needs a GEGL loader that takes a descriptor.
+
+**Unsupported ops degrade, never fail.** Without `gegl:png-load` /
+`gegl:jpg-load` installed that format keeps the loader path (sRGB); without
+a saver the export is refused as unsupported (the tests reach both through
+`enhancer_test_set_missing_op`). A non-local file (GVFS) keeps the loader
+path, since GEGL's loaders need a path. Without GEGL (the minimal lane) none
+of this is compiled, `intact.c` included; the info card still names the
+colour space. The card adds "may be managed on enhance/export" only where
+the managed path's own gates pass header-deep: `enhancer_would_manage`
+(GEGL present, a local PNG — or JPEG with libjpeg — within the size caps,
+the loader op installed, a vetted, parseable non-sRGB profile for the
+image's components). "May": the completeness checks read the whole file —
+measured on the corpus, ~0.02 ms a file for the header gates against
+~150 ms on average and ~0.9 s at most for the PNG inflate / libjpeg pass,
+on every `i` press — so the card does not run them, and a file whose data
+is broken past its headers (a JPEG cut inside its scan) still takes the
+loader path at enhance time.
+
+**Leaks we cannot fix.** Two per-decode leaks on the managed path are
+upstream's, and the LSan suppressions (`tests/lsan_suppressions.txt`:
+`leak:babl`, `leak:gio_source_init`) hide them, so they are measured here.
+GEGL's loaders read the file's profile and header **four times per
+decode** — the op's bounding box is queried by ggaze's extent check, by
+the graph's prepare and by its prepare-request, and the decode reads the
+header once more (counted under gdb on gegl 0.4.72):
+- **grey profiles:** each of those four `babl_space_from_icc` calls on a
+  grey profile babl already has a space for re-copies the profile onto that
+  space (`ret->space.icc_profile = malloc (icc_length)` over the previous
+  copy): **4 × the profile's size per decode** of a grey-profiled file
+  (1472 bytes for `grey-icc.png`'s 368-byte profile; a real grey profile
+  is a few hundred bytes to a few KB). ggaze's own call is made once per distinct profile (the
+  verdict table); GEGL's loaders take no space from outside, so theirs
+  cannot be avoided short of not decoding through them;
+- **JPEGs:** `gegl:jpg-load`'s source manager allocates its 1 KiB read
+  buffer in `init_source` and frees it only in `term_source`, which
+  libjpeg calls from `jpeg_finish_decompress` alone — never after the
+  header-only reads of the three bounding-box queries, nor after the
+  decode, which destroys without finishing: **4 KiB per managed JPEG
+  decode**.
+Dropping ggaze's own bounding-box query would save a quarter of both but
+lets a header libjpeg rejects reach `gegl_node_process` (GEGL's "0px
+rectangle" warning); at these sizes the check is kept.
+
+**Left open:** RGB profiles babl cannot parse (LUT-only), profiles in
+WebP/AVIF/HEIF/JXL, a managed plain view, and non-sRGB displays.
 
 ## Costs & trade-offs
 

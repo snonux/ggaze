@@ -15,9 +15,13 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "ggaze-config.h"
 #include "histogram-view.h"
 #include "histogram.h"
 #include "info.h"
+#if GGAZE_HAVE_GEGL
+#include "enhancer-gegl.h"
+#endif
 
 struct InfoOverlay {
    gatomicrefcount u_refs;
@@ -222,6 +226,13 @@ _info_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
                                  "info: gather failed");
          return;
       }
+#if GGAZE_HAVE_GEGL
+      /* The card's "may be managed on enhance/export" note: the enhancer's
+       * own gates, asked header-deep (info.h b_icc_managed). */
+      p_job->p_info->b_icc_managed =
+         p_job->p_info->e_icc == GGAZE_ICC_EMBEDDED &&
+         enhancer_would_manage(p_job->p_file);
+#endif
    }
    /* Skip the binning if superseded while the metadata was gathering: the
     * completion is a no-op on cancel and the job dies with the task. */

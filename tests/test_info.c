@@ -10,6 +10,9 @@
  * format/undersized data buffer (lu0) -- both must fail safe, never crash --
  * and the truncated / empty / garbage-JXL files the loader's decode gate
  * (tb2) must turn away before gdk-pixbuf's glycin loaders can hang on them.
+ * xb2: the colour-space line -- an embedded profile's name (swapped.png /
+ * swapped.jpg), the sRGB assumption for an untagged file, an unreadable
+ * profile (badicc.png) -- and info_exif_orientation() on its own.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -22,6 +25,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "ggaze-config.h"
 #include "loader/detect.h"
 
 static GgazeInfo *
@@ -466,6 +470,170 @@ test_dnl_zero_height_jpeg_size_unknown(void) {
    g_free(c_tmp);
 }
 
+/* xb2: the colour space the card names. swapped.png / swapped.jpg carry a
+ * hand-built profile called "ggaze swapped RGB" (tests/fixtures/gen.py);
+ * the line says so, and adds "may be managed on enhance/export" only when the
+ * caller established it (b_icc_managed: info_new cannot know, it leaves it
+ * FALSE -- the enhancer's answer is test_enhancer_icc's to pin). */
+static void
+test_colorspace_embedded_profile(void) {
+   GgazeInfo *p_png = info_from_fixture("swapped.png");
+   g_assert_cmpint(p_png->e_icc, ==, GGAZE_ICC_EMBEDDED);
+   g_assert_cmpstr(p_png->c_colorspace, ==, "ggaze swapped RGB");
+   char *c_fmt = info_format(p_png);
+   g_assert_false(p_png->b_icc_managed);
+   g_assert_nonnull(
+      g_strstr_len(c_fmt, -1, "Color space: ggaze swapped RGB (embedded ICC)"));
+   g_assert_nonnull(g_strstr_len(c_fmt, -1, "6\u00d73"));
+   g_assert_null(g_strstr_len(c_fmt, -1, "managed"));
+   g_free(c_fmt);
+   p_png->b_icc_managed = TRUE;
+   c_fmt                = info_format(p_png);
+   g_assert_nonnull(g_strstr_len(c_fmt, -1,
+                                 "Color space: ggaze swapped RGB (embedded "
+                                 "ICC; may be managed on enhance/export)"));
+   g_free(c_fmt);
+   info_delete(p_png);
+
+   GgazeInfo *p_jpg = info_from_fixture("swapped.jpg");
+   g_assert_cmpint(p_jpg->e_icc, ==, GGAZE_ICC_EMBEDDED);
+   g_assert_cmpstr(p_jpg->c_colorspace, ==, "ggaze swapped RGB");
+   g_assert_cmpint(p_jpg->i_width, ==, 8);
+   g_assert_cmpint(p_jpg->i_height, ==, 8);
+   info_delete(p_jpg);
+}
+
+/* No profile: sRGB is what every path assumes, and the card says so. */
+static void
+test_colorspace_assumed_srgb_without_profile(void) {
+   GgazeInfo *p_info = info_from_fixture("plain.jpg");
+   g_assert_cmpint(p_info->e_icc, ==, GGAZE_ICC_NONE);
+   g_assert_null(p_info->c_colorspace);
+   char *c_fmt = info_format(p_info);
+   g_assert_nonnull(g_strstr_len(c_fmt, -1, "Color space: sRGB (assumed"));
+   g_free(c_fmt);
+   info_delete(p_info);
+}
+
+/* A format icc.c does not search (tiny.avif) is "not read", never
+ * "sRGB (assumed)": the card must not vouch for a search it did not do. */
+static void
+test_colorspace_uninspected_format(void) {
+   GgazeInfo *p_info = info_from_fixture("tiny.avif");
+   g_assert_cmpint(p_info->e_icc, ==, GGAZE_ICC_UNINSPECTED);
+   g_assert_null(p_info->c_colorspace);
+   char *c_fmt = info_format(p_info);
+   g_assert_nonnull(
+      g_strstr_len(c_fmt, -1, "Color space: not read for this format"));
+   g_assert_null(g_strstr_len(c_fmt, -1, "sRGB (assumed"));
+   g_free(c_fmt);
+   info_delete(p_info);
+}
+
+/* badicc.png: an iCCP whose content is not a profile. The card must say
+ * "unreadable", never name it and never silently call it sRGB. */
+static void
+test_colorspace_unreadable_profile(void) {
+   GgazeInfo *p_info = info_from_fixture("badicc.png");
+   g_assert_cmpint(p_info->e_icc, ==, GGAZE_ICC_UNREADABLE);
+   g_assert_null(p_info->c_colorspace);
+   char *c_fmt = info_format(p_info);
+   g_assert_nonnull(
+      g_strstr_len(c_fmt, -1, "Color space: embedded ICC profile unreadable"));
+   g_free(c_fmt);
+   info_delete(p_info);
+}
+
+/* xb2 review: the profile's 'desc' is the file's text. A newline in it
+ * must not start a fake card line, and a paragraph must not fill the
+ * card: control characters become spaces, the name is cut at
+ * INFO_ICC_DESC_MAX characters (not bytes: the cut never splits a UTF-8
+ * sequence) with an ellipsis. */
+static void
+test_colorspace_description_is_capped_and_one_line(void) {
+   GString *p_desc = g_string_new("line1\nline2\t");
+   for (int i = 0; i < 100; i++) {
+      g_string_append(p_desc, "\u00e9"); /* 2 bytes, 1 character */
+   }
+   GgazeInfo t_info    = {0};
+   t_info.e_icc        = GGAZE_ICC_EMBEDDED;
+   t_info.c_colorspace = p_desc->str;
+   char       *c_fmt   = info_format(&t_info);
+   const char *c_line  = g_strstr_len(c_fmt, -1, "Color space: ");
+   g_assert_nonnull(c_line);
+   g_assert_null(strchr(c_line, '\n')); /* the card's last line: one line */
+   g_assert_true(g_str_has_prefix(c_line, "Color space: line1 line2 "));
+   const char *c_name = c_line + strlen("Color space: ");
+   const char *c_end  = g_strstr_len(c_name, -1, "\u2026 (embedded ICC)");
+   g_assert_nonnull(c_end);
+   g_assert_true(g_utf8_validate(c_name, c_end - c_name, NULL));
+   g_assert_cmpint(g_utf8_strlen(c_name, c_end - c_name), ==,
+                   INFO_ICC_DESC_MAX);
+   g_free(c_fmt);
+   /* A short name is shown whole, with no ellipsis. */
+   t_info.c_colorspace = "Display P3";
+   c_fmt               = info_format(&t_info);
+   g_assert_nonnull(
+      g_strstr_len(c_fmt, -1, "Color space: Display P3 (embedded ICC)"));
+   g_free(c_fmt);
+   g_string_free(p_desc, TRUE);
+}
+
+/* Stray bytes between two JPEG segments, which libjpeg skips: an untagged
+ * file is still "sRGB (assumed)" -- not "unreadable" -- and a profiled one
+ * still names its profile (xb2 review). */
+static void
+test_colorspace_padded_jpeg(void) {
+   const char *C_NAMES[] = {"plain.jpg", "swapped.jpg"};
+   for (gsize u = 0; u < G_N_ELEMENTS(C_NAMES); u++) {
+      char *c_src =
+         g_build_filename(g_getenv("GGAZE_FIXTURES_DIR"), C_NAMES[u], NULL);
+      char *c_data = NULL;
+      gsize u_len  = 0;
+      g_assert_true(g_file_get_contents(c_src, &c_data, &u_len, NULL));
+      /* the offset right after the first segment */
+      gsize    u_hi  = (guint8)c_data[4];
+      gsize    u_seg = 4 + ((u_hi << 8) | (guint8)c_data[5]);
+      GString *p_pad = g_string_new_len(c_data, (gssize)u_seg);
+      g_string_append_len(p_pad, "\x00\x11\x22", 3);
+      g_string_append_len(p_pad, c_data + u_seg, (gssize)(u_len - u_seg));
+      char *c_tmp =
+         g_build_filename(g_get_tmp_dir(), "ggaze-pad-XXXXXX.jpg", NULL);
+      int i_fd = g_mkstemp(c_tmp);
+      g_assert_cmpint(i_fd, >=, 0);
+      close(i_fd);
+      g_assert_true(
+         g_file_set_contents(c_tmp, p_pad->str, (gssize)p_pad->len, NULL));
+      GFile     *p_file = g_file_new_for_path(c_tmp);
+      GgazeInfo *p_info = info_new(p_file);
+      g_assert_cmpint(p_info->e_icc, ==,
+                      u == 0 ? GGAZE_ICC_NONE : GGAZE_ICC_EMBEDDED);
+      info_delete(p_info);
+      g_object_unref(p_file);
+      unlink(c_tmp);
+      g_free(c_tmp);
+      g_string_free(p_pad, TRUE);
+      g_free(c_data);
+      g_free(c_src);
+   }
+}
+
+/* info_exif_orientation(): the validated Orientation read on its own. */
+static void
+test_exif_orientation_alone(void) {
+   const char *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
+   char       *c_rot = g_build_filename(c_dir, "rot6.jpg", NULL);
+   char       *c_pln = g_build_filename(c_dir, "plain.jpg", NULL);
+   char       *c_png = g_build_filename(c_dir, "small.png", NULL);
+   g_assert_cmpint(info_exif_orientation(c_rot), ==, 6);
+   g_assert_cmpint(info_exif_orientation(c_pln), ==, 1);
+   g_assert_cmpint(info_exif_orientation(c_png), ==, 0);
+   g_assert_cmpint(info_exif_orientation("/nonexistent/ggaze.jpg"), ==, 0);
+   g_free(c_rot);
+   g_free(c_pln);
+   g_free(c_png);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -485,6 +653,18 @@ main(int i_argc, char **c_argv) {
                    test_truncated_jxl_fails_fast);
    g_test_add_func("/info/empty_file_fails_fast", test_empty_file_fails_fast);
    g_test_add_func("/info/garbage_jxl_fails_fast", test_garbage_jxl_fails_fast);
+   g_test_add_func("/info/colorspace_embedded_profile",
+                   test_colorspace_embedded_profile);
+   g_test_add_func("/info/colorspace_assumed_srgb_without_profile",
+                   test_colorspace_assumed_srgb_without_profile);
+   g_test_add_func("/info/colorspace_uninspected_format",
+                   test_colorspace_uninspected_format);
+   g_test_add_func("/info/colorspace_unreadable_profile",
+                   test_colorspace_unreadable_profile);
+   g_test_add_func("/info/colorspace_description_is_capped_and_one_line",
+                   test_colorspace_description_is_capped_and_one_line);
+   g_test_add_func("/info/colorspace_padded_jpeg", test_colorspace_padded_jpeg);
+   g_test_add_func("/info/exif_orientation_alone", test_exif_orientation_alone);
    g_test_add_func("/info/dnl_zero_height_jpeg_size_unknown",
                    test_dnl_zero_height_jpeg_size_unknown);
    return (g_test_run());

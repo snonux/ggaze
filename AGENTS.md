@@ -148,8 +148,8 @@ when adding an optional backend — gate code with `GGAZE_HAVE_*` from
 - Plain-C modules (`navigator`, `loader`, `detect`, `animation`,
   `thumbnail`, `trash`, `mover`, `opener`, `runner`, `enhancer`, `info`,
   `histogram`, `texturecache`, `clipboard`, `viewload`, `pathutil`,
-  `settings-pair`, `undo`, `croprect`, `transform`, `gesture-math`) own
-  no GtkWidget and are unit-tested standalone.
+  `settings-pair`, `undo`, `croprect`, `transform`, `gesture-math`, `icc`,
+  `streamread`, `intact`) own no GtkWidget and are unit-tested standalone.
 - An animated GIF/WebP is **one texture per file** like any still: the
   loader returns its first frame with the other frames attached as
   textures of their own (`loader/animation.h`, decoded and COPIED on the
@@ -191,7 +191,7 @@ src/undo.{c,h}        which of trash/move `u` undoes
 src/pathutil.{c,h}    stem/ext split, safe mkdir -p, non-colliding child names
 src/settings-pair.{c,h} the (name, value) pair of the a(ss) lists
 src/ggaze-enums.h     shared preference enums
-src/enhancer.{c,h}    optional GEGL presets (built-in table + user graphs), export naming
+src/enhancer.{c,h}    optional GEGL presets (built-in table + user graphs), export naming, ICC-aware load/export
 src/enhancer-gegl.h   the GEGL buffer/texture/export operations (sync + async)
 src/enhance-ctrl.{c,h} optional enhance feature controller (mask, previews, side panel, saved flag, async save)
 src/enhance-ui.{c,h}  optional pure enhance side-panel widget construction
@@ -204,11 +204,14 @@ src/thumbnail.{c,h}   freedesktop TMS cache (bounded pool)
 src/texturecache.{c,h} bounded LRU of decoded GdkTextures (stamp: mtime ns, size, inode)
 src/settings.{c,h}    GSettings wrapper (org.buetow.ggaze)
 src/prefs.{c,h}       Preferences dialog (schema-driven enums, list editors)
-src/info.{c,h}        EXIF/dimensions gather (libexif)
+src/info.{c,h}        EXIF/dimensions/colour-space gather (libexif, icc)
+src/icc.{c,h}         embedded ICC profile of a PNG/JPEG + its desc name (plain C, every build)
+src/streamread.{c,h}  bounded GInputStream reads (exact / skip / JPEG marker, EOF vs error) for icc + intact
 src/loader/loader.{c,h}   sync + async load API; sniff, dispatch, explicit pixbuf fallback
 src/loader/detect.{c,h}   content-sniff format detection + the one dimension cap
 src/loader/animation.{c,h} animated GIF/WebP: decoder-free frame probe, playback budget, delay clamp, frame store, texture <-> frames channel
 src/loader/pixbuf-util.{c,h} GdkPixbuf -> upright GdkTexture; bytes -> pixbuf / animation decode; one owned texture per frame
+src/loader/intact.{c,h}   GEGL builds: will GEGL's PNG/JPEG loader get through it? (complete, sound data, libjpeg ok)
 src/loader/backends/       pixbuf.c jpeg.c jxl.c avif.c heif.c
 ```
 

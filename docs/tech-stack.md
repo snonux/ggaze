@@ -398,7 +398,7 @@ streams a low-res `GdkTexture` first, then replaces it.
 gtk4-devel   glib2-devel   libadwaita-devel (?)
 gdk-pixbuf2-devel
 libjpeg-turbo-devel   libjxl-devel   libavif-devel   libheif-devel
-gegl04-devel   babl-devel   # optional, feature-gated
+gegl04-devel   babl-devel   # optional, feature-gated (+ lcms2-devel, which babl-devel pulls in)
 meson   gcc
 ```
 

@@ -89,13 +89,17 @@ gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 # test_texturecache and test_enhance_flow drive the texture cache's stamp
 # into a hit or a miss (fd2); pixbuf_modules.c (is a gdk-pixbuf module
 # installed at all) is how test_loader_pixbuf and test_viewer skip a
-# fixture only an optional module decodes (gg2: fedora:40 has no webp one).
+# fixture only an optional module decodes (gg2: fedora:40 has no webp one);
+# icc_build.c (ICC profiles built from (signature, data) tags, gen.py's
+# _icc_from_tags in C) is how test_icc and test_enhancer_icc build the
+# exact profile a case needs -- 'para' curves of any type, 'curv' tables of
+# any length -- instead of patching a fixture's (xb2 review 4).
 test_helpers_inc = include_directories('helpers')
 test_helpers_lib = static_library(
    'ggaze_test_helpers',
    ['helpers/gtk_helpers.c', 'helpers/mem_file.c', 'helpers/open_counter.c',
     'helpers/temp_dir.c', 'helpers/wait_until.c', 'helpers/file_stamp.c',
-    'helpers/pixbuf_modules.c', ggaze_conf_h],
+    'helpers/pixbuf_modules.c', 'helpers/icc_build.c', ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
    install : false,
@@ -339,6 +343,38 @@ test_info = executable(
 )
 test('info', test_info, suite : 'unit', env : fixtures_env)
 
+# icc (xb2): the embedded-ICC-profile reader behind the info card's colour
+# space line and the enhancer's profile-preserving export. Plain C over GIO
+# streams -- no GEGL, no display -- so it runs in every lane, the minimal
+# one included, over the committed swapped/badicc/srgb-icc fixtures and
+# hand-built containers.
+test_icc = executable(
+   'test_icc',
+   ['test_icc.c', ggaze_conf_h],
+   include_directories : [inc, src_inc, test_helpers_inc],
+   dependencies : [glib_dep, gio_dep, m_dep],
+   link_with : [ggaze_lib, test_helpers_lib],
+   install : false,
+)
+test('icc', test_icc, suite : 'unit', env : fixtures_env)
+
+# intact (xb2): the check that vouches for a PNG / JPEG before GEGL's
+# loaders see it (they spin on a truncated file and turn corrupt PNG data
+# into a silent black buffer). Plain C over GIO streams, no display; built
+# only with GEGL, like intact.c itself (meson.build), so the minimal lane
+# neither compiles nor tests code it cannot reach.
+if gegl_dep.found()
+   test_intact = executable(
+      'test_intact',
+      ['test_intact.c', ggaze_conf_h],
+      include_directories : [inc, src_inc],
+      dependencies : [glib_dep, gio_dep],
+      link_with : ggaze_lib,
+      install : false,
+   )
+   test('intact', test_intact, suite : 'unit', env : fixtures_env)
+endif
+
 # histogram: the plain-C RGB/luminance binner behind the info card's plot,
 # driven over hand-built pixel buffers and GdkMemoryTextures (no display).
 test_histogram = executable(
@@ -400,6 +436,24 @@ if gegl_dep.found()
                                   'lsan_suppressions.txt'))
    test('enhancer', test_enhancer, suite : 'unit', env : enhancer_env,
       protocol : 'tap')
+
+   # enhancer_icc (xb2): colour management on the enhance path (decision
+   # #45) -- managed decodes, the loader's verdict for every broken file,
+   # the profile-keeping export, the missing-op fallbacks (the enhancer's
+   # test seam), a non-local file (tests/helpers/mem_file.c) and, when
+   # ./sample-images is there, every profiled camera file (a full read of
+   # each: the longer timeout).
+   test_enhancer_icc = executable(
+      'test_enhancer_icc', ['test_enhancer_icc.c', ggaze_conf_h],
+      include_directories : [inc, src_inc, test_helpers_inc],
+      dependencies : [glib_dep, gegl_dep, gtk4_dep],
+      link_with : [ggaze_lib, test_helpers_lib], install : false,
+   )
+   enhancer_icc_env = enhancer_env
+   enhancer_icc_env.set('GGAZE_SAMPLE_DIR',
+      join_paths(meson.project_source_root(), 'sample-images'))
+   test('enhancer_icc', test_enhancer_icc, suite : 'unit',
+      env : enhancer_icc_env, protocol : 'tap', timeout : 180)
 endif
 
 test_texturecache = executable(

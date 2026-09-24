@@ -190,7 +190,18 @@ ggaze
   active and renders the result back to a `GdkTexture`. The crop/straighten/
   rotate tools add `gegl:rotate`/`gegl:crop` to the same graph via the
   enhancer, from one plain-C `Transform` (decision #35 order). GEGL also
-  backs color-managed decode/export (ICC, not yet wired). Owns no GTK state.
+  backs color-managed decode/export (decision #45): a PNG/JPEG with a
+  non-sRGB profile decodes through GEGL's ICC-aware loaders when the
+  loader's gate and `loader/intact.c` vouch for it (anything else takes the
+  loader path, as before), the chain runs in the image's space, the preview
+  and the hold-`Space` original are converted to sRGB, and the PNG/JPEG
+  savers keep the profile. Owns no GTK state.
+- **icc** — plain C: the embedded ICC profile of a PNG (iCCP) or JPEG (APP2
+  ICC_PROFILE) and its `desc` name, for the info card's colour-space line in
+  every build (no GEGL, no babl). **streamread** holds the bounded stream
+  reads and the JPEG marker step it shares with **loader/intact** (GEGL
+  builds only: will GEGL's PNG/JPEG loader get through this file? --
+  container complete, PNG image data sound, libjpeg decodes it).
 - **clipboard** — stateless provider builders for the `GdkClipboard`:
   `clipboard_build_texture_provider(GdkTexture *)` offers the DISPLAYED
   texture as `image/png` (already decoded, so only the PNG encode runs, on
@@ -377,6 +388,14 @@ feels instant.
   on navigation (an open or a drop of another file included: the open
   path runs the same identity reset, since a file that sorts first in its
   folder never emits "changed"), on a rewrite's rescan, and in dispose.
+  With GEGL a THIRD one may join them for a colour-managed file (decision
+  #45): the managed original hold-`Space` compares against, a full-size
+  RGBA8 texture (`w × h × 4` bytes: ~100 MB at 24 MP, ~200 MB at 50 MP).
+  It is built only on the first `Space` press over a managed render (a
+  worker re-decodes the file), never with every render, and dropped on
+  discard / nothing left to render, navigation, a rewrite and dispose — so
+  a session that never holds `Space` pays nothing for it (docs/gegl.md
+  "Color management").
 
 ## Threading / cancellation invariant
 

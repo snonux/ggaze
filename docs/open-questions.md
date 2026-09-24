@@ -43,6 +43,26 @@ locked in decision #37.
   babl + LCMS (`gegl:icc-file-loader`, `gegl:lcms-from-profile`,
   `gegl:convert-color-space`) — no separate lcms2 wiring. Without GEGL, stay
   sRGB-only.
+- **Resolved (xb2, decision #45):** with GEGL, the enhance preview, its
+  hold-`Space` compare and the `s` export of a PNG/JPEG with an embedded
+  non-sRGB profile are colour-managed: `gegl:png-load` / `gegl:jpg-load` tag
+  the buffer with the embedded profile's babl space, the chain runs in it
+  (sRGB for CMYK / grey), the preview asks babl for sRGB, and
+  `gegl:png-save` / `gegl:jpg-save` write the source's profile back byte for
+  byte (a WebP export comes out sRGB: its saver reads the pixels as sRGB and
+  babl converts). Two names above do not exist on gegl 0.4.72
+  (`gegl:icc-file-loader`, `gegl:convert-color-space`; the real ops are
+  `gegl:icc-load`, `gegl:convert-space`, `gegl:cast-space`) and no op beyond
+  the loaders and savers was needed. An sRGB-profiled or untagged file, and
+  any file or embedded profile GEGL's loaders or babl cannot be trusted
+  with (gegl.md "Color management": babl does not bounds-check tag data,
+  so the profile is vetted first), keeps the loader path exactly as
+  before. lcms2 is linked in GEGL builds after all, but only to check that
+  a CMYK profile opens before babl keeps a broken LCMS transform. The plain view
+  stays as the decoder delivers it (sRGB assumed), and the info card names
+  the colour space in every build (`icc.{c,h}`). Left open: RGB profiles
+  babl cannot parse (LUT-only; such a file keeps the loader path), profiles
+  in WebP/AVIF/HEIF/JXL, managing the plain view, and non-sRGB displays.
 
 ## H. Scroll behavior default
 - Scroll = zoom (feh-style `--scale-zoom`) vs scroll = next/prev.

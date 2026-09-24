@@ -4,8 +4,18 @@
 #   minimal  all optional backends disabled (jpeg included: only then is
 #            GGAZE_HAVE_ANY_BACKEND 0 and the loader's #else branches
 #            compiled at all); plain GdkPixbuf viewer.
-#   gegl     gegl=enabled (+ jxl/avif/heif auto) — keeps the optional path
-#            from bit-rotting.
+#   gegl     gegl=enabled (+ jxl/avif/heif/jpeg auto) — keeps the optional
+#            path from bit-rotting. libjpeg-turbo-devel is installed so
+#            jpeg=auto finds it: colour-managed JPEGs on the enhance path
+#            need the libjpeg check pass (loader/intact.c), without which
+#            every JPEG keeps the loader path (the tests cover both).
+#            lcms2-devel: the enhancer opens CMYK profiles with LCMS before
+#            babl does (babl-devel pulls it in; named for clarity). The
+#            lane also builds gegl=enabled jpeg=disabled a second time and
+#            runs its unit suite only: that build is the one where every
+#            JPEG must keep the loader path (no libjpeg to check it with),
+#            which no other lane compiles; its integration suites add
+#            nothing the unit ones do not pin for that branch.
 #   asan     the same minimal build (jpeg disabled too) under
 #            AddressSanitizer + UBSan (also drives the per-feature
 #            leak-check tasks).
@@ -56,7 +66,8 @@ steps:
           desktop-file-utils libasan libubsan
       - |
         if [ "$LANE" = "gegl" ]; then
-          dnf install -y --setopt=install_weak_deps=False gegl04-devel babl-devel
+          dnf install -y --setopt=install_weak_deps=False gegl04-devel babl-devel \
+            lcms2-devel libjpeg-turbo-devel
         fi
       - meson setup build $MESON_OPTS
       - ninja -C build
@@ -73,3 +84,9 @@ steps:
         fi
       - meson test -C build --suite unit
       - xvfb-run -a meson test -C build --suite integration
+      - |
+        if [ "$LANE" = "gegl" ]; then
+          meson setup build-nojpeg $MESON_OPTS -Djpeg=disabled
+          ninja -C build-nojpeg
+          meson test -C build-nojpeg --suite unit
+        fi

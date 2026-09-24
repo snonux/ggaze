@@ -68,6 +68,14 @@ typedef struct {
  * unconditionally. */
 extern const GgazeLoaderBackend pixbuf_backend;
 
+/* The first u_max bytes of p_file (fewer only at EOF: a read_all, so a
+ * FIFO / GVFS short read cannot pass a valid file off as truncated), for a
+ * caller that runs the sniff and gate itself before choosing a decoder
+ * (the enhancer's ICC-aware GEGL path, decision #45). Returns the byte
+ * count (0 for an empty file) or -1 with p_err set on an I/O failure. */
+gssize loader_read_header(GFile *p_file, GCancellable *p_cancel, guint8 *p_head,
+                          gsize u_max, GError **p_err);
+
 /* Synchronously load p_file into a GdkTexture (EXIF orientation applied).
  * Returns a new GdkTexture (caller owns it) or NULL with p_err set (always,
  * including for an empty file). Used by tests and the GEGL enhancer; the

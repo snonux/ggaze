@@ -58,6 +58,8 @@
 
 #if GGAZE_HAVE_GEGL
 #include <gegl.h>
+
+#include "enhancer-gegl.h"
 #endif
 
 #include <gio/gio.h>
@@ -665,6 +667,51 @@ test_enhance_a_is_safe_with_and_without_gegl(void) {
    drain_main(200);
 }
 
+/* xb2: the `i` card names the file's colour space -- the embedded
+ * profile's description for swapped.png, the sRGB assumption for the
+ * untagged plain.jpg -- in both lanes (the line is info.c's, no GEGL
+ * involved; only the "managed" note behind the name differs per build). */
+static void
+test_info_shows_color_space(void) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-icc-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   copy_fixture(c_dir, "plain.jpg");
+   copy_fixture(c_dir, "swapped.png");
+   char        *c_path = g_build_filename(c_dir, "plain.jpg", NULL);
+   GFile       *p_file = g_file_new_for_path(c_path);
+   GgazeWindow *p_win  = new_window();
+   ggaze_window_open(p_win, p_file);
+   wait_for_load(p_win);
+   GtkWidget *p_lbl = ggaze_window_get_info_label(p_win);
+
+   fire(p_win, "win.info");
+   wait_for_info(p_win);
+   const char *c_text = gtk_label_get_text(GTK_LABEL(p_lbl));
+   g_assert_nonnull(g_strstr_len(c_text, -1, "Color space: sRGB (assumed"));
+
+   fire(p_win, "win.next"); /* -> swapped.png; the card went with plain */
+   g_assert_false(gtk_widget_get_visible(p_lbl));
+   wait_for_load(p_win);
+   fire(p_win, "win.info");
+   wait_for_info(p_win);
+   c_text = gtk_label_get_text(GTK_LABEL(p_lbl));
+   g_assert_nonnull(
+      g_strstr_len(c_text, -1, "Color space: ggaze swapped RGB (embedded"));
+   /* The "may be managed" note only where the enhancer's header-deep gates
+    * pass: a GEGL build (the overlay asks enhancer_would_manage), never
+    * the minimal lane. */
+   gboolean b_note =
+      g_strstr_len(c_text, -1, "may be managed on enhance/export") != NULL;
+   g_assert_true(b_note == GGAZE_HAVE_GEGL);
+
+   g_object_unref(p_file);
+   g_free(c_path);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(200);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
 #if GGAZE_HAVE_GEGL
@@ -680,6 +727,7 @@ main(int i_argc, char **c_argv) {
     * gegl_operations_update_visible() abort on a NULL hash table, off the main
     * thread and with no hint that the registry was the problem. */
    gegl_init(&i_argc, &c_argv);
+   enhancer_babl_ready(); /* as app.c, right after gegl_init() */
 #endif
    g_test_init(&i_argc, &c_argv, NULL);
 
@@ -704,6 +752,8 @@ main(int i_argc, char **c_argv) {
                    test_info_hides_on_navigation);
    g_test_add_func("/window/info_hides_on_reopen", test_info_hides_on_reopen);
    g_test_add_func("/window/info_shows_histogram", test_info_shows_histogram);
+   g_test_add_func("/window/info_shows_color_space",
+                   test_info_shows_color_space);
    g_test_add_func("/window/info_plots_animation_first_frame",
                    test_info_plots_animation_first_frame);
    g_test_add_func("/window/info_no_plot_while_loading",

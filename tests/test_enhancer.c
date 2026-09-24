@@ -4,6 +4,7 @@
 #include "transform.h"
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <string.h>
 #include <unistd.h>
 
 /* Query the platform content type for p_path; return a non-NULL string
@@ -1122,6 +1123,7 @@ test_export_dest_for(void) {
 int
 main(int argc, char **argv) {
    gegl_init(&argc, &argv);
+   enhancer_babl_ready(); /* as app.c, right after gegl_init() */
    g_test_init(&argc, &argv, NULL);
    g_test_add_func("/enhancer/builtin_presets", test_builtin_presets);
    g_test_add_func("/enhancer/export", test_export);

@@ -25,8 +25,8 @@ ggaze has **two complementary test tracks**. Both run under `meson test`.
 
 - Target the **plain-C modules** (`detect`, `navigator`, `thumbnail`,
   `trash`, `mover`, `opener`, `runner`, `enhancer`, `info`, `histogram`,
-  `texturecache`, `clipboard` helpers, `gesture-math`). No GTK display
-  needed.
+  `texturecache`, `clipboard` helpers, `gesture-math`, `icc` + `streamread`,
+  and in the GEGL lane `loader/intact`). No GTK display needed.
 - GLib `GTest` framework; per-module `a(ss)`/path/EXIF fixtures.
 - **Coverage gate ≥80%** on these modules (gcov/lcov), flipped to *fail* at
   M10, *warn* before.
@@ -105,7 +105,7 @@ that cost a full investigation to learn, so they are written down here:
 | `test_grid_cull.c` | M7 | Grid view shows N cells; `d` bins one into `.Trash`, cell dims; `u` restores; counter reflects remaining; `Enter`→large on the right cell. |
 | `test_move_undo.c` | M8 | Mark 3 → `m`→dest2 → files gone from folder, present in dest; `u` moves back; collision suffixing. |
 | `test_runner_rescan.c` | M8 | `!` runs a script that writes a file into the dir; on exit the navigator rescans and the new file appears; injection-guard filename is single-quoted. |
-| `test_enhance_flow.c` | M9 (gated on `gegl`) | `a`→preset applies a preview off-thread (texture differs from raw); toggle-off restores the original; hold-`Space` compares and restores (incl. the flag not sticking when the mask is cleared mid-hold); `s` writes a collision-safe `-enhanced[-n].<ext>` with the original byte-identical; a dirty preview blocks grid selection and native window close behind the Save/Discard/Cancel prompt — and the prompt itself is **answered** (`tests/helpers/gtk_helpers.h`): Cancel keeps the preview and releases the continuation, Discard/Save apply the deferred grid select / open / move, a **failed** Save (read-only folder) keeps the preview and aborts the continuation, repeated close-requests do not stack dialogs, and `t` `t` keeps a dirty preview on screen. wb2: the `c`/`R`/`[`/`]` tools on a generated 400×300 PNG — quarter turns wrap to the original and export the turned copy, a turn composes with a preset and is gated by the prompt, crop keys / aspect presets / drags commit on `Enter` and `Esc` restores, straighten nudges and the horizon drag level live with auto-crop on and off, a tool refuses the other tool and the turns, `Enter` is refused while the base preview renders, a crop turns with the image, navigation / leaving the large view abandon a tool; review round: re-opening the crop tool keeps the applied crop as work (`s` in the tool exports it, navigation prompts), a tool cancelled back to the saved state stays saved, a drag END without BEGIN levels nothing, twenty rapid nudges cost two renders (`ggaze_window_enhance_render_count`), a crop follows a straighten (kept whole and re-centred, never dropped — see the third round), and the tools' capture-phase key controller stops `h` only while a tool is active (emitted on the controller; the shortcut's action navigates otherwise); second round: a discard (the Original card, `0` with the panel open) ends a straighten tool and a crop tool with its turn before the reset, the crop tool passes foreign keys (`q`/`s`/`?`/`t`/Space) while its base is unknown, a crop drag is ignored while the shown texture is not the base; third round: a horizon drag END is refused while a render is pending (twenty fast nudges) and while `Space` holds the original, then accepted on the landed render, the crop tool waits for the *exact* render (`]` `]` then `c`, a same-size preset toggled under the tool) before drawing/dragging/`Enter`, the gate's Discard and the slideshow tick end a straighten tool in a one-file folder (no navigation could have), a failed render (file made unreadable) ends the tool, and a crop pushed outside the view is kept and comes back by nudging or `Esc`; fourth round: a refused crop-drag BEGIN grabs nothing (the next accepted UPDATE cannot continue a stale gesture), the crop overlay survives a `touch` of the file with its cache entry evicted (the controller remembers the original's identity — no texture-cache lookup per frame or pointer motion), leaving the large view restores a nudged straighten like `Esc` without pulling the large view back, `c` over a crop pushed outside the view starts from the whole base, a held `Space` refuses the crop tool's `Enter`/drag with "Release Space first", and a same-file rewrite with another size re-bases the crop tool after the rescan; fifth round: a same-file reload without a rescan (the file touched, a preset discarded: a new texture object) refreshes the remembered original — `c` + `Enter` and a horizon drag at 0° are accepted on it (identity learned at the window's texture choke point, not once from the cache), the touch subtest reloads under the open tool to tell "refreshed" from "remembered", a rewrite under an active preset re-renders it at the new size (the `-enhanced` copy's rescan does not: render count) and hold-`Space` compares against the new original, and a crop tool open through a rewrite is laid out and drawn on the new base with no key pressed (`ggaze_window_tool_crop_rect`); sixth round: opening a first-sorted file in another folder (no "changed" is ever emitted for it) ends the crop tool and drops A's *saved* turn — B's own decode on screen, no rectangle, `s` has nothing to save — the gate's Save before such an open exports A and then shows B clean, a render that decodes the file at another size before any reload (the rewrite keeps the cache stamp) re-bases the crop tool through `original_changed`, and a folder's first rescan after an open is a same-file event (tool, rectangle and base stay, no render); gd2: a multi-file open with the panel up and a start file that is not first-sorted re-points the panel at it with one preview batch and one load (`ggaze_window_enhance_preview_count`, `ggaze_window_load_count`), no render; zb2: a touch swipe away from a dirty preview raises the prompt (Cancel keeps file and preview, Discard moves on) and is refused while the crop tool is up, navigating again once `Esc` ended it; review: a pinch landing on a straighten horizon drag with (1, 1) px of jitter levels nothing (no render, no angle; a stray END sent to the tool afterwards neither, which proves the line was dropped), and one landing on a crop corner drag keeps the rectangle as dragged before it (`Enter` crops 300×200); a two-finger tap whose first finger jittered a crop corner leaves the rectangle as it was (`ggaze_window_tool_crop_rect`); third review: a `set_texture(NULL)` mid straighten drag drops the line (a stray END then levels nothing) and mid crop drag lets go of the corner (a CANCEL and REVERT with no texture put the rectangle back; a stray UPDATE after does not resize it). `test_viewload.c` counts a JPEG's low-res partial through `show_partial` (never `show_texture`; `>= 1` only with the direct JPEG backend) and none for a PNG, and what is left shown is the cached full decode. `test_window.c` (both lanes) covers the GEGL-disabled keys; `test_viewer.c` pins the pan re-base when an overlay leaves mid-drag. |
+| `test_enhance_flow.c` | M9 (gated on `gegl`) | `a`→preset applies a preview off-thread (texture differs from raw); toggle-off restores the original; hold-`Space` compares and restores (incl. the flag not sticking when the mask is cleared mid-hold); `s` writes a collision-safe `-enhanced[-n].<ext>` with the original byte-identical; a dirty preview blocks grid selection and native window close behind the Save/Discard/Cancel prompt — and the prompt itself is **answered** (`tests/helpers/gtk_helpers.h`): Cancel keeps the preview and releases the continuation, Discard/Save apply the deferred grid select / open / move, a **failed** Save (read-only folder) keeps the preview and aborts the continuation, repeated close-requests do not stack dialogs, and `t` `t` keeps a dirty preview on screen. wb2: the `c`/`R`/`[`/`]` tools on a generated 400×300 PNG — quarter turns wrap to the original and export the turned copy, a turn composes with a preset and is gated by the prompt, crop keys / aspect presets / drags commit on `Enter` and `Esc` restores, straighten nudges and the horizon drag level live with auto-crop on and off, a tool refuses the other tool and the turns, `Enter` is refused while the base preview renders, a crop turns with the image, navigation / leaving the large view abandon a tool; review round: re-opening the crop tool keeps the applied crop as work (`s` in the tool exports it, navigation prompts), a tool cancelled back to the saved state stays saved, a drag END without BEGIN levels nothing, twenty rapid nudges cost two renders (`ggaze_window_enhance_render_count`), a crop follows a straighten (kept whole and re-centred, never dropped — see the third round), and the tools' capture-phase key controller stops `h` only while a tool is active (emitted on the controller; the shortcut's action navigates otherwise); second round: a discard (the Original card, `0` with the panel open) ends a straighten tool and a crop tool with its turn before the reset, the crop tool passes foreign keys (`q`/`s`/`?`/`t`/Space) while its base is unknown, a crop drag is ignored while the shown texture is not the base; third round: a horizon drag END is refused while a render is pending (twenty fast nudges) and while `Space` holds the original, then accepted on the landed render, the crop tool waits for the *exact* render (`]` `]` then `c`, a same-size preset toggled under the tool) before drawing/dragging/`Enter`, the gate's Discard and the slideshow tick end a straighten tool in a one-file folder (no navigation could have), a failed render (file made unreadable) ends the tool, and a crop pushed outside the view is kept and comes back by nudging or `Esc`; fourth round: a refused crop-drag BEGIN grabs nothing (the next accepted UPDATE cannot continue a stale gesture), the crop overlay survives a `touch` of the file with its cache entry evicted (the controller remembers the original's identity — no texture-cache lookup per frame or pointer motion), leaving the large view restores a nudged straighten like `Esc` without pulling the large view back, `c` over a crop pushed outside the view starts from the whole base, a held `Space` refuses the crop tool's `Enter`/drag with "Release Space first", and a same-file rewrite with another size re-bases the crop tool after the rescan; fifth round: a same-file reload without a rescan (the file touched, a preset discarded: a new texture object) refreshes the remembered original — `c` + `Enter` and a horizon drag at 0° are accepted on it (identity learned at the window's texture choke point, not once from the cache), the touch subtest reloads under the open tool to tell "refreshed" from "remembered", a rewrite under an active preset re-renders it at the new size (the `-enhanced` copy's rescan does not: render count) and hold-`Space` compares against the new original, and a crop tool open through a rewrite is laid out and drawn on the new base with no key pressed (`ggaze_window_tool_crop_rect`); sixth round: opening a first-sorted file in another folder (no "changed" is ever emitted for it) ends the crop tool and drops A's *saved* turn — B's own decode on screen, no rectangle, `s` has nothing to save — the gate's Save before such an open exports A and then shows B clean, a render that decodes the file at another size before any reload (the rewrite keeps the cache stamp) re-bases the crop tool through `original_changed`, and a folder's first rescan after an open is a same-file event (tool, rectangle and base stay, no render); gd2: a multi-file open with the panel up and a start file that is not first-sorted re-points the panel at it with one preview batch and one load (`ggaze_window_enhance_preview_count`, `ggaze_window_load_count`), no render; zb2: a touch swipe away from a dirty preview raises the prompt (Cancel keeps file and preview, Discard moves on) and is refused while the crop tool is up, navigating again once `Esc` ended it; review: a pinch landing on a straighten horizon drag with (1, 1) px of jitter levels nothing (no render, no angle; a stray END sent to the tool afterwards neither, which proves the line was dropped), and one landing on a crop corner drag keeps the rectangle as dragged before it (`Enter` crops 300×200); a two-finger tap whose first finger jittered a crop corner leaves the rectangle as it was (`ggaze_window_tool_crop_rect`); third review: a `set_texture(NULL)` mid straighten drag drops the line (a stray END then levels nothing) and mid crop drag lets go of the corner (a CANCEL and REVERT with no texture put the rectangle back; a stray UPDATE after does not resize it); xb2: a red/blue-swapped-profile PNG previews blue under a preset (managed) and its `s` copy carries the source ICC profile byte for byte. `test_viewload.c` counts a JPEG's low-res partial through `show_partial` (never `show_texture`; `>= 1` only with the direct JPEG backend) and none for a PNG, and what is left shown is the cached full decode. `test_window.c` (both lanes) covers the GEGL-disabled keys; `test_viewer.c` pins the pan re-base when an overlay leaves mid-drag. |
 | `test_grid_select_gate.c` | M9 | `gridview.c` routes every selection through the installed `GgazeGridSelectFunc` instead of `navigator_set_current_file` — a refusing gate blocks the change, an allowing one lets it through, and with **no** gate (or after uninstalling one) it falls back to `navigator_set_current_file` itself. No GEGL/window/dialog involved, so it runs in the minimal lane too. |
 | `test_clipboard_copy.c` | M8 | `Ctrl+c` with no marks → `image/png` on `GdkClipboard`; with marks → `text/uri-list`; paste back into a fake target. |
 | `test_full_lifecycle.c` | M10 | The elevator-pitch session scripted: open → walk → `i` → `d` ×k → mark → `m`→dest → `e`→program (use `true`) → `!`→script → quit. End-to-end smoke. |
@@ -569,7 +569,8 @@ animation is one cache entry like any still).
 reset, `s` export-copy, and the dirty Save/Discard/Cancel gate are done and
 wired into the window (tu0), and the crop (`c`), straighten (`R`) and
 rotate 90 (`[`/`]`) tools ride the same preview graph (wb2, see below). ICC
-color management is **not yet built** — tracked as follow-up work.
+color management on the enhance/export path is done (xb2, decision #45; see
+`docs/gegl.md` "Color management").
 
 **Deliverables**
 - `meson` `gegl` feature; `src/enhancer.c/.h` plain-C.
@@ -619,8 +620,28 @@ color management is **not yet built** — tracked as follow-up work.
   silently instead of blocking on an unanswerable prompt.
 - Hold-`Space` compare (decision #23/#24): swaps to the cached original
   texture while held, restores the cached modified one on release — no GEGL
-  recompute either way.
-- ICC color management via GEGL/babl (open question G) is **not yet wired**.
+  recompute either way. For a colour-managed preview the original held up is
+  the managed one (decision #45), not the plain decode: fetched in a worker
+  on the first press (the plain original shows until it lands), dropped on
+  discard / navigation / rewrite, and plotted by the `i` card.
+- ICC color management via GEGL/babl (open question G, decision #45, xb2):
+  a PNG/JPEG with a non-sRGB profile decodes through
+  `gegl:png-load`/`gegl:jpg-load` (space-tagged; untagged and sRGB-profiled
+  files keep the loader path, byte for byte the same file without a
+  profile — main's copy swapped R/B and was premultiplied, fixed by xb2),
+  only when the loader's gate and `loader/intact.c` vouch for it, the
+  profile passes `icc_profile_is_sane` (tone-shaped curves, bounded `para`
+  parameters), babl's space has a name of its own no longer than its format names
+  leave room for (254 − 1 − the longest registered encoding: 229) and
+  converts through the profile's own formula curves (babl < 0.1.114
+  shares one `para` curve per type and gamma), a
+  PNG's iCCP is the one libpng keeps (no sRGB beside it, any gAMA / cHRM
+  one libpng 1.6.40 takes without discarding the iCCP:
+  `icc_png_applied_profile`), and the profile fits the image's components
+  (else the loader path decides, as before);
+  preview converted to sRGB; hold-`Space` shows the managed original;
+  PNG/JPEG exports keep the source profile, WebP exports come out sRGB. The
+  `i` card names the colour space in every build (`icc.{c,h}`).
 - "GEGL not built in" status message (via the info-overlay label; this
   project has no toast infra) for `a`/`s` when the build has no GEGL; safe no-op for the numeric preset hotkeys.
 
@@ -631,10 +652,75 @@ color management is **not yet built** — tracked as follow-up work.
   pixel (quarter turns as permutations, crops in base coordinates, the
   straighten's analytic sizes, a turned export). `test_croprect.c` and
   `test_transform.c` (every lane, no GEGL): the rectangle rules and the
-  angle / size maths.
+  angle / size maths. xb2 (ICC): `test_enhancer_icc.c` (gated) — a
+  profiled PNG/JPEG is tagged with its space and previews managed (the
+  fixtures store pure red under a red/blue-swapped profile, so managed =
+  blue), also with EXIF Orientation 6 (`swapped-rot6.jpg`), CMYK
+  (`cmyk-icc.jpg`, a lut8 printer profile through babl's LCMS) and grey
+  (`grey-icc.png`/`.jpg`, linear curve) running in sRGB, and with the SOF
+  past 64 KiB or padding between segments; the space survives two presets +
+  a quarter turn; sRGB-profiled PNG/JPEG decode byte-identical to the same
+  files stripped of the profile; untagged / corrupt-iCCP / non-local
+  (`mem_file`) / GEGL-op-missing (`enhancer_test_set_missing_op`) files and
+  a profile for other colour components (a grey profile on RGB) take the
+  loader path; every broken file (cut, lying headers, two SOFs, corrupt PNG
+  data -- bad CRC, bad deflate, short IDAT -- and a progressive JPEG cut
+  mid-scan or right after a COM holding FF D9 between scans, which made
+  `gegl:jpg-load` exit the process) gets exactly the loader's verdict;
+  PNG/JPEG exports carry the source's profile (byte for byte for the first
+  profile of its kind in the process; babl answers a later equivalent
+  profile with the earlier one's space and bytes), a WebP export
+  comes out sRGB, a missing saver is NOT_SUPPORTED; the render reports
+  "managed" for CMYK/grey too; the lazy managed original (swapped, grey,
+  CMYK; none for an untagged file; CANCELLED when cancelled);
+  `enhancer_would_manage` (the card's note) per fixture; every JPEG case
+  also holds in a GEGL build without libjpeg (`GGAZE_HAVE_JPEG`); and every
+  profiled file in `./sample-images` (skipped when absent) is vouched for
+  with its size and, when its profile is not sRGB, decodes managed (and a
+  corpus PNG's iCCP is the one libpng keeps). Review 5, the review-5 cases
+  in fresh subprocesses: the curves babl could not invert (constant
+  tables, 1137 of 1139 points at 0, a spike, a `para` above [0, 1]) are
+  declined and their files export as JPEGs; the `para` at −32767 is
+  declined without a slot, a `para` curve whose babl space name is past
+  the limit is declined (a kept slot) and one at the limit managed -- the
+  limit put at babl's own length for a name through a seam, since babl
+  0.1.112 spells names longer than 0.1.128; review 7: the computed limit
+  is 254 − 1 − 24 with babl's and GEGL's formats, a space named in 226
+  (0.1.128) / 229 (0.1.112) characters is managed under it, and two type 3 / 4
+  `para` profiles of one gamma and the same primaries are each managed
+  with their own curve (babl 0.1.128) or the second declined (babl
+  0.1.112, where it got the first one's curve and space); a second grey and a second
+  same-primaries RGB table-curve profile (both `lut-trc`) are declined and
+  their files take the loader path; PNGs whose iCCP libpng drops (intent
+  0xFFFF, a v4 odd length) next to a gAMA, and sound ones next to an sRGB
+  or a gAMA / cHRM libpng 1.6.40 rejects (gamma 0, two gAMA, no
+  primaries), are declined with no slot, verdict or new babl format, and
+  sound ones next to a good gAMA (and cHRM) are managed in the vetted
+  profile's own space (review 6); a PNG export carries gAMA + cHRM beside
+  its iCCP and `enhancer_would_manage` vouches for its reload; corrupt PNG
+  data gets the loader's verdict, whatever it is (gdk-pixbuf 2.42 decodes
+  past a bad IDAT CRC); the
+  fuzz also flattens / spikes tables and converts float both ways.
+  `test_icc.c`, `test_info.c` (every lane) and `test_intact.c` (GEGL lane,
+  like `intact.c`): profile extraction (PNG iCCP, multi-segment JPEG APP2,
+  padding skipped, every broken container), the iCCP libpng keeps (one,
+  before PLTE, CRC right, libpng 1.6's fatal header checks one rule at a
+  time, the colour space per PNG colour type, 8 000 000 bytes, no sRGB, gAMA /
+  cHRM only single, well-formed and of values libpng 1.6.40 takes -- its
+  gamma range, its chromaticity round trip: out of range, collinear
+  primaries, a white point outside them), the curve-shape and `para`-bound rules, the `desc` parser, the card's
+  colour-space line in each state (one line, capped at 64 characters, a
+  padded JPEG not "unreadable"), the completeness walk and sizes (SOF past
+  64 KiB) and component counts, PNG rows (Adam7 sizes cross-checked with
+  real interlaced files), one IDAT run (IDAT, tEXt, IDAT is short), the
+  IHDR caps before the inflate (a <1 MB zlib bomb declaring 32768²), CRC /
+  inflate / filter corruption, cancellation, and the libjpeg pass (a
+  two-SOF JPEG; EOF fatal: cut, no EOI, the progressive cuts).
 - Integration: `test_enhance_flow.c` (gated `if gegl_dep.found()`): async
   apply swaps the texture without touching the original (byte-identical),
-  toggle-off resets to the original, hold-Space compares then restores,
+  toggle-off resets to the original, hold-Space compares then restores
+  (for a managed file -- swapped, CMYK, grey -- against the lazily fetched
+  managed original, which the `i` card plots and a discard drops),
   `s` twice produces collision-suffixed copies, non-dirty navigation is
   immediate — plus the Save/Discard/Cancel prompt driven to each outcome
   (see the suite table above). `test_grid_select_gate.c` covers `gridview.c`'s
@@ -645,7 +731,7 @@ color management is **not yet built** — tracked as follow-up work.
 **Acceptance:** `a` popover (layered, async apply); `s` copy
 (collision-safe); hold-`Space`; dirty prompt across navigate/trash/delete/
 move/open/quit; minimal build reports "GEGL not built in" cleanly. `c`/`R`/
-`[`/`]` and ICC remain open for a follow-up task.
+`[`/`]` landed with wb2 and ICC with xb2.
 
 ---
 
