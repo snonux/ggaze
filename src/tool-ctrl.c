@@ -882,11 +882,12 @@ _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
 static gboolean
 _apply_straighten(ToolCtrl *p_tc) {
    char     *c_angle = _angle_text(p_tc->t_work.d_degrees);
-   char     *c_msg   = g_strdup_printf("Straightened %s — s saves a "
-                                       "copy, u undoes, x reverts every edit",
-                                       c_angle);
    char     *c_label = g_strdup_printf("straighten %s", c_angle);
    Transform t_from  = p_tc->t_saved; /* _leave ends the session */
+
+   char *c_msg = g_strdup_printf("Straightened %s — s saves a copy, u "
+                                 "undoes, x reverts every edit",
+                                 c_angle);
    _leave(p_tc);
    enhance_ctrl_record_tool_step(p_tc->p_ec, EDIT_STEP_STRAIGHTEN, c_label,
                                  &t_from);
