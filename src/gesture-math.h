@@ -10,8 +10,8 @@
  *
  *   - zoom about a point: the one "new zoom around widget point (cx, cy)"
  *     rule that the wheel, the keys and a pinch all go through, with the
- *     2 %..6400 % clamp (raised to the fit ratio, jx0) and the non-finite
- *     guard (hx0) in exactly one place;
+ *     2 %..6400 % clamp (widened to the fit ratio, jx0 / zb2) and the
+ *     non-finite guard (hx0) in exactly one place;
  *   - pinch: the zoom a pinch asks for, from the zoom it began at and
  *     GtkGestureZoom's scale factor, and the fit detent's rebased scale;
  *   - swipe: whether a one-finger touch drag was a deliberate horizontal
@@ -32,8 +32,8 @@
 
 G_BEGIN_DECLS
 
-/* Zoom limits (1.0 = 100 %): see gesture_math_clamp_zoom for how the upper
- * one rises to the fit ratio. docs/ui-and-interactions.md "Zoom behavior". */
+/* Zoom limits (1.0 = 100 %): see gesture_math_clamp_zoom for how each one
+ * gives way to the fit ratio. docs/ui-and-interactions.md "Zoom behavior". */
 #define GGAZE_ZOOM_MIN 0.02
 #define GGAZE_ZOOM_MAX 64.0
 
@@ -67,9 +67,13 @@ typedef struct {
    gdouble d_fit; /* fit-to-window ratio */
 } GestureView;
 
-/* Clamp d_zoom to [GGAZE_ZOOM_MIN, MAX(GGAZE_ZOOM_MAX, d_fit)] (jx0: a small
- * image in a big window fits above 6400 %, and clamping it to the bare
- * ceiling made zoom-in SHRINK it). d_zoom must be finite. */
+/* Clamp d_zoom to [MIN(GGAZE_ZOOM_MIN, d_fit), MAX(GGAZE_ZOOM_MAX, d_fit)]:
+ * the range always contains the fit ratio, so no zoom from fit goes the
+ * wrong way (jx0: a small image in a big window fits above 6400 %, and the
+ * bare ceiling made zoom-in SHRINK it; zb2: a huge panorama fits below
+ * 2 %, and the bare floor made zoom-out ENLARGE it). A non-finite or
+ * non-positive d_fit leaves both limits as they are. d_zoom must be
+ * finite. */
 gdouble gesture_math_clamp_zoom(gdouble d_zoom, gdouble d_fit);
 
 /* Zoom to d_zoom (clamped) around widget point (d_cx, d_cy): the image pixel

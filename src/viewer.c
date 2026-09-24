@@ -52,12 +52,13 @@
  * pans with its midpoint while it zooms, so two fingers moved together
  * drag the picture along -- except over a fitted picture while the scale
  * stays within a tap's wobble of 1 (a two-finger pan reports ~1.01): that
- * picture has nothing to pan and stays fitted, so `0`, a resize refit and
- * a swipe keep working; a two-finger tap leaves the view as it was
- * before its first finger went down, and undoes what that finger did to a
- * tool (DRAG_REVERT, viewer.h). None of the gestures claims
- * its sequences, so the drag gesture keeps working for one finger and the
- * mouse path is untouched.
+ * picture stays fitted and holds still, so `0`, a resize refit and a swipe
+ * keep working (re-entering that band keeps the position the fingers
+ * gave it: fit mode does not re-centre); a two-finger tap leaves the view
+ * as it was before its first finger went down, and undoes what that
+ * finger did to a tool (DRAG_REVERT, viewer.h). None of the gestures
+ * claims its sequences, so the drag gesture keeps working for one finger
+ * and the mouse path is untouched.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -286,8 +287,9 @@ _tex_h(GgazeViewer *p_v) {
  *
  * Note this is NOT bounded by GGAZE_ZOOM_MAX -- an image small enough relative
  * to the window fits at far more than 6400% (a 6x3 image in a 600x400 window
- * fits at 100x). _zoom_at relies on that being expressible; see the ceiling
- * gesture_math_clamp_zoom derives from this (jx0). */
+ * fits at 100x), nor by GGAZE_ZOOM_MIN -- a 32768 px panorama in a 600 px
+ * window fits at 1.83 %. _zoom_at relies on both being expressible; see the
+ * limits gesture_math_clamp_zoom derives from this (jx0 / zb2). */
 static gdouble
 _fit_scale(GgazeViewer *p_v, int i_w, int i_h) {
    int i_tw = _tex_w(p_v);
@@ -354,8 +356,8 @@ _current_scale(GgazeViewer *p_v) {
 
 /* Zoom around widget point (d_cx, d_cy), keeping that point over the same
  * image pixel -- the one zoom path the wheel, the keys and a pinch share.
- * The rule itself, the 2 %..6400 % clamp with its ceiling raised to the
- * fit ratio (jx0) and the non-finite guard (hx0) are gesture-math.c's
+ * The rule itself, the 2 %..6400 % clamp with both limits widened to the
+ * fit ratio (jx0 / zb2) and the non-finite guard (hx0) are gesture-math.c's
  * gesture_math_zoom_about; _compute_geom clamps the pan on the next draw.
  *
  * hx0 in short: a non-finite centre or zoom is rejected, not stored. CLAMP
@@ -1180,6 +1182,29 @@ _pinch_in_fit_detent(const GgazeViewer *p_v, gdouble d_scale) {
            fabs(d_scale - 1.0) <= GESTURE_TAP_MAX_SCALE_DEV);
 }
 
+/* Hold the picture at fit inside the detent: fit back on, and the pinch's
+ * zoom-at-begin, but the pan left where it is now (clamped to the fitted
+ * picture at once, so the stored state is what is drawn). Why not the pan
+ * the pinch began at (zb2 fourth review): fit mode does not re-centre --
+ * _compute_geom keeps a fitted picture's pan anywhere inside its
+ * letterbox, and a one-finger drag moves it there -- so a picture the
+ * fingers moved along the letterbox while zoomed past the band has a
+ * legitimate fitted position where it is. Putting back the begin pan
+ * snapped it across the letterbox (tens of px) on re-entry; keeping it
+ * makes re-entry as continuous as leaving (at the band's edge the rebased
+ * zoom IS the fit zoom). */
+static void
+_pinch_hold_fit(GgazeViewer *p_v) {
+   p_v->b_fit  = p_v->t_pinch0.b_fit;
+   p_v->d_zoom = p_v->t_pinch0.d_zoom;
+   if (p_v->p_texture != NULL) {
+      _compute_geom(p_v, gtk_widget_get_width(GTK_WIDGET(p_v)),
+                    gtk_widget_get_height(GTK_WIDGET(p_v)), NULL, NULL, NULL,
+                    NULL, NULL);
+   }
+   gtk_widget_queue_draw(GTK_WIDGET(p_v));
+}
+
 void
 ggaze_viewer_pinch_update(GgazeViewer *p_viewer, gdouble d_scale, gdouble d_cx,
                           gdouble d_cy) {
@@ -1204,12 +1229,13 @@ ggaze_viewer_pinch_update(GgazeViewer *p_viewer, gdouble d_scale, gdouble d_cx,
       /* A two-finger pan over a fitted picture: GtkGestureZoom reports a
        * scale a little off 1 on every move, and zooming by it would turn
        * fit off for good (`0`, a resize refit, a swipe all read b_fit).
-       * The picture fits: it has nothing to pan, so it stays as the pinch
-       * found it -- also after a pinch out and back into the band, which
-       * snaps back to fit (seamlessly: at the band's edge the rebased
-       * zoom below IS the fit zoom). The midpoint is still tracked, so a
-       * real zoom that follows starts from here. */
-      _view_restore(p_viewer, &p_viewer->t_pinch0);
+       * The picture fits, so it stays fitted and holds still -- also
+       * after a pinch out and back into the band, which returns to fit
+       * where the picture is (_pinch_hold_fit: zoom AND position are
+       * continuous; at the band's edge the rebased zoom below IS the fit
+       * zoom). The midpoint is still tracked, so a real zoom that follows
+       * starts from here. */
+      _pinch_hold_fit(p_viewer);
       p_viewer->d_pinch_last_cx = d_cx;
       p_viewer->d_pinch_last_cy = d_cy;
       return;

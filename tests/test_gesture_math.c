@@ -2,8 +2,9 @@
  * ggaze — zoom / touch-gesture math unit test (no display)
  *
  * Pins the rules gesture-math.h promises (task zb2): zooming about a point
- * keeps that point's image pixel under it, the zoom clamp rises to the fit
- * ratio (jx0), a pinch multiplies its start zoom, a swipe needs distance,
+ * keeps that point's image pixel under it, the zoom clamp's ceiling rises
+ * to a fit ratio above it (jx0) and its floor falls to one below it (zb2),
+ * a pinch multiplies its start zoom, a swipe needs distance,
  * speed and a mostly horizontal path, and a two-finger tap is short and
  * still. Negative rules: NaN / Inf anywhere (hx0) changes nothing, a zero
  * or negative pinch scale is refused, a zero-duration swipe (no velocity),
@@ -79,6 +80,44 @@ test_zoom_about_clamps(void) {
    g_assert_cmpfloat(gesture_math_clamp_zoom(150.0, INFINITY), ==,
                      GGAZE_ZOOM_MAX);
    g_assert_cmpfloat(gesture_math_clamp_zoom(150.0, NAN), ==, GGAZE_ZOOM_MAX);
+}
+
+/* zb2 fourth review: the floor falls to a fit ratio below it, never rises
+ * above it -- a 32768 px panorama in a 600 px window fits at 1.83 %, and
+ * the bare 2 % floor made zooming out from fit ENLARGE it. */
+static void
+test_clamp_floor_falls_to_fit(void) {
+   const gdouble d_fit = 600.0 / 32768.0;
+   g_assert_cmpfloat(d_fit, <, GGAZE_ZOOM_MIN);
+   /* Zooming out from fit (by a key step, or far) stays at fit. */
+   g_assert_cmpfloat(gesture_math_clamp_zoom(d_fit / 1.25, d_fit), ==, d_fit);
+   g_assert_cmpfloat(gesture_math_clamp_zoom(1e-9, d_fit), ==, d_fit);
+   /* Between fit and the normal floor is a legal zoom now. */
+   gdouble d_mid = (d_fit + GGAZE_ZOOM_MIN) / 2.0;
+   g_assert_cmpfloat(gesture_math_clamp_zoom(d_mid, d_fit), ==, d_mid);
+   /* A fit above the floor does not lift it. */
+   g_assert_cmpfloat(gesture_math_clamp_zoom(1e-9, 0.5), ==, GGAZE_ZOOM_MIN);
+   /* Nonsense fits leave the floor alone. */
+   g_assert_cmpfloat(gesture_math_clamp_zoom(1e-9, 0.0), ==, GGAZE_ZOOM_MIN);
+   g_assert_cmpfloat(gesture_math_clamp_zoom(1e-9, -1.0), ==, GGAZE_ZOOM_MIN);
+   g_assert_cmpfloat(gesture_math_clamp_zoom(1e-9, -INFINITY), ==,
+                     GGAZE_ZOOM_MIN);
+   g_assert_cmpfloat(gesture_math_clamp_zoom(1e-9, NAN), ==, GGAZE_ZOOM_MIN);
+   /* Through the zoom rule: from a fitted panorama, zoom out is a no-op. */
+   GestureView t_v = {.i_w     = 600,
+                      .i_h     = 400,
+                      .i_tex_w = 32768,
+                      .i_tex_h = 16,
+                      .d_scale = d_fit,
+                      .d_x     = 0.0,
+                      .d_y     = (400.0 - 16.0 * d_fit) / 2.0,
+                      .d_fit   = d_fit};
+   gdouble     d_z, d_px, d_py;
+   g_assert_true(gesture_math_zoom_about(&t_v, 300.0, 200.0, d_fit / 1.25, &d_z,
+                                         &d_px, &d_py));
+   g_assert_cmpfloat(d_z, ==, d_fit);
+   g_assert_cmpfloat(fabs(d_px), <, 1e-9);
+   g_assert_cmpfloat(fabs(d_py), <, 1e-9);
 }
 
 /* A view not drawn yet (scale 0) zooms about the image's top-left instead
@@ -237,6 +276,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/gesture_math/zoom_about_keeps_the_point",
                    test_zoom_about_keeps_the_point);
    g_test_add_func("/gesture_math/zoom_about_clamps", test_zoom_about_clamps);
+   g_test_add_func("/gesture_math/clamp_floor_falls_to_fit",
+                   test_clamp_floor_falls_to_fit);
    g_test_add_func("/gesture_math/zoom_about_undrawn_view",
                    test_zoom_about_undrawn_view);
    g_test_add_func("/gesture_math/zoom_about_rejects_non_finite",

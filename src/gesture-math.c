@@ -14,17 +14,27 @@
 
 gdouble
 gesture_math_clamp_zoom(gdouble d_zoom, gdouble d_fit) {
-   /* The ceiling is the normal limit or the fit ratio, whichever is larger
-    * (jx0): when fit-to-window already exceeds GGAZE_ZOOM_MAX, clamping to
-    * the bare limit turned the first zoom-in into a shrink. Rising to the
-    * fit ratio makes the top end a no-op instead of a reversal. A
-    * non-finite fit (never produced by the viewer) is ignored rather than
-    * allowed to lift the ceiling to infinity. */
+   /* Both limits give way to the fit ratio, symmetrically. The ceiling is
+    * the normal limit or the fit ratio, whichever is larger (jx0): when
+    * fit-to-window already exceeds GGAZE_ZOOM_MAX, clamping to the bare
+    * limit turned the first zoom-in into a shrink. The floor is the normal
+    * limit or the fit ratio, whichever is SMALLER (zb2 fourth review): a
+    * 32768 px panorama in a 600 px window fits at 1.83 %, below the 2 %
+    * floor, and clamping to the bare floor turned every zoom-out from fit
+    * -- `-`, the wheel, a pinch in -- into an enlargement (and made a
+    * pinch jump ~9 % leaving the fit detent). With either limit moved to
+    * fit, the far end is a no-op instead of a reversal. A non-finite or
+    * non-positive fit (never produced by the viewer) is ignored rather
+    * than allowed to move a limit to infinity or to zero. */
+   gdouble d_min = GGAZE_ZOOM_MIN;
    gdouble d_max = GGAZE_ZOOM_MAX;
    if (isfinite(d_fit) && d_fit > d_max) {
       d_max = d_fit;
    }
-   return (CLAMP(d_zoom, GGAZE_ZOOM_MIN, d_max));
+   if (isfinite(d_fit) && d_fit > 0.0 && d_fit < d_min) {
+      d_min = d_fit;
+   }
+   return (CLAMP(d_zoom, d_min, d_max));
 }
 
 /* TRUE when every number the zoom derives from is finite. CLAMP cannot

@@ -30,7 +30,10 @@
  * nowhere; a swipe or a
  * navigate-mode wheel notch stops a running slideshow, as l / h do; a
  * pinch over a fitted picture holds it at fit within the tap's wobble and
- * zooms on continuously (no jump) past that band; a
+ * zooms on continuously (no jump) past that band, and back into it keeps
+ * the picture where the fingers moved it (no snap back); zooming out a
+ * panorama that fits below the 2 % floor never enlarges it (key, wheel,
+ * pinch); a
  * two-finger tap toggles the info card and leaves the view as it was
  * before its first finger went down, a long or moving one, a touchpad
  * pinch and one cut short by a new texture or an unmap do not. The
@@ -294,6 +297,88 @@ test_leaving_the_fit_detent_does_not_jump(void) {
    g_assert_cmpfloat(fabs(ggaze_viewer_get_scale(fx.p_viewer) - 1.05), <, 1e-9);
    ggaze_viewer_pinch_update(fx.p_viewer, 1.5, 300.0, 200.0); /* no tap */
    g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   fx_close(&fx);
+}
+
+/* Re-entering the fit detent keeps the picture where the fingers put it
+ * (zb2 fourth review). Fit mode does not re-centre: a fitted picture may
+ * sit anywhere in its letterbox. So a pinch out a little, moved along the
+ * letterbox, then back into the band returns to fit WITHOUT snapping back
+ * to where the pinch began: the drawn top-left at the band's outer edge
+ * and just inside it agree. */
+static void
+test_reentering_the_fit_detent_keeps_the_position(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   gdouble       d_fit  = ggaze_viewer_get_scale(fx.p_viewer);
+   const gdouble d_edge = 1.0 + GESTURE_TAP_MAX_SCALE_DEV;
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   /* 5 % past the edge: still letterboxed along the short axis, whichever
+    * that is in this allocation; move 20 px diagonally along it. */
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.05 * d_edge, 300.0, 200.0);
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.05 * d_edge, 320.0, 220.0);
+   ggaze_viewer_pinch_update(fx.p_viewer, d_edge + 1e-9, 320.0, 220.0);
+   GgazeViewerGeom t_out, t_in;
+   g_assert_true(ggaze_viewer_get_geometry(fx.p_viewer, &t_out));
+   ggaze_viewer_pinch_update(fx.p_viewer, d_edge - 1e-9, 320.0, 220.0);
+   g_assert_true(ggaze_viewer_get_geometry(fx.p_viewer, &t_in));
+   g_assert_cmpfloat(t_in.d_scale, ==, d_fit); /* fitted again */
+   g_assert_cmpfloat(fabs(t_in.d_x - t_out.d_x), <, 1e-3);
+   g_assert_cmpfloat(fabs(t_in.d_y - t_out.d_y), <, 1e-3);
+   /* Negative: the position really moved off the begin position (0, 0),
+    * so the check above would see a snap back. */
+   gdouble d_px, d_py;
+   ggaze_viewer_get_pan(fx.p_viewer, &d_px, &d_py);
+   g_assert_cmpfloat(hypot(d_px, d_py), >, 10.0);
+   /* Inside the band it holds still: a two-finger move pans nothing. */
+   ggaze_viewer_pinch_update(fx.p_viewer, 1.0, 300.0, 200.0);
+   g_assert_true(ggaze_viewer_get_geometry(fx.p_viewer, &t_out));
+   g_assert_cmpfloat(fabs(t_out.d_x - t_in.d_x), <, 1e-9);
+   g_assert_cmpfloat(fabs(t_out.d_y - t_in.d_y), <, 1e-9);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), ==, d_fit);
+   fx_close(&fx);
+}
+
+/* A panorama so wide it fits below the 2 % floor (32768 px across 600 px
+ * or less: fit < 1.83 %). Zooming out from fit -- `-`, a wheel notch, a
+ * pinch in, over a fitted or a zoomed picture -- must never ENLARGE it;
+ * the floor falls to the fit ratio (zb2 fourth review, the mirror of jx0's
+ * ceiling). */
+static void
+test_panorama_zoom_out_never_enlarges(void) {
+   GestureFx fx;
+   fx_open(&fx);
+   const int i_w = 32768, i_h = 16; /* the loader's per-side cap */
+   GBytes   *p_px =
+      g_bytes_new_take(g_malloc0((gsize)i_w * i_h * 4), (gsize)i_w * i_h * 4);
+   GdkTexture *p_tex = gdk_memory_texture_new(i_w, i_h, GDK_MEMORY_R8G8B8A8,
+                                              p_px, (gsize)i_w * 4);
+   g_bytes_unref(p_px);
+   ggaze_viewer_set_texture(fx.p_viewer, p_tex);
+   gdouble d_fit = ggaze_viewer_get_scale(fx.p_viewer);
+   g_assert_cmpfloat(d_fit, <, GGAZE_ZOOM_MIN);
+   ggaze_viewer_zoom_out(fx.p_viewer);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), <=, d_fit);
+   ggaze_viewer_set_scroll_behavior(fx.p_viewer, GGAZE_SCROLL_ZOOM);
+   GtkEventController *p_scroll =
+      controller_of(fx.p_viewer, GTK_TYPE_EVENT_CONTROLLER_SCROLL);
+   gboolean b_handled = FALSE;
+   g_signal_emit_by_name(p_scroll, "scroll", 0.0, 1.0, &b_handled);
+   g_assert_true(b_handled);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), <=, d_fit);
+   /* A pinch in over the (no longer fitted) picture ... */
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 0.5, 300.0, 200.0);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), <=, d_fit);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   /* ... and over a fitted one, past the detent's lower edge. */
+   ggaze_viewer_set_texture(fx.p_viewer, p_tex);
+   ggaze_viewer_pinch_begin(fx.p_viewer, 300.0, 200.0, FALSE);
+   ggaze_viewer_pinch_update(fx.p_viewer, 0.8, 300.0, 200.0);
+   g_assert_cmpfloat(ggaze_viewer_get_scale(fx.p_viewer), <=, d_fit);
+   g_assert_false(ggaze_viewer_pinch_end(fx.p_viewer));
+   g_object_unref(p_tex);
    fx_close(&fx);
 }
 
@@ -899,6 +984,10 @@ main(int i_argc, char **c_argv) {
                    test_two_finger_pan_keeps_fit);
    g_test_add_func("/gestures/leaving_the_fit_detent_does_not_jump",
                    test_leaving_the_fit_detent_does_not_jump);
+   g_test_add_func("/gestures/reentering_the_fit_detent_keeps_the_position",
+                   test_reentering_the_fit_detent_keeps_the_position);
+   g_test_add_func("/gestures/panorama_zoom_out_never_enlarges",
+                   test_panorama_zoom_out_never_enlarges);
    g_test_add_func("/gestures/pinch_at_max_zoom_still_pans",
                    test_pinch_at_max_zoom_still_pans);
    g_test_add_func("/gestures/zoom_controller_drives_the_pinch",
