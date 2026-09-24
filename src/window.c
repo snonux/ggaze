@@ -515,12 +515,14 @@ _update_empty_state(GgazeWindow *p_win) {
       c_desc  = g_strdup(navigator_get_error(p_win->p_nav));
    } else if (u_total > 0) {
       c_title = g_strdup_printf("All %u images trashed", u_total);
-      c_desc  = g_strdup("Press u to restore the last one, "
-                         "o to open something else");
+
+      c_desc = g_strdup("Press u to restore the last one, "
+                        "o to open something else");
    } else {
       c_title = g_strdup_printf("No images in %s", c_folder);
-      c_desc  = g_strdup("Press o to open an image, O a folder, "
-                         "or drop one here");
+
+      c_desc = g_strdup("Press o to open an image, O a folder, "
+                        "or drop one here");
    }
    adw_status_page_set_title(ADW_STATUS_PAGE(p_win->p_status_page), c_title);
    adw_status_page_set_description(ADW_STATUS_PAGE(p_win->p_status_page),
@@ -3219,11 +3221,13 @@ static void
 _menu_add(GMenu *p_menu, const char *c_action, const char *c_fallback) {
    const char *c_title = shortcuts_title_for_action(c_action);
    char       *c_keys  = shortcuts_keys_for_action(c_action);
-   char       *c_label =
-      c_keys != NULL
-         ? g_strdup_printf("%s (%s)", c_title != NULL ? c_title : c_fallback,
-                           c_keys)
-         : g_strdup(c_title != NULL ? c_title : c_fallback);
+   const char *c_name  = c_title != NULL ? c_title : c_fallback;
+   char       *c_label = NULL;
+   if (c_keys != NULL) {
+      c_label = g_strdup_printf("%s (%s)", c_name, c_keys);
+   } else {
+      c_label = g_strdup(c_name);
+   }
    g_menu_append(p_menu, c_label, c_action);
    g_free(c_label);
    g_free(c_keys);

@@ -113,9 +113,15 @@ the CI-portable baseline; `./sample-images/` is a local supplement.
   unit-testable without a display.
 - `clang-format --dry-run --Werror` must be clean on every `*.c`/`*.h`
   (`.clang-format` matches the conventions). CI fails on a dirty tree. The
-  config targets LLVM clang-format >=16 (Fedora 40 ships 18); it uses the
-  cross-version key spellings (`UseTab`, `AlwaysBreakAfterReturnType`) so
-  both the Fedora-40 CI toolchain and newer local builds accept it.
+  config targets LLVM clang-format >=16 (Fedora 40 ships 18, package
+  `clang-tools-extra`); it uses the cross-version key spellings (`UseTab`,
+  `AlwaysBreakAfterReturnType`) so both the Fedora-40 CI toolchain and
+  newer local builds accept it. The tree must be clean under BOTH 18 and a
+  current release (22): they align the continuation lines of a multi-line
+  statement inside an `AlignConsecutive*` run differently, so keep such a
+  statement out of the run (an `if`/`else`, a helper, or a blank line)
+  rather than accept whichever layout the local formatter picks. Check 18
+  in a `fedora:40` container before pushing a layout-heavy change.
 - Header guards uppercase from filename with the project prefix
   (`GGAZE_NAVIGATOR_H`). `.c` includes: own
   header first, blank line, system `<...>`, then project `"..."`.

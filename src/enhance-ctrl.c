@@ -417,10 +417,12 @@ static void
 _save_report(EnhanceCtrl *p_ctrl, GFile *p_out, gboolean b_ok,
              const GError *p_err) {
    char *c_saved = g_file_get_basename(p_out);
-   char *c_msg   = b_ok ? g_strdup_printf("Saved %s", c_saved)
-                        : g_strdup_printf("Enhance-save failed: %s",
-                                          p_err != NULL ? p_err->message : "?");
-   if (!b_ok) {
+   char *c_msg   = NULL;
+   if (b_ok) {
+      c_msg = g_strdup_printf("Saved %s", c_saved);
+   } else {
+      c_msg = g_strdup_printf("Enhance-save failed: %s",
+                              p_err != NULL ? p_err->message : "?");
       g_warning("ggaze: %s", c_msg);
    }
    _show_status(p_ctrl, c_msg);

@@ -854,9 +854,10 @@ _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
 static gboolean
 _apply_straighten(ToolCtrl *p_tc) {
    char *c_angle = _angle_text(p_tc->t_work.d_degrees);
-   char *c_msg   = g_strdup_printf("Straightened %s — s saves a "
-                                   "copy, Esc discards the preview",
-                                   c_angle);
+
+   char *c_msg = g_strdup_printf("Straightened %s — s saves a "
+                                 "copy, Esc discards the preview",
+                                 c_angle);
    _leave(p_tc);
    _status(p_tc, c_msg);
    g_free(c_msg);

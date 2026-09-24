@@ -41,6 +41,10 @@ AllowShortLoopsOnASingleLine:        false
 AllowShortEnumsOnASingleLine:        false
 
 AlignAfterOpenBracket: Align
+# CAUTION (gg2): LLVM 18 (CI) and LLVM 22 align the continuation lines of
+# a multi-line statement that sits inside one of these runs differently, so
+# such code is formatted clean by one and dirty by the other. Keep multi-
+# line statements out of aligned runs (if/else, a helper, a blank line).
 AlignConsecutiveAssignments: Consecutive
 AlignConsecutiveDeclarations: Consecutive
 AlignTrailingComments: true

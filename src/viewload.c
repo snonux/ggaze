@@ -293,8 +293,9 @@ _load_progress_cb(GdkTexture *p_partial, gpointer p_data) {
 static void
 _report_failure(ViewLoad *p_vl, GFile *p_file, const GError *p_err) {
    char *c_name = g_file_get_basename(p_file);
-   char *c_msg  = g_strdup_printf("Cannot show %s: %s", c_name,
-                                  p_err != NULL ? p_err->message : "?");
+
+   char *c_msg = g_strdup_printf("Cannot show %s: %s", c_name,
+                                 p_err != NULL ? p_err->message : "?");
    g_debug("ggaze: failed to load %s: %s", c_name,
            p_err != NULL ? p_err->message : "?");
    p_vl->p_ops->show_texture(p_vl->p_host, NULL);
