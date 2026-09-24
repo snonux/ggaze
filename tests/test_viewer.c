@@ -57,6 +57,7 @@
 #include "gtk_helpers.h"
 #include "loader/animation.h"
 #include "loader/loader.h"
+#include "pixbuf_modules.h"
 #include "viewer.h"
 
 #include <math.h>
@@ -709,9 +710,16 @@ test_play_once_gif_holds_last_frame(void) {
 }
 
 /* The same through a WebP's ANIM count of 1, where the machine's webp
- * module decodes frames (optional, like everywhere in the suites). */
+ * module decodes frames (optional, like everywhere in the suites). With no
+ * webp module at all (CI's fedora:40 installs no webp-pixbuf-loader) the
+ * load can only fail, so the skip must come BEFORE the open: the readiness
+ * wait inside fx_open_fixture() would otherwise time out and abort. */
 static void
 test_play_once_webp_holds_last_frame(void) {
+   if (!ggtest_pixbuf_module_available("webp")) {
+      g_test_skip("no webp gdk-pixbuf module here");
+      return;
+   }
    ViewerFx fx;
    fx_open_fixture(&fx, "once.webp", ANIM_W, ANIM_H);
    if (animation_lookup(ggaze_viewer_get_texture(fx.p_viewer)) == NULL) {

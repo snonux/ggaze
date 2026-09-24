@@ -87,13 +87,15 @@ gsettings_env.set('GSETTINGS_SCHEMA_DIR', ggaze_gschema_dir)
 # hd2); file_stamp.c (read a file's mtime-to-the-ns/size/inode stamp and
 # set its mtime back, failing clearly on a whole-second filesystem) is how
 # test_texturecache and test_enhance_flow drive the texture cache's stamp
-# into a hit or a miss (fd2).
+# into a hit or a miss (fd2); pixbuf_modules.c (is a gdk-pixbuf module
+# installed at all) is how test_loader_pixbuf and test_viewer skip a
+# fixture only an optional module decodes (gg2: fedora:40 has no webp one).
 test_helpers_inc = include_directories('helpers')
 test_helpers_lib = static_library(
    'ggaze_test_helpers',
    ['helpers/gtk_helpers.c', 'helpers/mem_file.c', 'helpers/open_counter.c',
     'helpers/temp_dir.c', 'helpers/wait_until.c', 'helpers/file_stamp.c',
-    ggaze_conf_h],
+    'helpers/pixbuf_modules.c', ggaze_conf_h],
    include_directories : [inc, src_inc, test_helpers_inc],
    dependencies : ggaze_deps,
    install : false,

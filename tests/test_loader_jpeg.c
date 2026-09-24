@@ -26,10 +26,15 @@
 
 #include "loader/loader.h"
 
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
 #include <unistd.h>
+
+/* tests/fixtures/plain.jpg's SOF dimensions. */
+#define PLAIN_JPG_W 6
+#define PLAIN_JPG_H 3
 
 static volatile int g_progress_fired = 0;
 static GMainLoop   *g_loop           = NULL;
@@ -252,11 +257,22 @@ test_progressive_oversized(void) {
 
 /* Truncate plain.jpg right after its SOS marker so the header/SOF/quant/
  * Huffman tables are intact but the entropy-coded scan is incomplete.
- * jpeg_backend.load now uses the GdkPixbuf path (orientation-aware), which
- * rejects a truncated scan (GdkPixbuf is stricter than libjpeg-turbo's direct
- * scan decoder) -- so this asserts graceful failure rather than a partial
- * image. The libjpeg _decode_at_scale() longjmp-path p_rgb free (1z0) lives
- * in the progressive low-res phase and is verified by inspection. */
+ * jpeg_backend.load decodes through GdkPixbuf (orientation-aware), so its
+ * verdict on such a file IS GdkPixbuf's, and that verdict depends on the
+ * gdk-pixbuf in use (gg2):
+ *
+ *   - gdk-pixbuf 2.44 (glycin loaders; Fedora 44) rejects the truncated
+ *     scan: the backend must fail closed, with an error set.
+ *   - gdk-pixbuf 2.42 (built-in libjpeg loader; CI's fedora:40) decodes it,
+ *     libjpeg filling the missing scan with grey after a "premature end of
+ *     data" warning: the backend must hand back a texture of the SOF size.
+ *
+ * So the test asks GdkPixbuf about the very same bytes first and asserts
+ * the backend agrees -- exact on both, and never "anything goes": a crash,
+ * a NULL without an error, an error where GdkPixbuf decoded, or a texture
+ * of some other size all fail. The libjpeg _decode_at_scale() longjmp-path
+ * p_rgb free (1z0) lives in the progressive low-res phase and is verified by
+ * inspection. */
 static void
 test_jpeg_truncated_scan(void) {
    const gchar *c_dir = g_getenv("GGAZE_FIXTURES_DIR");
@@ -283,19 +299,24 @@ test_jpeg_truncated_scan(void) {
    gchar *c_tmp = _write_tmp(p_buf, u_cut);
    g_free(p_buf);
 
+   GdkPixbuf  *p_ref  = gdk_pixbuf_new_from_file(c_tmp, NULL);
    GFile      *p_file = g_file_new_for_path(c_tmp);
    GError     *p_err  = NULL;
    GdkTexture *p_tex  = jpeg_backend.load(p_file, NULL, &p_err);
-   /* jpeg_backend.load uses the GdkPixbuf path (orientation-aware, same as
-    * the progressive backend's full-decode phase), and GdkPixbuf rejects a
-    * truncated scan rather than returning a partial image -- so a corrupt
-    * JPEG fails closed instead of loading silently. Assert graceful failure
-    * (no crash) here; the libjpeg _decode_at_scale() longjmp-path p_rgb free
-    * (1z0) still lives in the progressive low-res phase and is verified by
-    * inspection. */
-   g_assert_null(p_tex);
-   g_assert_nonnull(p_err);
-   g_clear_error(&p_err);
+   if (p_ref == NULL) {
+      g_test_message("this gdk-pixbuf rejects a truncated scan: fail closed");
+      g_assert_null(p_tex);
+      g_assert_nonnull(p_err);
+      g_clear_error(&p_err);
+   } else {
+      g_test_message("this gdk-pixbuf decodes a truncated scan: same size");
+      g_assert_no_error(p_err);
+      g_assert_nonnull(p_tex);
+      g_assert_cmpint(gdk_texture_get_width(p_tex), ==, PLAIN_JPG_W);
+      g_assert_cmpint(gdk_texture_get_height(p_tex), ==, PLAIN_JPG_H);
+      g_object_unref(p_tex);
+      g_object_unref(p_ref);
+   }
    g_object_unref(p_file);
    unlink(c_tmp);
    g_free(c_tmp);
