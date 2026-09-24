@@ -63,11 +63,14 @@ struct ToolCtrl {
    /* an in-progress pointer drag */
    CropRectHit e_hit;        /* crop: what the drag grabbed */
    CropRect    t_drag_start; /* crop: the rectangle when it began */
-   gdouble     d_drag_x0;    /* where it began, image px */
-   gdouble     d_drag_y0;
-   gboolean    b_line;    /* straighten: a horizon line is being drawn */
-   gdouble     d_line_x1; /* its far end, image px (the near end is the
-                           * drag start above) */
+   gboolean    b_revertable; /* crop: a pinch CANCELled a drag that had
+                              * grabbed t_drag_start; a DRAG_REVERT (the
+                              * pinch was a tap) puts it back */
+   gdouble  d_drag_x0;       /* where it began, image px */
+   gdouble  d_drag_y0;
+   gboolean b_line;    /* straighten: a horizon line is being drawn */
+   gdouble  d_line_x1; /* its far end, image px (the near end is the
+                        * drag start above) */
    gdouble d_line_y1;
 };
 
@@ -312,9 +315,10 @@ _drag_cb(GgazeViewerDragPhase e_phase, gdouble d_x, gdouble d_y,
  * it). */
 static void
 _leave(ToolCtrl *p_tc) {
-   p_tc->e_tool = GGAZE_TOOL_NONE;
-   p_tc->b_line = FALSE;
-   p_tc->e_hit  = CROPRECT_HIT_NONE;
+   p_tc->e_tool       = GGAZE_TOOL_NONE;
+   p_tc->b_line       = FALSE;
+   p_tc->e_hit        = CROPRECT_HIT_NONE;
+   p_tc->b_revertable = FALSE;
    g_clear_object(&p_tc->p_file);
    GgazeViewer *p_v = _viewer(p_tc);
    if (p_v != NULL) {
@@ -356,7 +360,8 @@ _begin(ToolCtrl *p_tc, GgazeTool e_tool) {
  * at the nearest corner that nobody drew. */
 static void
 _refit_rect(ToolCtrl *p_tc, gint i_w, gint i_h) {
-   CropRect t_in = p_tc->t_rect;
+   p_tc->b_revertable = FALSE; /* t_drag_start is on the old base */
+   CropRect t_in      = p_tc->t_rect;
    croprect_intersect(&t_in, i_w, i_h);
    if (t_in.d_w <= 0.0 || t_in.d_h <= 0.0) {
       croprect_init_full(&p_tc->t_rect, i_w, i_h);
@@ -555,6 +560,9 @@ _crop_key(ToolCtrl *p_tc, guint u_keyval) {
    if (!_is_crop_key(u_keyval)) {
       return (FALSE);
    }
+   /* A key edit made while two fingers were down is kept: a REVERT that
+    * follows must not undo it along with the first finger's jitter. */
+   p_tc->b_revertable = FALSE;
    if (!_ensure_rect(p_tc)) {
       _say_not_ready(p_tc);
       return (TRUE);
@@ -621,6 +629,22 @@ _crop_editable(ToolCtrl *p_tc, gboolean b_say) {
    return (TRUE);
 }
 
+/* DRAG_REVERT (viewer.h): the drag a pinch CANCELled was a two-finger
+ * tap's first finger, so the rectangle goes back to what that drag
+ * grabbed. Nothing to do when the CANCEL grabbed nothing (the drag began
+ * outside the rectangle, its BEGIN was refused, it went to another tool),
+ * or when the base changed size since (_refit_rect: the saved rectangle
+ * is on the old base). */
+static void
+_crop_revert(ToolCtrl *p_tc) {
+   if (!p_tc->b_revertable) {
+      return;
+   }
+   p_tc->b_revertable = FALSE;
+   p_tc->t_rect       = p_tc->t_drag_start;
+   _redraw(p_tc);
+}
+
 /* A drag over the crop rectangle: BEGIN decides what was grabbed, every
  * later phase re-derives the rectangle from the one at BEGIN plus the total
  * offset (croprect_drag), so a drag never accumulates clamping error. Each
@@ -634,13 +658,31 @@ _crop_editable(ToolCtrl *p_tc, gboolean b_say) {
  * (a gesture whose END was refused too, or one GTK cancelled without an
  * END), and the first UPDATE accepted after the render landed re-derived
  * the rectangle from that stale start -- a jump to a corner resize nobody
- * made. */
+ * made. A CANCEL (a pinch took the drag over, viewer.h) lets go and keeps
+ * the rectangle as the last UPDATE left it: that is what the user saw
+ * under the finger, and snapping it back would undo a drag they watched
+ * land. It re-derives nothing, since its point is the last UPDATE's. A
+ * REVERT after it (the pinch was a two-finger tap, so the drag was only
+ * its first finger's jitter) puts back the rectangle the drag grabbed
+ * (_crop_revert). CANCEL and REVERT read neither p_g nor the point: they
+ * arrive with p_g NULL (_drag_release) when the viewer has no picture. */
 static void
 _crop_drag(ToolCtrl *p_tc, const GgazeViewerGeom *p_g,
            GgazeViewerDragPhase e_phase, gdouble d_ix, gdouble d_iy) {
    CropRectHit e_hit = p_tc->e_hit; /* the grab an UPDATE / END continues */
+   if (e_phase == GGAZE_VIEWER_DRAG_REVERT) {
+      _crop_revert(p_tc);
+      return;
+   }
    if (e_phase != GGAZE_VIEWER_DRAG_UPDATE) {
       p_tc->e_hit = CROPRECT_HIT_NONE;
+   }
+   /* Only the CANCEL of a drag that grabbed something can be reverted;
+    * any other phase starts or finishes a drag, which is then kept. */
+   p_tc->b_revertable =
+      (e_phase == GGAZE_VIEWER_DRAG_CANCEL && e_hit != CROPRECT_HIT_NONE);
+   if (e_phase == GGAZE_VIEWER_DRAG_CANCEL) {
+      return;
    }
    if (!_crop_editable(p_tc, e_phase == GGAZE_VIEWER_DRAG_BEGIN)) {
       return;
@@ -768,10 +810,23 @@ _horizon_measurable(ToolCtrl *p_tc) {
  * stale end -- has no line to level by and is ignored, the way _crop_drag
  * ignores a drag that began outside the rectangle (it used to apply
  * whatever the start coordinates last held: a lone END at (300, 200)
- * levelled by 35 degrees). */
+ * levelled by 35 degrees). A CANCEL (a second finger turned the drag into
+ * a pinch, viewer.h) drops the line without levelling: the line was never
+ * finished, and a finger that jittered by (1, 1) px before the pinch
+ * would otherwise level the image by 45 degrees. A REVERT (that pinch was
+ * a tap) finds the line already dropped: nothing was levelled, so nothing
+ * is undone. */
 static void
 _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
                  gdouble d_iy) {
+   if (e_phase == GGAZE_VIEWER_DRAG_CANCEL ||
+       e_phase == GGAZE_VIEWER_DRAG_REVERT) {
+      if (p_tc->b_line) {
+         p_tc->b_line = FALSE;
+         _redraw(p_tc);
+      }
+      return;
+   }
    if (e_phase == GGAZE_VIEWER_DRAG_BEGIN) {
       p_tc->b_line    = TRUE;
       p_tc->d_drag_x0 = d_ix;
@@ -926,11 +981,32 @@ tool_ctrl_key(ToolCtrl *p_tc, guint u_keyval, GdkModifierType e_state) {
    return (_straighten_key(p_tc, u_keyval));
 }
 
+/* CANCEL / REVERT (viewer.h): let go of whatever the drag held -- the crop
+ * grab (and, on REVERT, the rectangle it grabbed), the straighten line.
+ * Neither reads a point or the geometry, so they are handled before the
+ * geometry guard in tool_ctrl_drag: the viewer CANCELs a drag when a new
+ * texture is set, which may be NULL (nothing to map the point through),
+ * and a CANCEL dropped there left the straighten line or the crop grab
+ * live for a stray END / UPDATE to act on. */
+static void
+_drag_release(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase) {
+   if (p_tc->e_tool == GGAZE_TOOL_CROP) {
+      _crop_drag(p_tc, NULL, e_phase, 0.0, 0.0);
+   } else {
+      _straighten_drag(p_tc, e_phase, 0.0, 0.0);
+   }
+}
+
 void
 tool_ctrl_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_x,
                gdouble d_y) {
    g_return_if_fail(p_tc != NULL);
    if (p_tc->e_tool == GGAZE_TOOL_NONE) {
+      return;
+   }
+   if (e_phase == GGAZE_VIEWER_DRAG_CANCEL ||
+       e_phase == GGAZE_VIEWER_DRAG_REVERT) {
+      _drag_release(p_tc, e_phase);
       return;
    }
    GgazeViewer    *p_v = _viewer(p_tc);

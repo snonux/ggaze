@@ -29,8 +29,9 @@ adwaita_dep    = dependency('libadwaita-1')
 gdkpixbuf_dep  = dependency('gdk-pixbuf-2.0')  # pixbuf loader backend
 libexif_dep    = dependency('libexif')           # EXIF gather (info overlay, M4)
 # libm for the plain-C geometry modules (croprect/transform use sin/cos/
-# floor); GTK pulls it in transitively everywhere else, but the unit tests
-# that link only glib + the static ggaze library need it spelled out.
+# floor, gesture-math fabs); GTK pulls it in transitively everywhere else,
+# but the unit tests that link only glib + the static ggaze library need it
+# spelled out.
 cc    = meson.get_compiler('c')
 m_dep = cc.find_library('m', required : false)
 
@@ -92,6 +93,7 @@ ggaze_src = files(
       'src/opener.c',
       'src/pathutil.c',
       'src/croprect.c',
+      'src/gesture-math.c',
       'src/transform.c',
       'src/runner.c',
       'src/settings.c',

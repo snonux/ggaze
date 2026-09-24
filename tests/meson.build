@@ -287,6 +287,18 @@ test_croprect = executable(
 )
 test('croprect', test_croprect, suite : 'unit', env : fixtures_env)
 
+# zb2: the zoom / touch-gesture math is plain C (no GTK), so it runs in
+# every lane, the minimal one included.
+test_gesture_math = executable(
+   'test_gesture_math',
+   ['test_gesture_math.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, m_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('gesture_math', test_gesture_math, suite : 'unit', env : fixtures_env)
+
 test_transform = executable(
    'test_transform',
    ['test_transform.c', ggaze_conf_h],
@@ -678,6 +690,21 @@ test_viewer = executable(
    install : false,
 )
 test('viewer', test_viewer, suite : 'integration', env : fixtures_env,
+   timeout : 90)
+
+# zb2: pinch / swipe / two-finger tap on a presented window, driven through
+# the viewer's gesture bodies and the controllers' own signals (GTK4 cannot
+# synthesise touch). The GEGL halves (dirty gate, crop tool) are in
+# test_enhance_flow.
+test_gestures = executable(
+   'test_gestures',
+   ['test_gestures.c', ggaze_conf_h],
+   include_directories : [inc, src_inc, test_helpers_inc],
+   dependencies : ggaze_deps,
+   link_with : [ggaze_lib, test_helpers_lib],
+   install : false,
+)
+test('gestures', test_gestures, suite : 'integration', env : fixtures_env,
    timeout : 90)
 
 # info_overlay: the InfoOverlay driven directly on a bare GtkOverlay (no

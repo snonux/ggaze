@@ -133,7 +133,7 @@ drift from the live bindings.
 | `Space`        | hold to compare original vs modified (large, enhance) |
 | `f` / `F11`    | toggle fullscreen |
 | `s`            | save enhanced copy (GEGL); no auto-save |
-| `S` / `F5`     | start / stop slideshow (large view; any navigation key stops it) |
+| `S` / `F5`     | start / stop slideshow (large view; any navigation key, a swipe and a navigate-mode wheel notch stop it) |
 | `i`            | toggle info overlay |
 | `d` / `Delete` | move to `.Trash` (status line offers `u`), then next; undoable |
 | `D` / `Shift+Delete` | delete permanently (no trash), then next; no undo |
@@ -162,13 +162,73 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
 ## Mouse / touch
 
 - **Scroll** — `zoom` (default), `pan-when-zoomed`, or `navigate` next/prev
-  — `scroll-behavior` setting.
+  — `scroll-behavior` setting. In `navigate` a notch is exactly `l` / `h`:
+  it stops a running slideshow and goes through the Save/Discard/Cancel
+  prompt (the slideshow stop is new with zb2; before it a notch turned the
+  page under a running slideshow and left it running).
 - **Click-drag** — pan when zoomed in.
 - **Double-click** — toggle fit ↔ 100%.
 - **Middle-click** — toggle mark on a grid cell (grid view) / toggle
   fullscreen (large view).
-- **Touch pinch** — zoom; **swipe** — next/prev; **two-finger tap** — info
-  (planned; not yet implemented).
+- **Touch** (large view; zb2, decision #48). None of these touches the
+  mouse, the wheel or the `scroll-behavior` setting, and all work the same
+  in fullscreen:
+  - **Pinch** — zoom around the pinch midpoint (a touchpad pinch too —
+    on **Wayland only**: X11 does not deliver touchpad pinch events to
+    GTK 4, so under X11 only a touchscreen pinches), through the same zoom
+    rule, 2 %–6400 % clamp (widened to the fit ratio) and NaN guard as
+    the wheel
+    (`src/gesture-math.c`, see "Zoom behavior"). The zoom is absolute from
+    where the pinch began, and the picture **moves with the midpoint**:
+    the image pixel under the fingers stays under them, so two fingers
+    moved together at a constant distance drag the picture, as common
+    viewers do. Over a **fitted** picture a two-finger move whose finger
+    distance stays within 10 % keeps it fitted (it has nothing to pan, and
+    fit must survive for `0`, a window resize and the swipe); pinching out
+    and back within that 10 % returns to fit — **where the picture is now**:
+    fit mode does not re-centre (a fitted picture may sit anywhere in its
+    letterbox, as a one-finger drag leaves it), so the position the
+    fingers gave it along the letterbox is kept rather than snapping back
+    to where the pinch began; zoom and position are both continuous
+    across the band's edge. Past the 10 % the zoom picks
+    up **from the edge of that band**, not from where the fingers began:
+    the first step out is still the fit size and the picture grows (or
+    shrinks) smoothly from there, rather than jumping straight to 110 %
+    (90 %) of fit. A pinch that starts while
+    one finger is already dragging takes that drag away where the finger
+    is — a pan stops; a crop tool lets go and keeps the rectangle as far as it was dragged; a straighten
+    tool drops its horizon line **without levelling** (the line was never
+    finished — ending it would level by whatever the finger jittered) —
+    and the second finger never drags it.
+  - **Swipe** — one finger, flicked horizontally: leftward = next image,
+    rightward = previous. It must travel ≥ 80 px, end at ≥ 300 px/s in the
+    same direction, and stay mostly horizontal (|dy| ≤ ½|dx|); a slower,
+    shorter, vertical or reversing drag is not a swipe. It is exactly `l` /
+    `h`: a dirty enhance preview raises the Save/Discard/Cancel prompt
+    first. It is **refused** while the picture is zoomed wider than the
+    window (the same finger is panning it — zoom out or `0` first) and
+    while a crop / straighten tool is up (the tool owns every drag, and a
+    navigation would abandon it). A flick whose finger was already down
+    when a running slideshow stepped to the next picture turns **no** page
+    when it lands (it was aimed at the picture the slideshow replaced;
+    turning again would skip one); the slideshow keeps running, and the
+    next flick navigates and stops it as usual. Touch only: a mouse drag
+    still only pans.
+  - **Two-finger tap** — toggle the info card (`i`). Both fingers down and
+    the first one up within 250 ms, the midpoint moving ≤ 20 px and the
+    finger distance changing ≤ 10 %; whatever tiny zoom the fingers caused
+    is undone, and so is any pan the first finger made before the second
+    landed (the view goes back to what it was before the *first* finger
+    went down, and the 250 ms and 20 px count from that finger), so a
+    fitted view stays fitted. A tap edits nothing either: when its first
+    finger had grabbed the crop rectangle, the rectangle goes back to what
+    it was before that finger went down. A touchpad pinch is never a tap.
+    A new picture on screen mid-pinch (the slideshow, a preview render) ends
+    the pinch: the rest of it neither zooms nor taps; a new picture or
+    leaving the large view mid-drag ends that drag the same way (a tool
+    lets go as on a pinch) — also when the new "picture" is none at all
+    (the view blanked between files): the tool still lets go of the line
+    or the rectangle it held.
 
 ## Zoom behavior
 
@@ -180,13 +240,21 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
   than to a bogus point. Do not "simplify" that fallback away by ignoring
   `gdk_event_get_position()`'s return value: it writes NaN to its
   out-parameters on failure, and a NaN reaching the pan state makes the image
-  vanish for good (hx0). `viewer.c` guards both the scroll centre and the pan.
+  vanish for good (hx0). `viewer.c` guards both the scroll centre and the pan,
+  and the zoom rule itself (`gesture_math_zoom_about`, shared by the wheel,
+  the keys and a pinch) refuses any non-finite input.
 - Panning clamps so the image can't drift off-screen.
-- Zoom is limited to 2 %–6400 % (`GGAZE_ZOOM_MIN`/`MAX`), except that the upper
-  limit rises to the fit-to-window ratio when that is already larger — a small
-  enough image in a large window fits above 6400 %, and clamping to the bare
-  ceiling made zoom-in *shrink* it (jx0). At the top end zoom-in is a no-op,
-  never a reversal.
+- Zoom is limited to 2 %–6400 % (`GGAZE_ZOOM_MIN`/`MAX`), except that either
+  limit gives way to the fit-to-window ratio when that lies outside it: the
+  upper one rises to it — a small enough image in a large window fits above
+  6400 %, and clamping to the bare ceiling made zoom-in *shrink* it (jx0) —
+  and the lower one falls to it — a 32768 px panorama in a 600 px window fits
+  at 1.83 %, and clamping to the bare floor made zoom-out (`-`, the wheel, a
+  pinch in) *enlarge* it (zb2). At either end zooming further is a no-op,
+  never a reversal — also when a resize moved the fit ratio since the zoom
+  was set (a panorama zoomed out to 1.83 % stays there, rather than jumping
+  to 2 %, after the window widens; zooming back in, or a two-finger pan's
+  wobble, moves it only as far as asked).
 
 ## Info overlay (`i`)
 
