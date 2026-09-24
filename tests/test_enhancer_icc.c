@@ -1079,33 +1079,13 @@ test_cmyk_profile_lcms_cannot_open_is_declined(void) {
  * before babl sees it, costing no slot. Built as swapped.png with its
  * iCCP replaced (icc_build.h), so every lane's build can decode it. */
 
-/* p_icc zlib-compressed, as an iCCP chunk's data wants it. */
-static GBytes *
-zlib_bytes(GBytes *p_icc) {
-   GConverter *p_z =
-      G_CONVERTER(g_zlib_compressor_new(G_ZLIB_COMPRESSOR_FORMAT_ZLIB, -1));
-   GOutputStream *p_mem = g_memory_output_stream_new_resizable();
-   GOutputStream *p_out = g_converter_output_stream_new(p_mem, p_z);
-   gsize          u_len = 0;
-   const void    *p_d   = g_bytes_get_data(p_icc, &u_len);
-   g_assert_true(
-      g_output_stream_write_all(p_out, p_d, u_len, NULL, NULL, NULL));
-   g_assert_true(g_output_stream_close(p_out, NULL, NULL));
-   GBytes *p_zb =
-      g_memory_output_stream_steal_as_bytes(G_MEMORY_OUTPUT_STREAM(p_mem));
-   g_object_unref(p_out);
-   g_object_unref(p_mem);
-   g_object_unref(p_z);
-   return (p_zb);
-}
-
 /* swapped.png with its iCCP chunk carrying p_icc instead. */
 static GByteArray *
 png_with_profile(GBytes *p_icc) {
    GByteArray *p_a  = fixture_bytes("swapped.png");
    gsize       u_at = png_chunk_at(p_a, "iCCP");
    g_byte_array_remove_range(p_a, (guint)u_at, be32(p_a->data + u_at) + 12);
-   GBytes       *p_z    = zlib_bytes(p_icc);
+   GBytes       *p_z    = icc_build_zlib(p_icc);
    gsize         u_zlen = 0;
    const guint8 *p_zd   = g_bytes_get_data(p_z, &u_zlen);
    GByteArray   *p_ch   = g_byte_array_new();
@@ -1197,6 +1177,75 @@ test_babl_crashers_are_declined(void) {
                                  rgb_of("cie", icc_build_para(1, CIE, 3)));
 }
 
+/* A 'curv' tag of the u_n points p_v. */
+static GBytes *
+curv_table(const guint16 *p_v, guint32 u_n) {
+   GByteArray *p_arr = g_byte_array_new();
+   guint8      c_hdr[12];
+   memcpy(c_hdr, "curv\0\0\0\0", 8);
+   put32(c_hdr + 8, u_n);
+   g_byte_array_append(p_arr, c_hdr, sizeof(c_hdr));
+   for (guint32 u = 0; u < u_n; u++) {
+      guint8 c_v[2] = {(guint8)(p_v[u] >> 8), (guint8)p_v[u]};
+      g_byte_array_append(p_arr, c_v, 2);
+   }
+   return (g_byte_array_free_to_bytes(p_arr));
+}
+
+/* swapped.png carrying p_icc exports as a JPEG with a preset on, the `s`
+ * path -- where babl aborted (glibc's "buffer overflow detected") for the
+ * curves below before they were declined. */
+static void
+assert_exports_jpeg(GBytes *p_icc) {
+   GByteArray *p_png = png_with_profile(p_icc);
+   GFile      *p_src = temp_file("tojpeg.png", p_png);
+   GeglBuffer *p_buf = load_ok(p_src);
+   Enhancer   *p_e   = enhancer_new();
+   char       *c_out = g_build_filename(c_dir, "fromcurve.jpg", NULL);
+   GFile      *p_out = g_file_new_for_path(c_out);
+   GError     *p_err = NULL;
+   g_assert_true(enhancer_export(
+      p_buf, g_ptr_array_index((GPtrArray *)enhancer_get_presets(p_e), 2),
+      p_out, &p_err));
+   g_assert_no_error(p_err);
+   drop_temp(p_out);
+   g_free(c_out);
+   enhancer_delete(p_e);
+   g_object_unref(p_buf);
+   drop_temp(p_src);
+   g_byte_array_unref(p_png);
+}
+
+/* Curves babl cannot invert (xb2 review 5): its conversion search then
+ * finds no close path and overflowed a buffer in its deepest candidates,
+ * aborting the JPEG export. Each is declined (no slot, no verdict) and
+ * the file exports through the loader path. */
+static void
+test_uninvertible_curves_are_declined(void) {
+   static const guint16 C_ZERO[2] = {0, 0}, C_MID[2] = {30000, 30000};
+   static const guint16 C_FULL[2]    = {65535, 65535};
+   guint16              c_near[1139] = {0}, c_spike[1139] = {0};
+   c_near[1137] = c_near[1138] = 65535;
+   c_spike[570]                = 65535;
+   const double OUT[7]         = {2.2, 1.0, 0.0, 0.0, 0.0, 1.5, 1.5};
+   const struct {
+      const char *c_what;
+      GBytes     *p_trc;
+   } CASES[] = {
+      {"curv 0, 0", curv_table(C_ZERO, 2)},
+      {"curv 30000, 30000", curv_table(C_MID, 2)},
+      {"curv 65535, 65535", curv_table(C_FULL, 2)},
+      {"curv 1137 of 1139 at 0", curv_table(c_near, 1139)},
+      {"curv with a spike", curv_table(c_spike, 1139)},
+      {"para above [0, 1]", icc_build_para(4, OUT, 7)},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      GBytes *p_icc = rgb_of(CASES[u].c_what, CASES[u].p_trc);
+      assert_exports_jpeg(p_icc);
+      assert_built_profile_declined(CASES[u].c_what, p_icc);
+   }
+}
+
 /* p_icc (taken) managed: babl takes it, and swapped.png carrying it
  * decodes in its space -- babl built the space and its profile copy (the
  * 64 KiB buffer) without incident. */
@@ -1215,16 +1264,35 @@ assert_built_profile_managed(const char *c_what, GBytes *p_icc) {
    g_bytes_unref(p_icc);
 }
 
+/* p_icc (taken) with the X of its red primary (rXYZ) moved by i_lsb
+ * s15Fixed16 steps. babl names an RGB space by its primaries to four
+ * decimals and a table curve "lut-trc" whatever its points, so two
+ * table-curve profiles of icc_build_rgb's primaries share a space name
+ * and the second is declined (xb2 review 5); a nudge of a few hundred
+ * steps gives a profile a name of its own. */
+static GBytes *
+nudge_red(GBytes *p_icc, gint32 i_lsb) {
+   GByteArray *p_arr = g_bytes_unref_to_array(p_icc);
+   guint8     *p_x   = p_arr->data + profile_tag_at(p_arr, 0, "rXYZ") + 8;
+   put32(p_x, (guint32)((gint32)be32(p_x) + i_lsb));
+   return (g_byte_array_free_to_bytes(p_arr));
+}
+
 /* What real profiles carry still gets through: 4096- and 1024-point
- * curves, three distinct or shared, and 'para' types 0, 3 and 4. */
+ * curves, three distinct or shared, and 'para' types 0, 3 and 4. The
+ * table-curve ones each get primaries of their own (nudge_red), so no
+ * other test's table-curve space holds their name. */
 static void
 test_real_size_curves_are_managed(void) {
    assert_built_profile_managed("three 4096-point curves",
-                                rgb_of_three("4096", 4096));
-   assert_built_profile_managed("shared 1024-point curve",
-                                rgb_of("1024", icc_build_curv(1024, 1.83)));
+                                nudge_red(rgb_of_three("4096", 4096), 3001));
+   assert_built_profile_managed(
+      "shared 1024-point curve",
+      nudge_red(rgb_of("1024", icc_build_curv(1024, 1.83)), 4001));
+   const double R709[7] = {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5,
+                           0.081,    0.005,     0.005};
    assert_built_profile_managed("para 4",
-                                rgb_of("para4", para_cd(4, 0.5, 0.04)));
+                                rgb_of("para4", icc_build_para(4, R709, 7)));
    const double G[1] = {1.93};
    assert_built_profile_managed("para 0",
                                 rgb_of("para0", icc_build_para(0, G, 1)));
@@ -1321,11 +1389,17 @@ test_babl_declines_cost_nothing(void) {
 
 /* Slot-free verdicts past GGAZE_ENHANCER_MAX_FREE_VERDICTS drop the oldest:
  * the table stays bounded, no slot is spent, and a dropped profile asked
- * about again gets the same answer, again for free. */
+ * about again gets the same answer, again for free. Runnable alone (-p):
+ * the space is made by a profile asked about before the count starts. */
 static void
 test_verdicts_are_bounded(void) {
-   GBytes *p_c     = icc_build_curv(1, 1.37); /* test_slot_accounting's space */
-   guint   u_slots = enhancer_test_profile_slots();
+   GBytes *p_c    = icc_build_curv(1, 1.37); /* test_slot_accounting's space */
+   GBytes *p_base = icc_build_rgb("free base", p_c, p_c, p_c);
+   /* The space's first profile (a slot, unless test_slot_accounting ran
+    * first): every "free" one after it costs none, run alone or not. */
+   g_assert_true(enhancer_test_profile_is_managed(p_base));
+   g_bytes_unref(p_base);
+   guint u_slots = enhancer_test_profile_slots();
    for (guint u = 0; u < 2 * GGAZE_ENHANCER_MAX_FREE_VERDICTS + 8; u++) {
       char c_desc[32];
       g_snprintf(c_desc, sizeof(c_desc), "free %u", u);
@@ -1341,6 +1415,226 @@ test_verdicts_are_bounded(void) {
    g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots);
    g_bytes_unref(p_first);
    g_bytes_unref(p_c);
+}
+
+/* --- babl's names and libpng's iCCP (xb2 review 5) ----------------------
+ *
+ * Profiles babl takes but whose space cannot be used by name -- a name so
+ * long babl cuts its format names short (its fish search then spun
+ * forever), or one another space already has (babl finds formats by
+ * name, so the file would convert with the other space's) -- are
+ * declined after babl has kept them, at the cost of their slot. PNGs
+ * whose iCCP libpng drops (gegl:png-load then builds a space from gAMA /
+ * cHRM, outside the cap) are declined before babl is asked. Each runs in
+ * a subprocess (run_fresh): the slots they spend would otherwise come out
+ * of the per-process cap the later cases (and the corpus) count on, and
+ * babl's tables start without any space an earlier case made. */
+
+/* Run the test at p_path (a "/subprocess" path) in a child with fresh
+ * babl tables and slots. */
+static void
+run_fresh(gconstpointer p_path) {
+   g_test_trap_subprocess(p_path, 120 * G_USEC_PER_SEC,
+                          G_TEST_SUBPROCESS_INHERIT_STDERR);
+   g_test_trap_assert_passed();
+}
+
+/* Every format babl has (babl_format_class_for_each is exported by babl
+ * but not declared in its public header): a space GEGL builds adds its
+ * formats, so the count shows babl's tables growing. */
+int babl_format_class_for_each(int (*p_each)(Babl *, void *), void *p_data);
+
+static int
+count_format(Babl *p_babl, void *p_data) {
+   (void)p_babl;
+   (*(guint *)p_data)++;
+   return (0);
+}
+
+static guint
+babl_format_count(void) {
+   guint u_n = 0;
+   babl_format_class_for_each(count_format, &u_n);
+   return (u_n);
+}
+
+/* The review's 'para' at -32767 is refused by icc.c's parameter bounds
+ * (no slot); a curve inside them whose space name babl makes 238
+ * characters long is declined on the name (a slot, kept: asking again
+ * costs nothing), its twin at 220 characters managed; a file carrying the
+ * long one decodes on the loader path, promptly. */
+static void
+test_long_space_name_is_declined(void) {
+   const double HANG[7] = {-32767, -1.31, -1.7, 0.768, 0.038, 0.604, 1.10};
+   assert_built_profile_declined("para at -32767",
+                                 rgb_of("hang", icc_build_para(4, HANG, 7)));
+   double  f_long[7] = {2.4, 0.2807, 1.1841, -1.5, 0.0, -1.5, -1.2345};
+   GBytes *p_long    = rgb_of("long", icc_build_para(4, f_long, 7));
+   g_assert_true(icc_profile_is_sane(p_long));
+   guint u_slots = enhancer_test_profile_slots();
+   g_assert_false(enhancer_test_profile_is_managed(p_long));
+   g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
+   g_assert_false(enhancer_test_profile_is_managed(p_long));
+   g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
+   GByteArray *p_png = png_with_profile(p_long);
+   assert_profile_declined("longname.png", p_png);
+   g_byte_array_unref(p_png);
+   g_bytes_unref(p_long);
+   f_long[6] = 0.0; /* "-1.-2345" -> "0.": 220 characters */
+   assert_built_profile_managed(
+      "space name of 220", rgb_of("long220", icc_build_para(4, f_long, 7)));
+}
+
+/* c_fixture with its iCCP chunk carrying p_icc instead. */
+static GByteArray *
+fixture_with_profile(const char *c_fixture, GBytes *p_icc) {
+   GByteArray *p_swapped = png_with_profile(p_icc);
+   GByteArray *p_a       = fixture_bytes(c_fixture);
+   gsize       u_old     = png_chunk_at(p_a, "iCCP");
+   gsize       u_new     = png_chunk_at(p_swapped, "iCCP");
+   guint32     u_len     = be32(p_swapped->data + u_new) + 12;
+   g_byte_array_remove_range(p_a, (guint)u_old, be32(p_a->data + u_old) + 12);
+   bytes_insert(p_a, u_old, p_swapped->data + u_new, u_len);
+   g_byte_array_unref(p_swapped);
+   return (p_a);
+}
+
+/* Two grey profiles with different table curves: babl names both spaces
+ * "space-gray-lut-trc", so the second is declined -- its file takes the loader
+ * path instead of converting through the first one's formats. Likewise two RGB
+ * profiles of the same primaries with different table curves. (Primaries that
+ * differ only past babl's four printed decimals do not collide: babl
+ * matches such a profile to the earlier space itself.) */
+static void
+test_spaces_sharing_a_name_are_declined(void) {
+   GBytes     *p_ka = icc_build_curv(1024, 1.61);
+   GBytes     *p_kb = icc_build_curv(1024, 2.07);
+   GBytes     *p_a  = icc_build_gray("lut a", p_ka);
+   GBytes     *p_b  = icc_build_gray("lut b", p_kb);
+   const Babl *p_sa = enhancer_test_profile_space(p_a);
+   g_assert_nonnull(p_sa);
+   g_assert_true(babl_space(babl_get_name(p_sa)) == p_sa);
+   guint u_slots = enhancer_test_profile_slots();
+   g_assert_false(enhancer_test_profile_is_managed(p_b));
+   g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
+   GByteArray *p_png = fixture_with_profile("grey-icc.png", p_b);
+   assert_profile_declined("greylut.png", p_png);
+   g_byte_array_unref(p_png);
+   /* RGB: babl names every table curve "lut-trc" too. */
+   GBytes *p_rc = nudge_red(icc_build_rgb("lut c", p_ka, p_ka, p_ka), 5003);
+   GBytes *p_rd = nudge_red(icc_build_rgb("lut d", p_kb, p_kb, p_kb), 5003);
+   g_assert_true(enhancer_test_profile_is_managed(p_rc));
+   g_assert_false(enhancer_test_profile_is_managed(p_rd));
+   p_png = png_with_profile(p_rd);
+   assert_profile_declined("rgblut.png", p_png);
+   g_byte_array_unref(p_png);
+   g_bytes_unref(p_rc);
+   g_bytes_unref(p_rd);
+   g_bytes_unref(p_a);
+   g_bytes_unref(p_b);
+   g_bytes_unref(p_ka);
+   g_bytes_unref(p_kb);
+}
+
+/* p_a with a chunk of type c_type (u_len bytes of p_data) inserted in
+ * front of its iCCP. */
+static void
+insert_before_iccp(GByteArray *p_a, const char *c_type, const guint8 *p_data,
+                   guint32 u_len) {
+   GByteArray *p_ch = g_byte_array_new();
+   guint8      c_len[4];
+   put32(c_len, u_len);
+   g_byte_array_append(p_ch, c_len, 4);
+   g_byte_array_append(p_ch, (const guint8 *)c_type, 4);
+   g_byte_array_append(p_ch, p_data, u_len);
+   g_byte_array_append(p_ch, (const guint8 *)"\0\0\0\0", 4);
+   gsize u_at = png_chunk_at(p_a, "iCCP");
+   bytes_insert(p_a, u_at, p_ch->data, p_ch->len);
+   png_fix_crc(p_a, u_at);
+   g_byte_array_unref(p_ch);
+}
+
+/* p_a (taken) declined without babl being asked or growing: the loader
+ * decodes it, no slot, no verdict, no new babl format. */
+static void
+assert_png_declined_quietly(const char *c_what, GByteArray *p_a) {
+   g_test_message("declined: %s", c_what);
+   guint  u_slots    = enhancer_test_profile_slots();
+   guint  u_verdicts = enhancer_test_profile_verdicts();
+   guint  u_formats  = babl_format_count();
+   gint   i_decodes  = enhancer_test_loader_decodes();
+   GFile *p_file     = temp_file("dropped.png", p_a);
+   g_assert_false(enhancer_would_manage(p_file));
+   GeglBuffer *p_buf = load_ok(p_file);
+   g_assert_true(is_srgb(p_buf));
+   g_object_unref(p_buf);
+   g_assert_cmpint(enhancer_test_loader_decodes(), ==, i_decodes + 1);
+   g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots);
+   g_assert_cmpuint(enhancer_test_profile_verdicts(), ==, u_verdicts);
+   g_assert_cmpuint(babl_format_count(), ==, u_formats);
+   drop_temp(p_file);
+   g_byte_array_unref(p_a);
+}
+
+/* A fresh RGB profile (a table curve of its own gamma and primaries, so
+ * babl has never seen it), edited: the 32-bit field at u_at set to u_val,
+ * or its version made 4.3 and its length 2 bytes past a multiple of 4. */
+static GBytes *
+fresh_profile(guint u_n, gsize u_at, guint32 u_val, gboolean b_v4_odd) {
+   GBytes     *p_c   = icc_build_curv(1, 1.40 + 0.01 * u_n);
+   GBytes     *p_icc = icc_build_rgb("dropped", p_c, p_c, p_c);
+   GByteArray *p_arr = g_bytes_unref_to_array(nudge_red(p_icc, 6007 + 7 * u_n));
+   if (u_at > 0) {
+      put32(p_arr->data + u_at, u_val);
+   }
+   if (b_v4_odd) {
+      put32(p_arr->data + 8, 0x04300000u);
+      g_byte_array_append(p_arr, (const guint8 *)"\0\0", 2);
+      put32(p_arr->data, p_arr->len);
+   }
+   g_bytes_unref(p_c);
+   return (g_byte_array_free_to_bytes(p_arr));
+}
+
+/* PNGs whose iCCP libpng drops -- a rendering intent of 0xFFFF, a v4
+ * profile whose length is no multiple of 4 -- next to a gAMA (and cHRM)
+ * GEGL would build a new space from, and sound profiles next to a gAMA,
+ * cHRM or sRGB chunk: each declined before babl sees it, and nothing
+ * grows babl's tables. The same profile alone in the file is managed. */
+static void
+test_png_iccp_libpng_drops_is_declined(void) {
+   static const guint8 C_GAMA[4]  = {0, 0, 0x75, 0x30}; /* 1 / 3.33 */
+   static const guint8 C_CHRM[32] = {0, 0, 0x7a, 0x26};
+   static const guint8 C_SRGB[1]  = {0};
+   const struct {
+      const char *c_what;
+      gsize       u_at;
+      guint32     u_val;
+      gboolean    b_v4_odd;
+      const char *c_chunk;
+   } CASES[] = {
+      {"intent 0xFFFF + gAMA", 64, 0xFFFFu, FALSE, "gAMA"},
+      {"v4, odd length + gAMA", 0, 0, TRUE, "gAMA"},
+      {"sound + gAMA", 0, 0, FALSE, "gAMA"},
+      {"sound + cHRM", 0, 0, FALSE, "cHRM"},
+      {"sound + sRGB", 0, 0, FALSE, "sRGB"},
+   };
+   for (guint u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      GBytes *p_icc =
+         fresh_profile(u, CASES[u].u_at, CASES[u].u_val, CASES[u].b_v4_odd);
+      g_assert_true(icc_profile_is_sane(p_icc));
+      GByteArray   *p_a    = png_with_profile(p_icc);
+      const char   *c_ch   = CASES[u].c_chunk;
+      const guint8 *p_data = c_ch[0] == 'g'   ? C_GAMA
+                             : c_ch[0] == 'c' ? C_CHRM
+                                              : C_SRGB;
+      guint32       u_len  = c_ch[0] == 'g' ? 4 : c_ch[0] == 'c' ? 32 : 1;
+      insert_before_iccp(p_a, c_ch, p_data, u_len);
+      assert_png_declined_quietly(CASES[u].c_what, p_a);
+      g_bytes_unref(p_icc);
+   }
+   GBytes *p_ok = fresh_profile(G_N_ELEMENTS(CASES), 0, 0, FALSE);
+   assert_built_profile_managed("the same, alone", p_ok);
 }
 
 /* --- cancellation (xb2 review 3) -----------------------------------------
@@ -1522,25 +1816,32 @@ test_profile_cap(void) {
 /* --- fuzz: the profile gate and babl together ---------------------------
  *
  * Damage to profiles through the managed path's whole profile gate
- * (icc_babl_kind, the CMYK LCMS check, babl) and on into babl: every
- * profile that gets through makes babl build its space, and pixels are
- * converted through that space both ways (as the preview and the chain /
- * export do) and its profile copied out (as the savers do). No crash, no
- * assertion, no babl_fatal exit, whatever passes. The seeds are the
- * fixture profiles and built ones with the curve kinds the fixtures lack
- * ('para' 0 / 3 / 4, long 'curv' tables, a grey 'para', an RGB profile
- * with a kTRC), and half the edits are aimed INSIDE a tag -- a parameter
- * set to an edge value, a function type, a reserved byte, a curve count --
- * where babl's own crashes were, so most edited profiles stay well-formed
- * enough to reach babl. In subprocesses, because each profile babl takes
- * may take a slot of its fixed tables and the per-process cap then keeps
- * new ones from babl: each round starts with empty tables and runs until
- * its slots are spent. The rounds run with BABL_PATH_LENGTH=1: babl then
- * converts through its reference fish (the space's own curves and matrix,
- * in double -- what is under test) instead of timing candidate paths for
- * every new space, ~1 s each, which made a round take 20 s. Seeded per
- * round, so a failure reproduces (GGAZE_FUZZ_ROUND=<n> and
- * BABL_PATH_LENGTH=1 with -p /enhancer_icc/profile_fuzz/subprocess). */
+ * (icc_babl_kind, the CMYK LCMS check, babl, the space-name check) and on
+ * into babl: every profile that gets through makes babl build its space,
+ * and pixels are converted through that space both ways -- in u8 and in
+ * float, float values past both ends of [0, 1] included -- (as the
+ * preview, the chain and the savers do) and its profile copied out (as
+ * the savers do). No crash, no assertion, no babl_fatal exit, whatever
+ * passes. The seeds are the fixture profiles and built ones with the
+ * curve kinds the fixtures lack ('para' 0 / 3 / 4, long 'curv' tables, a
+ * grey 'para', an RGB profile with a kTRC), and half the edits are aimed
+ * INSIDE a tag -- a parameter set to an edge value (babl's break points,
+ * ICC_PARA_MAX, +-32767), a function type, a reserved byte, a curve count,
+ * a 'curv' table made constant or spiked -- where babl's own crashes
+ * were, so most edited profiles stay well-formed enough to reach babl. In
+ * subprocesses, because each profile babl takes may take a slot of its
+ * fixed tables and the per-process cap then keeps new ones from babl:
+ * each round starts with empty tables and runs until its slots are spent.
+ * The rounds run with BABL_PATH_LENGTH=1: babl then converts through its
+ * reference fish (the space's own curves and matrix, in double -- what is
+ * under test) instead of timing candidate paths for every new space, ~1 s
+ * each, which made a round take 20 s. That also skips babl's deep path
+ * search, where a curve babl cannot invert aborted it (xb2 review 5), so
+ * that hazard is pinned outside the fuzz, with babl's full search:
+ * /enhancer_icc/uninvertible_curves_are_declined exports each such curve
+ * as a JPEG, and /icc/sane_curve_shape holds the rule. Seeded per round,
+ * so a failure reproduces (GGAZE_FUZZ_ROUND=<n> and BABL_PATH_LENGTH=1
+ * with -p /enhancer_icc/profile_fuzz/subprocess). */
 
 #define FUZZ_ROUNDS 12
 #define FUZZ_RUNS 300
@@ -1572,18 +1873,42 @@ fuzz_mutate(GRand *p_rand, GByteArray *p_arr) {
    }
 }
 
+/* A 'curv' tag of p_tag (u_size bytes) made one of the shapes babl could
+ * not invert (xb2 review 5): every point one value (0, 30000 or 65535),
+ * or one point set to a spike. Other tags are left alone. */
+static void
+fuzz_flatten_curv(GRand *p_rand, guint8 *p_tag, guint32 u_size) {
+   static const guint16 C_LEVEL[] = {0, 30000, 65535};
+   guint32              u_n       = be32(p_tag + 8);
+   if (memcmp(p_tag, "curv", 4) != 0 || u_n < 2 || 12 + 2 * u_n > u_size) {
+      return;
+   }
+   guint16 u_v = C_LEVEL[g_rand_int_range(p_rand, 0, G_N_ELEMENTS(C_LEVEL))];
+   if (g_rand_boolean(p_rand)) {
+      guint u_at           = (guint)g_rand_int_range(p_rand, 0, (gint32)u_n);
+      p_tag[12 + 2 * u_at] = 0xff; /* a spike */
+      p_tag[13 + 2 * u_at] = 0xff;
+      return;
+   }
+   for (guint32 u = 0; u < u_n; u++) {
+      p_tag[12 + 2 * u] = (guint8)(u_v >> 8);
+      p_tag[13 + 2 * u] = (guint8)u_v;
+   }
+}
+
 /* One edit inside the data of a random tag of p_arr (whose table is known
  * to lie inside it and whose tag is at least 16 bytes): an s15Fixed16
  * parameter set to a value at or across one of babl's edges, the 'para'
- * function type, a reserved byte, or a 'curv' count. */
+ * function type, a reserved byte, a 'curv' count, or a 'curv' table
+ * flattened or spiked. */
 static void
 fuzz_edit_tag(GRand *p_rand, guint8 *p_tag, guint32 u_size) {
-   static const double  C_PARAM[] = {0.0,    1.0,       -0.1,    0.9975,
-                                     0.9985, 30.0,      2.4,     -2.0,
-                                     0.04,   1 / 12.92, 32767.0, -32768.0};
+   static const double  C_PARAM[] = {0.0,     1.0,      -0.1, 0.9975, 0.9985,
+                                     30.0,    2.4,      -2.0, 0.04,   1 / 12.92,
+                                     32767.0, -32768.0, 9.99, 10.01,  1.5};
    static const guint32 C_COUNT[] = {0, 1, 2, 4096, 4097, 65536};
    guint                u_slots   = (u_size - 12) / 4;
-   switch (g_rand_int_range(p_rand, 0, 4)) {
+   switch (g_rand_int_range(p_rand, 0, 5)) {
    case 0: {
       double f_v = C_PARAM[g_rand_int_range(p_rand, 0, G_N_ELEMENTS(C_PARAM))];
       guint  u_k = (guint)g_rand_int_range(p_rand, 0, (gint32)u_slots);
@@ -1596,6 +1921,9 @@ fuzz_edit_tag(GRand *p_rand, guint8 *p_tag, guint32 u_size) {
    case 2:
       p_tag[g_rand_int_range(p_rand, 4, 8)] =
          (guint8)g_rand_int_range(p_rand, 0, 256);
+      break;
+   case 3:
+      fuzz_flatten_curv(p_rand, p_tag, u_size);
       break;
    default:
       put32(p_tag + 8,
@@ -1625,7 +1953,8 @@ fuzz_mutate_tag(GRand *p_rand, GByteArray *p_arr) {
 static void
 fuzz_built_seeds(GPtrArray *p_seeds) {
    const double SRGB[5] = {2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045};
-   const double P4[7]   = {2.2, 0.9, 0.1, 0.5, 0.05, 0.01, 0.0};
+   const double P4[7]   = {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5,
+                           0.081,    0.005,     0.005}; /* Rec. 709 */
    const double G[1]    = {1.8};
    GBytes      *p_p3    = icc_build_para(3, SRGB, 5);
    GBytes      *p_p4    = icc_build_para(4, P4, 7);
@@ -1659,23 +1988,44 @@ fuzz_seeds(void) {
    return (p_seeds);
 }
 
+/* n pixels of p_src (format p_from) converted into p_dst (p_to). */
+static void
+fuzz_convert(const Babl *p_from, const Babl *p_to, const void *p_src,
+             void *p_dst, long i_n) {
+   babl_process(babl_fish(p_from, p_to), p_src, p_dst, i_n);
+}
+
 /* Pixels through p_space both ways, and its profile copied out: what the
  * preview (to sRGB), the chain and the savers (into the space -- never a
- * CMYK one, whose chain runs in sRGB) and the export's profile ask of it. */
+ * CMYK one, whose chain runs in sRGB) and the export's profile ask of it.
+ * In u8 (the decode, the preview, a JPEG / PNG save) and in float (GEGL's
+ * ops work in float; a saver converts float INTO the space, the direction
+ * babl aborted in on a curve it could not invert -- xb2 review 5), with
+ * float values past both ends of [0, 1]. */
 static void
 fuzz_use_space(const Babl *p_space) {
-   const char *c_fmt = babl_space_is_gray(p_space)   ? "Y' u8"
-                       : babl_space_is_cmyk(p_space) ? "cmyk u8"
-                                                     : "R'G'B' u8";
-   const Babl *p_in  = babl_format_with_space(c_fmt, p_space);
-   const Babl *p_out = babl_format("R'G'B'A u8");
+   gboolean    b_gray = babl_space_is_gray(p_space);
+   gboolean    b_cmyk = babl_space_is_cmyk(p_space);
+   const char *c_u8   = b_gray ? "Y' u8" : b_cmyk ? "cmyk u8" : "R'G'B' u8";
+   const char *c_fl   = b_gray   ? "Y'A float"
+                        : b_cmyk ? "CMYKA float"
+                                 : "R'G'B'A float";
+   const Babl *p_u8   = babl_format_with_space(c_u8, p_space);
+   const Babl *p_fl   = babl_format_with_space(c_fl, p_space);
+   const Babl *p_rgba = babl_format("R'G'B'A u8");
+   const Babl *p_lin  = babl_format("RGBA float");
    guint8      c_px[16 * 4], c_rgba[16 * 4];
-   for (guint u = 0; u < sizeof(c_px); u++) {
-      c_px[u] = (guint8)(u * 17);
+   float       f_px[16 * 4], f_lin[16 * 4];
+   for (guint u = 0; u < G_N_ELEMENTS(c_px); u++) {
+      c_px[u]  = (guint8)(u * 17);
+      f_lin[u] = (float)u / 42.0f - 0.25f; /* -0.25 .. 1.25 */
    }
-   babl_process(babl_fish(p_in, p_out), c_px, c_rgba, 16);
-   if (!babl_space_is_cmyk(p_space)) {
-      babl_process(babl_fish(p_out, p_in), c_rgba, c_px, 16);
+   fuzz_convert(p_u8, p_rgba, c_px, c_rgba, 16);
+   fuzz_convert(p_fl, p_lin, f_lin, f_px, 16);
+   if (!b_cmyk) {
+      fuzz_convert(p_rgba, p_u8, c_rgba, c_px, 16);
+      fuzz_convert(p_lin, p_u8, f_lin, c_px, 16);
+      fuzz_convert(p_lin, p_fl, f_lin, f_px, 16);
    }
    int i_len = 0;
    g_assert_nonnull(babl_space_get_icc(p_space, &i_len));
@@ -1773,8 +2123,9 @@ profile_space(GFile *p_file) {
 }
 
 /* One profiled corpus file: the completeness walk vouches for it and
- * reads a size (a Pixel photo's SOF lies past 64 KiB), and a file with a
- * non-sRGB profile really decodes managed at that size. */
+ * reads a size (a Pixel photo's SOF lies past 64 KiB), a PNG's iCCP is
+ * the one libpng keeps, and a file with a non-sRGB profile really decodes
+ * managed at that size. */
 static void
 check_corpus_file(GFile *p_file, const Babl *p_space) {
    IntactSize t_size = {0, 0, 0};
@@ -1786,6 +2137,14 @@ check_corpus_file(GFile *p_file, const Babl *p_space) {
    g_assert_no_error(p_err);
    g_assert_cmpuint(t_size.u_w, >, 0);
    g_assert_cmpuint(t_size.u_h, >, 0);
+   if (b_png) { /* libpng keeps every corpus PNG's iCCP, alone */
+      GBytes *p_want = icc_read_embedded(p_file, NULL);
+      GBytes *p_got  = icc_png_applied_profile(p_file);
+      g_assert_nonnull(p_got);
+      g_assert_true(g_bytes_equal(p_got, p_want));
+      g_bytes_unref(p_got);
+      g_bytes_unref(p_want);
+   }
    if (p_space != babl_space("sRGB") && (b_png || GGAZE_HAVE_JPEG) &&
        !enhancer_would_manage(p_file)) {
       /* Only past the per-process profile cap (a corpus with more
@@ -1831,6 +2190,16 @@ test_sample_images_profiled_files(void) {
    g_dir_close(p_dir);
    g_test_message("%u profiled corpus files, %u babl slots", u_seen,
                   enhancer_test_profile_slots());
+}
+
+/* c_path run in a fresh subprocess (run_fresh): the test itself is
+ * registered at c_path + "/subprocess". */
+static void
+add_fresh(const char *c_path, GTestFunc p_test) {
+   char *c_sub = g_strconcat(c_path, "/subprocess", NULL);
+   g_test_add_data_func_full(c_path, g_strdup(c_sub), run_fresh, g_free);
+   g_test_add_func(c_sub, p_test);
+   g_free(c_sub);
 }
 
 /* The managed decode, its fallbacks and the export. */
@@ -1889,11 +2258,19 @@ add_profile_tests(void) {
                    test_cmyk_profile_lcms_cannot_open_is_declined);
    g_test_add_func("/enhancer_icc/babl_crashers_are_declined",
                    test_babl_crashers_are_declined);
+   g_test_add_func("/enhancer_icc/uninvertible_curves_are_declined",
+                   test_uninvertible_curves_are_declined);
    g_test_add_func("/enhancer_icc/real_size_curves_are_managed",
                    test_real_size_curves_are_managed);
    g_test_add_func("/enhancer_icc/slot_accounting", test_slot_accounting);
    g_test_add_func("/enhancer_icc/babl_declines_cost_nothing",
                    test_babl_declines_cost_nothing);
+   add_fresh("/enhancer_icc/long_space_name_is_declined",
+             test_long_space_name_is_declined);
+   add_fresh("/enhancer_icc/spaces_sharing_a_name_are_declined",
+             test_spaces_sharing_a_name_are_declined);
+   add_fresh("/enhancer_icc/png_iccp_libpng_drops_is_declined",
+             test_png_iccp_libpng_drops_is_declined);
    g_test_add_func("/enhancer_icc/verdicts_are_bounded",
                    test_verdicts_are_bounded);
    g_test_add_func("/enhancer_icc/cancelled_load_decodes_nothing",

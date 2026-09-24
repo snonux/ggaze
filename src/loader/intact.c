@@ -53,37 +53,10 @@ _be32(const guint8 *p) {
            ((guint32)p[2] << 8) | (guint32)p[3]);
 }
 
-/* --- CRC-32 (ISO 3309, the one PNG chunks carry) ------------------------
+/* --- CRC-32 ------------------------------------------------------------
  *
  * libpng stops on a critical chunk whose CRC does not match, so the walk
- * checks it. GLib has no CRC-32 and ggaze links no zlib of its own (GIO's
- * zlib converter below does the inflating), hence the 256-entry table. */
-
-static guint32 u_crc_table[256];
-
-static void
-_crc_init(void) {
-   static gsize u_once = 0;
-   if (g_once_init_enter(&u_once)) {
-      for (guint32 u = 0; u < 256; u++) {
-         guint32 u_c = u;
-         for (int i = 0; i < 8; i++) {
-            u_c = (u_c & 1) ? 0xEDB88320u ^ (u_c >> 1) : u_c >> 1;
-         }
-         u_crc_table[u] = u_c;
-      }
-      g_once_init_leave(&u_once, 1);
-   }
-}
-
-/* Running CRC over p (start with 0xFFFFFFFF, finish by inverting). */
-static guint32
-_crc_update(guint32 u_crc, const guint8 *p, gsize u_len) {
-   for (gsize u = 0; u < u_len; u++) {
-      u_crc = u_crc_table[(u_crc ^ p[u]) & 0xFF] ^ (u_crc >> 8);
-   }
-   return (u_crc);
-}
+ * checks it (streamread_crc32, shared with icc.c's iCCP check). */
 
 /* --- PNG image data: the rows IHDR promises -----------------------------
  *
@@ -263,7 +236,7 @@ _png_read_data(GInputStream *p_in, PngWalk *p_w, gsize u_len, gboolean b_idat,
       if (e_rd != STREAMREAD_OK) {
          return (e_rd);
       }
-      *pu_crc = _crc_update(*pu_crc, c_buf, u_n);
+      *pu_crc = streamread_crc32(*pu_crc, c_buf, u_n);
       u_len -= u_n;
    }
    return (STREAMREAD_OK);
@@ -287,7 +260,7 @@ _png_take_ihdr(GInputStream *p_in, PngWalk *p_w, guint32 u_len, guint32 *pu_crc,
    if (e_rd != STREAMREAD_OK) {
       return (e_rd);
    }
-   *pu_crc          = _crc_update(*pu_crc, c_ihdr, 13);
+   *pu_crc          = streamread_crc32(*pu_crc, c_ihdr, 13);
    p_w->b_ihdr      = TRUE;
    p_w->p_size->u_w = _be32(c_ihdr);
    p_w->p_size->u_h = _be32(c_ihdr + 4);
@@ -308,7 +281,7 @@ _png_take_ihdr(GInputStream *p_in, PngWalk *p_w, guint32 u_len, guint32 *pu_crc,
 static StreamReadStatus
 _png_critical(GInputStream *p_in, PngWalk *p_w, const guint8 *c_type,
               guint32 u_len, GError **p_err) {
-   guint32          u_crc = _crc_update(0xFFFFFFFFu, c_type, 4);
+   guint32          u_crc = streamread_crc32(STREAMREAD_CRC32_INIT, c_type, 4);
    gboolean         b_hdr = memcmp(c_type, "IHDR", 4) == 0;
    gboolean         b_dat = memcmp(c_type, "IDAT", 4) == 0;
    StreamReadStatus e_rd =
@@ -318,7 +291,8 @@ _png_critical(GInputStream *p_in, PngWalk *p_w, const guint8 *c_type,
    if (e_rd == STREAMREAD_OK) {
       e_rd = streamread_exact(p_in, c_crc, 4, p_err);
    }
-   if (e_rd == STREAMREAD_OK && _be32(c_crc) != (u_crc ^ 0xFFFFFFFFu)) {
+   if (e_rd == STREAMREAD_OK &&
+       _be32(c_crc) != (u_crc ^ STREAMREAD_CRC32_INIT)) {
       return (_png_corrupt("CRC error in a critical chunk", p_err));
    }
    p_w->b_idat = p_w->b_idat || b_dat;
@@ -385,7 +359,6 @@ _png_check(GInputStream *p_in, GCancellable *p_cancel, IntactSize *p_size,
    if (memcmp(c_sig, "\x89PNG\r\n\x1a\n", 8) != 0) {
       return (_png_corrupt("no PNG signature", p_err));
    }
-   _crc_init();
    PngWalk t_w = {.p_size = p_size, .p_cancel = p_cancel};
    t_w.p_dec =
       G_CONVERTER(g_zlib_decompressor_new(G_ZLIB_COMPRESSOR_FORMAT_ZLIB));

@@ -76,3 +76,31 @@ streamread_jpeg_marker(GInputStream *p_in, guint8 *p_code, GError **p_err) {
    *p_code = u_byte;
    return (e_rd);
 }
+
+/* --- CRC-32 (see streamread.h) ------------------------------------------ */
+
+static guint32 u_crc_table[256];
+
+static void
+_crc_init(void) {
+   static gsize u_once = 0;
+   if (g_once_init_enter(&u_once)) {
+      for (guint32 u = 0; u < 256; u++) {
+         guint32 u_c = u;
+         for (int i = 0; i < 8; i++) {
+            u_c = (u_c & 1) ? 0xEDB88320u ^ (u_c >> 1) : u_c >> 1;
+         }
+         u_crc_table[u] = u_c;
+      }
+      g_once_init_leave(&u_once, 1);
+   }
+}
+
+guint32
+streamread_crc32(guint32 u_crc, const guint8 *p, gsize u_len) {
+   _crc_init();
+   for (gsize u = 0; u < u_len; u++) {
+      u_crc = u_crc_table[(u_crc ^ p[u]) & 0xFF] ^ (u_crc >> 8);
+   }
+   return (u_crc);
+}

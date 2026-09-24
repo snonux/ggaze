@@ -14,6 +14,7 @@
 
 #include <gio/gio.h>
 #include <glib.h>
+#include <math.h>
 #include <string.h>
 
 #include "streamread.h"
@@ -382,6 +383,190 @@ icc_extract(const guint8 *p_data, gsize u_len, GError **p_err) {
    return (p_icc);
 }
 
+/* --- the iCCP libpng keeps (xb2 review 5) --------------------------------
+ *
+ * gegl:png-load tags its buffer from what libpng hands it: the iCCP
+ * profile when libpng kept one, else -- with a gAMA chunk -- a space babl
+ * builds from gAMA / cHRM, a new space and curve per file OUTSIDE the
+ * enhancer's slot cap (110 such files filled babl's tables and the next
+ * profile crashed it). libpng drops an iCCP for reasons babl does not
+ * share, so a PNG is managed only when the profile ggaze vets is the one
+ * GEGL will use, which is when every rule below holds. They are libpng
+ * 1.6's, the fatal ones: 1.6.40 (fedora:40) and 1.6.58 agree on them
+ * (png.c png_icc_check_length / _header / _tag_table, pngrutil.c
+ * png_handle_iCCP); the warnings are left out.
+ *   - one iCCP, before PLTE (a second one is "duplicate", one after PLTE
+ *     "out of place"), with its stored CRC right (whatever a given libpng
+ *     does with a damaged ancillary chunk, it is not vouched for);
+ *   - no gAMA, cHRM or sRGB chunk at all: those are what GEGL falls back
+ *     on, and libpng 1.6.40 ranks them against the iCCP by its own rules
+ *     (an sRGB before the iCCP makes it drop the iCCP). The corpus's
+ *     profiled PNGs carry none;
+ *   - the profile: 132 bytes or more, at most ICC_PNG_MAX_PROFILE_LEN;
+ *     a v4 or later one a multiple of 4 long; 'acsp'; a tag table inside
+ *     it (12 bytes an entry) whose tags lie inside it; a rendering intent
+ *     under 0xFFFF; a colour space of 'RGB ' on a colour PNG, 'GRAY' on a
+ *     grey one, nothing else; a class other than 'abst' and 'link'; a PCS
+ *     of 'XYZ ' or 'Lab '. (libpng's own size check, header against the
+ *     inflated length, is icc_profile_is_sane's too.) */
+
+/* libpng's default limit on a profile's length, PNG_USER_CHUNK_MALLOC_MAX
+ * in upstream's pnglibconf.h (a distribution may raise it: Fedora 44
+ * builds 1 000 000 000). The smallest a stock libpng applies, so a profile
+ * over it is dropped by some libpng and declined here. */
+#define ICC_PNG_MAX_PROFILE_LEN 8000000u
+
+/* What the walk up to the image data found. */
+typedef struct {
+   guint8   u_ctype; /* IHDR's colour type */
+   gboolean b_ihdr;  /* IHDR was read */
+   gboolean b_plte;  /* a PLTE was seen: an iCCP now is out of place */
+   gboolean b_other; /* a gAMA, cHRM or sRGB chunk */
+   gboolean b_bad;   /* an iCCP libpng would not keep: stop */
+   GBytes  *p_iccp;  /* the iCCP chunk's data, CRC checked */
+} PngColour;
+
+/* libpng's fatal checks of the profile header (section comment above)
+ * for a PNG of colour type u_ctype. */
+static gboolean
+_libpng_header_ok(const guint8 *p, gsize u_len, guint8 u_ctype) {
+   guint32  u_tags  = _be32(p + 128);
+   gboolean b_color = (u_ctype & 2) != 0; /* PNG_COLOR_MASK_COLOR */
+   if (u_len > ICC_PNG_MAX_PROFILE_LEN || (p[8] > 3 && u_len % 4 != 0) ||
+       u_tags > (u_len - 132) / 12 || _be32(p + 64) >= 0xFFFFu ||
+       memcmp(p + 36, "acsp", 4) != 0) {
+      return (FALSE);
+   }
+   gboolean b_space = memcmp(p + 16, "RGB ", 4) == 0   ? b_color
+                      : memcmp(p + 16, "GRAY", 4) == 0 ? !b_color
+                                                       : FALSE;
+   return (b_space && memcmp(p + 12, "abst", 4) != 0 &&
+           memcmp(p + 12, "link", 4) != 0 &&
+           (memcmp(p + 20, "XYZ ", 4) == 0 || memcmp(p + 20, "Lab ", 4) == 0));
+}
+
+/* libpng's fatal checks of a whole profile p_icc on a PNG of colour type
+ * u_ctype: the header's and every tag inside the profile. */
+static gboolean
+_libpng_takes(GBytes *p_icc, guint8 u_ctype) {
+   gsize         u_len = 0;
+   const guint8 *p     = g_bytes_get_data(p_icc, &u_len);
+   if (u_len < 132 || _be32(p) != u_len ||
+       !_libpng_header_ok(p, u_len, u_ctype)) {
+      return (FALSE);
+   }
+   for (guint32 u = 0; u < _be32(p + 128); u++) {
+      guint32 u_off  = _be32(p + 132 + 12 * u + 4);
+      guint32 u_size = _be32(p + 132 + 12 * u + 8);
+      if (u_off > u_len || u_size > u_len - u_off) {
+         return (FALSE);
+      }
+   }
+   return (TRUE);
+}
+
+/* An iCCP chunk of u_len data bytes (its header read): kept in p_c when it
+ * is the first, before PLTE, and its CRC is right; otherwise p_c->b_bad. */
+static StreamReadStatus
+_png_take_iccp(GInputStream *p_in, gsize u_len, PngColour *p_c,
+               GError **p_err) {
+   if (p_c->p_iccp != NULL || p_c->b_plte || u_len > ICC_MAX_PROFILE_LEN) {
+      p_c->b_bad = TRUE;
+      return (STREAMREAD_OK);
+   }
+   GBytes *p_data = _read_payload(p_in, u_len, p_err);
+   guint8  c_crc[4];
+   if (p_data == NULL ||
+       streamread_exact(p_in, c_crc, 4, p_err) != STREAMREAD_OK) {
+      g_clear_pointer(&p_data, g_bytes_unref);
+      return (STREAMREAD_ERROR);
+   }
+   guint32 u_crc =
+      streamread_crc32(STREAMREAD_CRC32_INIT, (const guint8 *)"iCCP", 4);
+   u_crc = streamread_crc32(u_crc, g_bytes_get_data(p_data, NULL), u_len);
+   if (_be32(c_crc) != (u_crc ^ STREAMREAD_CRC32_INIT)) {
+      p_c->b_bad = TRUE;
+      g_bytes_unref(p_data);
+      return (STREAMREAD_OK);
+   }
+   p_c->p_iccp = p_data;
+   return (STREAMREAD_OK);
+}
+
+/* One chunk (its 8-byte header c_hdr read) of the walk to the image data:
+ * IHDR's colour type (IHDR must come first), the iCCP, the colour chunks
+ * noted; the rest skipped (data + CRC). */
+static StreamReadStatus
+_png_colour_chunk(GInputStream *p_in, const guint8 *c_hdr, PngColour *p_c,
+                  GError **p_err) {
+   gsize         u_len = _be32(c_hdr);
+   const guint8 *c_t   = c_hdr + 4;
+   if (!p_c->b_ihdr && memcmp(c_t, "IHDR", 4) != 0) {
+      p_c->b_bad = TRUE; /* libpng: "missing IHDR" */
+      return (STREAMREAD_OK);
+   }
+   if (memcmp(c_t, "iCCP", 4) == 0) {
+      return (_png_take_iccp(p_in, u_len, p_c, p_err));
+   }
+   if (memcmp(c_t, "IHDR", 4) == 0 && u_len == 13 && !p_c->b_ihdr) {
+      guint8 c_ihdr[13 + 4];
+      p_c->b_ihdr =
+         streamread_exact(p_in, c_ihdr, sizeof(c_ihdr), p_err) == STREAMREAD_OK;
+      p_c->u_ctype = c_ihdr[9];
+      return (p_c->b_ihdr ? STREAMREAD_OK : STREAMREAD_ERROR);
+   }
+   p_c->b_plte |= memcmp(c_t, "PLTE", 4) == 0;
+   p_c->b_other |= memcmp(c_t, "gAMA", 4) == 0 || memcmp(c_t, "cHRM", 4) == 0 ||
+                   memcmp(c_t, "sRGB", 4) == 0;
+   return (streamread_skip(p_in, u_len + 4, p_err));
+}
+
+/* Walk p_in (a PNG, signature read) up to its image data into p_c. */
+static void
+_png_colour_walk(GInputStream *p_in, PngColour *p_c, GError **p_err) {
+   while (!p_c->b_bad) {
+      guint8 c_hdr[8];
+      if (streamread_exact(p_in, c_hdr, sizeof(c_hdr), p_err) !=
+             STREAMREAD_OK ||
+          memcmp(c_hdr + 4, "IDAT", 4) == 0 ||
+          memcmp(c_hdr + 4, "IEND", 4) == 0 ||
+          _png_colour_chunk(p_in, c_hdr, p_c, p_err) != STREAMREAD_OK) {
+         return;
+      }
+   }
+}
+
+GBytes *
+icc_png_applied_profile(GFile *p_file) {
+   g_return_val_if_fail(G_IS_FILE(p_file), NULL);
+   GFileInputStream *p_fin = g_file_read(p_file, NULL, NULL);
+   if (p_fin == NULL) {
+      return (NULL);
+   }
+   GInputStream *p_in  = g_buffered_input_stream_new(G_INPUT_STREAM(p_fin));
+   PngColour     t_c   = {0};
+   GError       *p_err = NULL;
+   guint8        c_sig[8];
+   if (streamread_exact(p_in, c_sig, 8, &p_err) == STREAMREAD_OK &&
+       memcmp(c_sig, "\x89PNG\r\n\x1a\n", 8) == 0) {
+      _png_colour_walk(p_in, &t_c, &p_err);
+   }
+   g_input_stream_close(p_in, NULL, NULL);
+   g_object_unref(p_in);
+   g_object_unref(p_fin);
+   GBytes *p_icc = NULL;
+   if (p_err == NULL && t_c.b_ihdr && !t_c.b_bad && !t_c.b_other &&
+       t_c.p_iccp != NULL) {
+      p_icc = _png_inflate_iccp(t_c.p_iccp, &p_err);
+   }
+   if (p_icc != NULL && !_libpng_takes(p_icc, t_c.u_ctype)) {
+      g_clear_pointer(&p_icc, g_bytes_unref);
+   }
+   g_clear_pointer(&t_c.p_iccp, g_bytes_unref);
+   g_clear_error(&p_err);
+   return (p_icc);
+}
+
 /* --- the profile itself: header + 'desc' tag ------------------------------
  *
  * ICC layout: a 128-byte header ('acsp' at offset 36, the profile size at
@@ -568,21 +753,52 @@ _s15f16(const guint8 *p) {
  * (and complain on stderr). */
 static const guint PARA_PARAMS[] = {1, 0, 0, 5, 7};
 
+/* How far a 'para' curve's parameters may go (xb2 review 5). Real curves
+ * sit far inside: a gamma g of 1.8 to 2.6 (sRGB's piecewise 2.4, Rec.
+ * 709's 1 / 0.45, DCI's 2.6), a scale a near 1, an offset b near 0.05 to
+ * 0.1, a slope c of 1 / 12.92 to 1 / 4.5 and offsets e, f near 0. The
+ * bound is what keeps babl working, not taste: babl NAMES a formula curve
+ * after its seven parameters ("%i.%06i ...", babl-core.c), a space after
+ * its primaries and three curves' names, and each format of that space
+ * "<encoding>-<space>" in a 256-byte buffer (babl-format.c) -- an
+ * s15Fixed16 at -32767 made the space's name so long that its format names
+ * were cut short, two formats then share a name, and babl's fish search
+ * between them spun forever in an uncancellable GEGL decode. g and a in
+ * (0, ICC_PARA_MAX], every other parameter within +-ICC_PARA_MAX, keep
+ * each printed parameter to eight characters; enhancer.c also checks the
+ * name babl built (ENHANCER_MAX_SPACE_NAME). */
+#define ICC_PARA_MAX 10.0f
+
+/* Whether the u_n parameters at p_p (s15Fixed16) are in the bounds above:
+ * the first two (g, a) positive. Type 0 has only g. */
+static gboolean
+_para_params_in_range(const guint8 *p_p, guint u_n) {
+   for (guint u = 0; u < u_n; u++) {
+      float f_v = _s15f16(p_p + 4 * u);
+      if (f_v > ICC_PARA_MAX || f_v < -ICC_PARA_MAX || (u < 2 && f_v <= 0)) {
+         return (FALSE);
+      }
+   }
+   return (TRUE);
+}
+
 /* A 'para' curve babl can take (above): the reserved word zero -- babl
  * tells 'para' from 'curv' with strcmp(data, "para"), so a nonzero byte 4
  * turns the tag into a 'curv' whose "count" is the function type and
  * padding (up to 0x4FFFF points: the 64 KiB overrun, reproduced as a
- * SIGSEGV) -- a known function type with all its parameters, and for the
- * piecewise types 3 and 4 the curve's break point d and its linear
- * segment's end c * d both in [0, ICC_PARA_X0_LIMIT): babl approximates
- * the curve from x0 = d (to linear) and x0 = c * d (from linear), each an
- * assertion that aborts the process when it fails. Type 0's gamma needs
- * no bound: babl clamps a negative one to 0 and asserts nothing. */
+ * SIGSEGV) -- a known function type with all its parameters, each within
+ * ICC_PARA_MAX, and for the piecewise types 3 and 4 the curve's break
+ * point d and its linear segment's end c * d both in [0,
+ * ICC_PARA_X0_LIMIT): babl approximates the curve from x0 = d (to linear)
+ * and x0 = c * d (from linear), each an assertion that aborts the process
+ * when it fails. (babl would clamp a negative type 0 gamma to 0, a flat
+ * curve: refused by the bounds and by _curve_is_tone.) */
 static gboolean
 _para_is_sane(const guint8 *p_tag, guint32 u_size) {
    guint u_fn = ((guint)p_tag[8] << 8) | p_tag[9];
    if (_be32(p_tag + 4) != 0 || u_fn >= G_N_ELEMENTS(PARA_PARAMS) ||
-       PARA_PARAMS[u_fn] == 0 || 12u + 4u * PARA_PARAMS[u_fn] > u_size) {
+       PARA_PARAMS[u_fn] == 0 || 12u + 4u * PARA_PARAMS[u_fn] > u_size ||
+       !_para_params_in_range(p_tag + 12, PARA_PARAMS[u_fn])) {
       return (FALSE);
    }
    if (u_fn < 3) {
@@ -595,26 +811,146 @@ _para_is_sane(const guint8 *p_tag, guint32 u_size) {
            f_cd < ICC_PARA_X0_LIMIT);
 }
 
+/* --- the curve's shape (xb2 review 5) -------------------------------------
+ *
+ * babl builds the conversion to every format it is asked for by trying
+ * candidate paths until one converts its test pixels closely enough. For
+ * a curve it cannot invert -- flat, or falling somewhere -- none does, the
+ * search runs on into its deepest candidates, and one of those
+ * (babl_conversion_planar_process, babl 0.1.128) overflows a buffer:
+ * glibc's fortify check aborted the JPEG export of a file whose profile had
+ * a constant 'curv' ([0, 0], [30000, 30000], [65535, 65535]), a 'curv'
+ * with one spike, or a 'para' that never enters [0, 1]. So a curve goes
+ * to babl only when it is shaped like a tone curve: sampled over [0, 1]
+ * (a 'curv' table at its own points, a formula at ICC_CURVE_SAMPLES) and
+ * clamped to [0, 1], it
+ *   - never falls (a table not by one u16 step; a formula not by more
+ *     than float rounding),
+ *   - rises by at least ICC_CURVE_MIN_SPAN from its first sample to its
+ *     last, and
+ *   - is not flat over half its domain or more (steps rising less than
+ *     half a u16 step count as flat).
+ * The corpus's curves (4096- and 1024-point tables, sRGB 'para' curves, a
+ * u8Fixed8 gamma of 2.2), the fixtures' and Rec. 709's pass with room to
+ * spare; a gamma past ~20 fails the flat rule, a curve over a quarter of
+ * the output range the span rule. */
+#define ICC_CURVE_SAMPLES 1024u
+#define ICC_CURVE_MIN_SPAN 0.5
+#define ICC_CURVE_FLAT_STEP (0.5 / 65535.0)
+#define ICC_CURVE_FALL_EPS 1e-9
+
+typedef struct {
+   gboolean b_started;  /* a first sample was taken */
+   double   f_first;    /* the first sample */
+   double   f_prev;     /* the latest sample */
+   guint    u_steps;    /* samples after the first */
+   guint    u_flat;     /* the current run of flat steps */
+   guint    u_max_flat; /* the longest run of flat steps */
+   gboolean b_falls;    /* a step fell, or a sample was NaN */
+} CurveShape;
+
+/* Add the next sample f_y of a curve (clamped to [0, 1]) to p_s. */
+static void
+_shape_add(CurveShape *p_s, double f_y) {
+   if (isnan(f_y)) {
+      p_s->b_falls = TRUE;
+      return;
+   }
+   f_y = CLAMP(f_y, 0.0, 1.0);
+   if (!p_s->b_started) {
+      p_s->b_started = TRUE;
+      p_s->f_first   = f_y;
+      p_s->f_prev    = f_y;
+      return;
+   }
+   double f_rise = f_y - p_s->f_prev;
+   p_s->b_falls |= f_rise < -ICC_CURVE_FALL_EPS;
+   p_s->u_flat     = f_rise < ICC_CURVE_FLAT_STEP ? p_s->u_flat + 1 : 0;
+   p_s->u_max_flat = MAX(p_s->u_max_flat, p_s->u_flat);
+   p_s->u_steps++;
+   p_s->f_prev = f_y;
+}
+
+static gboolean
+_shape_ok(const CurveShape *p_s) {
+   return (!p_s->b_falls && p_s->u_steps > 0 &&
+           p_s->f_prev - p_s->f_first >= ICC_CURVE_MIN_SPAN &&
+           2u * p_s->u_max_flat < p_s->u_steps);
+}
+
+/* babl's to-linear value of a gamma: x^g for x > 0, else 0
+ * (_babl_trc_gamma_to_linear). */
+static double
+_gamma_at(double f_x, double f_g) {
+   return (f_x > 0 ? pow(f_x, f_g) : 0.0);
+}
+
+/* babl's to-linear value at f_x of the 'para' at p_tag (a type 0, 3 or 4
+ * _para_is_sane took): _babl_trc_formula_srgb_to_linear's form, which is
+ * ICC's, e and f 0 for type 3. */
+static double
+_para_at(const guint8 *p_tag, double f_x) {
+   guint  u_fn   = p_tag[9];
+   double f_p[7] = {0};
+   for (guint u = 0; u < PARA_PARAMS[u_fn]; u++) {
+      f_p[u] = _s15f16(p_tag + 12 + 4 * u);
+   }
+   if (u_fn == 0) {
+      return (_gamma_at(f_x, f_p[0]));
+   }
+   return (f_x >= f_p[4] ? _gamma_at(f_p[1] * f_x + f_p[2], f_p[0]) + f_p[5]
+                         : f_p[3] * f_x + f_p[6]);
+}
+
+/* Whether a TRC tag babl can read (a 'curv' _trc_is_sane sized, or a
+ * 'para' _para_is_sane took) is shaped like a tone curve (above). A
+ * 'curv' of no points is the identity. */
+static gboolean
+_curve_is_tone(const guint8 *p_tag) {
+   CurveShape t_s    = {0};
+   gboolean   b_curv = memcmp(p_tag, "curv", 4) == 0;
+   guint32    u_n    = b_curv ? _be32(p_tag + 8) : 0;
+   if (b_curv && u_n == 0) {
+      return (TRUE);
+   }
+   if (u_n >= 2) {
+      for (guint32 u = 0; u < u_n; u++) {
+         const guint8 *p_v = p_tag + 12 + 2 * u;
+         _shape_add(&t_s, (((guint)p_v[0] << 8) | p_v[1]) / 65535.0);
+      }
+      return (_shape_ok(&t_s));
+   }
+   /* One point is a u8Fixed8 gamma; otherwise a formula. */
+   double f_g = b_curv ? (((guint)p_tag[12] << 8) | p_tag[13]) / 256.0 : 0;
+   for (guint u = 0; u < ICC_CURVE_SAMPLES; u++) {
+      double f_x = u / (double)(ICC_CURVE_SAMPLES - 1);
+      _shape_add(&t_s, b_curv ? _gamma_at(f_x, f_g) : _para_at(p_tag, f_x));
+   }
+   return (_shape_ok(&t_s));
+}
+
 /* The tone curve tags babl reads: 'curv' with 12 + 2 * count bytes and at
- * most ICC_MAX_CURVE_POINTS points, or a 'para' _para_is_sane() takes. A
- * TRC tag of another type is refused: babl would read it as a 'curv'
- * count. (A 'curv' needs no zero reserved word: babl reads anything that
- * is not "para" as a 'curv', which it then is.) */
+ * most ICC_MAX_CURVE_POINTS points, or a 'para' _para_is_sane() takes --
+ * either shaped like a tone curve (_curve_is_tone). A TRC tag of another
+ * type is refused: babl would read it as a 'curv' count. (A 'curv' needs
+ * no zero reserved word: babl reads anything that is not "para" as a
+ * 'curv', which it then is.) */
 static gboolean
 _trc_is_sane(const guint8 *p_tag, guint32 u_size) {
+   gboolean b_ok = FALSE;
    if (u_size < 12) {
       return (FALSE);
    }
    if (memcmp(p_tag, "curv", 4) == 0) {
       guint32 u_count = _be32(p_tag + 8);
-      return (u_count <= ICC_MAX_CURVE_POINTS &&
-              12u + 2u * (guint64)u_count <= u_size);
+      b_ok            = u_count <= ICC_MAX_CURVE_POINTS &&
+                        12u + 2u * (guint64)u_count <= u_size;
+   } else if (memcmp(p_tag, "para", 4) == 0) {
+      b_ok = _para_is_sane(p_tag, u_size);
    }
-   if (memcmp(p_tag, "para", 4) == 0) {
-      return (_para_is_sane(p_tag, u_size));
-   }
-   return (FALSE);
+   return (b_ok && _curve_is_tone(p_tag));
 }
+
 /* The type and least size of every other tag babl (or, for 'chad', LCMS
  * behind babl's CMYK path) reads a fixed layout from: three s15Fixed16
  * numbers after the 8-byte type header for an XYZ tag, the channel count,

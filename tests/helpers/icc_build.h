@@ -17,6 +17,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
 
+#include <gio/gio.h>
 #include <glib.h>
 
 G_BEGIN_DECLS
@@ -70,6 +71,10 @@ GBytes *icc_build_gray(const char *c_desc, GBytes *p_k);
 /* icc_build_gray() with the u_extra tags p_extra appended. */
 GBytes *icc_build_gray_with(const char *c_desc, GBytes *p_k,
                             const IccBuildTag *p_extra, gsize u_extra);
+
+/* p_data zlib-compressed, as a PNG iCCP chunk carries a profile after its
+ * name and method byte. Caller unrefs. */
+GBytes *icc_build_zlib(GBytes *p_data);
 
 G_END_DECLS
 

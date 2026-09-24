@@ -835,7 +835,11 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
  *     libjpeg to check with. A camera-truncated JPEG (no EOI) decodes on
  *     the loader path as it always did;
  *   - a decode whose extent is not the header's (a corrupt header the
- *     checks above could not see).
+ *     checks above could not see);
+ *   - a PNG whose iCCP libpng would drop, or that carries a gAMA, cHRM
+ *     or sRGB chunk (icc_png_applied_profile): gegl:png-load would tag it
+ *     with a space built from those chunks -- outside the slot cap below
+ *     -- or with none, not with the profile vetted here.
  *
  * The file-swap window: the managed path opens the file four times for a
  * PNG, five for a JPEG -- the sniff, the profile walk, the completeness
@@ -849,7 +853,12 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
  * the last walk and GEGL's open (the completeness walk also reads the
  * stored size, so no separate header peek opens the file), and the same
  * race exists for gdk-pixbuf's path-taking calls on the loader path
- * (tech-stack.md).
+ * (tech-stack.md). The same window lets a swapped-in file's profile (or
+ * gAMA) reach babl through GEGL without the profile gate or the slot cap
+ * below: a crafted profile could then crash babl or add a space outside
+ * the cap. Nothing cheap narrows that further -- re-reading the profile
+ * after GEGL's decode would only tell the damage afterwards -- so it is
+ * documented (docs/gegl.md) rather than claimed closed.
  *
  * The checks that read a whole file (the PNG inflate, the libjpeg pass)
  * take the worker's GCancellable, so a superseded render stops checking
@@ -912,10 +921,11 @@ _gegl_loader_for(GFile *p_file, GgazeFormat *pe_fmt) {
 
 /* --- which profiles babl sees ---------------------------------------------
  *
- * babl_space_from_icc() is not safe on untrusted bytes, in three ways, and
+ * babl_space_from_icc() is not safe on untrusted bytes, in four ways, and
  * the managed path hands it nothing it has not first vetted:
  *   - it reads tag data unchecked, and what it builds from some well-formed
- *     curves overruns its own buffers or trips its assertions:
+ *     curves overruns its own buffers, trips its assertions or -- for a
+ *     curve it cannot invert -- aborts a later conversion:
  *     icc_profile_is_sane() (icc.c) vouches for every tag babl reads and
  *     every curve it builds first;
  *   - on a CMYK profile it keeps whatever LCMS gives back, a NULL
@@ -936,9 +946,23 @@ _gegl_loader_for(GFile *p_file, GgazeFormat *pe_fmt) {
  *     gave, whose curves it therefore had too) and the profile carries no
  *     curve that space does not use (a kTRC on an RGB profile is a new
  *     curve even then). So camera files whose sRGB profiles differ only
- *     in their bytes cost nothing, while no profile adds to babl's tables
- *     without costing a slot. Past the cap a new profile is declined --
- *     its file takes the loader path, sRGB, as before xb2.
+ *     in their bytes cost nothing, while no profile the enhancer hands
+ *     babl adds to its tables without costing a slot. Past the cap a new
+ *     profile is declined -- its file takes the loader path, sRGB, as
+ *     before xb2. What GEGL's own loaders make of a file is held to the
+ *     same bound by only letting them see files whose profile they will
+ *     use: gegl:png-load builds a space and curve of its own from a PNG's
+ *     gAMA / cHRM when libpng drops the iCCP (110 such files filled babl's
+ *     tables past the cap), so a PNG is managed only when libpng keeps
+ *     the iCCP and no such chunk is there (icc_png_applied_profile).
+ *     The one way past the bound left is the file-swap window (the load
+ *     section): a file replaced after these checks reaches GEGL, and so
+ *     babl, unvetted -- its profile or gAMA may add a space per swap;
+ *   - a space babl makes may be unusable by NAME, which is how babl and
+ *     GEGL find its formats: too long (babl cuts format names at 255
+ *     bytes and then confuses two formats) or another space's (babl
+ *     names spaces only partly by content). _space_name_ok() declines
+ *     those after babl has kept them, at the cost of their slot.
  * A profile babl would decline outright (icc_babl_kind: a class or PCS it
  * does not take, both CLUT directions, no curves or primaries) is never
  * handed to babl and costs nothing. Verdicts are kept per profile (SHA-256
@@ -1079,8 +1103,48 @@ _keep_verdict(char *c_key, const Babl *p_space, gboolean b_slot) {
    }
 }
 
+/* The longest space name a managed space may have. babl names each format
+ * of a space "<encoding>-<space name>" and cuts the name at 255 bytes
+ * (babl-format.c, format_new_from_format_with_space); two formats whose
+ * names are cut to the same bytes are then one to babl's name lookups, and
+ * its fish search between them spun forever in an uncancellable GEGL
+ * decode (xb2 review 5: a 238-character name from a 'para' curve at
+ * -32767). The longest encoding babl and GEGL register is 24 characters
+ * ("CIE LCH(ab) alpha double", listed with babl_format_class_for_each),
+ * so 254 - 1 - 24 = 229 is the true limit; 220 leaves room for a longer
+ * one. icc.c's parameter bounds keep real curves well inside: a Rec. 709
+ * 'para' curve on all three channels names its space in 208. */
+#define ENHANCER_MAX_SPACE_NAME 220u
+
+/* Whether babl's new space p_space can be managed by name: its name short
+ * enough (above) and naming no other space. babl names spaces it makes
+ * from a profile by its content only in part -- every grey table-curve
+ * space is "space-gray-lut-trc", an RGB space's primaries go to four
+ * decimals -- and babl_format_with_space() and GEGL find a space's formats
+ * by that name: a second space under the first one's name would decode
+ * and convert with the FIRST one's formats, silently in the wrong
+ * colours. So a space babl_space() does not return by its own name is
+ * declined. */
+static gboolean
+_space_name_ok(const Babl *p_space) {
+   const char *c_name = babl_get_name(p_space);
+   if (strlen(c_name) > ENHANCER_MAX_SPACE_NAME) {
+      g_debug("enhancer: not managed, babl's space name is %" G_GSIZE_FORMAT
+              " characters long",
+              strlen(c_name));
+      return (FALSE);
+   }
+   if (babl_space(c_name) != p_space) {
+      g_debug("enhancer: not managed, babl has another space named %s", c_name);
+      return (FALSE);
+   }
+   return (TRUE);
+}
+
 /* A new verdict for p_icc (kind e_kind, key c_key taken), under the lock:
- * babl's answer while the cap allows, NULL past it. */
+ * babl's answer while the cap allows, NULL past it. A space babl made that
+ * _space_name_ok() refuses is declined AFTER babl has kept it: the verdict
+ * is NULL and it costs its slot like any other growth. */
 static const Babl *
 _ask_babl(GBytes *p_icc, IccBablKind e_kind, char *c_key) {
    if (u_profile_slots >= GGAZE_ENHANCER_MAX_PROFILES) {
@@ -1095,7 +1159,12 @@ _ask_babl(GBytes *p_icc, IccBablKind e_kind, char *c_key) {
       g_free(c_key);
       return (NULL);
    }
-   _keep_verdict(c_key, p_space, !_grew_nothing(p_space, e_kind, p_icc));
+   gboolean b_slot = !_grew_nothing(p_space, e_kind, p_icc);
+   if (p_space != NULL && !_space_name_ok(p_space)) {
+      p_space = NULL;
+      b_slot  = TRUE;
+   }
+   _keep_verdict(c_key, p_space, b_slot);
    return (p_space);
 }
 
@@ -1137,11 +1206,16 @@ _space_of_profile(GBytes *p_icc) {
    return (p_space == babl_space("sRGB") ? NULL : p_space);
 }
 
-/* _space_of_profile() for p_file's embedded profile: the space GEGL's
- * loader will tag the decoded buffer with. */
+/* _space_of_profile() for the profile GEGL's loader will tag p_file's
+ * decoded buffer with: a JPEG's embedded one, and for a PNG (e_fmt) the
+ * iCCP libpng keeps with no gAMA / cHRM / sRGB chunk beside it
+ * (icc_png_applied_profile) -- any other PNG is declined, since GEGL
+ * would tag it with a space it builds from those chunks, outside the
+ * slot cap (xb2 review 5), or with none. */
 static const Babl *
-_managed_space(GFile *p_file) {
-   GBytes     *p_icc   = icc_read_embedded(p_file, NULL);
+_managed_space(GFile *p_file, GgazeFormat e_fmt) {
+   GBytes     *p_icc = e_fmt == GGAZE_FMT_PNG ? icc_png_applied_profile(p_file)
+                                              : icc_read_embedded(p_file, NULL);
    const Babl *p_space = p_icc != NULL ? _space_of_profile(p_icc) : NULL;
    if (p_icc != NULL) {
       g_bytes_unref(p_icc);
@@ -1334,7 +1408,7 @@ _load_managed(GFile *p_file, const char *c_path, GCancellable *p_cancel) {
    }
    GgazeFormat e_fmt   = GGAZE_FMT_UNKNOWN;
    const char *c_op    = _gegl_loader_for(p_file, &e_fmt);
-   const Babl *p_space = c_op != NULL ? _managed_space(p_file) : NULL;
+   const Babl *p_space = c_op != NULL ? _managed_space(p_file, e_fmt) : NULL;
    IntactSize  t_size;
    if (p_space == NULL || !_vouched(p_file, e_fmt, p_cancel, &t_size) ||
        !_space_fits(p_space, t_size.u_comps) ||
@@ -1406,7 +1480,7 @@ enhancer_would_manage(GFile *p_file) {
    IntactSize  t_size  = {0, 0, 0};
    g_free(c_path);
    if (c_op != NULL && (b_png || GGAZE_HAVE_JPEG)) {
-      p_space = _managed_space(p_file);
+      p_space = _managed_space(p_file, e_fmt);
    }
    if (p_space == NULL) {
       return (FALSE);

@@ -680,6 +680,7 @@ test_sane_curv_count(void) {
    g_assert_true(is_sane(p_arr));
    put_be32(tag_entry(p_arr, "gTRC") + 8, 16); /* room for 2 points */
    put_be32(tag_data(p_arr, "gTRC") + 8, 2);
+   put_be32(tag_data(p_arr, "gTRC") + 12, 0x0000ffffu); /* 0, 65535 */
    g_assert_true(is_sane(p_arr));
    put_be32(tag_data(p_arr, "gTRC") + 8, 3);
    g_assert_false(is_sane(p_arr));
@@ -697,6 +698,9 @@ test_sane_curv_count(void) {
       memset(p_arr->data + u_off, 0, u_size);
       memcpy(p_arr->data + u_off, "curv", 4);
       put_be32(p_arr->data + u_off + 8, u_n);
+      for (guint32 u = 0; u < u_n; u++) { /* a ramp: a tone curve */
+         p_arr->data[u_off + 12 + 2 * u] = (guint8)(u >> 4);
+      }
       put_be32(tag_entry(p_arr, "kTRC") + 4, u_off);
       put_be32(tag_entry(p_arr, "kTRC") + 8, u_size);
       put_be32(p_arr->data, p_arr->len);
@@ -780,34 +784,73 @@ para_profile_is_sane(guint16 u_fn, const double *p_params, gsize u_n) {
 /* The piecewise types' break points against babl's assertion 0 <= x0 <
  * 254.5 / 255 for x0 = d and x0 = c * d (each aborted babl in the
  * review): d = 1.0, d < 0 and c < 0 are refused, as is c * d past the
- * bound in type 4; the sRGB curve, d = 0 with any c (c * d is then 0),
- * and a d just inside pass. Type 0 has no bound: babl clamps a negative
- * gamma and asserts nothing. */
+ * bound; the sRGB curve, d = 0 with any c (c * d is then 0), and a d just
+ * inside pass. Each passing case is a curve _curve_is_tone takes (no fall
+ * at d), so only the break point decides; every type 4 case is its type 3
+ * twin with e = f = 0. */
 static void
 test_sane_para_break_points(void) {
-   const double SRGB[5] = {2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045};
+   const double A = 1 / 1.055, B = 0.055 / 1.055;
    const struct {
-      double   f_c;
-      double   f_d;
+      double   f_p[5]; /* g, a, b, c, d */
       gboolean b_ok;
    } CASES[] = {
-      {1 / 12.92, 0.04045, TRUE}, {1 / 12.92, 1.0, FALSE},
-      {1 / 12.92, -0.1, FALSE},   {-0.5, 0.04, FALSE},
-      {-0.5, 0.0, TRUE},          {1.0, 0.997, TRUE},
-      {1.0, 0.9985, FALSE},       {30.0, 0.04, FALSE},
-      {24.0, 0.04, TRUE}, /* c * d = 0.96 */
+      {{2.4, A, B, 1 / 12.92, 0.04045}, TRUE},
+      {{2.4, A, B, 1 / 12.92, 1.0}, FALSE},
+      {{2.4, A, B, 1 / 12.92, -0.1}, FALSE},
+      {{2.4, A, B, -0.5, 0.04}, FALSE},
+      {{2.4, A, B, -0.5, 0.0}, TRUE},
+      {{1.0, 1.0, 0.003, 1.0, 0.997}, TRUE}, /* c * d = 0.997 */
+      {{1.0, 1.0, 0.003, 1.0, 0.9985}, FALSE},
+      {{2.4, A, B, 9.0, 0.12}, FALSE}, /* c * d = 1.08 */
    };
    for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
-      double f_p3[5] = {SRGB[0], SRGB[1], SRGB[2], CASES[u].f_c, CASES[u].f_d};
-      double f_p4[7] = {2.2, 1.0, 0.0, CASES[u].f_c, CASES[u].f_d, 0.0, 0.0};
-      g_assert_true(para_profile_is_sane(3, f_p3, 5) == CASES[u].b_ok);
+      double f_p4[7] = {0};
+      memcpy(f_p4, CASES[u].f_p, sizeof(CASES[u].f_p));
+      g_assert_true(para_profile_is_sane(3, CASES[u].f_p, 5) == CASES[u].b_ok);
       g_assert_true(para_profile_is_sane(4, f_p4, 7) == CASES[u].b_ok);
    }
-   const double NEG[1] = {-1.0};
-   g_assert_true(para_profile_is_sane(0, NEG, 1));
    const double CIE[4] = {2.2, 1.0, 0.0, 0.1};
    g_assert_false(para_profile_is_sane(1, CIE, 3));
    g_assert_false(para_profile_is_sane(2, CIE, 4));
+}
+
+/* The parameter bounds (ICC_PARA_MAX = 10, g and a positive): the
+ * review's curve that made babl's format names too long to tell apart
+ * (its fish search then spun forever), each parameter just past the bound
+ * against the same curve inside it. The passing twins are shaped like
+ * tone curves, so only the bound decides. */
+static void
+test_sane_para_bounds(void) {
+   const double HANG[7] = {-32767, -1.31, -1.7, 0.768, 0.038, 0.604, 1.10};
+   g_assert_false(para_profile_is_sane(4, HANG, 7));
+   const double G_OK[1] = {9.99}, G_BIG[1] = {10.01}, G_NEG[1] = {-1.0};
+   const double G_ZERO[1] = {0.0};
+   g_assert_true(para_profile_is_sane(0, G_OK, 1));
+   g_assert_false(para_profile_is_sane(0, G_BIG, 1));
+   g_assert_false(para_profile_is_sane(0, G_NEG, 1)); /* babl: flat */
+   g_assert_false(para_profile_is_sane(0, G_ZERO, 1));
+   const struct {
+      guint  u_at;  /* the parameter changed */
+      double f_in;  /* inside the bound: the curve passes */
+      double f_out; /* past it: refused */
+   } CASES[] = {
+      {1, 1.5, 10.5},                   /* a */
+      {1, 1.5, 0.0},                    /* a must be positive */
+      {1, 1.5, -1.0},                   /* ... */
+      {2, -0.5, -10.5},                 /* b */
+      {3, 5.0, 10.5},                   /* c, unused with d = 0 */
+      {3, -5.0, -10.5}, {5, 0.0, 10.5}, /* e */
+      {6, 0.0, -10.5},                  /* f, unused with d = 0 */
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      /* Y = 1.5 X - 0.5, clamped: flat for a third, then rising to 1. */
+      double f_p[7]      = {1.0, 1.5, -0.5, 0.0, 0.0, 0.0, 0.0};
+      f_p[CASES[u].u_at] = CASES[u].f_in;
+      g_assert_true(para_profile_is_sane(4, f_p, 7));
+      f_p[CASES[u].u_at] = CASES[u].f_out;
+      g_assert_false(para_profile_is_sane(4, f_p, 7));
+   }
 }
 
 /* An RGB profile with 'curv' tables of u_r, u_g, u_b points; b_shared
@@ -842,6 +885,82 @@ test_sane_curve_budget(void) {
    g_assert_true(curv_profile_is_sane(4096, 4096, 4096, FALSE));
    g_assert_true(curv_profile_is_sane(1024, 1024, 1024, FALSE));
    g_assert_true(curv_profile_is_sane(1024, 0, 0, TRUE));
+}
+
+/* An RGB profile whose three curves are the 'curv' table p_v of u_n
+ * points. */
+static gboolean
+table_profile_is_sane(const guint16 *p_v, guint32 u_n) {
+   GByteArray *p_arr = g_byte_array_new();
+   guint8      c_hdr[12];
+   memcpy(c_hdr, "curv\0\0\0\0", 8);
+   put_be32(c_hdr + 8, u_n);
+   g_byte_array_append(p_arr, c_hdr, sizeof(c_hdr));
+   for (guint32 u = 0; u < u_n; u++) {
+      guint8 c_v[2] = {(guint8)(p_v[u] >> 8), (guint8)p_v[u]};
+      g_byte_array_append(p_arr, c_v, 2);
+   }
+   GBytes  *p_curv = g_byte_array_free_to_bytes(p_arr);
+   GBytes  *p_icc  = icc_build_rgb("table", p_curv, p_curv, p_curv);
+   gboolean b_sane = icc_profile_is_sane(p_icc);
+   g_bytes_unref(p_icc);
+   g_bytes_unref(p_curv);
+   return (b_sane);
+}
+
+/* A u_n-point table: u_flat points of u_lo, then a straight rise from
+ * u_lo (point u_flat) to u_hi (the last point). */
+static gboolean
+ramp_is_sane(guint32 u_n, guint16 u_lo, guint16 u_hi, guint32 u_flat) {
+   guint16 *p_v = g_new(guint16, u_n);
+   for (guint32 u = 0; u < u_n; u++) {
+      p_v[u] = u < u_flat
+                  ? u_lo
+                  : (guint16)(u_lo + (double)(u_hi - u_lo) * (u - u_flat) /
+                                        (u_n - 1 - u_flat));
+   }
+   gboolean b_sane = table_profile_is_sane(p_v, u_n);
+   g_free(p_v);
+   return (b_sane);
+}
+
+/* The curve shapes babl aborted a JPEG export on (xb2 review 5: its
+ * conversion search found no path for a curve it cannot invert and
+ * overflowed a buffer in the deepest candidates) are refused: a constant
+ * table (two points at 0, 30000 or 65535), one flat over nearly all of it
+ * (1137 of 1139 points at 0), one that falls (a spike, a reversed ramp),
+ * one spanning less than half the output range; a 'para' that never
+ * enters [0, 1], one that falls at its break point; a gamma of 0. Their
+ * well-shaped neighbours pass. */
+static void
+test_sane_curve_shape(void) {
+   const guint16 ZERO[2] = {0, 0}, MID[2] = {30000, 30000};
+   const guint16 FULL[2] = {65535, 65535}, RAMP[2] = {0, 65535};
+   const guint16 DOWN[2] = {65535, 0}, SPIKE[3] = {0, 65535, 0};
+   g_assert_false(table_profile_is_sane(ZERO, 2));
+   g_assert_false(table_profile_is_sane(MID, 2));
+   g_assert_false(table_profile_is_sane(FULL, 2));
+   g_assert_false(table_profile_is_sane(DOWN, 2));
+   g_assert_false(table_profile_is_sane(SPIKE, 3));
+   g_assert_true(table_profile_is_sane(RAMP, 2));
+   g_assert_false(ramp_is_sane(1139, 0, 65535, 1137));
+   g_assert_false(ramp_is_sane(256, 0, 30000, 0));     /* span < 1/2 */
+   g_assert_true(ramp_is_sane(256, 0, 32768, 0));      /* span 1/2 */
+   g_assert_false(ramp_is_sane(256, 0, 65535, 128));   /* flat for 1/2 */
+   g_assert_true(ramp_is_sane(256, 0, 65535, 100));    /* flat for 2/5 */
+   g_assert_true(curv_profile_is_sane(1, 0, 0, TRUE)); /* gamma 1.6 */
+   GBytes *p_g0  = icc_build_curv(1, 0.0);
+   GBytes *p_icc = icc_build_rgb("g0", p_g0, p_g0, p_g0);
+   g_assert_false(icc_profile_is_sane(p_icc));
+   g_bytes_unref(p_icc);
+   g_bytes_unref(p_g0);
+   const double OUT[7]   = {2.2, 1.0, 0.0, 0.0, 0.0, 1.5, 1.5};
+   const double FALLS[7] = {2.4, 1 / 1.055, 0.055 / 1.055, 0.5, 0.04, 0, 0};
+   const double R709[7]  = {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5,
+                            0.081,    0.005,     0.005};
+   g_assert_false(para_profile_is_sane(4, OUT, 7));
+   g_assert_false(para_profile_is_sane(4, FALLS, 7));
+   g_assert_true(para_profile_is_sane(4, R709, 7));
 }
 
 /* The XYZ tags babl reads three numbers from: 20 bytes and the 'XYZ '
@@ -1089,9 +1208,234 @@ test_sane_fuzz(void) {
    g_test_message("%u of 20000 mutated profiles passed", u_passed);
 }
 
-int
-main(int argc, char **argv) {
-   g_test_init(&argc, &argv, NULL);
+/* --- icc_png_applied_profile: the iCCP libpng keeps (xb2 review 5) ------
+ *
+ * gegl:png-load tags its buffer with the iCCP profile only when libpng
+ * keeps it, and otherwise builds a space from gAMA / cHRM outside the
+ * enhancer's slot cap. Each case is a PNG whose chunk list and profile
+ * break exactly one of libpng 1.6's fatal rules (or, for the passing
+ * twins, only a warning of libpng's). */
+
+/* A PNG of colour type u_ctype whose chunks are c_layout's, space-
+ * separated and in order: "iCCP" carries p_icc (zlib), "iCCP!" the same
+ * with a wrong CRC, "IHDR" a 1 x 1 8-bit header, any other type 4 zero
+ * bytes. Every other CRC is right. Written to a temp file (caller
+ * deletes and unrefs). */
+static GBytes *
+layout_chunk_data(const char *c_type, guint8 u_ctype, GBytes *p_icc) {
+   if (g_str_has_prefix(c_type, "iCCP")) {
+      GBytes     *p_z = icc_build_zlib(p_icc);
+      GByteArray *p_c = g_byte_array_new();
+      g_byte_array_append(p_c, (const guint8 *)"ggaze\0\0", 7);
+      g_byte_array_append(p_c, g_bytes_get_data(p_z, NULL),
+                          (guint)g_bytes_get_size(p_z));
+      g_bytes_unref(p_z);
+      return (g_byte_array_free_to_bytes(p_c));
+   }
+   if (strcmp(c_type, "IHDR") == 0) {
+      const guint8 C_IHDR[13] = {0, 0, 0, 1, 0, 0, 0, 1, 8, u_ctype, 0, 0, 0};
+      return (g_bytes_new(C_IHDR, sizeof(C_IHDR)));
+   }
+   return (g_bytes_new_static("\0\0\0\0", 4));
+}
+
+/* p_png written to a new temp file (caller deletes and unrefs). */
+static GFile *
+temp_png(const GByteArray *p_png) {
+   GFileIOStream *p_io   = NULL;
+   GFile         *p_file = g_file_new_tmp("ggaze-iccp-XXXXXX.png", &p_io, NULL);
+   g_assert_nonnull(p_file);
+   g_io_stream_close(G_IO_STREAM(p_io), NULL, NULL);
+   g_object_unref(p_io);
+   g_assert_true(g_file_replace_contents(p_file, (const char *)p_png->data,
+                                         p_png->len, NULL, FALSE, 0, NULL, NULL,
+                                         NULL));
+   return (p_file);
+}
+
+/* A PNG of colour type u_ctype whose chunks are c_layout's, space-
+ * separated and in order: "iCCP" carries p_icc (zlib), "iCCP!" the same
+ * with a wrong CRC, "IHDR" a 1 x 1 8-bit header, any other type 4 zero
+ * bytes. Every other CRC is right. Written to a temp file (caller
+ * deletes and unrefs). */
+static GFile *
+layout_png(guint8 u_ctype, GBytes *p_icc, const char *c_layout) {
+   GByteArray *p_png   = g_byte_array_new();
+   char      **c_types = g_strsplit(c_layout, " ", -1);
+   g_byte_array_append(p_png, (const guint8 *)"\x89PNG\r\n\x1a\n", 8);
+   for (char **c_t = c_types; *c_t != NULL; c_t++) {
+      GBytes       *p_data = layout_chunk_data(*c_t, u_ctype, p_icc);
+      gsize         u_len  = 0;
+      const guint8 *p_d    = g_bytes_get_data(p_data, &u_len);
+      guint8        c_len[4];
+      put_be32(c_len, (guint32)u_len);
+      g_byte_array_append(p_png, c_len, 4);
+      g_byte_array_append(p_png, (const guint8 *)*c_t, 4);
+      g_byte_array_append(p_png, p_d, (guint)u_len);
+      guint32 u_crc =
+         streamread_crc32(STREAMREAD_CRC32_INIT, (const guint8 *)*c_t, 4);
+      u_crc = streamread_crc32(u_crc, p_d, u_len) ^ STREAMREAD_CRC32_INIT;
+      put_be32(c_len, strcmp(*c_t, "iCCP!") == 0 ? ~u_crc : u_crc);
+      g_byte_array_append(p_png, c_len, 4);
+      g_bytes_unref(p_data);
+   }
+   g_strfreev(c_types);
+   GFile *p_file = temp_png(p_png);
+   g_byte_array_unref(p_png);
+   return (p_file);
+}
+
+/* Whether icc_png_applied_profile() hands back p_icc (byte for byte) for
+ * layout_png(u_ctype, p_icc, c_layout). */
+static gboolean
+applied(guint8 u_ctype, GBytes *p_icc, const char *c_layout) {
+   GFile   *p_file = layout_png(u_ctype, p_icc, c_layout);
+   GBytes  *p_got  = icc_png_applied_profile(p_file);
+   gboolean b_same = p_got != NULL && g_bytes_equal(p_got, p_icc);
+   g_assert_true(p_got == NULL || b_same);
+   g_clear_pointer(&p_got, g_bytes_unref);
+   g_file_delete(p_file, NULL, NULL);
+   g_object_unref(p_file);
+   return (b_same);
+}
+
+#define PNG_OK "IHDR iCCP IDAT IEND"
+
+/* The chunk rules: one iCCP, before PLTE, its CRC right, IHDR first, no
+ * gAMA / cHRM / sRGB anywhere before the image data. */
+static void
+test_png_applied_chunk_rules(void) {
+   GBytes *p_icc = read_fixture_profile("swapped.png");
+   g_assert_true(applied(2, p_icc, PNG_OK));
+   g_assert_true(applied(2, p_icc, "IHDR iCCP PLTE IDAT IEND"));
+   g_assert_true(applied(2, p_icc, "IHDR iCCP cICP tEXt IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR PLTE iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP! IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR gAMA iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP gAMA IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR iCCP cHRM IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR sRGB iCCP IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "iCCP IHDR IDAT IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR IDAT iCCP IEND"));
+   g_assert_false(applied(2, p_icc, "IHDR tEXt")); /* cut short */
+   g_bytes_unref(p_icc);
+   /* Not a PNG, and no file at all. */
+   GFile *p_file = fixture("swapped.jpg");
+   g_assert_null(icc_png_applied_profile(p_file));
+   g_object_unref(p_file);
+   p_file = fixture("no-such-file.png");
+   g_assert_null(icc_png_applied_profile(p_file));
+   g_object_unref(p_file);
+}
+
+/* p_icc (taken) with the 32-bit field at u_at set to u_val, or with u_pad
+ * zero bytes appended (the size field kept honest). */
+static GBytes *
+edited(GBytes *p_icc, gsize u_at, guint32 u_val, guint u_pad) {
+   GByteArray *p_arr = g_bytes_unref_to_array(p_icc);
+   if (u_pad > 0) {
+      g_byte_array_set_size(p_arr, p_arr->len + u_pad);
+      memset(p_arr->data + p_arr->len - u_pad, 0, u_pad);
+      put_be32(p_arr->data, p_arr->len);
+   } else {
+      put_be32(p_arr->data + u_at, u_val);
+   }
+   return (g_byte_array_free_to_bytes(p_arr));
+}
+
+static gboolean
+applied_edit(gsize u_at, guint32 u_val, guint u_pad) {
+   GBytes *p_icc =
+      edited(read_fixture_profile("swapped.png"), u_at, u_val, u_pad);
+   gboolean b_ok = applied(2, p_icc, PNG_OK);
+   g_bytes_unref(p_icc);
+   return (b_ok);
+}
+
+#define SIG(c)                                                                 \
+   (((guint32)(c)[0] << 24) | ((guint32)(c)[1] << 16) |                        \
+    ((guint32)(c)[2] << 8) | (guint32)(c)[3])
+
+/* libpng 1.6's fatal header checks: the rendering intent (0xFFFE only
+ * warns), a v4 length not a multiple of 4 (a v2 one may be), the
+ * signature, the tag table and its tags inside the profile, the class
+ * ('abst' and 'link' refused, 'prtr' taken), the PCS ('XYZ ' / 'Lab '). */
+static void
+test_png_applied_header_rules(void) {
+   g_assert_false(applied_edit(64, 0xFFFFu, 0));
+   g_assert_false(applied_edit(64, 0xFFFFFFFFu, 0));
+   g_assert_true(applied_edit(64, 0xFFFEu, 0));
+   g_assert_true(applied_edit(0, 0, 2)); /* v2.1: any length */
+   GBytes *p_v4 =
+      edited(read_fixture_profile("swapped.png"), 8, 0x04300000u, 0);
+   g_assert_true(applied(2, p_v4, PNG_OK));
+   GBytes *p_v4odd = edited(p_v4, 0, 0, 2);
+   g_assert_false(applied(2, p_v4odd, PNG_OK));
+   g_bytes_unref(p_v4odd);
+   g_assert_false(applied_edit(36, SIG("ascp"), 0));
+   g_assert_false(applied_edit(128, 0x7fffffffu, 0));
+   g_assert_false(applied_edit(132 + 4, 0x7ffffff0u, 0)); /* a tag out */
+   g_assert_false(applied_edit(12, SIG("abst"), 0));
+   g_assert_false(applied_edit(12, SIG("link"), 0));
+   g_assert_true(applied_edit(12, SIG("prtr"), 0));
+   g_assert_true(applied_edit(20, SIG("Lab "), 0));
+   g_assert_false(applied_edit(20, SIG("RGB "), 0));
+}
+
+/* The colour space against the PNG's colour type (RGB on a colour type,
+ * GRAY on a grey one, nothing else), and the length limit a stock libpng
+ * applies (8 000 000 bytes). */
+static void
+test_png_applied_space_and_length(void) {
+   GBytes *p_rgb  = read_fixture_profile("swapped.png");
+   GBytes *p_grey = read_fixture_profile("grey-icc.png");
+   GBytes *p_cmyk = read_fixture_profile("cmyk-icc.jpg");
+   g_assert_true(applied(6, p_rgb, PNG_OK));
+   g_assert_true(applied(3, p_rgb, PNG_OK)); /* palette: colour */
+   g_assert_false(applied(0, p_rgb, PNG_OK));
+   g_assert_false(applied(4, p_rgb, PNG_OK));
+   g_assert_true(applied(0, p_grey, PNG_OK));
+   g_assert_true(applied(4, p_grey, PNG_OK));
+   g_assert_false(applied(2, p_grey, PNG_OK));
+   g_assert_false(applied(2, p_cmyk, PNG_OK));
+   g_bytes_unref(p_grey);
+   g_bytes_unref(p_cmyk);
+   gsize   u_len  = g_bytes_get_size(p_rgb);
+   GBytes *p_max  = edited(g_bytes_ref(p_rgb), 0, 0, 8000000u - (guint)u_len);
+   GBytes *p_over = edited(g_bytes_ref(p_rgb), 0, 0, 8000004u - (guint)u_len);
+   g_assert_true(applied(2, p_max, PNG_OK));
+   g_assert_false(applied(2, p_over, PNG_OK));
+   g_bytes_unref(p_max);
+   g_bytes_unref(p_over);
+   g_bytes_unref(p_rgb);
+}
+
+/* The committed profiled PNGs are what libpng keeps. */
+static void
+test_png_applied_fixtures(void) {
+   const char *C_NAMES[] = {"swapped.png", "srgb-icc.png", "grey-icc.png"};
+   for (gsize u = 0; u < G_N_ELEMENTS(C_NAMES); u++) {
+      GFile  *p_file = fixture(C_NAMES[u]);
+      GBytes *p_want = icc_read_embedded(p_file, NULL);
+      GBytes *p_got  = icc_png_applied_profile(p_file);
+      g_assert_nonnull(p_got);
+      g_assert_true(g_bytes_equal(p_got, p_want));
+      g_bytes_unref(p_got);
+      g_bytes_unref(p_want);
+      g_object_unref(p_file);
+   }
+   GFile *p_file = fixture("badicc.png"); /* inflates, not a profile */
+   g_assert_null(icc_png_applied_profile(p_file));
+   g_object_unref(p_file);
+   p_file = fixture("rgba.png"); /* no iCCP */
+   g_assert_null(icc_png_applied_profile(p_file));
+   g_object_unref(p_file);
+}
+
+/* The container walks and the description. */
+static void
+add_read_tests(void) {
    g_test_add_func("/icc/fixtures_png_and_jpeg_carry_the_same_profile",
                    test_fixtures_png_and_jpeg_carry_the_same_profile);
    g_test_add_func("/icc/untagged_fixtures_have_no_profile",
@@ -1119,6 +1463,11 @@ main(int argc, char **argv) {
                    test_description_broken_headers);
    g_test_add_func("/icc/description_ascii_and_broken_tables",
                    test_description_ascii_and_broken_tables);
+}
+
+/* The gates in front of babl and GEGL. */
+static void
+add_gate_tests(void) {
    g_test_add_func("/icc/sane_fixture_profiles_pass",
                    test_sane_fixture_profiles_pass);
    g_test_add_func("/icc/sane_header_and_table", test_sane_header_and_table);
@@ -1131,11 +1480,27 @@ main(int argc, char **argv) {
    g_test_add_func("/icc/sane_para_reserved_word",
                    test_sane_para_reserved_word);
    g_test_add_func("/icc/sane_para_break_points", test_sane_para_break_points);
+   g_test_add_func("/icc/sane_para_bounds", test_sane_para_bounds);
+   g_test_add_func("/icc/sane_curve_shape", test_sane_curve_shape);
    g_test_add_func("/icc/sane_curve_budget", test_sane_curve_budget);
    g_test_add_func("/icc/sane_xyz_tags", test_sane_xyz_tags);
    g_test_add_func("/icc/babl_kind", test_babl_kind);
    g_test_add_func("/icc/babl_kind_fixtures", test_babl_kind_fixtures);
    g_test_add_func("/icc/babl_curve_tags", test_babl_curve_tags);
    g_test_add_func("/icc/sane_fuzz", test_sane_fuzz);
+   g_test_add_func("/icc/png_applied_chunk_rules",
+                   test_png_applied_chunk_rules);
+   g_test_add_func("/icc/png_applied_header_rules",
+                   test_png_applied_header_rules);
+   g_test_add_func("/icc/png_applied_space_and_length",
+                   test_png_applied_space_and_length);
+   g_test_add_func("/icc/png_applied_fixtures", test_png_applied_fixtures);
+}
+
+int
+main(int argc, char **argv) {
+   g_test_init(&argc, &argv, NULL);
+   add_read_tests();
+   add_gate_tests();
    return (g_test_run());
 }

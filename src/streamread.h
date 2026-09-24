@@ -12,7 +12,8 @@
  * loader/intact.c (the completeness check); each used to carry its own
  * copy -- of these and of the JPEG marker step below, which is here for
  * the same reason: two walkers that must agree with libjpeg on where the
- * next marker is.
+ * next marker is -- and of the CRC-32 PNG chunks carry, which both check
+ * (intact.c the critical chunks', icc.c the iCCP's).
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -54,6 +55,15 @@ StreamReadStatus streamread_skip(GInputStream *p_in, gsize u_len,
 
 StreamReadStatus streamread_jpeg_marker(GInputStream *p_in, guint8 *p_code,
                                         GError **p_err);
+
+/* The CRC-32 (ISO 3309) a PNG chunk carries over its type and data, as a
+ * running value: start with STREAMREAD_CRC32_INIT, feed every block, and
+ * compare the result XOR STREAMREAD_CRC32_INIT with the stored CRC. GLib
+ * has none and ggaze links no zlib of its own (GIO's zlib converter does
+ * the inflating), hence the 256-entry table, built once, thread-safe. */
+#define STREAMREAD_CRC32_INIT 0xFFFFFFFFu
+
+guint32 streamread_crc32(guint32 u_crc, const guint8 *p, gsize u_len);
 
 G_END_DECLS
 

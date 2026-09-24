@@ -10,6 +10,7 @@
 
 #include "icc_build.h"
 
+#include <gio/gio.h>
 #include <glib.h>
 #include <math.h>
 #include <string.h>
@@ -216,4 +217,24 @@ icc_build_gray_with(const char *c_desc, GBytes *p_k, const IccBuildTag *p_extra,
 GBytes *
 icc_build_gray(const char *c_desc, GBytes *p_k) {
    return (icc_build_gray_with(c_desc, p_k, NULL, 0));
+}
+
+GBytes *
+icc_build_zlib(GBytes *p_data) {
+   GConverter *p_z =
+      G_CONVERTER(g_zlib_compressor_new(G_ZLIB_COMPRESSOR_FORMAT_ZLIB, -1));
+   GOutputStream *p_mem = g_memory_output_stream_new_resizable();
+   GOutputStream *p_out = g_converter_output_stream_new(p_mem, p_z);
+   gsize          u_len = 0;
+   const void    *p_d   = g_bytes_get_data(p_data, &u_len);
+   gboolean       b_ok =
+      g_output_stream_write_all(p_out, p_d, u_len, NULL, NULL, NULL) &&
+      g_output_stream_close(p_out, NULL, NULL);
+   g_assert_true(b_ok);
+   GBytes *p_zb =
+      g_memory_output_stream_steal_as_bytes(G_MEMORY_OUTPUT_STREAM(p_mem));
+   g_object_unref(p_out);
+   g_object_unref(p_mem);
+   g_object_unref(p_z);
+   return (p_zb);
 }

@@ -47,6 +47,18 @@ G_BEGIN_DECLS
  * validated as a profile: see icc_is_profile(). */
 GBytes *icc_read_embedded(GFile *p_file, GError **p_err);
 
+/* The ICC profile gegl:png-load will tag the PNG p_file's pixels with:
+ * its iCCP profile, inflated, when libpng keeps it -- one iCCP before
+ * PLTE with its CRC right, a profile libpng 1.6's fatal checks pass (a
+ * rendering intent under 0xFFFF, a v4 length a multiple of 4, at most
+ * 8 000 000 bytes, the colour space the PNG's colour type needs, ...) --
+ * and no gAMA, cHRM or sRGB chunk GEGL could build a space from instead.
+ * NULL otherwise, for a file that is not a PNG, and on any read error:
+ * the enhancer declines such a PNG for colour management (icc.c has the
+ * rules and why). Not validated as a profile beyond that: see
+ * icc_profile_is_sane(). */
+GBytes *icc_png_applied_profile(GFile *p_file);
+
 /* TRUE iff p_file starts with a signature icc_read_embedded() searches (a
  * JPEG SOI or the PNG signature), so a caller can tell "no profile in this
  * PNG / JPEG" from "a format this module does not look into" -- the info
@@ -84,13 +96,18 @@ gboolean icc_is_profile(GBytes *p_icc);
  * babl reads (r/g/b/kTRC, r/g/bXYZ, wtpt, chrm, chad) of the type and
  * size babl reads it as -- a 'curv' with 12 + 2 * count bytes (count <=
  * ICC_MAX_CURVE_POINTS), a 'para' with a zero reserved word, function
- * type 0, 3 or 4 and all its parameters, the piecewise types' break
- * points inside babl's assertion (0 <= d, c * d < 0.998), an XYZ tag of 20
- * bytes or more. babl checks none of that itself: a huge 'curv' count, a
- * 'para' with a nonzero reserved byte or a curve past 4096 points crashes
- * it, a break point outside [0, 0.998) aborts it (assert), and some counts
- * exit the process (babl_fatal). FALSE for NULL. Says nothing about CLUT
- * tags (A2B0, ...), which only LCMS reads, on babl's CMYK path: see
+ * type 0, 3 or 4 and all its parameters, g and a in (0, 10] and the rest
+ * within +-10, the piecewise types' break points inside babl's assertion
+ * (0 <= d, c * d < 0.998), an XYZ tag of 20 bytes or more -- and every
+ * tone curve shaped like one: over [0, 1] never falling, rising by half
+ * the output range or more, flat over less than half its domain. babl
+ * checks none of that itself: a huge 'curv' count, a 'para' with a
+ * nonzero reserved byte or a curve past 4096 points crashes it, a break
+ * point outside [0, 0.998) aborts it (assert), some counts exit the
+ * process (babl_fatal), a parameter at +-32767 names the space so long
+ * that babl's format lookups spin forever, and a curve it cannot invert
+ * (a constant table) aborts a later conversion. FALSE for NULL. Says nothing
+ * about CLUT tags (A2B0, ...), which only LCMS reads, on babl's CMYK path: see
  * enhancer.c. */
 gboolean icc_profile_is_sane(GBytes *p_icc);
 
