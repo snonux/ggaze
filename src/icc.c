@@ -509,7 +509,7 @@ _png_colour_chunk(GInputStream *p_in, const guint8 *c_hdr, PngColour *p_c,
       return (_png_take_iccp(p_in, u_len, p_c, p_err));
    }
    if (memcmp(c_t, "IHDR", 4) == 0 && u_len == 13 && !p_c->b_ihdr) {
-      guint8 c_ihdr[13 + 4];
+      guint8 c_ihdr[13 + 4] = {0};
       p_c->b_ihdr =
          streamread_exact(p_in, c_ihdr, sizeof(c_ihdr), p_err) == STREAMREAD_OK;
       p_c->u_ctype = c_ihdr[9];
@@ -824,16 +824,17 @@ _para_is_sane(const guint8 *p_tag, guint32 u_size) {
  * to babl only when it is shaped like a tone curve: sampled over [0, 1]
  * (a 'curv' table at its own points, a formula at ICC_CURVE_SAMPLES) and
  * clamped to [0, 1], it
- *   - never falls (a table not by one u16 step; a formula not by more
- *     than float rounding),
+ *   - never falls (a table not by a single u16 step; a formula not by
+ *     more than rounding),
  *   - rises by at least ICC_CURVE_MIN_SPAN from its first sample to its
  *     last, and
  *   - is not flat over half its domain or more (steps rising less than
  *     half a u16 step count as flat).
  * The corpus's curves (4096- and 1024-point tables, sRGB 'para' curves, a
  * u8Fixed8 gamma of 2.2), the fixtures' and Rec. 709's pass with room to
- * spare; a gamma past ~20 fails the flat rule, a curve over a quarter of
- * the output range the span rule. */
+ * spare. A gamma past ~11 fails the flat rule (x^g stays within half a
+ * u16 step of 0 for half the domain), a curve covering less than half the
+ * output range the span rule. */
 #define ICC_CURVE_SAMPLES 1024u
 #define ICC_CURVE_MIN_SPAN 0.5
 #define ICC_CURVE_FLAT_STEP (0.5 / 65535.0)
