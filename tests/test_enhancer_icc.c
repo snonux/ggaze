@@ -1501,6 +1501,24 @@ rec709_profile(const char *c_desc) {
    return (rgb_of(c_desc, icc_build_para(4, R709, 7)));
 }
 
+/* A type 4 RGB profile whose babl space name is over 220 characters but
+ * within babl's own limit: every parameter printed with all its digits,
+ * and f at -1.23 (babl prints it "-1.-2345", two characters more than an
+ * f within (-1, 1)) -- 226 characters in babl 0.1.128, 229 in 0.1.112
+ * (two spaces after each curve's gamma). One curve on all three channels,
+ * of a gamma no other curve in the process has: babl 0.1.112 would hand a
+ * second curve of the same gamma the first one's (review 7), and the
+ * profile would be declined for that instead. */
+static GBytes *
+mid_name_profile(void) {
+   const double F[7]  = {2.456789, 0.923456, 0.076543, 0.123456,
+                         0.065432, 0.012345, -1.234567};
+   GBytes      *p_trc = icc_build_para(4, F, 7);
+   GBytes      *p_icc = icc_build_rgb("mid name", p_trc, p_trc, p_trc);
+   g_bytes_unref(p_trc);
+   return (p_icc);
+}
+
 /* The review's 'para' at -32767 is refused by icc.c's parameter bounds
  * (no slot); a curve inside them whose space name babl makes over 220
  * characters long (238 in babl 0.1.128, 241 in 0.1.112) is declined on
@@ -1537,11 +1555,15 @@ test_long_space_name_is_declined(void) {
    assert_built_profile_managed("a name at the limit",
                                 rec709_profile("at the limit"));
    enhancer_test_set_max_space_name(0);
-   /* babl's own limit takes the smooth curve (babl 0.1.112 names its
-    * space in 223 characters: a fixed 220 declined it, review 7). */
-   assert_built_profile_managed("the default limit",
-                                rec709_profile("default limit"));
    g_bytes_unref(p_under);
+   /* babl's own limit (229) takes a space named in 221 to 229
+    * characters, which a fixed 220 declined (review 7). */
+   GBytes *p_mid = mid_name_profile();
+   gsize   u_mid = babl_name_len(p_mid);
+   g_test_message("babl names the mid-length space in %" G_GSIZE_FORMAT, u_mid);
+   g_assert_cmpuint(u_mid, >, 220);
+   g_assert_cmpuint(u_mid, <=, enhancer_max_space_name());
+   assert_built_profile_managed("a name past 220", p_mid);
 }
 
 /* The longest format encoding babl has registered (babl_format_get_

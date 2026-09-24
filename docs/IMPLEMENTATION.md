@@ -685,7 +685,8 @@ color management on the enhance/export path is done (xb2, decision #45; see
   the limit is declined (a kept slot) and one at the limit managed -- the
   limit put at babl's own length for a name through a seam, since babl
   0.1.112 spells names longer than 0.1.128; review 7: the computed limit
-  is 254 − 1 − 24 with babl's and GEGL's formats, and two type 3 / 4
+  is 254 − 1 − 24 with babl's and GEGL's formats, a space named in 226
+  (0.1.128) / 229 (0.1.112) characters is managed under it, and two type 3 / 4
   `para` profiles of one gamma and the same primaries are each managed
   with their own curve (babl 0.1.128) or the second declined (babl
   0.1.112, where it got the first one's curve and space); a second grey and a second
