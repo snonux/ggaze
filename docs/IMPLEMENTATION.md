@@ -631,7 +631,10 @@ color management on the enhance/export path is done (xb2, decision #45; see
   profile — main's copy swapped R/B and was premultiplied, fixed by xb2),
   only when the loader's gate and `loader/intact.c` vouch for it, the
   profile passes `icc_profile_is_sane` (tone-shaped curves, bounded `para`
-  parameters), babl's space has a name of its own under 220 characters, a
+  parameters), babl's space has a name of its own no longer than its format names
+  leave room for (254 − 1 − the longest registered encoding: 229) and
+  converts through the profile's own formula curves (babl < 0.1.114
+  shares one `para` curve per type and gamma), a
   PNG's iCCP is the one libpng keeps (no sRGB beside it, any gAMA / cHRM
   one libpng 1.6.40 takes without discarding the iCCP:
   `icc_png_applied_profile`), and the profile fits the image's components
@@ -678,10 +681,14 @@ color management on the enhance/export path is done (xb2, decision #45; see
   in fresh subprocesses: the curves babl could not invert (constant
   tables, 1137 of 1139 points at 0, a spike, a `para` above [0, 1]) are
   declined and their files export as JPEGs; the `para` at −32767 is
-  declined without a slot, a family of `para` curves whose babl space names straddle 220
-  characters is managed exactly when babl's own name fits (a longer one
-  costs its kept slot) -- checked against the names, since babl 0.1.112
-  spells them longer than 0.1.128; a second grey and a second
+  declined without a slot, a `para` curve whose babl space name is past
+  the limit is declined (a kept slot) and one at the limit managed -- the
+  limit put at babl's own length for a name through a seam, since babl
+  0.1.112 spells names longer than 0.1.128; review 7: the computed limit
+  is 254 − 1 − 24 with babl's and GEGL's formats, and two type 3 / 4
+  `para` profiles of one gamma and the same primaries are each managed
+  with their own curve (babl 0.1.128) or the second declined (babl
+  0.1.112, where it got the first one's curve and space); a second grey and a second
   same-primaries RGB table-curve profile (both `lut-trc`) are declined and
   their files take the loader path; PNGs whose iCCP libpng drops (intent
   0xFFFF, a v4 odd length) next to a gAMA, and sound ones next to an sRGB

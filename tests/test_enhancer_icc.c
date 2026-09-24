@@ -1519,7 +1519,7 @@ test_long_space_name_is_declined(void) {
    g_assert_true(icc_profile_is_sane(p_long));
    guint u_slots = enhancer_test_profile_slots();
    g_assert_false(enhancer_test_profile_is_managed(p_long));
-   g_assert_cmpuint(babl_name_len(p_long), >, GGAZE_ENHANCER_MAX_SPACE_NAME);
+   g_assert_cmpuint(babl_name_len(p_long), >, enhancer_max_space_name());
    g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
    g_assert_false(enhancer_test_profile_is_managed(p_long));
    g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
@@ -1537,7 +1537,85 @@ test_long_space_name_is_declined(void) {
    assert_built_profile_managed("a name at the limit",
                                 rec709_profile("at the limit"));
    enhancer_test_set_max_space_name(0);
+   /* babl's own limit takes the smooth curve (babl 0.1.112 names its
+    * space in 223 characters: a fixed 220 declined it, review 7). */
+   assert_built_profile_managed("the default limit",
+                                rec709_profile("default limit"));
    g_bytes_unref(p_under);
+}
+
+/* The longest format encoding babl has registered (babl_format_get_
+ * encoding over its whole format table). */
+static int
+longest_encoding(Babl *p_babl, void *p_data) {
+   gsize *pu_max = p_data;
+   *pu_max       = MAX(*pu_max, strlen(babl_format_get_encoding(p_babl)));
+   return (0);
+}
+
+/* The name limit is babl's own: 254 characters of format name, less the
+ * dash and the longest encoding -- 229 with babl's and GEGL's formats
+ * ("CIE LCH(ab) alpha double") -- and the seam overrides it until reset. */
+static void
+test_space_name_limit_is_babls(void) {
+   gsize u_enc = 0;
+   babl_format_class_for_each(longest_encoding, &u_enc);
+   g_test_message("longest babl encoding: %" G_GSIZE_FORMAT, u_enc);
+   g_assert_cmpuint(u_enc, >=, strlen("CIE LCH(ab) alpha double"));
+   g_assert_cmpuint(enhancer_max_space_name(), ==,
+                    GGAZE_ENHANCER_FORMAT_NAME_MAX - 1 - u_enc);
+   enhancer_test_set_max_space_name(100);
+   g_assert_cmpuint(enhancer_max_space_name(), ==, 100);
+   enhancer_test_set_max_space_name(0);
+   g_assert_cmpuint(enhancer_max_space_name(), ==,
+                    GGAZE_ENHANCER_FORMAT_NAME_MAX - 1 - u_enc);
+}
+
+/* babl's linear value for 0 in the first channel of p_space's curves. */
+static float
+black_through(const Babl *p_space) {
+   const float F_IN[3] = {0, 0, 0};
+   float       f_out[3];
+   babl_process(babl_fish(babl_format_with_space("R'G'B' float", p_space),
+                          babl_format_with_space("RGB float", p_space)),
+                F_IN, f_out, 1);
+   return (f_out[0]);
+}
+
+/* Two 'para' profiles of one gamma and the same primaries (review 7):
+ * Rec. 709 as type 4 with e = f = 0.005, then plain as type 3. babl <
+ * 0.1.114 keeps one formula curve per type and gamma, so it hands the
+ * second the first one's curve and space (black to 0.005 linear): the
+ * second is declined, its slot charged, and its file takes the loader
+ * path. A babl that tells them apart manages each with its own curve. */
+static void
+test_para_sharing_a_gamma(void) {
+   const double R709[7] = {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5,
+                           0.081,    0.005,     0.005};
+   GBytes      *p_a     = rgb_of("para4 e f", icc_build_para(4, R709, 7));
+   GBytes      *p_b     = rgb_of("para3", icc_build_para(3, R709, 5));
+   const Babl  *p_sa    = enhancer_test_profile_space(p_a);
+   g_assert_nonnull(p_sa);
+   g_assert_cmpfloat_with_epsilon(black_through(p_sa), 0.005, 1e-4);
+   guint       u_slots = enhancer_test_profile_slots();
+   const Babl *p_sb    = enhancer_test_profile_space(p_b);
+   int         i_maj = 0, i_min = 0, i_mic = 0;
+   babl_get_version(&i_maj, &i_min, &i_mic);
+   g_test_message("babl %d.%d.%d: the type 3 profile is %s", i_maj, i_min,
+                  i_mic, p_sb != NULL ? "managed" : "declined");
+   if (i_maj == 0 && i_min == 1 && i_mic < 114) {
+      g_assert_null(p_sb);
+      g_assert_cmpuint(enhancer_test_profile_slots(), ==, u_slots + 1);
+      GByteArray *p_png = png_with_profile(p_b);
+      assert_profile_declined("para3.png", p_png);
+      g_byte_array_unref(p_png);
+   } else {
+      g_assert_nonnull(p_sb);
+      g_assert_true(p_sb != p_sa);
+      g_assert_cmpfloat_with_epsilon(black_through(p_sb), 0.0, 1e-4);
+   }
+   g_bytes_unref(p_a);
+   g_bytes_unref(p_b);
 }
 
 /* c_fixture with its iCCP chunk carrying p_icc instead. */
@@ -2386,6 +2464,9 @@ add_profile_tests(void) {
              test_long_space_name_is_declined);
    add_fresh("/enhancer_icc/spaces_sharing_a_name_are_declined",
              test_spaces_sharing_a_name_are_declined);
+   g_test_add_func("/enhancer_icc/space_name_limit_is_babls",
+                   test_space_name_limit_is_babls);
+   add_fresh("/enhancer_icc/para_sharing_a_gamma", test_para_sharing_a_gamma);
    add_fresh("/enhancer_icc/png_iccp_libpng_drops_is_declined",
              test_png_iccp_libpng_drops_is_declined);
    g_test_add_func("/enhancer_icc/verdicts_are_bounded",

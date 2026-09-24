@@ -144,6 +144,22 @@ IccBablKind icc_babl_kind(GBytes *p_icc);
  * (a kTRC on an RGB profile). */
 guint icc_babl_curve_tags(GBytes *p_icc);
 
+/* babl's to-linear values of p_icc's tone curve c_sig ("rTRC", "gTRC",
+ * "bTRC" or "kTRC") at the u_n inputs pf_x, into pf_y, when that curve is
+ * a formula: a 'para' of type 0, 3 or 4, or a 'curv' of one point (a
+ * u8Fixed8 gamma) or none (the identity) -- as babl_space_from_icc()
+ * builds it, whose own substitutions are mirrored: a gamma within 0.01 of
+ * 1 is linear, and a type 3 / 4 'para' with every parameter within 0.01
+ * of sRGB's is babl's sRGB curve. FALSE, pf_y untouched, when p_icc is
+ * not a profile icc_profile_is_sane() takes, has no such tag, or the tag
+ * is a table (a 'curv' of 2+ points: babl compares tables byte for byte,
+ * and swaps in a formula for one within its own tolerance of it,
+ * babl_trc_lut_find). The enhancer converts the same inputs through the
+ * space babl answered with to catch babl < 0.1.114 handing a profile a
+ * curve made for another one (icc.c, "the curve babl builds"). */
+gboolean icc_formula_curve_at(GBytes *p_icc, const char *c_sig,
+                              const double *pf_x, double *pf_y, guint u_n);
+
 /* The profile's description ('desc' tag) as UTF-8, caller frees: the ASCII
  * text of a v2 textDescriptionType or, for a v4 multiLocalizedUnicodeType,
  * the English record when there is one and the first record otherwise.

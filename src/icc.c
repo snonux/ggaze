@@ -400,12 +400,19 @@ icc_extract(const guint8 *p_data, gsize u_len, GError **p_err) {
  * png_handle_iCCP / _gAMA / _cHRM / _sRGB, 1.6.58's png_handle_chunk);
  * where they differ the stricter one is taken, and the warnings are left
  * out.
- *   - one iCCP, before PLTE (a second one is "duplicate", one after PLTE
- *     "out of place"), with its stored CRC right (whatever a given libpng
- *     does with a damaged ancillary chunk, it is not vouched for);
- *   - no sRGB chunk. 1.6.40 allows one sRGB-or-iCCP: an sRGB before the
- *     iCCP makes it skip the iCCP, one after marks the colour space
- *     invalid, which throws the iCCP away (1.6.58 keeps both);
+ *   - one iCCP, before PLTE (one after PLTE is "out of place" to both),
+ *     with its stored CRC right (whatever a given libpng does with a
+ *     damaged ancillary chunk, it is not vouched for). A second iCCP is
+ *     refused, stricter than either libpng needs: 1.6.58 drops it as a
+ *     "duplicate", while 1.6.40 lets a second valid one REPLACE the first
+ *     -- and the profile ggaze would vet is then not the one GEGL uses;
+ *   - no sRGB chunk, again stricter than needed. In 1.6.40 an sRGB before
+ *     the iCCP makes it refuse the iCCP ("too many profiles") and mark the
+ *     colour space invalid, dropping both; one after a non-sRGB iCCP is
+ *     taken beside it and the iCCP kept (only an sRGB chunk, or an iCCP
+ *     matching sRGB, sets the one-profile flag it checks); 1.6.58 keeps
+ *     both. Refusing every sRGB chunk costs nothing real: a file tagged
+ *     sRGB is not worth managing anyway;
  *   - at most one gAMA and one cHRM, before PLTE, of their exact lengths
  *     (4 and 32 bytes), CRCs right, and values 1.6.40 accepts: a gamma of
  *     16 to 625 000 000, chromaticities its round trip passes (below).
@@ -982,7 +989,7 @@ static const guint PARA_PARAMS[] = {1, 0, 0, 5, 7};
  * between them spun forever in an uncancellable GEGL decode. g and a in
  * (0, ICC_PARA_MAX], every other parameter within +-ICC_PARA_MAX, keep
  * each printed parameter to eight characters; enhancer.c also checks the
- * name babl built (GGAZE_ENHANCER_MAX_SPACE_NAME). */
+ * name babl built (enhancer_max_space_name). */
 #define ICC_PARA_MAX 10.0f
 
 /* Whether the u_n parameters at p_p (s15Fixed16) are in the bounds above:
@@ -1144,6 +1151,78 @@ _curve_is_tone(const guint8 *p_tag) {
       _shape_add(&t_s, b_curv ? _gamma_at(f_x, f_g) : _para_at(p_tag, f_x));
    }
    return (_shape_ok(&t_s));
+}
+
+/* --- the curve babl builds from a formula (xb2 review 7) ---------------
+ *
+ * What babl_space_from_icc() makes of a formula tone curve, so the
+ * enhancer can check the space babl answered with converts through the
+ * profile's own curves: babl < 0.1.114 keeps ONE curve per formula type
+ * and gamma (babl_trc_new compares type, table size and gamma only), so a
+ * second 'para' with the first one's gamma but other parameters silently
+ * gets the first one's curve. babl's own deliberate substitutions are
+ * mirrored (babl-core.c, the same in 0.1.112 and 0.1.128): a gamma within
+ * 0.01 of 1 becomes its linear curve (babl_trc_gamma), and a type 3 / 4
+ * 'para' whose seven parameters (e and f 0 for type 3) are each within
+ * 0.01 of sRGB's becomes its sRGB curve (babl_trc_formula_srgb). */
+
+/* babl's sRGB curve (BABL_TRC_SRGB) to linear. */
+static double
+_srgb_at(double f_x) {
+   return (f_x > 0.04045 ? pow((f_x + 0.055) / 1.055, 2.4) : f_x / 12.92);
+}
+
+/* Whether babl replaces the type 3 / 4 'para' at p_tag with its sRGB
+ * curve: every parameter within 0.01 of the ones babl compares with. */
+static gboolean
+_para_is_babl_srgb(const guint8 *p_tag) {
+   static const double SRGB[7] = {2.4, 0.947, 0.052, 0.077, 0.040, 0, 0};
+   guint               u_n     = PARA_PARAMS[p_tag[9]];
+   for (guint u = 0; u < 7; u++) {
+      double f_v = u < u_n ? _s15f16(p_tag + 12 + 4 * u) : 0.0;
+      if (!(fabs(f_v - SRGB[u]) < 0.01)) {
+         return (FALSE);
+      }
+   }
+   return (TRUE);
+}
+
+/* babl's to-linear value at f_x of the formula curve at p_tag: a 'curv'
+ * of 0 or 1 points or a 'para' of type 0, 3 or 4 (_para_is_sane). */
+static double
+_formula_at(const guint8 *p_tag, double f_x) {
+   double f_g = 1.0; /* a 'curv' of no points is the identity */
+   if (memcmp(p_tag, "curv", 4) == 0) {
+      if (_be32(p_tag + 8) == 1) {
+         f_g = (((guint)p_tag[12] << 8) | p_tag[13]) / 256.0;
+      }
+   } else if (p_tag[9] != 0) {
+      return (_para_is_babl_srgb(p_tag) ? _srgb_at(f_x) : _para_at(p_tag, f_x));
+   } else {
+      f_g = _s15f16(p_tag + 12);
+   }
+   return (fabs(f_g - 1.0) < 0.01 ? f_x : _gamma_at(f_x, f_g));
+}
+
+gboolean
+icc_formula_curve_at(GBytes *p_icc, const char *c_sig, const double *pf_x,
+                     double *pf_y, guint u_n) {
+   if (c_sig == NULL || pf_x == NULL || pf_y == NULL ||
+       !icc_profile_is_sane(p_icc)) {
+      return (FALSE);
+   }
+   gsize         u_len  = 0;
+   const guint8 *p      = g_bytes_get_data(p_icc, &u_len);
+   const guint8 *p_tag  = NULL;
+   gsize         u_size = 0;
+   if (!_find_tag(p, u_len, c_sig, &p_tag, &u_size) ||
+       (memcmp(p_tag, "curv", 4) == 0 && _be32(p_tag + 8) >= 2)) {
+      return (FALSE);
+   }
+   for (guint u = 0; u < u_n; u++) {
+      pf_y[u] = _formula_at(p_tag, pf_x[u]);
+   }
+   return (TRUE);
 }
 
 /* The tone curve tags babl reads: 'curv' with 12 + 2 * count bytes and at

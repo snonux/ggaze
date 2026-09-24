@@ -24,6 +24,7 @@
 #include <gio/gio.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <math.h>
 #include <string.h>
 
 #include "icc_build.h"
@@ -1427,6 +1428,16 @@ test_png_applied_gamut_rules(void) {
    g_assert_false(applied(2, p_icc,
                           "IHDR cHRM=31270,32900,60000,30000,"
                           "40000,40000,20000,50000 iCCP IDAT IEND"));
+   /* a set 1.6.40 inverts but whose xy -> XYZ -> xy round trip lands
+    * outside 5 (green y comes back 9 off): libpng drops the iCCP */
+   g_assert_false(applied(2, p_icc,
+                          "IHDR cHRM=35072,48820,44586,40566,"
+                          "33254,24889,34342,50246 iCCP IDAT IEND"));
+   /* one whose XYZ goes through, but whose way back overflows png_muldiv
+    * (a white y of 7 makes the primaries' XYZ huge): invalid in 1.6.40 */
+   g_assert_false(applied(2, p_icc,
+                          "IHDR cHRM=85099,7,69615,211,"
+                          "99766,207,41234,23764 iCCP IDAT IEND"));
    g_bytes_unref(p_icc);
 }
 
@@ -1534,6 +1545,107 @@ test_png_applied_fixtures(void) {
    g_object_unref(p_file);
 }
 
+/* --- icc_formula_curve_at (xb2 review 7) -------------------------------- */
+
+static const double PROBES[] = {0.0, 0.02, 0.1, 0.5, 1.0};
+
+/* An RGB profile whose three curves are p_trc (taken). */
+static GBytes *
+rgb_of(GBytes *p_trc) {
+   GBytes *p_icc = icc_build_rgb("formula", p_trc, p_trc, p_trc);
+   g_bytes_unref(p_trc);
+   return (p_icc);
+}
+
+/* icc_formula_curve_at() of p_icc's c_sig (p_icc taken) at PROBES is
+ * p_want, each within 1e-4 (s15Fixed16 steps are 1.5e-5). */
+static void
+assert_curve(GBytes *p_icc, const char *c_sig, const double *p_want) {
+   double f_y[G_N_ELEMENTS(PROBES)];
+   g_assert_true(
+      icc_formula_curve_at(p_icc, c_sig, PROBES, f_y, G_N_ELEMENTS(PROBES)));
+   for (gsize u = 0; u < G_N_ELEMENTS(PROBES); u++) {
+      g_assert_cmpfloat_with_epsilon(f_y[u], p_want[u], 1e-4);
+   }
+   g_bytes_unref(p_icc);
+}
+
+/* The formula curves as babl reads them: 'para' types 0, 3 and 4 (e and
+ * f offsetting both segments), a 'curv' gamma and the identity. */
+static void
+test_formula_curve_at(void) {
+   const double R709[7]  = {1 / 0.45, 1 / 1.099, 0.099 / 1.099, 1 / 4.5,
+                            0.081,    0.005,     0.005};
+   double       f_w4[5]  = {0.005, 0.02 / 4.5 + 0.005, 0, 0, 1.005};
+   double       f_w3[5]  = {0, 0.02 / 4.5, 0, 0, 1};
+   double       f_w0[5]  = {0, pow(0.02, 1.8), pow(0.1, 1.8), pow(0.5, 1.8), 1};
+   double       f_wid[5] = {0, 0.02, 0.1, 0.5, 1};
+   for (gsize u = 2; u < 4; u++) {
+      f_w3[u] = pow((PROBES[u] + 0.099) / 1.099, 1 / 0.45);
+      f_w4[u] = f_w3[u] + 0.005;
+   }
+   assert_curve(rgb_of(icc_build_para(4, R709, 7)), "gTRC", f_w4);
+   assert_curve(rgb_of(icc_build_para(3, R709, 5)), "bTRC", f_w3);
+   const double G[1] = {1.8};
+   assert_curve(rgb_of(icc_build_para(0, G, 1)), "rTRC", f_w0);
+   double f_u8[5] = {0}; /* a 'curv' gamma is u8Fixed8: 1.8 is 461 / 256 */
+   for (gsize u = 1; u < 5; u++) {
+      f_u8[u] = pow(PROBES[u], 461 / 256.0);
+   }
+   assert_curve(rgb_of(icc_build_curv(1, 1.8)), "rTRC", f_u8);
+   assert_curve(rgb_of(icc_build_curv(0, 1.0)), "rTRC", f_wid);
+   GBytes *p_k = icc_build_curv(1, 1.8);
+   assert_curve(icc_build_gray("grey", p_k), "kTRC", f_u8);
+   g_bytes_unref(p_k);
+}
+
+/* babl's own swaps, mirrored: a gamma within 0.01 of 1 is linear (a
+ * u8Fixed8 258 / 256 and a 'para' 1.005), a type 3 'para' with every
+ * parameter within 0.01 of sRGB's is babl's sRGB curve (which reaches 1
+ * at 1, where this one's own formula gives 1.005^2.4); 0.02 off in a is
+ * its own curve again. */
+static void
+test_formula_curve_at_mirrors_babl(void) {
+   double f_wid[5] = {0, 0.02, 0.1, 0.5, 1};
+   assert_curve(rgb_of(icc_build_curv(1, 258 / 256.0)), "rTRC", f_wid);
+   const double G[1] = {1.005};
+   assert_curve(rgb_of(icc_build_para(0, G, 1)), "rTRC", f_wid);
+   const double NEAR[5]   = {2.4, 0.955, 0.05, 0.07, 0.04};
+   double       f_srgb[5] = {0, 0.02 / 12.92, 0, 0, 1};
+   for (gsize u = 2; u < 5; u++) {
+      f_srgb[u] = pow((PROBES[u] + 0.055) / 1.055, 2.4);
+   }
+   assert_curve(rgb_of(icc_build_para(3, NEAR, 5)), "rTRC", f_srgb);
+   const double OFF[5]   = {2.4, 0.965, 0.05, 0.07, 0.04};
+   double       f_own[5] = {0, 0.02 * 0.07, 0, 0, 0};
+   for (gsize u = 2; u < 5; u++) {
+      f_own[u] = pow(0.965 * PROBES[u] + 0.05, 2.4);
+   }
+   assert_curve(rgb_of(icc_build_para(3, OFF, 5)), "rTRC", f_own);
+}
+
+/* No formula, no answer, and pf_y untouched: a table curve, a tag the
+ * profile lacks, a profile icc_profile_is_sane() refuses, NULL. */
+static void
+test_formula_curve_at_declines(void) {
+   double  f_y[1]  = {-7};
+   GBytes *p_table = rgb_of(icc_build_curv(1024, 1.8));
+   g_assert_false(icc_formula_curve_at(p_table, "rTRC", PROBES, f_y, 1));
+   g_bytes_unref(p_table);
+   GBytes *p_icc = rgb_of(icc_build_curv(1, 1.8));
+   g_assert_false(icc_formula_curve_at(p_icc, "kTRC", PROBES, f_y, 1));
+   g_assert_false(icc_formula_curve_at(p_icc, NULL, PROBES, f_y, 1));
+   g_assert_false(icc_formula_curve_at(p_icc, "rTRC", NULL, f_y, 1));
+   g_assert_false(icc_formula_curve_at(p_icc, "rTRC", PROBES, NULL, 1));
+   g_bytes_unref(p_icc);
+   const double BAD[5] = {2.4, 0.947, 0.052, 0.077, 1.5}; /* d past babl's */
+   GBytes      *p_bad  = rgb_of(icc_build_para(3, BAD, 5));
+   g_assert_false(icc_formula_curve_at(p_bad, "rTRC", PROBES, f_y, 1));
+   g_bytes_unref(p_bad);
+   g_assert_false(icc_formula_curve_at(NULL, "rTRC", PROBES, f_y, 1));
+   g_assert_cmpfloat(f_y[0], ==, -7);
+}
+
 /* The container walks and the description. */
 static void
 add_read_tests(void) {
@@ -1588,6 +1700,11 @@ add_gate_tests(void) {
    g_test_add_func("/icc/babl_kind", test_babl_kind);
    g_test_add_func("/icc/babl_kind_fixtures", test_babl_kind_fixtures);
    g_test_add_func("/icc/babl_curve_tags", test_babl_curve_tags);
+   g_test_add_func("/icc/formula_curve_at", test_formula_curve_at);
+   g_test_add_func("/icc/formula_curve_at_mirrors_babl",
+                   test_formula_curve_at_mirrors_babl);
+   g_test_add_func("/icc/formula_curve_at_declines",
+                   test_formula_curve_at_declines);
    g_test_add_func("/icc/sane_fuzz", test_sane_fuzz);
    g_test_add_func("/icc/png_applied_gamut_rules",
                    test_png_applied_gamut_rules);

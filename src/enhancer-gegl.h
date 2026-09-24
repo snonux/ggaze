@@ -210,21 +210,27 @@ guint enhancer_test_loader_decodes(void);
  * would decline outright is never handed to it. */
 #define GGAZE_ENHANCER_MAX_PROFILES 16u
 
-/* The longest space name a managed space may have. babl names each format
- * of a space "<encoding>-<space name>" and cuts the name at 255 bytes
- * (babl-format.c, format_new_from_format_with_space); two formats whose
- * names are cut to the same bytes are then one to babl's name lookups, and
- * its fish search between them spun forever in an uncancellable GEGL
- * decode (xb2 review 5: a 238-character name from a 'para' curve at
- * -32767). The longest encoding babl and GEGL register is 24 characters
- * ("CIE LCH(ab) alpha double", listed with babl_format_class_for_each), so
- * 254 - 1 - 24 = 229 is the true limit; 220 leaves room for a longer one.
- * (babl 0.1.112 prints the same space's name a few characters longer than
- * 0.1.128; the tests check the limit against babl's own names.) icc.c's
- * parameter bounds keep real curves inside, but not by much: a Rec. 709
- * 'para' curve on all three channels, with the tests' primaries, names
- * its space in 217 characters in 0.1.128 and in exactly 220 in 0.1.112. */
-#define GGAZE_ENHANCER_MAX_SPACE_NAME 220u
+/* The longest name babl gives a format: it names each format of a space
+ * "<encoding>-<space name>" in a 256-byte buffer, cut at 254 characters
+ * (babl-format.c, format_new_from_format_with_space). Two formats whose
+ * names are cut to the same bytes are then one to babl's name lookups,
+ * and its fish search between them spun forever in an uncancellable GEGL
+ * decode (xb2 review 5: a 238-character space name from a 'para' curve at
+ * -32767). So a managed space's name may be at most this, less the dash
+ * and the longest encoding babl has registered
+ * (enhancer_max_space_name). icc.c's parameter bounds keep real curves
+ * well inside: a Rec. 709 'para' curve on all three channels, with the
+ * tests' primaries, names its space in ~220 characters -- a few more in
+ * babl 0.1.112, which puts two spaces after a curve's gamma, than in
+ * 0.1.128; the exact length also depends on which curves babl already
+ * holds (a formula curve is named by the first profile that made it). */
+#define GGAZE_ENHANCER_FORMAT_NAME_MAX 254u
+
+/* The longest space name a managed space may have right now: the test
+ * seam's limit when one is set, else GGAZE_ENHANCER_FORMAT_NAME_MAX - 1 -
+ * the longest encoding in babl's format table (24, "CIE LCH(ab) alpha
+ * double", with babl's and GEGL's own formats: 229). */
+guint enhancer_max_space_name(void);
 
 /* How many slot-free verdicts (above) are kept, the oldest dropped first:
  * with the slots' own, the verdict table never holds more than
@@ -247,7 +253,7 @@ guint enhancer_test_profile_slots(void);
 guint enhancer_test_profile_verdicts(void);
 
 /* Test seam: the space-name limit the verdicts apply from now on (0: back
- * to GGAZE_ENHANCER_MAX_SPACE_NAME), so a test can put the limit at the
+ * to babl's own, enhancer_max_space_name), so a test can put the limit at the
  * length babl's own name for a space has -- which differs between babl
  * versions -- and check both sides of it. Verdicts already kept stay. */
 void enhancer_test_set_max_space_name(guint u_max);

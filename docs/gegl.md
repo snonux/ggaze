@@ -558,9 +558,12 @@ cleanly, so a file reaches them only through:
     `_tag_table` (1.6.40 on fedora:40 and 1.6.58 agree on those), at most
     8 000 000 bytes (upstream's `PNG_USER_CHUNK_MALLOC_MAX`; Fedora 44
     builds a larger one) — **and** nothing beside it makes libpng 1.6.40
-    drop it: no sRGB chunk (1.6.40 allows one sRGB-or-iCCP: an sRGB
-    before the iCCP makes it skip the iCCP, one after invalidates the
-    colour space, which discards the iCCP; 1.6.58 keeps both), and any
+    drop it: no sRGB chunk (stricter than needed, review 7: in 1.6.40 an
+    sRGB before the iCCP makes it refuse the iCCP and invalidate the
+    colour space, while one after a non-sRGB iCCP is taken beside it and
+    the iCCP kept; 1.6.58 keeps both — a file tagged sRGB is not worth
+    managing anyway; likewise a second iCCP, which 1.6.40 lets replace
+    the first and 1.6.58 drops as a duplicate, is refused), and any
     gAMA / cHRM single, before PLTE, of its exact length, its CRC right,
     and of values 1.6.40 takes — a gamma of 16 to 625 000 000, and
     chromaticities its fixed-point xy → XYZ → xy round trip passes, which
@@ -589,17 +592,41 @@ cleanly, so a file reaches them only through:
     — and babl names spaces only partly by content: every table curve is
     `lut-trc`, so all grey table-curve spaces are `space-gray-lut-trc` and
     RGB table-curve spaces of the same primaries share a name too. The
-    enhancer declines a space whose name is over 220 characters
-    (`GGAZE_ENHANCER_MAX_SPACE_NAME`; the true limit is 254 − 1 − 24, the
-    longest encoding babl and GEGL register being `CIE LCH(ab) alpha
-    double`; a Rec. 709 `para` curve on all three channels needs 217 with
-    the tests' primaries in babl 0.1.128, exactly 220 in 0.1.112 — babl
-    spells names differently between versions, so the tests put the limit
-    at babl's own length for a name, through a seam, rather than rely on
-    a fixed curve's name; review 6) or for which `babl_space(name)` is another space.
-    babl has kept that space by then, so it costs its slot. (Primaries
+    enhancer declines a space whose name is longer than babl's format
+    names leave room for — 254 characters, less the dash and the longest
+    encoding in babl's format table, read from babl
+    (`enhancer_max_space_name`: 229 with babl's and GEGL's own formats,
+    the longest being `CIE LCH(ab) alpha double`; review 7, was a fixed
+    220 that declined smooth type-4 curves on babl 0.1.112). A Rec. 709
+    `para` curve on all three channels names its space in ~220 characters
+    with the tests' primaries, a few more in babl 0.1.112 (two spaces
+    after a curve's gamma) than in 0.1.128, and the exact length depends
+    on which curves babl already holds (next item: in 0.1.112 a formula
+    curve is named by the first profile that made it), so the tests put
+    the limit at babl's own length for a name, through a seam, rather
+    than rely on a fixed curve's name. It also declines a space for which
+    `babl_space(name)` is another space. babl has kept that space by
+    then, so it costs its slot. (Primaries
     that differ only past the four printed decimals do not collide: babl
-    matches such a profile to the earlier space itself.) Verdicts are kept by SHA-256 — for
+    matches such a profile to the earlier space itself.)
+    A space babl answers with may also convert through **another profile's
+    curve** (review 7): babl < 0.1.114 — fedora:40 ships 0.1.112 — keeps
+    one formula curve per type and gamma (`babl_trc_new` compares type,
+    table size and gamma, not the other `para` parameters), so a Rec. 709
+    type 3 profile asked after a type 4 one with the same gamma and
+    e = f = 0.005 got the type 4 curve, and with the same primaries its
+    very space (black converted to 0.005 linear). After the name checks,
+    the enhancer converts 0, 0.02, 0.1, 0.5 and 1 through the space,
+    `R'G'B' float` → `RGB float` (grey: `Y' float` → `Y float`), and
+    compares each channel with the profile's own formula curve
+    (`icc_formula_curve_at`, which mirrors babl's deliberate swaps: a
+    gamma within 0.01 of 1 is linear, a `para` within 0.01 of sRGB's
+    parameters is babl's sRGB curve); off by more than half an 8-bit step
+    anywhere, the profile is declined at the cost of its slot. Table
+    curves are not checked — babl tells tables apart byte for byte and
+    swaps in a formula for a table within its own tolerance of it (up to
+    0.015 for linear) by design — nor is babl's own sRGB answer, which is
+    never managed. Verdicts are kept by SHA-256 — for
     good for the slots, up to 64 slot-free ones
     (`GGAZE_ENHANCER_MAX_FREE_VERDICTS`, oldest dropped: asking babl again
     about one adds nothing) — so a file seen again costs a checksum and

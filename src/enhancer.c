@@ -1105,21 +1105,67 @@ _keep_verdict(char *c_key, const Babl *p_space, gboolean b_slot) {
    }
 }
 
-/* Whether babl's new space p_space can be managed by name: its name short
- * enough (GGAZE_ENHANCER_MAX_SPACE_NAME, enhancer-gegl.h) and naming no
- * other space. babl names spaces it makes from a profile by its content
- * only in part -- every grey table-curve space is "space-gray-lut-trc", an
- * RGB space's primaries go to four decimals -- and
- * babl_format_with_space() and GEGL find a space's formats by that name: a
- * second space under the first one's name would decode and convert with
- * the FIRST one's formats, silently in the wrong colours. So a space
- * babl_space() does not return by its own name is declined. */
-static guint u_max_space_name = GGAZE_ENHANCER_MAX_SPACE_NAME; /* seam */
+/* babl_format_class_for_each() is exported by every babl this builds
+ * with (0.1.112 to 0.1.128 at least) but not declared in its public
+ * header. */
+int babl_format_class_for_each(int (*p_each)(Babl *, void *), void *p_data);
 
+/* Keep the longest format encoding (the name a format has in the default
+ * space) in *(gsize *)p_data. */
+static int
+_longest_encoding(Babl *p_format, void *p_data) {
+   const char *c_enc  = babl_format_get_encoding(p_format);
+   gsize      *pu_max = p_data;
+   if (c_enc != NULL) {
+      *pu_max = MAX(*pu_max, strlen(c_enc));
+   }
+   return (0);
+}
+
+static guint u_max_space_name = 0; /* test seam; 0: babl's own limit */
+
+/* The longest space name a managed space may have, now: babl names each
+ * format of a space "<encoding>-<space name>" in a 256-byte buffer, at
+ * most GGAZE_ENHANCER_FORMAT_NAME_MAX characters (enhancer-gegl.h), so a
+ * space name longer than that less the dash and the longest encoding
+ * babl has registered would cut some format's name short. Read from
+ * babl's format table on every new verdict (a few thousand formats, a
+ * walk of microseconds next to babl's own parse), so a format GEGL or a
+ * plugin registers later is counted too; 229 with babl's and GEGL's own
+ * formats ("CIE LCH(ab) alpha double", 24 characters). */
+static guint
+_space_name_limit(void) {
+   if (u_max_space_name > 0) {
+      return (u_max_space_name);
+   }
+   gsize u_enc = 0;
+   babl_format_class_for_each(_longest_encoding, &u_enc);
+   return (u_enc + 1 < GGAZE_ENHANCER_FORMAT_NAME_MAX
+              ? (guint)(GGAZE_ENHANCER_FORMAT_NAME_MAX - 1 - u_enc)
+              : 0);
+}
+
+guint
+enhancer_max_space_name(void) {
+   g_mutex_lock(&t_profiles_lock);
+   guint u_max = _space_name_limit();
+   g_mutex_unlock(&t_profiles_lock);
+   return (u_max);
+}
+
+/* Whether babl's new space p_space can be managed by name: its name short
+ * enough (_space_name_limit) and naming no other space. babl names spaces
+ * it makes from a profile by its content only in part -- every grey
+ * table-curve space is "space-gray-lut-trc", an RGB space's primaries go
+ * to four decimals -- and babl_format_with_space() and GEGL find a space's
+ * formats by that name: a second space under the first one's name would
+ * decode and convert with the FIRST one's formats, silently in the wrong
+ * colours. So a space babl_space() does not return by its own name is
+ * declined. */
 static gboolean
 _space_name_ok(const Babl *p_space) {
    const char *c_name = babl_get_name(p_space);
-   if (strlen(c_name) > u_max_space_name) {
+   if (strlen(c_name) > _space_name_limit()) {
       g_debug("enhancer: not managed, babl's space name is %" G_GSIZE_FORMAT
               " characters long",
               strlen(c_name));
@@ -1132,10 +1178,92 @@ _space_name_ok(const Babl *p_space) {
    return (TRUE);
 }
 
+/* The inputs _space_curves_ok() converts, and how far babl may be off
+ * the profile's curve at them: half an 8-bit step, finer than any
+ * difference an 8-bit preview or export could show, and ~20 times what
+ * babl's own polynomial approximation of a formula curve is off by. The
+ * inputs take in the linear segment of a piecewise curve (0, 0.02), its
+ * knee and its power segment. */
+static const double TRC_PROBES[] = {0.0, 0.02, 0.1, 0.5, 1.0};
+#define TRC_TOLERANCE (0.5 / 255.0)
+#define TRC_NPROBES G_N_ELEMENTS(TRC_PROBES)
+
+/* babl's linear values for TRC_PROBES through p_space's curves, into
+ * f_out (u_comps values per probe: 3, or 1 for a grey space):
+ * "R'G'B' float" (grey: "Y' float") converted to its linear twin in the
+ * same space, which is the curves and nothing else. */
+static void
+_space_curves_at(const Babl *p_space, gboolean b_gray, float *f_out) {
+   guint u_comps = b_gray ? 1 : 3;
+   float f_in[TRC_NPROBES * 3];
+   for (guint u = 0; u < TRC_NPROBES * u_comps; u++) {
+      f_in[u] = (float)TRC_PROBES[u / u_comps];
+   }
+   const Babl *p_from =
+      babl_format_with_space(b_gray ? "Y' float" : "R'G'B' float", p_space);
+   const Babl *p_to =
+      babl_format_with_space(b_gray ? "Y float" : "RGB float", p_space);
+   babl_process(babl_fish(p_from, p_to), f_in, f_out, TRC_NPROBES);
+}
+
+/* Whether the space p_space babl answered with for p_icc (kind e_kind)
+ * converts through the profile's own formula curves: babl < 0.1.114
+ * keeps one formula curve per type and gamma, so a profile whose 'para'
+ * shares its gamma with an earlier profile's but not its other parameters
+ * gets the earlier one's curve -- and, with the same primaries, its very
+ * space (icc.c, "the curve babl builds"; fedora:40 ships 0.1.112). Each
+ * channel's curve is read back through babl (_space_curves_at) and
+ * compared with icc_formula_curve_at(). Table curves are not checked:
+ * babl tells those apart byte for byte. A CMYK space has no curves of its
+ * own (LCMS). */
+static gboolean
+_space_curves_ok(const Babl *p_space, IccBablKind e_kind, GBytes *p_icc) {
+   static const char *C_SIGS[] = {"rTRC", "gTRC", "bTRC"};
+   gboolean           b_gray   = e_kind == ICC_BABL_GRAY;
+   guint              u_comps  = b_gray ? 1 : 3;
+   float              f_out[TRC_NPROBES * 3];
+   if (e_kind == ICC_BABL_CMYK) {
+      return (TRUE);
+   }
+   _space_curves_at(p_space, b_gray, f_out);
+   for (guint u_c = 0; u_c < u_comps; u_c++) {
+      double f_want[TRC_NPROBES];
+      if (!icc_formula_curve_at(p_icc, b_gray ? "kTRC" : C_SIGS[u_c],
+                                TRC_PROBES, f_want, TRC_NPROBES)) {
+         continue; /* a table curve */
+      }
+      for (guint u = 0; u < TRC_NPROBES; u++) {
+         double f_got = f_out[u * u_comps + u_c];
+         if (!(fabs(f_got - f_want[u]) <= TRC_TOLERANCE)) {
+            g_debug("enhancer: not managed, babl's curve %u gives %g at %g, "
+                    "the profile's %g",
+                    u_c, f_got, TRC_PROBES[u], f_want[u]);
+            return (FALSE);
+         }
+      }
+   }
+   return (TRUE);
+}
+
+/* Whether babl's answer p_space (not NULL) for p_icc can be managed: by
+ * name, and converting through the profile's own curves. babl's sRGB
+ * needs neither check -- it is never managed (_space_of_profile), and a
+ * table curve babl found close to sRGB's would fail the second for
+ * nothing. */
+static gboolean
+_space_usable(const Babl *p_space, IccBablKind e_kind, GBytes *p_icc) {
+   return (
+      p_space == babl_space("sRGB") ||
+      (_space_name_ok(p_space) && _space_curves_ok(p_space, e_kind, p_icc)));
+}
+
 /* A new verdict for p_icc (kind e_kind, key c_key taken), under the lock:
- * babl's answer while the cap allows, NULL past it. A space babl made that
- * _space_name_ok() refuses is declined AFTER babl has kept it: the verdict
- * is NULL and it costs its slot like any other growth. */
+ * babl's answer while the cap allows, NULL past it. A space babl answered
+ * with that _space_usable() refuses is declined AFTER babl has kept it:
+ * the verdict is NULL and it costs its slot like any other growth --
+ * whether or not this profile grew babl's tables, which the curve check
+ * cannot tell (a space babl reused for it had the wrong curve; one babl
+ * made may have added curves). */
 static const Babl *
 _ask_babl(GBytes *p_icc, IccBablKind e_kind, char *c_key) {
    if (u_profile_slots >= GGAZE_ENHANCER_MAX_PROFILES) {
@@ -1151,7 +1279,7 @@ _ask_babl(GBytes *p_icc, IccBablKind e_kind, char *c_key) {
       return (NULL);
    }
    gboolean b_slot = !_grew_nothing(p_space, e_kind, p_icc);
-   if (p_space != NULL && !_space_name_ok(p_space)) {
+   if (p_space != NULL && !_space_usable(p_space, e_kind, p_icc)) {
       p_space = NULL;
       b_slot  = TRUE;
    }
@@ -1237,7 +1365,7 @@ enhancer_test_profile_slots(void) {
 void
 enhancer_test_set_max_space_name(guint u_max) {
    g_mutex_lock(&t_profiles_lock);
-   u_max_space_name = u_max > 0 ? u_max : GGAZE_ENHANCER_MAX_SPACE_NAME;
+   u_max_space_name = u_max; /* 0: babl's own limit again */
    g_mutex_unlock(&t_profiles_lock);
 }
 
