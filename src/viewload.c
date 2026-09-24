@@ -35,20 +35,31 @@ struct ViewLoad {
  * miss read it, BEFORE the decode started: the finished texture is cached
  * under that stamp, so a rewrite that lands mid-decode makes the next get
  * miss instead of stamping the old pixels as the new file (texturecache.h
- * texturecache_put_stamped). The GTask always invokes the finish callback
- * (even on cancellation), which is the sole owner that frees the ctx. */
+ * texturecache_put_stamped). It carries the main context the load was
+ * started from, which the decode thread queues its partials on, and the
+ * cancellable the load was started with, which tells a queued partial
+ * whether its load was superseded by the time it is dispatched (see
+ * _load_progress_cb and _on_progress_main). The GTask always invokes the
+ * finish callback (even on cancellation, and after the last progress
+ * callback), which is the sole owner that frees the ctx (_load_ctx_free). */
 typedef struct {
-   ViewLoad    *p_vl;    /* ref'd; outlives the load */
-   GFile       *p_file;  /* ref'd; the file being loaded */
-   TextureStamp t_stamp; /* p_file's state before the decode began */
+   ViewLoad     *p_vl;     /* ref'd; outlives the load */
+   GFile        *p_file;   /* ref'd; the file being loaded */
+   TextureStamp  t_stamp;  /* p_file's state before the decode began */
+   GMainContext *p_main;   /* ref'd; the starting thread's main context */
+   GCancellable *p_cancel; /* ref'd; the load's own cancellable */
 } LoadCtx;
 
-/* A partial texture hopping from the decode thread to the main thread. */
+/* A partial texture hopping from the decode thread to the main thread on
+ * an idle source. Owns a ref on everything it holds; _progress_idle_free
+ * (the source's destroy notify) releases them whether or not the source
+ * ever dispatched. */
 typedef struct {
-   ViewLoad   *p_vl;
-   GFile      *p_file;
-   GdkTexture *p_tex;
-} ProgressInvoke;
+   ViewLoad     *p_vl;
+   GFile        *p_file;
+   GdkTexture   *p_tex;
+   GCancellable *p_cancel; /* the visible load's; cancelled = superseded */
+} ProgressIdle;
 
 static void _prefetch(ViewLoad *p_vl);
 
@@ -68,15 +79,33 @@ _unref(ViewLoad *p_vl) {
    }
 }
 
-/* A LoadCtx for p_file, owning refs on p_vl and p_file; p_stamp is the
- * miss stamp texturecache_lookup() read (the one query this load costs). */
+/* A LoadCtx for p_file, owning refs on p_vl, p_file and p_cancel (the
+ * cancellable the load is started with); p_stamp is the miss stamp
+ * texturecache_lookup() read (the one query this load costs). Built on the
+ * main thread, so the context it captures is the same one the GTask
+ * returns its result to. */
 static LoadCtx *
-_load_ctx_new(ViewLoad *p_vl, GFile *p_file, const TextureStamp *p_stamp) {
-   LoadCtx *p_ctx = g_new(LoadCtx, 1);
-   p_ctx->p_vl    = _ref(p_vl);
-   p_ctx->p_file  = (GFile *)g_object_ref(p_file);
-   p_ctx->t_stamp = *p_stamp;
+_load_ctx_new(ViewLoad *p_vl, GFile *p_file, const TextureStamp *p_stamp,
+              GCancellable *p_cancel) {
+   LoadCtx *p_ctx  = g_new(LoadCtx, 1);
+   p_ctx->p_vl     = _ref(p_vl);
+   p_ctx->p_file   = (GFile *)g_object_ref(p_file);
+   p_ctx->t_stamp  = *p_stamp;
+   p_ctx->p_cancel = (GCancellable *)g_object_ref(p_cancel);
+   /* Only a visible load reports partials, so only its ctx uses p_main; a
+    * prefetch ctx refs it too, which is harmless and keeps one shape. */
+   p_ctx->p_main = g_main_context_ref_thread_default();
    return (p_ctx);
+}
+
+/* Release everything a LoadCtx owns (each finish callback's last step). */
+static void
+_load_ctx_free(LoadCtx *p_ctx) {
+   g_object_unref(p_ctx->p_file);
+   g_object_unref(p_ctx->p_cancel);
+   g_main_context_unref(p_ctx->p_main);
+   _unref(p_ctx->p_vl);
+   g_free(p_ctx);
 }
 
 /* TRUE iff p_file is still navigator.current (last-write-wins). */
@@ -144,9 +173,7 @@ _prefetch_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       g_clear_error(&p_err); /* a neighbour that fails to decode is not
                               * worth a message; the visible load reports */
    }
-   g_object_unref(p_ctx->p_file);
-   _unref(p_ctx->p_vl);
-   g_free(p_ctx);
+   _load_ctx_free(p_ctx);
 }
 
 /* Prefetch the next/previous images into the cache (not shown). Cancels the
@@ -184,7 +211,8 @@ _prefetch(ViewLoad *p_vl) {
       TextureStamp t_stamp;
       if (p_file != NULL &&
           texturecache_lookup(p_vl->p_cache, p_file, &t_stamp) == NULL) {
-         LoadCtx *p_ctx = _load_ctx_new(p_vl, p_file, &t_stamp);
+         LoadCtx *p_ctx =
+            _load_ctx_new(p_vl, p_file, &t_stamp, p_vl->p_prefetch_cancel);
          loader_load_async(p_file, p_vl->p_prefetch_cancel, NULL, NULL,
                            _prefetch_finish_cb, p_ctx);
       }
@@ -193,34 +221,70 @@ _prefetch(ViewLoad *p_vl) {
 
 /* --- visible load -------------------------------------------------------- */
 
-static gboolean
-_on_progress_main(gpointer p_data) {
-   ProgressInvoke *p_pi = (ProgressInvoke *)p_data;
-   /* Last-write-wins: show the partial only if its source file is still the
-    * current one; the full result replaces it in _load_finish_cb. Through
-    * show_partial, not show_texture: a low-res stand-in is not the file's
-    * picture, and a host that remembers what it showed must not take it
-    * for one. */
-   if (_is_current(p_pi->p_vl, p_pi->p_file)) {
-      p_pi->p_vl->p_ops->show_partial(p_pi->p_vl->p_host, p_pi->p_tex);
-   }
+/* The partial's idle source destroy notify: drop every ref it holds. Runs
+ * after the dispatch, or on its own if the source is destroyed unrun. */
+static void
+_progress_idle_free(gpointer p_data) {
+   ProgressIdle *p_pi = (ProgressIdle *)p_data;
    g_object_unref(p_pi->p_tex);
    g_object_unref(p_pi->p_file);
+   g_object_unref(p_pi->p_cancel);
    _unref(p_pi->p_vl);
    g_free(p_pi);
+}
+
+/* Last-write-wins, per LOAD and not only per file: show the partial only
+ * if its load was not superseded AND its file is still the current one;
+ * the full result replaces it in _load_finish_cb. The file check alone let
+ * a stale partial through whenever the superseding step left the same file
+ * current: A->B->A answered from the cache (the full picture shown, then
+ * the old load's queued partial replaced it with a low-res one that
+ * stayed), or a reload of the same file (the old load's partial, emitted
+ * just before it saw the cancel, landing after the new load's full
+ * texture). Every superseding step cancels the load's cancellable, always
+ * on this thread: a new load and a cache hit through
+ * _restart_visible_cancel, dispose directly. So a cancelled one here means
+ * a stale partial. Through
+ * show_partial, not show_texture: a low-res stand-in is not the file's
+ * picture, and a host that remembers what it showed must not take it for
+ * one. The source's destroy notify frees p_data. */
+static gboolean
+_on_progress_main(gpointer p_data) {
+   ProgressIdle *p_pi = (ProgressIdle *)p_data;
+   if (!g_cancellable_is_cancelled(p_pi->p_cancel) &&
+       _is_current(p_pi->p_vl, p_pi->p_file)) {
+      p_pi->p_vl->p_ops->show_partial(p_pi->p_vl->p_host, p_pi->p_tex);
+   }
    return (G_SOURCE_REMOVE);
 }
 
-/* Decode-thread progress callback: hop to the main thread. */
+/* Decode-thread progress callback: hop to the main thread, ALWAYS through
+ * an idle source on the load's main context. Not g_main_context_invoke():
+ * that runs the function right here, on the decode thread, whenever it can
+ * acquire the context -- i.e. whenever no thread owns it at that instant.
+ * g_application_run() owns the default context for its whole run, so the
+ * app itself never hit that; but a caller that iterates the context by
+ * hand (every integration test's drain loop) leaves it unowned between
+ * iterations, and a partial then reached the viewer from the decode
+ * thread: a GTK call off the main thread (AGENTS.md), and a picture change
+ * the main thread never iterated for (task fe2: in
+ * /window/info_no_plot_while_loading B's partial replaced A in the middle
+ * of the synchronous `win.next`). Queued, a partial lands only when the
+ * main thread dispatches it. */
 static void
 _load_progress_cb(GdkTexture *p_partial, gpointer p_data) {
-   LoadCtx        *p_ctx = (LoadCtx *)p_data;
-   ProgressInvoke *p_pi  = g_new(ProgressInvoke, 1);
-   p_pi->p_vl            = _ref(p_ctx->p_vl);
-   p_pi->p_file          = (GFile *)g_object_ref(p_ctx->p_file);
-   p_pi->p_tex           = (GdkTexture *)g_object_ref(p_partial);
-   g_main_context_invoke_full(NULL, G_PRIORITY_DEFAULT, _on_progress_main, p_pi,
-                              NULL);
+   LoadCtx      *p_ctx = (LoadCtx *)p_data;
+   ProgressIdle *p_pi  = g_new(ProgressIdle, 1);
+   p_pi->p_vl          = _ref(p_ctx->p_vl);
+   p_pi->p_file        = (GFile *)g_object_ref(p_ctx->p_file);
+   p_pi->p_tex         = (GdkTexture *)g_object_ref(p_partial);
+   p_pi->p_cancel      = (GCancellable *)g_object_ref(p_ctx->p_cancel);
+   GSource *p_src      = g_idle_source_new();
+   g_source_set_priority(p_src, G_PRIORITY_DEFAULT);
+   g_source_set_callback(p_src, _on_progress_main, p_pi, _progress_idle_free);
+   g_source_set_static_name(p_src, "[ggaze] viewload partial");
+   g_source_attach(p_src, p_ctx->p_main);
+   g_source_unref(p_src);
 }
 
 /* The visible load of a still-current file failed: clear the canvas and say
@@ -254,6 +318,15 @@ _load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    ViewLoad   *p_vl  = p_ctx->p_vl;
    GError     *p_err = NULL;
    GdkTexture *p_tex = loader_load_finish(p_res, &p_err);
+   /* GTask's default check-cancellable already turns a result that lost
+    * the race with a cancel into CANCELLED; checking the load's own
+    * cancellable too keeps a superseded same-file load's older pixels off
+    * the screen and out of the cache even if that default ever changes. */
+   if (p_tex != NULL && g_cancellable_is_cancelled(p_ctx->p_cancel)) {
+      g_clear_object(&p_tex);
+      p_err =
+         g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, "superseded");
+   }
    if (p_tex == NULL) {
       if (!g_error_matches(p_err, G_IO_ERROR, G_IO_ERROR_CANCELLED) &&
           _is_current(p_vl, p_ctx->p_file)) {
@@ -269,9 +342,7 @@ _load_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       }
       g_object_unref(p_tex);
    }
-   g_object_unref(p_ctx->p_file);
-   _unref(p_vl);
-   g_free(p_ctx);
+   _load_ctx_free(p_ctx);
 }
 
 /* Cancel the previous visible load and hand out a fresh cancellable. */
@@ -303,17 +374,22 @@ viewload_load_current(ViewLoad *p_vl) {
    TextureStamp t_stamp;
    GdkTexture  *p_cached = texturecache_lookup(p_vl->p_cache, p_cur, &t_stamp);
    if (p_cached != NULL) {
-      _restart_visible_cancel(p_vl); /* an in-flight load is now stale */
+      /* An in-flight load is now stale: cancelling it also drops a partial
+       * it already queued, which would otherwise pass _is_current (same
+       * file) and replace this full picture (_on_progress_main). */
+      _restart_visible_cancel(p_vl);
       p_vl->p_ops->show_texture(p_vl->p_host, p_cached);
       p_vl->p_ops->update_header(p_vl->p_host);
       _prefetch(p_vl);
       return;
    }
    /* Cache miss: one active load -- cancel the previous, start a new one.
-    * Last-write-wins is enforced in the progress and finish callbacks via
-    * the LoadCtx's source GFile. */
+    * Last-write-wins is enforced in the progress and finish callbacks by
+    * both the LoadCtx's source GFile and the load's own cancellable, which
+    * the cancel here marks superseded (a same-file reload keeps the file
+    * current, so only the cancellable tells the old load apart). */
    _restart_visible_cancel(p_vl);
-   LoadCtx *p_ctx = _load_ctx_new(p_vl, p_cur, &t_stamp);
+   LoadCtx *p_ctx = _load_ctx_new(p_vl, p_cur, &t_stamp, p_vl->p_cancel);
    loader_load_async(p_cur, p_vl->p_cancel, _load_progress_cb, p_ctx,
                      _load_finish_cb, p_ctx);
    p_vl->p_ops->update_header(p_vl->p_host);

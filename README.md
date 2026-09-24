@@ -72,6 +72,9 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `?` / `F1`         | shortcuts overlay |
 | `q` / `Ctrl+q`     | quit |
 
+On a touchscreen: pinch to zoom, swipe left / right for the next / previous
+image, tap with two fingers for the info card.
+
 Full keybindings and mouse/touch gestures: `docs/ui-and-interactions.md`.
 
 ## Build

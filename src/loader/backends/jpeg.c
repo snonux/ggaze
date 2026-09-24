@@ -275,8 +275,11 @@ _jpeg_load_progressive(GFile *p_file, GCancellable *p_cancel,
       g_free(c_buf);
       return (NULL);
    }
-   /* Phase 1: low-res (1/8 scale). Skip once the load was superseded so a
-    * stale partial cannot be emitted for a file that is no longer current. */
+   /* Phase 1: low-res (1/8 scale). Skip once the load was superseded, to
+    * save the work of a partial nobody wants. The check is best effort (a
+    * cancel can land right after it): the caller must still drop a stale
+    * partial when it arrives, which viewload does by checking the load's
+    * cancellable on the main thread (viewload.c _on_progress_main). */
    int     i_lw, i_lh;
    guint8 *p_lp = NULL;
    if (!g_cancellable_is_cancelled(p_cancel) &&
