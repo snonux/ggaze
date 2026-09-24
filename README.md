@@ -85,6 +85,24 @@ image, tap with two fingers for the info card.
 
 Full keybindings and mouse/touch gestures: `docs/ui-and-interactions.md`.
 
+## Install
+
+Install the Fedora build dependencies (see below), then from the checkout:
+
+```sh
+make install                      # release build into ~/.local (no root)
+sudo make install PREFIX=/usr/local   # or system-wide
+make update                       # git pull, rebuild, reinstall
+make uninstall                    # remove what the last install put in place
+```
+
+`make` alone just builds (`build-release/`), `make test` runs the unit tests.
+Optional backends (GEGL, JPEG XL, AVIF, HEIF, libjpeg) are used when their
+`-devel` packages are installed; override with e.g.
+`make install MESON_OPTS="-Dgegl=disabled"`. With the `~/.local` prefix,
+make sure `~/.local/bin` is on your `PATH`; the desktop entry, icon, man page
+and GSettings schema land under `~/.local/share`.
+
 ## Build
 
 ```sh
