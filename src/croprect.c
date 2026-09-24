@@ -422,3 +422,55 @@ croprect_round(CropRect *p_r) {
    p_r->d_w = d_r - d_l;
    p_r->d_h = d_b - d_t;
 }
+
+/* --- aspect locks ----------------------------------------------------------
+ */
+
+/* The fixed ratios and the names of every lock, indexed by CropRectAspect.
+ * FREE and ORIGINAL carry 0: FREE locks nothing, and ORIGINAL's ratio is the
+ * image's, read per call. */
+static const struct {
+   gdouble     d_ratio;
+   const char *c_name;
+} _ASPECTS[CROPRECT_ASPECT_COUNT] = {
+   [CROPRECT_ASPECT_FREE]     = {0.0, "free"},
+   [CROPRECT_ASPECT_ORIGINAL] = {0.0, "original"},
+   [CROPRECT_ASPECT_1_1]      = {1.0, "1:1"},
+   [CROPRECT_ASPECT_3_2]      = {3.0 / 2.0, "3:2"},
+   [CROPRECT_ASPECT_4_3]      = {4.0 / 3.0, "4:3"},
+   [CROPRECT_ASPECT_16_9]     = {16.0 / 9.0, "16:9"},
+};
+
+/* TRUE iff e_aspect names a lock (not COUNT, not garbage). */
+static gboolean
+_aspect_valid(CropRectAspect e_aspect) {
+   return ((guint)e_aspect < (guint)CROPRECT_ASPECT_COUNT);
+}
+
+CropRectAspect
+croprect_aspect_next(CropRectAspect e_aspect) {
+   if (!_aspect_valid(e_aspect)) {
+      return (CROPRECT_ASPECT_FREE);
+   }
+   return (
+      (CropRectAspect)(((guint)e_aspect + 1u) % (guint)CROPRECT_ASPECT_COUNT));
+}
+
+gdouble
+croprect_aspect_ratio(CropRectAspect e_aspect, gdouble d_w, gdouble d_h) {
+   if (!_aspect_valid(e_aspect)) {
+      return (0.0);
+   }
+   if (e_aspect == CROPRECT_ASPECT_ORIGINAL) {
+      if (!isfinite(d_w) || !isfinite(d_h) || d_w <= 0.0 || d_h <= 0.0) {
+         return (0.0); /* no shape to keep: free */
+      }
+      return (d_w / d_h);
+   }
+   return (_ASPECTS[e_aspect].d_ratio);
+}
+
+const char *
+croprect_aspect_name(CropRectAspect e_aspect) {
+   return (_aspect_valid(e_aspect) ? _ASPECTS[e_aspect].c_name : "free");
+}
