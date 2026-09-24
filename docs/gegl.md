@@ -545,21 +545,42 @@ cleanly, so a file reaches them only through:
     babl leaves the tables under 36 spaces and 69 curves, while camera
     files whose sRGB profiles differ only in their bytes cost nothing.
     GEGL's own loaders are held to the same bound by seeing only files
-    whose vetted profile they will actually use: `gegl:png-load` falls back
-    to a space it builds from gAMA / cHRM whenever libpng drops the iCCP,
-    and libpng drops one babl takes — a rendering intent ≥ 0xFFFF, a v4
-    profile whose length is no multiple of 4, one over libpng's length
-    limit (review 5: 110 such PNGs, each with its own gAMA, filled babl's
-    tables past the cap and the next profile crashed
-    `babl_space_from_icc`). So a PNG is managed only when libpng 1.6's
-    fatal iCCP rules hold — one iCCP, before PLTE, its CRC right, a header
-    passing `png_icc_check_length` / `_header` / `_tag_table` (1.6.40 on
-    fedora:40 and 1.6.58 agree on those), at most 8 000 000 bytes (upstream's
-    `PNG_USER_CHUNK_MALLOC_MAX`; Fedora 44 builds a larger one) — **and**
-    the file carries no gAMA, cHRM or sRGB chunk GEGL could use instead
-    (`icc_png_applied_profile`; the corpus's profiled PNGs carry none).
-    Any other PNG takes the loader path, which never gets near babl. The
-    bound then has one way past it, the file-swap window below;
+    whose vetted profile they will actually use. `gegl:png-load` (0.4.58
+    and 0.4.72 alike) takes the iCCP when libpng kept one — and then
+    nothing else, even if babl declines it — else sRGB for an sRGB chunk,
+    else a space it builds from gAMA / cHRM, and libpng drops iCCPs babl
+    takes — a rendering intent ≥ 0xFFFF, a v4 profile whose length is no
+    multiple of 4, one over libpng's length limit (review 5: 110 such
+    PNGs, each with its own gAMA, filled babl's tables past the cap and
+    the next profile crashed `babl_space_from_icc`). So a PNG is managed
+    only when libpng 1.6's fatal iCCP rules hold — one iCCP, before PLTE,
+    its CRC right, a header passing `png_icc_check_length` / `_header` /
+    `_tag_table` (1.6.40 on fedora:40 and 1.6.58 agree on those), at most
+    8 000 000 bytes (upstream's `PNG_USER_CHUNK_MALLOC_MAX`; Fedora 44
+    builds a larger one) — **and** nothing beside it makes libpng 1.6.40
+    drop it: no sRGB chunk (1.6.40 allows one sRGB-or-iCCP: an sRGB
+    before the iCCP makes it skip the iCCP, one after invalidates the
+    colour space, which discards the iCCP; 1.6.58 keeps both), and any
+    gAMA / cHRM single, before PLTE, of its exact length, its CRC right,
+    and of values 1.6.40 takes — a gamma of 16 to 625 000 000, and
+    chromaticities its fixed-point xy → XYZ → xy round trip passes, which
+    `icc.c` ports (a duplicate or rejected one invalidates the colour
+    space there too; 1.6.58 checks neither at read time). Review 6:
+    until then any gAMA / cHRM was refused, but `gegl:png-save` writes both
+    beside the iCCP (so do GIMP and ImageMagick), so ggaze's own PNG
+    exports reloaded unmanaged — on gdk-pixbuf 2.42 as plain sRGB, and a
+    re-export baked the shift in. A gAMA / cHRM that passes never reaches
+    babl: the kept iCCP wins in `gegl_png_space`. Checked against the real
+    libraries: a generator of random chunk layouts, gAMA values and
+    chromaticities read with libpng exactly as `gegl:png-load` reads them
+    (benign errors on, `PNG_SKIP_sRGB_CHECK_PROFILE`) found no file ggaze
+    vouches for whose iCCP libpng 1.6.40 or 1.6.58 did not keep, byte for
+    byte (`icc_png_applied_profile`), besides files libpng refuses outright
+    (a damaged or second PLTE: the load fails, and the completeness walk
+    and the extent check hand those to the loader), and no in-range cHRM or
+    gAMA on which the port and 1.6.40 disagree. Any other PNG takes the loader
+    path, which never gets near babl. The bound then has one way past it,
+    the file-swap window below;
   - a space babl builds may be **unusable by name** (review 5), and babl
     and GEGL find a space's formats by its name. Too long a name gets the
     formats cut short (above: a 238-character one spun); a name another
@@ -568,10 +589,14 @@ cleanly, so a file reaches them only through:
     — and babl names spaces only partly by content: every table curve is
     `lut-trc`, so all grey table-curve spaces are `space-gray-lut-trc` and
     RGB table-curve spaces of the same primaries share a name too. The
-    enhancer declines a space whose name is over 220 characters (the true
-    limit is 254 − 1 − 24, the longest encoding babl and GEGL register
-    being `CIE LCH(ab) alpha double`; a Rec. 709 `para` curve on all three
-    channels needs 208) or for which `babl_space(name)` is another space.
+    enhancer declines a space whose name is over 220 characters
+    (`GGAZE_ENHANCER_MAX_SPACE_NAME`; the true limit is 254 − 1 − 24, the
+    longest encoding babl and GEGL register being `CIE LCH(ab) alpha
+    double`; a Rec. 709 `para` curve on all three channels needs 217 with
+    the tests' primaries in babl 0.1.128, exactly 220 in 0.1.112 — babl
+    spells names differently between versions, so the tests put the limit
+    at babl's own length for a name, through a seam, rather than rely on
+    a fixed curve's name; review 6) or for which `babl_space(name)` is another space.
     babl has kept that space by then, so it costs its slot. (Primaries
     that differ only past the four printed decimals do not collide: babl
     matches such a profile to the earlier space itself.) Verdicts are kept by SHA-256 — for

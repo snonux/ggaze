@@ -577,8 +577,9 @@ color management on the enhance/export path is done (xb2, decision #45; see
   only when the loader's gate and `loader/intact.c` vouch for it, the
   profile passes `icc_profile_is_sane` (tone-shaped curves, bounded `para`
   parameters), babl's space has a name of its own under 220 characters, a
-  PNG's iCCP is the one libpng keeps with no gAMA / cHRM / sRGB beside it
-  (`icc_png_applied_profile`), and the profile fits the image's components
+  PNG's iCCP is the one libpng keeps (no sRGB beside it, any gAMA / cHRM
+  one libpng 1.6.40 takes without discarding the iCCP:
+  `icc_png_applied_profile`), and the profile fits the image's components
   (else the loader path decides, as before);
   preview converted to sRGB; hold-`Space` shows the managed original;
   PNG/JPEG exports keep the source profile, WebP exports come out sRGB. The
@@ -622,19 +623,29 @@ color management on the enhance/export path is done (xb2, decision #45; see
   in fresh subprocesses: the curves babl could not invert (constant
   tables, 1137 of 1139 points at 0, a spike, a `para` above [0, 1]) are
   declined and their files export as JPEGs; the `para` at −32767 is
-  declined without a slot, a 238-character space name after babl kept it
-  (a slot), its 220-character twin managed; a second grey and a second
+  declined without a slot, a family of `para` curves whose babl space names straddle 220
+  characters is managed exactly when babl's own name fits (a longer one
+  costs its kept slot) -- checked against the names, since babl 0.1.112
+  spells them longer than 0.1.128; a second grey and a second
   same-primaries RGB table-curve profile (both `lut-trc`) are declined and
   their files take the loader path; PNGs whose iCCP libpng drops (intent
-  0xFFFF, a v4 odd length) next to a gAMA, and sound ones next to gAMA /
-  cHRM / sRGB, are declined with no slot, verdict or new babl format; the
+  0xFFFF, a v4 odd length) next to a gAMA, and sound ones next to an sRGB
+  or a gAMA / cHRM libpng 1.6.40 rejects (gamma 0, two gAMA, no
+  primaries), are declined with no slot, verdict or new babl format, and
+  sound ones next to a good gAMA (and cHRM) are managed in the vetted
+  profile's own space (review 6); a PNG export carries gAMA + cHRM beside
+  its iCCP and `enhancer_would_manage` vouches for its reload; corrupt PNG
+  data gets the loader's verdict, whatever it is (gdk-pixbuf 2.42 decodes
+  past a bad IDAT CRC); the
   fuzz also flattens / spikes tables and converts float both ways.
   `test_icc.c`, `test_info.c` (every lane) and `test_intact.c` (GEGL lane,
   like `intact.c`): profile extraction (PNG iCCP, multi-segment JPEG APP2,
   padding skipped, every broken container), the iCCP libpng keeps (one,
   before PLTE, CRC right, libpng 1.6's fatal header checks one rule at a
-  time, the colour space per PNG colour type, 8 000 000 bytes, no gAMA /
-  cHRM / sRGB), the curve-shape and `para`-bound rules, the `desc` parser, the card's
+  time, the colour space per PNG colour type, 8 000 000 bytes, no sRGB, gAMA /
+  cHRM only single, well-formed and of values libpng 1.6.40 takes -- its
+  gamma range, its chromaticity round trip: out of range, collinear
+  primaries, a white point outside them), the curve-shape and `para`-bound rules, the `desc` parser, the card's
   colour-space line in each state (one line, capped at 64 characters, a
   padded JPEG not "unreadable"), the completeness walk and sizes (SOF past
   64 KiB) and component counts, PNG rows (Adam7 sizes cross-checked with
