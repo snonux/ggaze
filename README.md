@@ -6,6 +6,14 @@ cull the rejects, move on.** Think `feh` / `nsxiv` / `qiv`, but GNOME-native
 and KISS — no library, no database, no sidecars. The layout nods to gthumb
 (header bar, thumbnail grid, full-window viewer) without the weight.
 
+![ggaze thumbnail grid: a folder of fifteen landscape images in four columns under a dark header bar](docs/screenshots/grid.png)
+
+![ggaze large view: a dusk mountain landscape with the info card (dimensions, format, size, camera, RGB histogram) in the top-left corner](docs/screenshots/large-view.png)
+
+*The thumbnail grid, and the large view with the info overlay (`i`). The
+pictures are procedurally generated; `docs/screenshots/make-screenshots.sh`
+re-renders them and re-takes both shots under Xvfb.*
+
 > **Status:** usable for its core job (browse, cull, move, open externally,
 > run scripts, quick GEGL enhance, crop / straighten / rotate 90°). Animated
 > GIF/WebP play in the large view; thumbnails and everything else use the
