@@ -421,12 +421,12 @@ wait_for_pictures_painted(GPtrArray *p_pics) {
    g_assert_cmpuint(u_painted, ==, p_pics->len);
 }
 
-/* Open plain.jpg alone in a presented 900x700 window with the thumbnail
+/* Open plain.jpg alone in a presented i_w x i_h window with the thumbnail
  * preference set as asked, and return the window. The caller frees c_dir /
  * c_path via the out parameters. */
 static GgazeWindow *
-open_presented(gboolean b_thumbnails, const char *c_tmpl, char **c_dir_out,
-               char **c_path_out) {
+open_presented_sized(gboolean b_thumbnails, const char *c_tmpl, gint i_w,
+                     gint i_h, char **c_dir_out, char **c_path_out) {
    Settings *p_cfg = settings_new();
    settings_set_enhance_preview_thumbnails(p_cfg, b_thumbnails);
    settings_delete(p_cfg);
@@ -439,12 +439,20 @@ open_presented(gboolean b_thumbnails, const char *c_tmpl, char **c_dir_out,
    GgazeWindow *p_win  = new_window();
    ggaze_window_open(p_win, p_file);
    g_object_unref(p_file);
-   gtk_window_set_default_size(GTK_WINDOW(p_win), 900, 700);
+   gtk_window_set_default_size(GTK_WINDOW(p_win), i_w, i_h);
    gtk_window_present(GTK_WINDOW(p_win));
    wait_for_view(p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    *c_dir_out  = c_dir;
    *c_path_out = c_path;
    return (p_win);
+}
+
+/* open_presented_sized at 900x700. */
+static GgazeWindow *
+open_presented(gboolean b_thumbnails, const char *c_tmpl, char **c_dir_out,
+               char **c_path_out) {
+   return (open_presented_sized(b_thumbnails, c_tmpl, 900, 700, c_dir_out,
+                                c_path_out));
 }
 
 /* Undo open_presented: reset the preference, close the window, drop the
@@ -544,6 +552,42 @@ test_panel_opens_beside_viewer_with_thumbnails(void) {
    fire(p_win, "win.enhance"); /* reopen, start another preview batch */
    fire(p_win, "win.enhance"); /* immediately close and cancel it */
    ggtest_drain_main(500);
+   close_presented(p_win, c_dir, c_path);
+}
+
+/* The panel is compact (6i2 review): in a 1280x800 window every one of the
+ * eight built-in presets is on screen without scrolling -- the card
+ * scroller's content fits its page -- and the Transform and Save rows sit
+ * inside the panel below them. The old full-width cards showed one and a
+ * half presets there. */
+static void
+test_panel_fits_eight_presets_at_1280x800(void) {
+   char        *c_dir  = NULL;
+   char        *c_path = NULL;
+   GgazeWindow *p_win  = open_presented_sized(TRUE, "ggaze-enhance-fit-XXXXXX",
+                                              1280, 800, &c_dir, &c_path);
+   fire(p_win, "win.enhance");
+   GtkWidget *p_panel = find_panel(p_win);
+   GtkWidget *p_last  = find_card(p_panel, 7);
+   GtkWidget *p_sw = gtk_widget_get_ancestor(p_last, GTK_TYPE_SCROLLED_WINDOW);
+   GtkAdjustment *p_adj =
+      gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(p_sw));
+   for (guint u = 0; u < 3000 && (gtk_widget_get_height(p_last) == 0 ||
+                                  gtk_adjustment_get_page_size(p_adj) == 0.0);
+        u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   ggtest_drain_main(200);
+   g_assert_cmpint(gtk_widget_get_height(GTK_WIDGET(p_win)), <=, 800);
+   g_assert_cmpfloat(gtk_adjustment_get_upper(p_adj), <=,
+                     gtk_adjustment_get_page_size(p_adj) + 0.5);
+   graphene_rect_t r_save, r_panel;
+   g_assert_true(gtk_widget_compute_bounds(
+      find_action_button(p_panel, "win.enhance-save"), p_panel, &r_save));
+   g_assert_true(gtk_widget_compute_bounds(p_panel, p_panel, &r_panel));
+   g_assert_cmpfloat(r_save.origin.y + r_save.size.height, <=,
+                     r_panel.size.height);
    close_presented(p_win, c_dir, c_path);
 }
 
@@ -5697,6 +5741,8 @@ static void
 add_feature_tests(void) {
    g_test_add_func("/enhance_flow/panel_opens_beside_viewer_with_thumbnails",
                    test_panel_opens_beside_viewer_with_thumbnails);
+   g_test_add_func("/enhance_flow/panel_fits_eight_presets_at_1280x800",
+                   test_panel_fits_eight_presets_at_1280x800);
    g_test_add_func("/enhance_flow/panel_label_only_mode_has_no_pictures",
                    test_panel_label_only_mode_has_no_pictures);
    g_test_add_func("/enhance_flow/panel_cards_track_mask_and_thumbnails_stay",
