@@ -21,14 +21,17 @@ editing remains a non-goal.
 
 - `a` → **the edit panel**: a narrow column *beside* the large view,
   inside the main window (no second window, no popover), and the one home
-  of every edit (6i2): *Presets* (the cards below), *Transform* (Crop `c`,
-  Straighten `r`, the quarter turns `[` `]` as buttons) and *Actions* (the
-  save state, Save copy `s` naming the file it writes, Revert all `x`,
-  Close `a/Esc`), each button showing its key from `shortcuts.c`'s table.
-  The image keeps the whole viewer; the cards are the choices: an
-  `Original` reference first (a picture, not a button), then one
-  card per preset with its auto-assigned hotkey (`1`, `2`, …, capped at the
-  mask's 8 slots). By default each card carries a bounded preview thumbnail
+  of every edit (6i2), compact enough that the eight built-in presets fit
+  a 1280x800 window without scrolling: a title row (*Edit*, close `a/Esc`),
+  *Presets* (the row cards below), *Transform* (crop `c`, straighten `r`,
+  the quarter turns `[` `]` as four icon buttons) and the save state with
+  Save copy `s` (naming the file it writes) beside Revert `x`, each button
+  showing its key from `shortcuts.c`'s table (docs/ui-and-interactions.md
+  "Quick enhance"). The image keeps the whole viewer; the cards are the
+  choices: a small, dim `Original` reference first (a picture, not a
+  button), then one row card per preset with its auto-assigned hotkey
+  (`1`, `2`, …, capped at the mask's 8 slots), highlighted and checked
+  while it is on. By default each card carries a small preview thumbnail
   of that preset applied *alone*, all generated as one cancellable background
   batch; Preferences can turn the thumbnails off, which leaves label-only
   cards (no batch at all) for slower systems. The thumbnails and the

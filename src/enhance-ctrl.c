@@ -876,7 +876,7 @@ _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
 }
 
 /* Canonical "nothing to render" site -- every path that clears the state
- * (x / Revert all, the fourth quarter turn, the
+ * (x / the Revert button, the fourth quarter turn, the
  * easy-to-miss one: toggling the LAST enabled preset back off via
  * win.enhance-N or a card) and the crop tool opening over a crop-only
  * transform funnel through here. Shows the original (texturecache is fast,
@@ -946,7 +946,7 @@ _apply_async(EnhanceCtrl *p_ctrl) {
 /* Drop the current enhance preview and go back to showing the unmodified
  * original: clears the mask + cached texture and reloads the original
  * (_apply_async's mask==0 path also invalidates any in-flight apply via
- * u_enhance_gen). Used by x / Revert all (explicit, no prompt -- Esc no
+ * u_enhance_gen). Used by x / the Revert button (explicit, no prompt -- Esc no
  * longer discards, 6i2), the slideshow timer, a failed apply, and after
  * Save/Discard
  * in the navigate-away prompt. Never touches the file on disk -- discarding

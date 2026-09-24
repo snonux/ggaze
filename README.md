@@ -67,11 +67,11 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `!`               | run a shell script popup |
 | `Ctrl+c`          | copy image (or marked files) to the clipboard |
 | `a`               | the GEGL **edit panel** (optional): presets, crop, straighten, rotate, save, revert — every button shows its key, and a key-hint bar under the image lists the live keys |
-| `1`–`8`           | toggle preset N (layered) — only while the edit panel is open |
-| `c`               | crop tool (GEGL; opens the panel): drag, or `h`/`j`/`k`/`l` move, `Shift+h/j/k/l` grow / `Ctrl+h/j/k/l` shrink that side, `a` cycles the aspect (free, original, 1:1, 3:2, 4:3, 16:9); `Enter` applies, `Esc` cancels |
+| `1`–`8`           | toggle preset N (layered) — only while the edit panel is open (large view) |
+| `c`               | crop tool (GEGL; opens the panel): drag, or `h`/`j`/`k`/`l` move, `Shift+h/j/k/l` grow / `Ctrl+h/j/k/l` shrink that side, `a` cycles the aspect (free, 1:1, 3:2, 4:3, 16:9, original); `Enter` applies, `Esc` cancels |
 | `r`               | straighten tool (GEGL; opens the panel): drag along the horizon or `h`/`l` nudge ±0.5°, `a` auto-crop; `Enter` / `Esc` |
 | `]` / `[`         | rotate 90° clockwise / counter-clockwise (GEGL, non-destructive; opens the panel; repeat for 180°/270°) |
-| `x`               | revert every edit (edit panel open) — `Esc` closes the panel and **keeps** the edit |
+| `x`               | revert every edit (edit panel open, large view) — `Esc` closes the panel and **keeps** the edit |
 | `s` / `Ctrl+S`     | save an edited copy — presets, crop, straighten and rotation composed (original is never modified; a saved preview no longer prompts; with GEGL a PNG/JPEG copy keeps its embedded ICC profile) |
 | `Space` (hold)     | compare original vs modified |
 | `f` / `F11`        | fullscreen |

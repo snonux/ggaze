@@ -120,7 +120,7 @@ typedef struct {
     * present, current NULL -- still reaches the mask-reset branch rather than
     * early-returning. */
    gboolean (*has_navigator)(gpointer p_host);
-   /* The preview is about to be discarded (x / Revert all, a failed
+   /* The preview is about to be discarded (x / the Revert button, a failed
     * apply, the gate's Discard, the slideshow): end a crop /
     * straighten session over it first, without restoring anything -- the
     * discard resets the transform and a tool's override together. A tool

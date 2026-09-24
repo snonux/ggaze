@@ -1474,7 +1474,7 @@ _ensure_panel_open(GgazeWindow *p_win) {
    }
 }
 
-/* win.edit-revert (`x`, the panel's Revert all): drop every edit -- presets
+/* win.edit-revert (`x`, the panel's Revert button): drop every edit -- presets
  * and transform -- and show the original. The one key that discards (Esc
  * and `0` no longer do), so it is bound to the open panel ON SCREEN: with
  * the panel closed, or hidden beside the grid (`a` then `t`), it only says

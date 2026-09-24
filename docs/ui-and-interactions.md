@@ -126,7 +126,7 @@ drift from the live bindings.
 | `g` / `Home`   | first image |
 | `G` / `End`    | last image |
 | `Enter`        | grid → large (open highlighted) |
-| `Esc`          | one step back: stop slideshow → cancel a crop/straighten tool → close the edit panel (the edit stays) → leave fullscreen → clear marks → large → grid; in the grid a second `Esc` within 2 s quits (the order `_action_back` in window.c implements). **`Esc` never discards an edit** — `x` does |
+| `Esc`          | one step back: stop slideshow → cancel a crop/straighten tool → close the edit panel (the edit stays; large view only — beside the grid the panel is hidden and `Esc` skips it) → leave fullscreen → clear marks → large → grid; in the grid a second `Esc` within 2 s quits (the order `_action_back` in window.c implements). **`Esc` never discards an edit** — `x` does |
 | `t`            | toggle grid ↔ large |
 | `+` / `=`, `Ctrl++` | zoom in (large) / grow thumbnails (grid) |
 | `-` / `_`, `Ctrl+-` | zoom out (large) / shrink thumbnails (grid) |
@@ -143,11 +143,11 @@ drift from the live bindings.
 | `e`            | open current image in an external program → popup |
 | `!`            | run a shell script → popup (e.g. `usbimport`) |
 | `a`            | open / close the **edit panel** beside the image (GEGL) — presets, crop, straighten, rotate, save, revert |
-| `1`–`8`        | toggle preset N (layered) — **only while the edit panel is open**; with it closed a digit does nothing |
+| `1`–`8`        | toggle preset N (layered) — **only while the edit panel is open and on screen** (large view); with it closed, or hidden beside the grid, a digit does nothing |
 | `c`            | crop tool (GEGL; opens the edit panel first): rectangle overlay; `Enter` applies, `Esc` cancels — see "Crop, straighten & rotate tools" |
 | `r`            | straighten tool (GEGL; opens the edit panel first): horizon drag / `h` `l` nudge ±0.5°, `a` auto-crop; `Enter` / `Esc` |
 | `]` / `[`      | rotate 90° clockwise / counter-clockwise (GEGL, one-shot; opens the edit panel first; repeat for 180°/270°) |
-| `x`            | revert every edit — presets and transform (edit panel open; with it closed a status line says so) |
+| `x`            | revert every edit — presets and transform (edit panel open, large view; with it closed or in the grid a status line says where it works) |
 | `u` / `Ctrl+z` | undo last `d` / `m` (restore from `.Trash` or move back) |
 | `o` / `Ctrl+o` | open image dialog (image filter) |
 | `O` / `Ctrl+Shift+o` | open folder dialog |
@@ -161,6 +161,11 @@ drift from the live bindings.
 fullscreen it returns to large view, in large view it returns to the grid, in
 the grid it quits. `q` always quits outright (exiting fullscreen first).
 
+Caps Lock never turns a letter into its Shift chord: with it on, `h` still
+moves the crop rectangle (`Shift+h` grows it), `a` is still the tool's
+aspect / auto-crop key, `c` still the crop tool — the key table matches a
+letter Caps Lock upper-cased as the plain letter.
+
 ### Edit modes and the key-hint bar
 
 Edit keys are **modal**. Three contexts own keys beyond the table above,
@@ -168,8 +173,8 @@ and each owns them only while it is on screen:
 
 | Mode | Live while | Its own keys |
 |------|------------|--------------|
-| **Edit** | the edit panel is open (and no tool is up) | `1`–`8` presets (plus the global `c` `r` `[` `]` `s` `x` `Space` `a`/`Esc` it lists) |
-| **Crop** | the crop tool is up | `h`/`j`/`k`/`l` move · `Shift+h/j/k/l` grow that side · `Ctrl+h/j/k/l` shrink that side · `a` aspect cycle · `Enter` apply · `Esc` cancel |
+| **Edit** | the edit panel is open and on screen (large view), no tool up | `1`–`N` presets — one digit per configured preset, at most 8 (plus the global `c` `r` `[` `]` `s` `x` `Space` `a`/`Esc` it lists) |
+| **Crop** | the crop tool is up | `h`/`j`/`k`/`l` move · `Shift+h/j/k/l` grow that side · `Ctrl+h/j/k/l` shrink that side · `a` aspect cycle (free → 1:1 → 3:2 → 4:3 → 16:9 → original) · `Enter` apply · `Esc` cancel |
 | **Straighten** | the straighten tool is up | `h`/`l` (and `-`/`+`) nudge ½° · `a` auto-crop · `Enter` apply · `Esc` cancel |
 
 A tool's keys win over the panel's, which win over the global table; a key
@@ -183,10 +188,14 @@ Edit   1–8 presets · c crop · r straighten · [/] rotate · s save copy · x
 Crop   h/j/k/l move · Shift+h/j/k/l grow · Ctrl+h/j/k/l shrink · a aspect · Enter apply · Esc cancel
 ```
 
-The bar, the edit panel's button keys, the `?` help, the header tooltips
-and the `F10` menu are all generated from `shortcuts.c`'s one table (rows
-scoped to a mode, each with a short hint label), so they cannot drift from
-the keys that actually work. Inside the panel `h`/`j`/`k`/`l` keep their
+The bar lists the preset digits that exist: `1–8 presets` with the eight
+built-ins, `1/2 presets` or `1 preset` with fewer, no presets segment for
+none. The bar, the edit panel's button keys, the `?` help, the header
+tooltips and the `F10` menu are all generated from `shortcuts.c`'s one
+table (rows scoped to a mode, each with a short hint label and, for the
+menu, a short label such as *Crop* where the help says "Crop tool (Enter
+applies, Esc cancels)"), so they cannot drift from the keys that actually
+work. Inside the panel `h`/`j`/`k`/`l` keep their
 navigation meaning and `u` is still the file undo: those are reserved for
 the panel's later strength and undo keys.
 
@@ -452,40 +461,47 @@ image's histogram.
 - **`a` → the edit panel**: a narrow column *beside* the large view,
   inside the main window (switching to the large view first if needed) —
   no second window, no popover. The image keeps the whole viewer. It is the
-  **one home of every edit**, in three sections, and every button in it
-  shows its key (read from `shortcuts.c`'s table, like the hint bar):
-  - **Presets** — an `Original` reference picture, then one card per
-    configurable preset with an auto-assigned hotkey (`1`, `2`, … capped at
-    the mask's 8 slots), by default each with a small preview thumbnail of
-    that preset applied alone (Preferences can turn the thumbnails off for
-    label-only cards; the cards and the Original always show the
-    **untransformed** image — they are references for the colour presets
-    alone and ignore a crop, straighten or turn). The Original is a
-    reference, not a button: reverting is `x`.
-  - **Transform** — *Crop* `c`, *Straighten* `r`, and the two quarter turns
-    `[` / `]` as buttons (the same actions as the keys).
-  - **Actions** — a state line that says whether the edit is unsaved,
-    **Save copy** `s` naming the file it will write (`as
-    IMG_0001-enhanced.jpg`), **Revert all** `x`, and **Close** `a/Esc`.
+  **one home of every edit**, compact enough that all eight built-in
+  presets show without scrolling in a 1280×800 window, and every button in
+  it shows its key (read from `shortcuts.c`'s table, like the hint bar) —
+  and every panel key has a button. Top to bottom:
+  - **Title row** — just *Edit* (the window title already names the file)
+    and a flat close button `a/Esc ✕` (tooltip "Close (a/Esc)").
+  - **Original** — a small reference thumbnail beside "Original · hold
+    Space to compare", dim and frameless so it never reads as a preset.
+    Reverting is `x`, not a click on it.
+  - **Presets** — one **row card** per configurable preset with an
+    auto-assigned hotkey (`1`, `2`, … capped at the mask's 8 slots): a
+    small preview thumbnail of that preset applied alone, `1  Auto-fix`,
+    and a check mark. An enabled preset's row is **highlighted and
+    checked**. Preferences can turn the thumbnails off for label-only rows;
+    the rows and the Original always show the **untransformed** image —
+    they are references for the colour presets alone and ignore a crop,
+    straighten or turn. More presets than fit the window scroll; the rows
+    below never do.
+  - **Transform** — one row of four icon buttons with key badges and
+    tooltips: crop `c`, straighten `r`, rotate left `[`, rotate right `]`
+    (the same actions as the keys).
+  - **Save state and actions** — one line saying *No edits yet*, *Unsaved
+    edits · original kept* or *Saved as …*, then **Save copy** `s` (naming
+    the file it will write, `as IMG_0001-enhanced.jpg`) beside **Revert**
+    `x`.
 
   Example:
   ```
-  Edit IMG_0001.jpg
+  Edit                       a/Esc ✕
+  [thumb] Original
+          hold Space to compare
   PRESETS
-   [thumb] Original
-   [thumb] 1  Auto-fix
-   [thumb] 2  Brightness
+  [thumb] 1  Auto-fix             ✓   <- on: highlighted + checked
+  [thumb] 2  Brightness
    …
+  [thumb] 8  Denoise
   TRANSFORM
-   [ Crop          c ]
-   [ Straighten    r ]
-   [ ⟲ Left [ ][ ⟳ Right ] ]
-  ACTIONS
-  Unsaved edits — s saves a copy (the original is never modified).
-   [ Save copy     s ]
+  [✂ c] [⟳ r] [↶ [] [↷ ]]
+  Unsaved edits · original kept
+  [⤓ Save copy   s] [↶ Revert x]
      as IMG_0001-enhanced.jpg
-   [ Revert all    x ]
-   [ Close     a/Esc ]
   ```
   While the panel is open the key-hint bar under the image lists its keys
   (see "Edit modes and the key-hint bar"). Presets are **layered**:
@@ -494,13 +510,18 @@ image's histogram.
   it back off. The digits are the **panel's keys**: with the panel closed
   they do nothing, so no edit can change without the panel showing it. A
   hotkey/card click does **not** close the panel (toggling combinations
-  while comparing is the point); `Esc` or re-pressing `a` closes it and
-  **keeps** the edit on screen — `Esc` never discards. **`x`** (or *Revert
-  all*) drops every edit, presets and transform, with a status line; with
-  the panel closed `x` only says where it works. `c`, `r`, `[` and `]`
-  open the panel first when it is closed, then act. The panel stays open
-  across navigation (re-titled, re-previewed and its Save target renamed
-  for the new image) and is hidden with the grid, back with the large view.
+  while comparing is the point); `Esc`, re-pressing `a` or the close
+  button closes it and **keeps** the edit on screen — `Esc` never
+  discards. Closing the panel while a crop or straighten tool is up (its
+  close button, the menu) cancels the tool first, as `Esc` would, so no
+  tool is ever left running without the panel. **`x`** (or *Revert*)
+  drops every edit, presets and transform, with a status line; with the
+  panel closed `x` only says where it works. `c`, `r`, `[` and `]` open
+  the panel first when it is closed, then act. The panel stays open across
+  navigation (re-previewed and its Save target renamed for the new image)
+  and is **hidden** with the grid, back with the large view — while hidden
+  it is no key mode: digits do nothing, `x` says it works in the large
+  view, `Esc` goes straight on to the grid's marks / quit steps.
 - **Hold `Space`** shows the original; release shows the current edit — with
   or without the panel.
 - Presets are GEGL op graphs (e.g. Auto-fix = `gegl:stretch-contrast` →
@@ -538,7 +559,7 @@ image's histogram.
   Cancel plus an error message: the preview is kept and nothing proceeds, so
   an unwritable destination can never cost the enhancement. `s` clears
   dirty by putting the work on disk (see above); toggling every preset back
-  off, or `x` / *Revert all* with the panel open, discards it directly
+  off, or `x` / *Revert* with the panel open, discards it directly
   (explicit, no prompt). `Esc` and `0` never do. Slideshow auto-advance is the one exception: it discards a dirty
   preview silently rather than blocking on a prompt no one is there to
   answer.
@@ -605,12 +626,15 @@ While a tool is up the key-hint bar under the image lists its keys.
     `Shift+l` the right, `Shift+k` the top, `Shift+j` the bottom),
     `Ctrl`+`h`/`j`/`k`/`l` **shrink** that side (moves it in) — all four
     edges alike, 1 % of the image's shorter side per press. `a` cycles the
-    aspect lock **free → original (the image's own shape) → 1:1 → 3:2 → 4:3
-    → 16:9 → free**, each the largest such rectangle centred inside the
+    aspect lock **free → 1:1 → 3:2 → 4:3 → 16:9 → original (the image's own
+    shape) → free**, each the largest such rectangle centred inside the
     rectangle as it was before the run of `a` presses (so cycling never
     shrinks it, and coming round to *free* gives that rectangle back); the
-    status line names the lock. The digits are not crop keys (`0` is zoom,
-    `1`–`8` the panel's presets).
+    status line names the lock and the next one (`Crop aspect: 1:1 (a:
+    next is 3:2)`). *Original* comes last because the tool starts on the
+    whole image, where it changes nothing — as the first press it made `a`
+    look dead. The digits are not crop keys (`0` is zoom, `1`–`8` the
+    panel's presets).
   - `Enter` applies (`gegl:crop`; a rectangle still covering the whole image
     removes the crop), `Esc` or `c` again cancels and restores. `Enter` and
     a drag are refused while `Space` holds the original ("Release Space
@@ -664,7 +688,7 @@ While a tool is up the key-hint bar under the image lists its keys.
   a nudged straighten goes back to the angle it started with, the crop
   tool's rectangle is dropped and the crop already applied stays. So does
   discarding the preview
-  under it — `x` / *Revert all*, the gate's Discard, the slideshow's
+  under it — `x` / *Revert*, the gate's Discard, the slideshow's
   auto-advance, or a render that failed — the tool is gone before the
   transform is reset, so nothing it was editing can come back on a later
   nudge or `Enter`. `?` lists the tool keys under *Crop tool (c)* and
@@ -694,16 +718,17 @@ Hotkeys are not hidden — each is printed on the element it triggers:
 
 - **Menu items** show their key right-aligned, e.g. `Copy   Ctrl+c`,
   `Move …   m`, `Open in …   e`, `Scripts …   !`, `Edit panel   a`,
-  `Crop   c`, `Straighten   r`, `Rotate 90° clockwise   ]`, `Rotate 90°
-  counter-clockwise   [`, `Save edited copy   s`, `Revert all edits   x`,
+  `Crop   c`, `Straighten   r`, `Rotate left   [`, `Rotate right   ]`,
+  `Save edited copy   s`, `Revert all edits   x` (short labels; `?` keeps
+  the long descriptions),
   `Show original (hold)   Space`, `Slideshow   S`, `Trash   d`, `Delete   D`,
   `Preferences …   ,`, `Fullscreen   f`.
 - **Header-bar buttons** show the key in the tooltip (plus an underline
   mnemonic where GTK draws one).
 - **Popup** entries (move / open-in / scripts) and the edit panel's
   preset cards lead with the hotkey: `1  irregular ninja`, `1  GIMP`,
-  `1  usbimport`, `1  Auto-fix`; the panel's Transform and Actions buttons
-  show theirs right-aligned (`Crop   c`, `Revert all   x`, `Close   a/Esc`).
+  `1  usbimport`, `1  Auto-fix`; the panel's other buttons carry a key
+  badge (`✂ c`, `Save copy   s`, `Revert   x`, `a/Esc ✕`).
 - **Key-hint bar**: while the edit panel or a tool is active, a bar under
   the image lists that mode's live keys (see "Edit modes and the key-hint
   bar").
@@ -738,7 +763,7 @@ buttons and their hotkeys:
 
 App menu (via `F10`) items — each reachable by mnemonic, by arrows + `Enter`,
 and by click: Copy, Move…, Open in…, Scripts…, Edit panel, Crop, Straighten,
-Rotate 90° CW/CCW, Save edited copy, Revert all edits, Show original, Trash, Delete, Sort (by
+Rotate left/right, Save edited copy, Revert all edits, Show original, Trash, Delete, Sort (by
 name / capture time / size), background colour, hide-trashed toggle, empty
 `.Trash`, About, Preferences….
 The move popup and all dialogs (open, preferences, shortcuts overlay) are
