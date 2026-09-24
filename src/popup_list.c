@@ -238,8 +238,12 @@ _is_shown(GtkWidget *p_w) {
  * the popover's former parent, the window's stack -- i.e. its visible page,
  * the viewer in the large view. Never the window's first focusable widget
  * (GTK_DIR_TAB_FORWARD from the window), which is the header's "Previous
- * image" button: Enter/Space would then page back. Nothing found leaves no
- * focus; the window's global shortcuts work without one. */
+ * image" button: Enter/Space would then page back. When GTK hid the
+ * popover itself it also parked a ref and a deferred focus move on the
+ * window, which only a successful grab of a visible widget here cancels;
+ * should neither choice take the focus (both stack pages normally do),
+ * GTK's own fallback runs at its next after-paint and may land on that
+ * header button, and the popover lives until then. */
 static void
 _restore_focus(GtkRoot *p_root, GtkWidget *p_prev, GtkWidget *p_parent) {
    if (p_prev != NULL && gtk_widget_get_root(p_prev) == p_root &&
@@ -271,9 +275,10 @@ _unref_idle(gpointer p_pop) {
  * gtk_tooltip_unset_surface() in gtk_popover_unmap), so a tooltip timeout in
  * that gap calls gdk_surface_get_device_position(NULL): a critical. On a
  * window that is never painted that frame never comes. Clearing the focus
- * explicitly BEFORE the unparent parks no ref (and drops one GTK parked when
- * it hid the popover itself); _restore_focus() then places it at once,
- * where the user was before the list opened.
+ * explicitly BEFORE the unparent parks no ref; _restore_focus() then places
+ * it at once, where the user was before the list opened (and its grab is
+ * what drops the ref GTK parked when it hid the popover itself -- clearing
+ * to NULL does not, see _restore_focus()).
  *
  * OUR OWN REF. The teardown can run INSIDE gtk_popover_popdown() -- GTK
  * hides a popover by itself, e.g. one taller than the room it has, and
@@ -292,6 +297,12 @@ _detach(PopupList *p_list) {
    if (b_inside) {
       gtk_root_set_focus(p_root, NULL);
    }
+   /* The popover outlives p_list until the idle below. Its own "closed"
+    * handler would then point at freed data; none fires today (unparent
+    * does not hide), but that is a GTK detail not worth depending on. The
+    * row and key handlers need input, which an unparented popover never
+    * receives. */
+   g_signal_handlers_disconnect_by_data(p_pop, p_list);
    gtk_widget_unparent(p_pop);
    if (b_inside) {
       _restore_focus(p_root, p_list->p_prev_focus, p_parent);
