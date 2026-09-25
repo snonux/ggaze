@@ -7819,12 +7819,17 @@ test_user_presets_scroll_and_cap(void) {
    reset_user_presets();
 }
 
-/* Set the presets and wait for the render that change causes. */
+/* Set the presets and wait for the render that change causes -- one
+ * launched by the change itself (the render count), not a texture that
+ * happened to change. */
 static void
 set_user_presets_and_wait(GgazeWindow *p_win, const char *const *c_pairs,
                           guint u_n) {
-   GdkTexture *p_before = ref_viewer_texture(p_win);
+   guint       u_renders = ggaze_window_enhance_render_count(p_win);
+   GdkTexture *p_before  = ref_viewer_texture(p_win);
    set_user_presets(c_pairs, u_n);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(p_win), ==,
+                    u_renders + 1);
    wait_for_texture_change(p_win, p_before);
    g_object_unref(p_before);
 }
