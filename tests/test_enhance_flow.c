@@ -7930,6 +7930,38 @@ test_preferences_carry_the_edit(void) {
    reset_user_presets();
 }
 
+/* An export still running when Preferences moves the rows wrote the
+ * state in the old rows: it is reported, but it does not become the saved
+ * state. Here the two enabled presets swap: the same mask and strengths in
+ * the new rows, another chain -- recording the old export would call the
+ * swapped picture saved. */
+static void
+test_preferences_change_during_a_save(void) {
+   static const char *const BD[] = {_BETA, "Delta",
+                                    "gegl:saturation scale=0.2"};
+   static const char *const DB[] = {"Delta", "gegl:saturation scale=0.2",
+                                    _BETA};
+   set_user_presets(BD, 2);
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   for (guint u = 0; u < 8; u++) {
+      edit_key(fx.p_win, GDK_KEY_j, 0);
+   }
+   edit_key_and_wait(fx.p_win, GDK_KEY_Return, 0); /* Beta */
+   edit_key(fx.p_win, GDK_KEY_j, 0);
+   edit_key_and_wait(fx.p_win, GDK_KEY_Return, 0); /* Delta */
+   wait_for_title(fx.p_win, "Beta, Delta");
+   fire(fx.p_win, "win.enhance-save"); /* the worker runs ... */
+   set_user_presets(DB, 2);            /* ... while the rows move */
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   wait_for_title(fx.p_win, "Delta, Beta");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_null(find_label_prefix(find_panel(fx.p_win), "Saved as "));
+   tool_fx_close(&fx);
+   reset_user_presets();
+}
+
 /* ai2: the user presets as panel rows. */
 static void
 add_user_preset_tests(void) {
@@ -7939,6 +7971,8 @@ add_user_preset_tests(void) {
                    test_user_presets_scroll_and_cap);
    g_test_add_func("/enhance_flow/preferences_carry_the_edit",
                    test_preferences_carry_the_edit);
+   g_test_add_func("/enhance_flow/preferences_change_during_a_save",
+                   test_preferences_change_during_a_save);
 }
 
 int

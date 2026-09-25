@@ -160,6 +160,9 @@ editing remains a non-goal.
   in row order): the preview re-renders only when that changed, and the
   saved copy stays saved only while its key is unchanged. A list equal to
   the old one (any other Preferences key moved) changes nothing at all.
+  An export still running when the rows move wrote a state named in the
+  old rows: it is reported, but not recorded as the saved state (a prompt
+  too many at worst, never a lost edit).
 - **Adjustable strength (8i2).** A preset graph may mark **one** number as
   tunable with a placeholder that also declares its range:
   `{s:DEFAULT:MIN..MAX}` (step: a twentieth of the range) or

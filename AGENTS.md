@@ -202,7 +202,7 @@ src/gesture-math.{c,h} zoom about a point (wheel/keys/pinch) + swipe / two-finge
 src/transform.{c,h}   rotate 90 / straighten / crop state + the sizes the tools and the chain share
 src/tool-ctrl.{c,h}   optional modal crop (c) / straighten (r) session: viewer overlay, keys, drags
 src/edit-mode.{c,h}   optional edit-key router (active tool, then the open panel, before the global table) + the key-hint bar
-src/edit-history.{c,h} bounded undo/redo of edit steps over whole edit snapshots (mask + strengths + transform), with runs, plain C
+src/edit-history.{c,h} bounded undo/redo of edit steps over whole edit snapshots (32-bit mask + strengths + transform), with runs and a remap for a changed preset list, plain C
 src/preset-strength.{c,h} a preset graph's one tunable number {s:DEFAULT:MIN..MAX[:STEP]}: parse, clamp, step, C-locale text, plain C
 src/clipboard.{c,h}   image/png (displayed texture) or file-URI content providers
 src/thumbnail.{c,h}   freedesktop TMS cache (bounded pool)

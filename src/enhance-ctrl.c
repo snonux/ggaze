@@ -127,7 +127,12 @@ struct EnhanceCtrl {
                                                           * strengths ... */
    Transform t_saved_xf;   /* ... and this transform */
    char     *c_saved_name; /* basename of that export, for the panel */
-   gboolean  b_hint_shown; /* the "Space compares / s saves / a shows the
+   guint     u_list_gen;   /* bumped whenever a Preferences change moved
+                            * the preset rows (_carry_edit): an export
+                            * launched before it recorded its mask in the
+                            * old rows, so it must not become the saved
+                            * state (_save_done_cb) */
+   gboolean b_hint_shown;  /* the "Space compares / s saves / a shows the
                             * presets" status line was shown for this file
                             * (it is shown once per file, and only when a
                             * preset is applied with the panel closed) */
@@ -529,6 +534,7 @@ _carry_edit(EnhanceCtrl *p_ctrl, const _PresetMove *p_mv) {
    char *c_now = enhancer_chain_key(p_mv->p_new, p_ctrl->u_enhance_mask,
                                     p_ctrl->d_strength);
    _move_saved(p_ctrl, p_mv);
+   p_ctrl->u_list_gen++; /* an export in flight is in the old rows */
    edit_history_remap(p_ctrl->p_history, _move_snapshot, (gpointer)p_mv);
    _move_selection(p_ctrl, p_mv);
    _refresh_saved(p_ctrl);
@@ -780,12 +786,16 @@ typedef struct {
    Transform         t_xf;
    EnhanceSaveDoneFn fn_done;
    gpointer          p_done_data;
+   guint             u_list_gen; /* the preset rows u_mask is in */
 } _SaveReq;
 
 /* A finished export records the pair it wrote as the saved one; the preview
  * is then saved iff the state still is (or comes back to) that pair -- a
  * mask that moved on while the worker ran stays dirty, as before, but is
- * saved again the moment it is toggled back. */
+ * saved again the moment it is toggled back. An export launched before a
+ * Preferences change moved the preset rows (ai2) wrote a state named in
+ * the old rows: it is reported but not recorded, so the screen stays
+ * unsaved (a prompt too many, never a lost edit). */
 static void
 _save_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
@@ -795,7 +805,7 @@ _save_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    gboolean     b_ok   = enhancer_export_chain_finish(p_res, &p_err);
    if (!_disposed(p_ctrl)) {
       _save_report(p_ctrl, p_req->p_out, b_ok, p_err);
-      if (b_ok) {
+      if (b_ok && p_req->u_list_gen == p_ctrl->u_list_gen) {
          p_ctrl->b_have_saved = TRUE;
          p_ctrl->u_saved_mask = p_req->u_mask;
          p_ctrl->t_saved_xf   = p_req->t_xf;
@@ -855,6 +865,7 @@ enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
    p_req->u_mask         = p_ctrl->u_enhance_mask;
    p_req->t_xf           = p_ctrl->t_xf;
    memcpy(p_req->d_strength, p_ctrl->d_strength, sizeof(p_req->d_strength));
+   p_req->u_list_gen  = p_ctrl->u_list_gen;
    p_req->fn_done     = fn_done;
    p_req->p_done_data = p_done_data;
    char *c_name       = g_file_get_basename(p_out);
