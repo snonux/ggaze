@@ -24,7 +24,7 @@
 /* The syntax, for the error messages. */
 #define _SYNTAX "{s:DEFAULT:MIN..MAX} or {s:DEFAULT:MIN..MAX:STEP}"
 
-/* Fail with c_fmt (a printf format) as a G_IO_ERROR_INVALID_ARGUMENT. */
+/* Set the printf-style message as a G_IO_ERROR_INVALID_ARGUMENT; FALSE. */
 #define _FAIL(p_err, ...)                                                      \
    (g_set_error((p_err), G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,              \
                 "strength placeholder: " __VA_ARGS__),                         \

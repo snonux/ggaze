@@ -13,9 +13,9 @@
  * caller renders whatever state it is handed, so nothing here knows how a
  * step is performed or reversed, and a new kind of edit needs no undo code
  * of its own. Storing whole snapshots instead of per-kind deltas is what
- * keeps x undoable (its "before" is every edit at once) and what makes
- * adding a field to the edit state (part 3's per-preset strengths) a
- * change to EditSnapshot and edit_snapshot_equal alone.
+ * keeps x undoable (its "before" is every edit at once) and what made
+ * adding a field to the edit state (8i2's per-preset strengths) a change
+ * to EditSnapshot and edit_snapshot_equal alone.
  *
  * The usual linear model: a new step after an undo drops the steps that
  * could have been redone; the history is bounded (EDIT_HISTORY_MAX_STEPS
@@ -23,8 +23,9 @@
  * equals its before (a crop applied over the crop already there, x with
  * nothing to revert under a tool) is no step and is not recorded.
  *
- * RUNS. A burst of steps of one kind on one target -- part 3's h / l
- * strength nudges on one preset -- should undo in one go, not one nudge
+ * RUNS. A burst of steps of one kind on one target -- 8i2's h / l
+ * strength nudges on one preset, or one drag of its slider -- should undo
+ * in one go, not one nudge
  * at a time. edit_history_push_run coalesces into the newest step while a
  * run of the same kind and key is open: its before stays, its after and
  * label move on (and a run that comes back to where it started is no step
@@ -47,20 +48,32 @@
 
 G_BEGIN_DECLS
 
+/* The presets a snapshot holds a strength for: the mask's 8 bits (the
+ * enhancer's GGAZE_ENHANCE_MAX_PRESETS, which enhance-ctrl.c asserts
+ * equal; this plain-C module does not include the GEGL-side header). */
+#define EDIT_SNAPSHOT_PRESETS 8
+
 /* The whole edit state of one image: what undo / redo restore. Plain data
  * (copied by assignment). Adding a field means adding it here, setting it
  * in edit_snapshot_init and comparing it in edit_snapshot_equal -- nothing
  * else in this module looks inside. */
 typedef struct {
-   guint8    u_mask; /* bit i: preset i enabled (layered) */
-   Transform t_xf;   /* rotate 90 / straighten / crop (the committed one) */
+   guint8  u_mask; /* bit i: preset i enabled (layered) */
+   gdouble d_strength[EDIT_SNAPSHOT_PRESETS]; /* preset i's tunable number
+                                               * (8i2), canonical
+                                               * (preset-strength.h) so ==
+                                               * is "renders the same"; 0
+                                               * for a preset without one */
+   Transform t_xf; /* rotate 90 / straighten / crop (the committed one) */
 } EditSnapshot;
 
-/* The untouched original: no preset, the identity transform. */
+/* The untouched original: no preset, every strength 0, the identity
+ * transform. (The controller then puts each preset's default strength in:
+ * the defaults are the preset list's, which this module does not know.) */
 void edit_snapshot_init(EditSnapshot *p_s);
 
-/* TRUE iff both describe the same edit state (the transform compared by
- * transform_equal). */
+/* TRUE iff both describe the same edit state (the strengths compared
+ * exactly -- they are canonical --, the transform by transform_equal). */
 gboolean edit_snapshot_equal(const EditSnapshot *p_a, const EditSnapshot *p_b);
 
 /* What a step was. Only runs look at it (a run coalesces steps of ONE
@@ -71,7 +84,7 @@ typedef enum {
    EDIT_STEP_CROP,       /* the crop tool applied */
    EDIT_STEP_STRAIGHTEN, /* the straighten tool applied */
    EDIT_STEP_REVERT,     /* x: every edit dropped */
-   EDIT_STEP_STRENGTH,   /* a preset's strength changed (part 3; runs) */
+   EDIT_STEP_STRENGTH,   /* a preset's strength changed (8i2; runs) */
 } EditStepKind;
 
 /* The default bound: this many steps, then the oldest is forgotten. */

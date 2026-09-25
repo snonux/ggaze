@@ -1120,6 +1120,233 @@ test_export_dest_for(void) {
    g_free(c_dir);
 }
 
+/* --- 8i2: tunable preset strengths ------------------------------------- */
+
+/* A 16x16 RGBA float gradient: every op the built-ins run changes it. */
+static GeglBuffer *
+gradient_buffer(void) {
+   GeglRectangle rect  = {0, 0, 16, 16};
+   GeglBuffer   *p_buf = gegl_buffer_new(&rect, babl_format("RGBA float"));
+   gfloat        f_px[16 * 16 * 4];
+   for (guint u = 0; u < 16 * 16; u++) {
+      f_px[u * 4 + 0] = (gfloat)(u % 16) / 15.0f;
+      f_px[u * 4 + 1] = (gfloat)(u / 16) / 15.0f;
+      f_px[u * 4 + 2] = (gfloat)((u * 7) % 16) / 15.0f;
+      f_px[u * 4 + 3] = 1.0f;
+   }
+   gegl_buffer_set(p_buf, &rect, 0, babl_format("RGBA float"), f_px,
+                   GEGL_AUTO_ROWSTRIDE);
+   return (p_buf);
+}
+
+/* TRUE iff the two buffers hold the very same RGBA float pixels. */
+static gboolean
+same_pixels(GeglBuffer *p_a, GeglBuffer *p_b) {
+   const GeglRectangle *p_ra = gegl_buffer_get_extent(p_a);
+   const GeglRectangle *p_rb = gegl_buffer_get_extent(p_b);
+   if (p_ra->width != p_rb->width || p_ra->height != p_rb->height) {
+      return (FALSE);
+   }
+   gsize   u_n = (gsize)p_ra->width * (gsize)p_ra->height * 4;
+   gfloat *f_a = g_new(gfloat, u_n);
+   gfloat *f_b = g_new(gfloat, u_n);
+   gegl_buffer_get(p_a, p_ra, 1.0, babl_format("RGBA float"), f_a,
+                   GEGL_AUTO_ROWSTRIDE, GEGL_ABYSS_NONE);
+   gegl_buffer_get(p_b, p_rb, 1.0, babl_format("RGBA float"), f_b,
+                   GEGL_AUTO_ROWSTRIDE, GEGL_ABYSS_NONE);
+   gboolean b_same = memcmp(f_a, f_b, u_n * sizeof(gfloat)) == 0;
+   g_free(f_a);
+   g_free(f_b);
+   return (b_same);
+}
+
+/* p_in through one node made the way the built-ins were before 8i2
+ * (gegl_node_new_child with the property set programmatically; c_prop
+ * NULL: the op's own defaults). */
+static GeglBuffer *
+old_builtin(GeglBuffer *p_in, const char *c_op, const char *c_prop,
+            gdouble d_value) {
+   GeglNode   *p_graph = gegl_node_new();
+   GeglBuffer *p_out   = NULL;
+   GeglNode   *p_src   = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-source", "buffer", p_in, NULL);
+   GeglNode *p_op = gegl_node_new_child(p_graph, "operation", c_op, NULL);
+   if (c_prop != NULL) {
+      gegl_node_set(p_op, c_prop, d_value, NULL);
+   }
+   GeglNode *p_sink = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-sink", "buffer", &p_out, NULL);
+   gegl_node_link_many(p_src, p_op, p_sink, NULL);
+   gegl_node_process(p_sink);
+   g_object_unref(p_graph);
+   return (p_out);
+}
+
+/* The built-in graphs at their default strength ARE the pre-8i2 presets:
+ * the substituted text is the graph they had, and the pixels are the ones
+ * the old programmatic nodes produced. Auto-fix and Warm have nothing to
+ * tune. */
+static void
+test_builtin_defaults_reproduce(void) {
+   static const struct {
+      const char *c_name;
+      const char *c_graph; /* at the default; NULL: not tunable */
+      const char *c_op;
+      const char *c_prop; /* NULL: the op's own defaults */
+      gdouble     d_value;
+   } CASES[] = {
+      {"Auto-fix", NULL, "gegl:stretch-contrast", NULL, 0},
+      {"Brightness", "gegl:exposure exposure=0.5", "gegl:exposure", "exposure",
+       0.5},
+      {"Contrast", "gegl:brightness-contrast contrast=1.3",
+       "gegl:brightness-contrast", "contrast", 1.3},
+      {"Saturation", "gegl:saturation scale=1.4", "gegl:saturation", "scale",
+       1.4},
+      {"Warm", NULL, "gegl:color-enhance", NULL, 0},
+      {"Cool", "gegl:exposure exposure=-0.3", "gegl:exposure", "exposure",
+       -0.3},
+      {"Sharpen", "gegl:unsharp-mask scale=0.5", "gegl:unsharp-mask", NULL, 0},
+      {"Denoise", "gegl:noise-reduction iterations=4", "gegl:noise-reduction",
+       NULL, 0},
+   };
+   Enhancer        *p_e   = enhancer_new();
+   const GPtrArray *p_all = enhancer_get_presets(p_e);
+   GeglBuffer      *p_in  = gradient_buffer();
+   gdouble          d_def[GGAZE_ENHANCE_MAX_PRESETS];
+   enhancer_default_strengths(p_all, d_def);
+   for (guint u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_all, u);
+      g_assert_cmpstr(p_pr->c_name, ==, CASES[u].c_name);
+      g_assert_cmpint(p_pr->b_tunable, ==, CASES[u].c_graph != NULL);
+      if (CASES[u].c_graph != NULL) {
+         char *c_graph = preset_strength_substitute(
+            p_pr->c_graph, p_pr->t_strength.d_default, NULL);
+         g_assert_cmpstr(c_graph, ==, CASES[u].c_graph);
+         g_free(c_graph);
+      } else {
+         g_assert_cmpfloat(d_def[u], ==, 0.0);
+      }
+      GError     *p_err = NULL;
+      GeglBuffer *p_new = enhancer_apply(p_in, p_pr, &p_err);
+      g_assert_no_error(p_err);
+      GeglBuffer *p_old =
+         old_builtin(p_in, CASES[u].c_op, CASES[u].c_prop, CASES[u].d_value);
+      if (!same_pixels(p_new, p_old)) {
+         g_error("%s renders differently from before 8i2", CASES[u].c_name);
+      }
+      g_object_unref(p_new);
+      g_object_unref(p_old);
+   }
+   g_object_unref(p_in);
+   enhancer_delete(p_e);
+}
+
+/* A strength reaches the pixels through enhancer_presets_resolve (the
+ * copy the render and the export run): Brightness at 1.2 renders exactly
+ * as a plain "exposure=1.2" graph, and differs from the default. The copy
+ * holds no placeholder any more; the original list is untouched. */
+static void
+test_resolve_strengths(void) {
+   Enhancer        *p_e   = enhancer_new();
+   const GPtrArray *p_all = enhancer_get_presets(p_e);
+   gdouble          d_s[GGAZE_ENHANCE_MAX_PRESETS];
+   enhancer_default_strengths(p_all, d_s);
+   g_assert_cmpfloat(d_s[1], ==, 0.5);
+   g_assert_cmpfloat(d_s[7], ==, 4.0);
+   d_s[1]                      = 1.2;
+   d_s[3]                      = 9.0; /* clamped to Saturation's 2 */
+   GPtrArray            *p_res = enhancer_presets_resolve(p_all, d_s);
+   const EnhancerPreset *p_b   = g_ptr_array_index(p_res, 1);
+   g_assert_cmpstr(p_b->c_graph, ==, "gegl:exposure exposure=1.2");
+   g_assert_false(p_b->b_tunable);
+   g_assert_cmpstr(((EnhancerPreset *)g_ptr_array_index(p_res, 3))->c_graph, ==,
+                   "gegl:saturation scale=2");
+   g_assert_true(
+      ((const EnhancerPreset *)g_ptr_array_index((GPtrArray *)p_all, 1))
+         ->b_tunable);
+
+   GeglBuffer *p_in   = gradient_buffer();
+   GeglBuffer *p_got  = enhancer_apply_chain(p_in, p_res, 0x02, NULL, NULL);
+   GeglBuffer *p_want = old_builtin(p_in, "gegl:exposure", "exposure", 1.2);
+   GeglBuffer *p_def =
+      enhancer_apply_chain(p_in, p_all, 0x02, NULL, NULL); /* unresolved */
+   g_assert_true(same_pixels(p_got, p_want));
+   g_assert_false(same_pixels(p_got, p_def));
+   g_object_unref(p_got);
+   g_object_unref(p_want);
+   g_object_unref(p_def);
+   g_object_unref(p_in);
+   g_ptr_array_unref(p_res);
+   /* NULL strengths: a plain copy. */
+   p_res = enhancer_presets_resolve(p_all, NULL);
+   g_assert_cmpuint(p_res->len, ==, p_all->len);
+   g_assert_true(((EnhancerPreset *)g_ptr_array_index(p_res, 1))->b_tunable);
+   g_ptr_array_unref(p_res);
+   enhancer_delete(p_e);
+}
+
+/* The title names a strength only where it is not the default. */
+static void
+test_describe_state(void) {
+   Enhancer        *p_e   = enhancer_new();
+   const GPtrArray *p_all = enhancer_get_presets(p_e);
+   gdouble          d_s[GGAZE_ENHANCE_MAX_PRESETS];
+   enhancer_default_strengths(p_all, d_s);
+   char *c_desc = enhancer_describe_state(p_all, 0x0b, d_s);
+   g_assert_cmpstr(c_desc, ==, "Auto-fix, Brightness, Saturation");
+   g_free(c_desc);
+   d_s[1] = 0.6;
+   d_s[3] = 0.9;
+   d_s[5] = -1.0; /* Cool, not enabled: not named */
+   c_desc = enhancer_describe_state(p_all, 0x0b, d_s);
+   g_assert_cmpstr(c_desc, ==, "Auto-fix, Brightness +0.6, Saturation 0.9");
+   g_free(c_desc);
+   c_desc = enhancer_describe_state(p_all, 0x0b, NULL);
+   g_assert_cmpstr(c_desc, ==, "Auto-fix, Brightness, Saturation");
+   g_free(c_desc);
+   g_assert_null(enhancer_describe_state(p_all, 0, d_s));
+   enhancer_delete(p_e);
+}
+
+/* A user preset with a placeholder is tunable like a built-in; one with a
+ * malformed placeholder is kept (Preferences still lists it), is not
+ * tunable, and fails to render with the parse message -- it never reaches
+ * GEGL with "{s:" read as 0. */
+static void
+test_user_placeholder_presets(void) {
+   Enhancer  *p_e     = enhancer_new();
+   GPtrArray *p_pairs = settings_pair_array_new();
+   g_ptr_array_add(p_pairs,
+                   settings_pair_new("Vivid", "gegl:saturation "
+                                              "scale={s:1.6:1..3:0.2}"));
+   g_ptr_array_add(p_pairs,
+                   settings_pair_new("Bad", "gegl:exposure exposure={s:x}"));
+   enhancer_set_user_presets(p_e, p_pairs);
+   const GPtrArray      *p_all = enhancer_get_presets(p_e);
+   const EnhancerPreset *p_v   = g_ptr_array_index((GPtrArray *)p_all, 8);
+   const EnhancerPreset *p_b   = g_ptr_array_index((GPtrArray *)p_all, 9);
+   g_assert_true(p_v->b_tunable);
+   g_assert_cmpfloat(p_v->t_strength.d_default, ==, 1.6);
+   g_assert_cmpfloat(p_v->t_strength.d_step, ==, 0.2);
+   g_assert_false(p_b->b_tunable);
+   g_assert_cmpstr(p_b->c_graph, ==, "gegl:exposure exposure={s:x}");
+   GeglBuffer *p_in  = gradient_buffer();
+   GError     *p_err = NULL;
+   GeglBuffer *p_out = enhancer_apply(p_in, p_v, &p_err);
+   g_assert_no_error(p_err);
+   GeglBuffer *p_want = old_builtin(p_in, "gegl:saturation", "scale", 1.6);
+   g_assert_true(same_pixels(p_out, p_want));
+   g_object_unref(p_out);
+   g_object_unref(p_want);
+   g_assert_null(enhancer_apply(p_in, p_b, &p_err));
+   g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+   g_assert_nonnull(g_strstr_len(p_err->message, -1, "strength placeholder"));
+   g_clear_error(&p_err);
+   g_object_unref(p_in);
+   g_ptr_array_unref(p_pairs);
+   enhancer_delete(p_e);
+}
+
 int
 main(int argc, char **argv) {
    gegl_init(&argc, &argv);
@@ -1151,5 +1378,11 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer/preview_orientation", test_preview_orientation);
    g_test_add_func("/enhancer/user_graph_presets", test_user_graph_presets);
    g_test_add_func("/enhancer/export_dest_for", test_export_dest_for);
+   g_test_add_func("/enhancer/builtin_defaults_reproduce",
+                   test_builtin_defaults_reproduce);
+   g_test_add_func("/enhancer/resolve_strengths", test_resolve_strengths);
+   g_test_add_func("/enhancer/describe_state", test_describe_state);
+   g_test_add_func("/enhancer/user_placeholder_presets",
+                   test_user_placeholder_presets);
    return g_test_run();
 }

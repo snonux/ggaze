@@ -36,12 +36,20 @@ void
 edit_snapshot_init(EditSnapshot *p_s) {
    g_return_if_fail(p_s != NULL);
    p_s->u_mask = 0;
+   for (guint u = 0; u < EDIT_SNAPSHOT_PRESETS; u++) {
+      p_s->d_strength[u] = 0.0;
+   }
    transform_init(&p_s->t_xf);
 }
 
 gboolean
 edit_snapshot_equal(const EditSnapshot *p_a, const EditSnapshot *p_b) {
    g_return_val_if_fail(p_a != NULL && p_b != NULL, FALSE);
+   for (guint u = 0; u < EDIT_SNAPSHOT_PRESETS; u++) {
+      if (p_a->d_strength[u] != p_b->d_strength[u]) {
+         return (FALSE);
+      }
+   }
    return (p_a->u_mask == p_b->u_mask &&
            transform_equal(&p_a->t_xf, &p_b->t_xf));
 }

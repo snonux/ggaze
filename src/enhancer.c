@@ -73,66 +73,31 @@ struct Enhancer {
 
 /* --- built-in preset table ------------------------------------------------
  *
- * Adding a built-in is one row here: the name the UI shows and the function
- * that creates its GEGL node. Nothing else switches on the preset kind. */
-typedef GeglNode *(*EnhancerMakeOpFn)(GeglNode *p_graph);
-
-static GeglNode *
-_make_auto_fix(GeglNode *p_graph) {
-   return (
-      gegl_node_new_child(p_graph, "operation", "gegl:stretch-contrast", NULL));
-}
-
-static GeglNode *
-_make_brightness(GeglNode *p_graph) {
-   return (gegl_node_new_child(p_graph, "operation", "gegl:exposure",
-                               "exposure", 0.5, NULL));
-}
-
-static GeglNode *
-_make_contrast(GeglNode *p_graph) {
-   return (gegl_node_new_child(p_graph, "operation", "gegl:brightness-contrast",
-                               "contrast", 1.3, NULL));
-}
-
-static GeglNode *
-_make_saturation(GeglNode *p_graph) {
-   return (gegl_node_new_child(p_graph, "operation", "gegl:saturation", "scale",
-                               1.4, NULL));
-}
-
-static GeglNode *
-_make_warm(GeglNode *p_graph) {
-   return (
-      gegl_node_new_child(p_graph, "operation", "gegl:color-enhance", NULL));
-}
-
-static GeglNode *
-_make_cool(GeglNode *p_graph) {
-   return (gegl_node_new_child(p_graph, "operation", "gegl:exposure",
-                               "exposure", -0.3, NULL));
-}
-
-static GeglNode *
-_make_sharpen(GeglNode *p_graph) {
-   return (
-      gegl_node_new_child(p_graph, "operation", "gegl:unsharp-mask", NULL));
-}
-
-static GeglNode *
-_make_denoise(GeglNode *p_graph) {
-   return (
-      gegl_node_new_child(p_graph, "operation", "gegl:noise-reduction", NULL));
-}
-
+ * Adding a built-in is one row here: the name the UI shows and its GEGL
+ * graph -- the same text a user preset is, run by the same parser, so
+ * nothing else switches on the preset kind. The tunable numbers (8i2,
+ * preset-strength.h) DEFAULT to the exact values the built-ins were made
+ * with before (then as gegl_node_new_child properties), so the panel at
+ * its defaults renders the same pixels (tests/test_enhancer.c compares
+ * them); the ranges stay inside each op's own ui range (gegl 0.4.72:
+ * exposure's -10..10, brightness-contrast's contrast 0..2, saturation's
+ * scale 0..2, unsharp-mask's scale 0..10, noise-reduction's iterations
+ * 0..32) where a step still visibly changes the picture. Auto-fix and Warm
+ * have no number to tune: stretch-contrast and color-enhance take none.
+ * Sharpen and Denoise had no properties set; their defaults are the ops'
+ * own (unsharp-mask scale 0.5, noise-reduction iterations 4). */
 static const struct {
-   const char      *c_name;
-   EnhancerMakeOpFn fn_make;
+   const char *c_name;
+   const char *c_graph;
 } BUILTINS[] = {
-   {"Auto-fix", _make_auto_fix}, {"Brightness", _make_brightness},
-   {"Contrast", _make_contrast}, {"Saturation", _make_saturation},
-   {"Warm", _make_warm},         {"Cool", _make_cool},
-   {"Sharpen", _make_sharpen},   {"Denoise", _make_denoise},
+   {"Auto-fix", "gegl:stretch-contrast"},
+   {"Brightness", "gegl:exposure exposure={s:0.5:-2..2:0.1}"},
+   {"Contrast", "gegl:brightness-contrast contrast={s:1.3:0..2:0.05}"},
+   {"Saturation", "gegl:saturation scale={s:1.4:0..2:0.1}"},
+   {"Warm", "gegl:color-enhance"},
+   {"Cool", "gegl:exposure exposure={s:-0.3:-2..0:0.1}"},
+   {"Sharpen", "gegl:unsharp-mask scale={s:0.5:0..3:0.1}"},
+   {"Denoise", "gegl:noise-reduction iterations={s:4:1..12:1}"},
 };
 
 /* --- preset list --------------------------------------------------------- */
@@ -147,12 +112,19 @@ _preset_free(gpointer p) {
    }
 }
 
+/* A preset of c_name running c_graph; its tunable number, if any, is
+ * parsed here once (a malformed placeholder leaves it on / off only -- the
+ * render reports the parse error). */
 static EnhancerPreset *
 _preset_new(const char *c_name, const char *c_graph, int i_builtin) {
    EnhancerPreset *p_pr = g_new0(EnhancerPreset, 1);
    p_pr->c_name         = g_strdup(c_name);
-   p_pr->c_graph        = g_strdup(c_graph);
+   p_pr->c_graph        = g_strdup(c_graph != NULL ? c_graph : "");
    p_pr->i_builtin      = i_builtin;
+   if (!preset_strength_parse(p_pr->c_graph, &p_pr->b_tunable,
+                              &p_pr->t_strength, NULL)) {
+      p_pr->b_tunable = FALSE;
+   }
    return (p_pr);
 }
 
@@ -174,7 +146,8 @@ _presets_copy(const GPtrArray *p_src) {
 static void
 _add_builtins(GPtrArray *p_list) {
    for (gsize u = 0; u < G_N_ELEMENTS(BUILTINS); u++) {
-      g_ptr_array_add(p_list, _preset_new(BUILTINS[u].c_name, NULL, 1));
+      g_ptr_array_add(p_list,
+                      _preset_new(BUILTINS[u].c_name, BUILTINS[u].c_graph, 1));
    }
 }
 
@@ -223,25 +196,79 @@ enhancer_get_presets(Enhancer *p_e) {
 
 char *
 enhancer_describe_mask(const GPtrArray *p_presets, guint8 u_mask) {
+   return (enhancer_describe_state(p_presets, u_mask, NULL));
+}
+
+/* Append preset p_pr's title name to p_str: its name, and its strength
+ * when it has one that is not its default (d_value). */
+static void
+_append_name(GString *p_str, const EnhancerPreset *p_pr, gdouble d_value) {
+   if (p_str->len > 0) {
+      g_string_append(p_str, ", ");
+   }
+   g_string_append(p_str, p_pr->c_name);
+   if (p_pr->b_tunable && preset_strength_clamp(&p_pr->t_strength, d_value) !=
+                             preset_strength_clamp(&p_pr->t_strength, NAN)) {
+      char *c_label = preset_strength_label(&p_pr->t_strength, d_value);
+      g_string_append_printf(p_str, " %s", c_label);
+      g_free(c_label);
+   }
+}
+
+char *
+enhancer_describe_state(const GPtrArray *p_presets, guint8 u_mask,
+                        const gdouble *pd_strength) {
    if (p_presets == NULL || u_mask == 0) {
       return (NULL);
    }
    GString *p_str = g_string_new(NULL);
    for (guint u = 0; u < p_presets->len && u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
-      if ((u_mask & (guint8)(1u << u)) == 0) {
-         continue;
+      if ((u_mask & (guint8)(1u << u)) != 0) {
+         _append_name(p_str, g_ptr_array_index((GPtrArray *)p_presets, u),
+                      pd_strength != NULL ? pd_strength[u] : NAN);
       }
-      const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_presets, u);
-      if (p_str->len > 0) {
-         g_string_append(p_str, ", ");
-      }
-      g_string_append(p_str, p_pr->c_name);
    }
    if (p_str->len == 0) {
       g_string_free(p_str, TRUE);
       return (NULL);
    }
    return (g_string_free(p_str, FALSE));
+}
+
+void
+enhancer_default_strengths(const GPtrArray *p_presets, gdouble *pd_out) {
+   g_return_if_fail(pd_out != NULL);
+   for (guint u = 0; u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
+      const EnhancerPreset *p_pr =
+         p_presets != NULL && u < p_presets->len
+            ? g_ptr_array_index((GPtrArray *)p_presets, u)
+            : NULL;
+      pd_out[u] = p_pr != NULL && p_pr->b_tunable
+                     ? preset_strength_clamp(&p_pr->t_strength, NAN)
+                     : 0.0;
+   }
+}
+
+GPtrArray *
+enhancer_presets_resolve(const GPtrArray *p_presets,
+                         const gdouble   *pd_strength) {
+   GPtrArray *p_out = _presets_copy(p_presets);
+   for (guint u = 0;
+        pd_strength != NULL && u < p_out->len && u < GGAZE_ENHANCE_MAX_PRESETS;
+        u++) {
+      EnhancerPreset *p_pr       = g_ptr_array_index(p_out, u);
+      char           *c_resolved = NULL;
+      if (p_pr->b_tunable) {
+         c_resolved =
+            preset_strength_substitute(p_pr->c_graph, pd_strength[u], NULL);
+      }
+      if (c_resolved != NULL) {
+         g_free(p_pr->c_graph);
+         p_pr->c_graph   = c_resolved; /* no placeholder left, so */
+         p_pr->b_tunable = FALSE;      /* nothing to tune in the copy */
+      }
+   }
+   return (p_out);
 }
 
 /* --- export destination --------------------------------------------------- */
@@ -321,12 +348,21 @@ _set_prop(GeglNode *p_node, const char *c_pair, GError **p_err) {
    return (b_ok);
 }
 
-/* Parse a user graph string ("gegl:op prop=v gegl:op2 ...") into nodes
- * chained after p_prev. Returns the last node, or NULL with p_err. */
+/* Parse a graph string ("gegl:op prop=v gegl:op2 ...") into nodes chained
+ * after p_prev. A tunable number still in it (a preset list that was not
+ * resolved, enhancer_presets_resolve) runs at its default; a malformed
+ * placeholder fails with its message rather than reaching the property
+ * parser, which would read "{s:..." as 0. Returns the last node, or NULL
+ * with p_err. */
 static GeglNode *
 _make_user_chain(GeglNode *p_graph, GeglNode *p_prev, const char *c_graph,
                  GError **p_err) {
-   char    **pp_tok = g_strsplit_set(c_graph, " \t\n", -1);
+   char *c_plain = preset_strength_substitute(c_graph, NAN, p_err);
+   if (c_plain == NULL) {
+      return (NULL);
+   }
+   char **pp_tok = g_strsplit_set(c_plain, " \t\n", -1);
+   g_free(c_plain);
    GeglNode *p_last = p_prev;
    GeglNode *p_node = NULL;
    gboolean  b_ok   = TRUE;
@@ -359,24 +395,12 @@ _make_user_chain(GeglNode *p_graph, GeglNode *p_prev, const char *c_graph,
 }
 
 /* Append p_preset's node(s) after p_prev in p_graph; returns the new tail
- * or NULL with p_err. Built-ins come from BUILTINS[], user presets from
- * their graph string. */
+ * or NULL with p_err. Built-ins and user presets are both graph strings
+ * (BUILTINS[] above). */
 static GeglNode *
 _append_preset(GeglNode *p_graph, GeglNode *p_prev,
                const EnhancerPreset *p_preset, GError **p_err) {
-   if (p_preset->c_graph != NULL) {
-      return (_make_user_chain(p_graph, p_prev, p_preset->c_graph, p_err));
-   }
-   for (gsize u = 0; u < G_N_ELEMENTS(BUILTINS); u++) {
-      if (g_str_equal(BUILTINS[u].c_name, p_preset->c_name)) {
-         GeglNode *p_op = BUILTINS[u].fn_make(p_graph);
-         gegl_node_link(p_prev, p_op);
-         return (p_op);
-      }
-   }
-   g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-               "enhancer: unknown preset '%s'", p_preset->c_name);
-   return (NULL);
+   return (_make_user_chain(p_graph, p_prev, p_preset->c_graph, p_err));
 }
 
 /* --- geometric transform nodes (decision #35) ---------------------------
