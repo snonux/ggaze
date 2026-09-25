@@ -26,7 +26,7 @@ ggaze
 ├── delete-confirm.{c,h}  # >1-target permanent-delete confirm (captured targets, folder re-check)
 ├── dialog-util.{c,h}     # alert-dialog toplevel lookup shared by the two dialog modules
 ├── enhance-ctrl.{c,h}    # (optional) enhance feature controller: mask, previews, side panel, saved flag, async save, edit undo/redo
-├── edit-history.{c,h}    # bounded undo/redo of edit steps over whole edit snapshots (mask + strengths + transform), with runs, plain C
+├── edit-history.{c,h}    # bounded undo/redo of edit steps over whole edit snapshots (32-bit mask + strengths + transform), with runs and a remap for a changed preset list, plain C
 ├── preset-strength.{c,h} # a preset graph's one tunable number {s:DEFAULT:MIN..MAX[:STEP]}: parse, clamp, step, C-locale text, plain C
 ├── enhance-ui.{c,h}      # (optional) pure enhance side-panel widget construction
 ├── popup_list.{c,h}      # shared hotkey list popover (e / ! / m)
@@ -227,8 +227,11 @@ ggaze
   and `scripts` — an ordered `a(ss)` array of `(name, command)` pairs used by
   the `!` run-script popup (`%f` = current path, `%d` = current folder; run
   via `/bin/sh -c`), and `enhance-presets` — an ordered `a(ss)` array of
-  `(name, gegl-graph)` pairs for the `a` enhance popup (GEGL only). List
-  order = hotkey order (`1`, `2`, …).
+  `(name, gegl-graph)` pairs: rows of the `a` edit panel after the eight
+  built-ins (GEGL only; at most 24, decision #52). List order = hotkey
+  order (`1`, `2`, …) in the `m` / `e` / `!` popups; in the edit panel it
+  is row order, the digits `1`-`8` being the built-ins' and the user rows
+  reached with `j` / `k`.
 
 ## Data flow (next image, large view)
 

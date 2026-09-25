@@ -69,7 +69,7 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `Ctrl+c`          | copy image (or marked files) to the clipboard |
 | `a`               | the GEGL **edit panel** (optional): presets, crop, straighten, rotate, save, revert — every button shows its key, and a key-hint bar under the image lists the live keys |
 | `1`–`8`           | toggle preset N (layered) — only while the edit panel is open (large view) |
-| `j`/`k`, `Enter`, `h`/`l` | with the edit panel open: select a preset card, toggle it, lower / raise its **strength** (`Shift` five steps) — the selected card also shows a strength slider; the arrows stay global, so `←`/`→` (or `Page Up`/`Page Down`) change the image meanwhile |
+| `j`/`k`, `Enter`, `h`/`l` | with the edit panel open: select a preset card (any row — your own presets from Preferences follow the eight built-ins, and the list scrolls), toggle it, lower / raise its **strength** (`Shift` five steps) — the selected card also shows a strength slider; the arrows stay global, so `←`/`→` (or `Page Up`/`Page Down`) change the image meanwhile |
 | `c`               | crop tool (GEGL; opens the panel): drag, or `h`/`j`/`k`/`l` move, `Shift+h/j/k/l` grow / `Ctrl+h/j/k/l` shrink that side, `a` cycles the aspect (free, 1:1, 3:2, 4:3, 16:9, original); `Enter` applies, `Esc` cancels |
 | `r`               | straighten tool (GEGL; opens the panel): drag along the horizon or `h`/`l` nudge ±0.5°, `a` auto-crop; `Enter` / `Esc` |
 | `]` / `[`         | rotate 90° clockwise / counter-clockwise (GEGL, non-destructive; opens the panel; repeat for 180°/270°) |

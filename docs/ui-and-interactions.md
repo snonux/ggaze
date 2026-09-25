@@ -143,9 +143,9 @@ drift from the live bindings.
 | `e`            | open current image in an external program → popup |
 | `!`            | run a shell script → popup (e.g. `usbimport`) |
 | `a`            | open / close the **edit panel** beside the image (GEGL) — presets, crop, straighten, rotate, save, revert; in the grid, where an open panel is hidden, `a` goes back to the large view and shows it (it never closes a panel you cannot see) |
-| `1`–`8`        | toggle preset N (layered) — **only while the edit panel is open and on screen** (large view); with it closed, or hidden beside the grid, a digit does nothing. The digit also selects that preset's card |
-| `j` / `k`      | **edit panel open:** select the next / previous preset card (a ring marks it; stops at the first and last) — instead of panning (`Down` / `Up` still pan) |
-| `Enter`        | **edit panel open:** toggle the selected preset, as its digit does |
+| `1`–`8`        | toggle preset N (layered) — **only while the edit panel is open and on screen** (large view); with it closed, or hidden beside the grid, a digit does nothing. The digit also selects that preset's card. Only the first eight rows (the built-ins) have a digit: your own presets, listed after them, are reached with `j` / `k` and `Enter` |
+| `j` / `k`      | **edit panel open:** select the next / previous preset card — every row, your own presets after the built-ins included; the list scrolls to keep it in view (a ring marks it; stops at the first and last) — instead of panning (`Down` / `Up` still pan) |
+| `Enter`        | **edit panel open:** toggle the selected preset (any row), as a digit does |
 | `h` / `l`      | **edit panel open:** lower / raise the selected preset's **strength** one step, turning it on (`Shift`: five steps) — instead of previous / next image; `Left` / `Right` and `Page Up` / `Page Down` still change the image, so flicking through a folder with the arrows never moves a strength. A preset with nothing to tune (Auto-fix, Warm) says so (and that `←`/`→` or `PgUp`/`PgDn` change the image) and changes nothing |
 | `c`            | crop tool (GEGL; opens the edit panel first): rectangle overlay; `Enter` applies, `Esc` cancels — see "Crop, straighten & rotate tools" |
 | `r`            | straighten tool (GEGL; opens the edit panel first): horizon drag / `h` `l` nudge ±0.5°, `a` auto-crop; `Enter` / `Esc` |
@@ -179,7 +179,7 @@ and each owns them only while it is on screen:
 
 | Mode | Live while | Its own keys |
 |------|------------|--------------|
-| **Edit** | the edit panel is open and on screen (large view), no tool up | `1`–`N` presets — one digit per configured preset, at most 8 · `j`/`k` select a preset card · `Enter` toggles it · `h`/`l` its strength, `Shift` five steps (the vi keys only: the arrows stay global) · `u` / `Ctrl+z` undo and `U` / `Ctrl+Shift+Z` redo an edit step (plus the global `c` `r` `[` `]` `s` `x` `Space` `a`/`Esc` it lists) |
+| **Edit** | the edit panel is open and on screen (large view), no tool up | `1`–`N` presets — one digit per preset row, at most 8 (the built-ins; rows past them have none) · `j`/`k` select a preset card (any row) · `Enter` toggles it · `h`/`l` its strength, `Shift` five steps (the vi keys only: the arrows stay global) · `u` / `Ctrl+z` undo and `U` / `Ctrl+Shift+Z` redo an edit step (plus the global `c` `r` `[` `]` `s` `x` `Space` `a`/`Esc` it lists) |
 | **Crop** | the crop tool is up | `h`/`j`/`k`/`l` move · `Shift+h/j/k/l` grow that side · `Ctrl+h/j/k/l` shrink that side · `a` aspect cycle (free → 1:1 → 3:2 → 4:3 → 16:9 → original) · `Enter` apply · `Esc` cancel |
 | **Straighten** | the straighten tool is up | `h`/`l` (and `-`/`+`) nudge ½° · `a` auto-crop · `Enter` apply · `Esc` cancel |
 
@@ -196,7 +196,8 @@ Crop   h/j/k/l move · Shift+h/j/k/l grow · Ctrl+h/j/k/l shrink · a aspect · 
 
 The bar lists the preset digits that exist: `1–8 presets` with the eight
 built-ins, `1/2 presets` or `1 preset` with fewer, no presets segment for
-none. The bar, the edit panel's button keys, the `?` help, the header
+none. Your own presets add rows after the built-ins but no digits — the
+bar never promises a `9`; `j/k select` and `Enter toggle` reach them. The bar, the edit panel's button keys, the `?` help, the header
 tooltips and the `F10` menu are all generated from `shortcuts.c`'s one
 table (rows scoped to a mode, each with a short hint label and, for the
 menu, a short label such as *Crop* where the help says "Crop tool (Enter
@@ -481,7 +482,8 @@ image's histogram.
   inside the main window (switching to the large view first if needed) —
   no second window, no popover. The image keeps the whole viewer. It is the
   **one home of every edit**, compact enough that all eight built-in
-  presets show without scrolling in a 1280×800 window, and every button in
+  presets show without scrolling in a 1280×800 window (your own presets
+  add rows below them, and the preset list scrolls), and every button in
   it shows its key (read from `shortcuts.c`'s table, like the hint bar) —
   and every panel key has a button. Top to bottom:
   - **Title row** — just *Edit* (the window title already names the file)
@@ -489,8 +491,11 @@ image's histogram.
   - **Original** — a small reference thumbnail beside "Original · hold
     Space to compare", dim and frameless so it never reads as a preset.
     Reverting is `x`, not a click on it.
-  - **Presets** — one **row card** per configurable preset with an
-    auto-assigned hotkey (`1`, `2`, … capped at the mask's 8 slots): a
+  - **Presets** — one **row card** per preset: the eight built-ins, then
+    **your own** from Preferences in their Preferences order (ai2), at
+    most 32 rows in all (24 of yours; Preferences refuses more). The first
+    eight rows carry their digit (`1`–`8`); a row past them shows its name
+    alone. Each row: a
     small preview thumbnail of that preset applied alone, `1  Auto-fix`,
     its **strength** when it has one to tune (`+0.5`, `1.3`; 8i2), and a
     check mark. An enabled preset's row is **highlighted and checked**; the
@@ -501,8 +506,10 @@ image's histogram.
     Preferences can turn the thumbnails off for label-only rows;
     the rows and the Original always show the **untransformed** image —
     they are references for the colour presets alone and ignore a crop,
-    straighten or turn. More presets than fit the window scroll; the rows
-    below never do.
+    straighten or turn. More presets than fit the window **scroll** — only
+    the preset list: the title, Original, Transform and the actions below
+    never move — and `j` / `k` scroll the selected row (with its slider)
+    into view.
   - **Transform** — one row of four icon buttons with key badges and
     tooltips: crop `c`, straighten `r`, rotate left `[`, rotate right `]`
     (the same actions as the keys).
@@ -525,6 +532,8 @@ image's histogram.
    ━━━━━━━━━━━━━━━━━━━●━━━━━━━          ... and its slider
    …
   [thumb] 8  Denoise          4
+  [thumb] Film look               ✓   <- your own: no digit, j/k + Enter
+  [thumb] Punch           1.3         <- ... tunable like a built-in
   TRANSFORM
   [✂ c] [⟳ r] [↶ [] [↷ ]]
   Unsaved edits · original kept
@@ -575,7 +584,8 @@ image's histogram.
   it; a run of `h` / `l` presses on one card undoes as **one step**
   (another card, a save or closing the panel ends the run, so undo can
   stop at the saved value), as does one drag of the slider. A
-  Preferences change keeps every strength. Every preset is back at its **default** on another image and
+  Preferences change keeps every strength (see "Editing your presets
+  while they are on" below). Every preset is back at its **default** on another image and
   after `x`. The cards' preview thumbnails show each preset at its
   default. The **selection** is not an edit: it survives navigation and
   undo never moves it.
@@ -622,7 +632,30 @@ image's histogram.
   off only, exactly as before. The preset editor explains the syntax and
   refuses a malformed placeholder with the reason (a second one, a missing
   field, an empty range, a default outside it, a step that is not
-  positive).
+  positive). Each of your presets is a **row of the edit panel** after
+  the built-ins, in the editor's order: `j` / `k` select it, `Enter`
+  toggles it, `h` / `l` and its slider tune it, and it is in the title,
+  the save state and undo exactly like a built-in (ai2). The panel holds
+  32 rows, so **24** presets of yours: at that many the editor's *Add* is
+  insensitive and says why, and an entry stored past it (written with
+  `gsettings`, say) is listed as *Ignored*.
+- **Editing your presets while they are on (ai2).** Preferences applies
+  every change at once, and the edit on screen follows **its presets**,
+  not their row numbers: each preset keeps its on / off, strength and the
+  selection in whatever row it moves to. A preset is the same one when it
+  has the same name and graph; else the same name (its graph edited —
+  a kept strength is clamped into the new range); else the same graph
+  (renamed). So adding, moving, editing or renaming one never turns
+  another on or off, and a **removed** preset simply drops out of the
+  edit. The undo history is carried along the same way (a step that only
+  toggled a removed preset goes with it) rather than cleared, so the
+  steps taken before still undo. The picture renders again only when what
+  it runs changed — an enabled preset edited or removed, two enabled ones
+  swapped; a copy saved earlier stays *saved* only while it still renders
+  the same (otherwise the state is unsaved, and moving on prompts). An
+  edit of both the name and the graph at once reads as a removal plus a
+  new preset. Hiding built-ins you never use is not offered: their rows
+  and digits stay fixed, which keeps `1`–`8` meaning the same everywhere.
 - Applying the enabled preset chain runs off the GTK main thread (a GTask
   worker); the UI stays responsive while GEGL processes, and a newer
   toggle/navigation/discard supersedes a still-in-flight one (last-write-wins

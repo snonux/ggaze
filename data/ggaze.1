@@ -66,10 +66,12 @@ a key-hint bar under the image lists the live keys
 .TP
 .B 1 \- 8
 Toggle preset N (only while the edit panel is open, in the large view); the
-digit also selects that preset's card
+digit also selects that preset's card. Only the first eight rows (the
+built\-in presets) have a digit; your own presets follow them
 .TP
 .B j / k / Enter / h / l
-With the edit panel open: select the next / previous preset card, toggle
+With the edit panel open: select the next / previous preset card (every
+row, your own presets included; the list scrolls to keep it in view), toggle
 the selected preset, lower / raise its strength one step (Shift: five
 steps), turning it on. A preset with nothing to tune (Auto\-fix, Warm) says
 so. The selected card shows its strength slider. The arrows are not the
@@ -110,6 +112,18 @@ Shortcuts overlay
 .TP
 .B q
 Quit
+.SH ENHANCE PRESETS
+Your own presets (Preferences, \fB,\fR, stored in the \fBenhance\-presets\fR
+GSettings key as name / GEGL graph pairs) are rows of the edit panel after
+the eight built\-ins, in their Preferences order, up to 24 of them (more
+are ignored, and Preferences marks them). One number in a graph may be made
+tunable with
+.B {s:DEFAULT:MIN..MAX}
+or
+.BR {s:DEFAULT:MIN..MAX:STEP} ,
+which \fBh\fR / \fBl\fR and the preset's slider then adjust. Editing,
+moving or removing presets in Preferences while some are on keeps each
+preset's state with it; a removed preset drops out of the edit.
 .SH FILES
 .TP
 .I ~/.cache/thumbnails/
