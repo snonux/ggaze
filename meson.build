@@ -98,6 +98,7 @@ ggaze_src = files(
       'src/gesture-math.c',
       'src/transform.c',
       'src/edit-history.c',
+      'src/preset-strength.c',
       'src/runner.c',
       'src/settings.c',
       'src/settings-pair.c',
