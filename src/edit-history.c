@@ -228,6 +228,23 @@ edit_history_redo_count(const EditHistory *p_h) {
 }
 
 void
+edit_history_remap(EditHistory *p_h, EditSnapshotFn fn, gpointer p_data) {
+   g_return_if_fail(p_h != NULL && fn != NULL);
+   p_h->b_run = FALSE;
+   for (guint u = p_h->p_steps->len; u > 0; u--) {
+      EditStep *p_step = g_ptr_array_index(p_h->p_steps, u - 1);
+      fn(&p_step->t_before, p_data);
+      fn(&p_step->t_after, p_data);
+      if (edit_snapshot_equal(&p_step->t_before, &p_step->t_after)) {
+         g_ptr_array_remove_index(p_h->p_steps, u - 1);
+         if (u <= p_h->u_done) {
+            p_h->u_done--; /* an applied step went */
+         }
+      }
+   }
+}
+
+void
 edit_history_clear(EditHistory *p_h) {
    g_return_if_fail(p_h != NULL);
    g_ptr_array_set_size(p_h->p_steps, 0);

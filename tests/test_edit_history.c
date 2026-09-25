@@ -4,8 +4,10 @@
  * The edit panel's undo / redo stack (7i2): push / undo / redo over whole
  * edit snapshots, the redo tail dropped by a new step, the bound that
  * forgets the oldest step, runs that coalesce (and a run that comes back
- * to its start dropping itself), clear, and the negative cases -- nothing
- * to undo or redo, a step that changes nothing, NULL arguments.
+ * to its start dropping itself), clear, the remap a Preferences change of
+ * the preset rows runs over every snapshot (ai2), and the negative cases
+ * -- nothing to undo or redo, a step that changes nothing, NULL
+ * arguments.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -19,7 +21,7 @@
 
 /* A snapshot with mask u_mask and u_turns quarter turns. */
 static EditSnapshot
-snap(guint8 u_mask, gint i_turns) {
+snap(guint32 u_mask, gint i_turns) {
    EditSnapshot t_s;
    edit_snapshot_init(&t_s);
    t_s.u_mask         = u_mask;
@@ -58,6 +60,105 @@ test_snapshot_strengths(void) {
       t_a.d_strength[u] = 0.6;
       g_assert_true(edit_snapshot_equal(&t_a, &t_b));
    }
+}
+
+/* ai2: the mask is 32 bits -- a user preset's row past the eight
+ * built-ins is part of the state like any other, up to the last row. */
+static void
+test_snapshot_wide_mask(void) {
+   EditSnapshot t_a = snap(0, 0);
+   g_assert_cmpuint(EDIT_SNAPSHOT_PRESETS, ==, 32);
+   for (guint u = 0; u < EDIT_SNAPSHOT_PRESETS; u++) {
+      EditSnapshot t_b = snap((guint32)1u << u, 0);
+      g_assert_false(edit_snapshot_equal(&t_a, &t_b));
+      EditSnapshot t_c = snap((guint32)1u << u, 0);
+      g_assert_true(edit_snapshot_equal(&t_b, &t_c));
+   }
+   EditSnapshot t_hi = snap(0x80000000u, 0);
+   EditSnapshot t_lo = snap(0x00000080u, 0);
+   g_assert_false(edit_snapshot_equal(&t_hi, &t_lo)); /* no truncation */
+}
+
+/* A remap that moves row 9 to row 8 (row 8 was removed) and carries the
+ * strength with it -- what a Preferences removal does to every snapshot. */
+static void
+drop_row_8(EditSnapshot *p_s, gpointer p_data) {
+   guint *pu_calls = p_data;
+   (*pu_calls)++;
+   guint32 u_low = p_s->u_mask & 0xFFu;
+   guint32 u_hi  = (p_s->u_mask >> 9) << 8;
+   p_s->u_mask   = u_low | u_hi;
+   for (guint u = 8; u + 1 < EDIT_SNAPSHOT_PRESETS; u++) {
+      p_s->d_strength[u] = p_s->d_strength[u + 1];
+   }
+   p_s->d_strength[EDIT_SNAPSHOT_PRESETS - 1] = 0.0;
+}
+
+/* edit_history_remap rewrites every snapshot, done and undone alike; a
+ * step that toggled only the removed row becomes no step and is dropped
+ * (the undo / redo counts shrink around it); the others undo to their
+ * carried states; an open run is closed. */
+static void
+test_remap(void) {
+   EditHistory *p_h   = edit_history_new(0);
+   EditSnapshot t_s0  = snap(0, 0);
+   EditSnapshot t_s1  = snap(0x100, 0); /* row 8 on: to be removed */
+   EditSnapshot t_s2  = snap(0x300, 0); /* row 9 on too */
+   t_s2.d_strength[9] = 1.5;
+   EditSnapshot t_s3  = t_s2;
+   t_s3.u_mask |= 0x1; /* row 0 on */
+   EditSnapshot t_s4   = t_s3;
+   t_s4.t_xf.i_quarter = 1;
+   g_assert_true(edit_history_push(p_h, EDIT_STEP_PRESET, "8", &t_s0, &t_s1));
+   g_assert_true(edit_history_push(p_h, EDIT_STEP_PRESET, "9", &t_s1, &t_s2));
+   g_assert_true(edit_history_push(p_h, EDIT_STEP_PRESET, "0", &t_s2, &t_s3));
+   g_assert_true(
+      edit_history_push_run(p_h, EDIT_STEP_ROTATE, 0, "r", &t_s3, &t_s4));
+   g_assert_nonnull(edit_history_undo(p_h, NULL)); /* "r" waits to redo */
+   guint u_calls = 0;
+   edit_history_remap(p_h, drop_row_8, &u_calls);
+   g_assert_cmpuint(u_calls, ==, 8); /* before + after of 4 steps */
+   /* "8" only toggled the removed row: gone; the rest remain. */
+   g_assert_cmpuint(edit_history_undo_count(p_h), ==, 2);
+   g_assert_cmpuint(edit_history_redo_count(p_h), ==, 1);
+   const char         *c_label = NULL;
+   const EditSnapshot *p_back  = edit_history_undo(p_h, &c_label);
+   g_assert_cmpstr(c_label, ==, "0");
+   g_assert_cmpuint(p_back->u_mask, ==, 0x100); /* row 9 is row 8 now */
+   g_assert_cmpfloat(p_back->d_strength[8], ==, 1.5);
+   p_back = edit_history_undo(p_h, &c_label);
+   g_assert_cmpstr(c_label, ==, "9");
+   g_assert_cmpuint(p_back->u_mask, ==, 0);
+   g_assert_null(edit_history_undo(p_h, NULL));
+   g_assert_nonnull(edit_history_redo(p_h, NULL));
+   g_assert_nonnull(edit_history_redo(p_h, NULL));
+   const EditSnapshot *p_fwd = edit_history_redo(p_h, &c_label);
+   g_assert_cmpstr(c_label, ==, "r");
+   g_assert_cmpuint(p_fwd->u_mask, ==, 0x101);
+   g_assert_cmpint(p_fwd->t_xf.i_quarter, ==, 1);
+   edit_history_delete(p_h);
+}
+
+/* A remap closes an open run: the next nudge is a step of its own (its
+ * row may be another preset now). */
+static void
+test_remap_closes_the_run(void) {
+   EditHistory *p_h   = edit_history_new(0);
+   EditSnapshot t_s0  = snap(0x200, 0);
+   EditSnapshot t_s1  = t_s0;
+   t_s1.d_strength[9] = 0.6;
+   EditSnapshot t_s2  = t_s1;
+   t_s2.d_strength[9] = 0.7;
+   edit_history_push_run(p_h, EDIT_STEP_STRENGTH, 9, "a", &t_s0, &t_s1);
+   guint u_calls = 0;
+   edit_history_remap(p_h, drop_row_8, &u_calls);
+   EditSnapshot t_m1 = t_s1;
+   drop_row_8(&t_m1, &u_calls);
+   EditSnapshot t_m2 = t_s2;
+   drop_row_8(&t_m2, &u_calls);
+   edit_history_push_run(p_h, EDIT_STEP_STRENGTH, 9, "b", &t_m1, &t_m2);
+   g_assert_cmpuint(edit_history_undo_count(p_h), ==, 2);
+   edit_history_delete(p_h);
 }
 
 /* A run of strength nudges on one preset (h / l held on its card) is one
@@ -349,6 +450,9 @@ null_call(guint u_case) {
    case 10:
       g_assert_false(edit_snapshot_equal(NULL, &t_s));
       break;
+   case 11:
+      edit_history_remap(NULL, drop_row_8, NULL);
+      break;
    default:
       edit_snapshot_init(NULL);
       break;
@@ -359,7 +463,7 @@ null_call(guint u_case) {
  * (g_return_*) and answers with the neutral value, never a crash. */
 static void
 test_null_arguments(void) {
-   for (guint u = 0; u < 12; u++) {
+   for (guint u = 0; u < 13; u++) {
       g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_CRITICAL, "*");
       null_call(u);
       g_test_assert_expected_messages();
@@ -372,6 +476,10 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/edit_history/snapshot_init_and_equal",
                    test_snapshot_init_and_equal);
    g_test_add_func("/edit_history/snapshot_strengths", test_snapshot_strengths);
+   g_test_add_func("/edit_history/snapshot_wide_mask", test_snapshot_wide_mask);
+   g_test_add_func("/edit_history/remap", test_remap);
+   g_test_add_func("/edit_history/remap_closes_the_run",
+                   test_remap_closes_the_run);
    g_test_add_func("/edit_history/strength_run", test_strength_run);
    g_test_add_func("/edit_history/push_undo_redo", test_push_undo_redo);
    g_test_add_func("/edit_history/push_drops_redo", test_push_drops_redo);

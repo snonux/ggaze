@@ -1071,7 +1071,7 @@ test_user_graph_presets(void) {
    g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
    g_clear_error(&p_err);
 
-   /* The title suffix names the enabled presets, capped at the 8-bit mask. */
+   /* The title suffix names the enabled presets. */
    char *c_desc = enhancer_describe_mask(p_presets, 0x03);
    g_assert_cmpstr(c_desc, ==, "Auto-fix, Brightness");
    g_free(c_desc);
@@ -1358,6 +1358,229 @@ test_user_placeholder_presets(void) {
    enhancer_delete(p_e);
 }
 
+/* --- ai2: every user preset is a row ------------------------------------ */
+
+/* A pair list of u_n user presets "U<i>" running c_graph (NULL: a graph
+ * of their own, saturation scale 1.<i>). */
+static GPtrArray *
+user_pairs(guint u_n, const char *c_graph) {
+   GPtrArray *p_pairs = settings_pair_array_new();
+   for (guint u = 0; u < u_n; u++) {
+      char *c_name = g_strdup_printf("U%u", u);
+      char *c_own  = g_strdup_printf("gegl:saturation scale=1.%u", u);
+      g_ptr_array_add(
+         p_pairs, settings_pair_new(c_name, c_graph != NULL ? c_graph : c_own));
+      g_free(c_name);
+      g_free(c_own);
+   }
+   return (p_pairs);
+}
+
+/* The list holds the built-ins then the user presets up to the mask's 32
+ * rows; the user presets past GGAZE_ENHANCE_MAX_USER_PRESETS are ignored,
+ * and so is a whole list longer than the rows (enhancer_set_presets). */
+static void
+test_user_presets_capped(void) {
+   g_assert_cmpint(GGAZE_ENHANCE_MAX_PRESETS, ==, 32);
+   g_assert_cmpint(GGAZE_ENHANCE_MAX_USER_PRESETS, ==, 24);
+   Enhancer  *p_e     = enhancer_new();
+   GPtrArray *p_pairs = user_pairs(30, NULL);
+   enhancer_set_user_presets(p_e, p_pairs);
+   const GPtrArray *p_all = enhancer_get_presets(p_e);
+   g_assert_cmpuint(p_all->len, ==, GGAZE_ENHANCE_MAX_PRESETS);
+   const EnhancerPreset *p_last = g_ptr_array_index((GPtrArray *)p_all, 31);
+   g_assert_cmpstr(p_last->c_name, ==, "U23");
+   g_assert_cmpint(p_last->i_builtin, ==, 0);
+   g_assert_cmpint(
+      ((EnhancerPreset *)g_ptr_array_index((GPtrArray *)p_all, 7))->i_builtin,
+      ==, 1);
+   GPtrArray *p_long  = enhancer_presets_resolve(p_all, NULL);
+   GPtrArray *p_spare = enhancer_presets_resolve(p_all, NULL);
+   g_ptr_array_add(p_long, g_ptr_array_steal_index(p_spare, 0)); /* 33 */
+   enhancer_set_presets(p_e, p_long);
+   g_assert_cmpuint(enhancer_get_presets(p_e)->len, ==, 32);
+   g_ptr_array_unref(p_spare);
+   g_ptr_array_unref(p_long);
+   g_ptr_array_unref(p_pairs);
+   enhancer_delete(p_e);
+}
+
+/* A user preset far past the digits' rows is a full row: its default
+ * strength, the title, the chain (bit 20 renders it, alone, exactly as
+ * the preset does) and the chain key. */
+static void
+test_wide_mask_rows(void) {
+   Enhancer  *p_e     = enhancer_new();
+   GPtrArray *p_pairs = user_pairs(12, NULL); /* rows 8 .. 19 */
+   g_ptr_array_add(p_pairs, settings_pair_new("Far", "gegl:exposure "
+                                                     "exposure={s:0.4:0..1}"));
+   enhancer_set_user_presets(p_e, p_pairs); /* "Far" is row 20 */
+   const GPtrArray *p_all = enhancer_get_presets(p_e);
+   gdouble          d_s[GGAZE_ENHANCE_MAX_PRESETS];
+   enhancer_default_strengths(p_all, d_s);
+   g_assert_cmpfloat(d_s[20], ==, 0.4);
+   g_assert_cmpfloat(d_s[21], ==, 0.0); /* no row there */
+   guint32 u_mask = GGAZE_ENHANCE_BIT(20) | GGAZE_ENHANCE_BIT(9);
+   char   *c_desc = enhancer_describe_state(p_all, u_mask, d_s);
+   g_assert_cmpstr(c_desc, ==, "U1, Far");
+   g_free(c_desc);
+   d_s[20] = 0.65; /* stepped with the implied step 0.05 */
+   c_desc  = enhancer_describe_state(p_all, u_mask, d_s);
+   g_assert_cmpstr(c_desc, ==, "U1, Far 0.65");
+   g_free(c_desc);
+   char *c_key = enhancer_chain_key(p_all, u_mask, d_s);
+   g_assert_cmpstr(c_key, ==,
+                   "gegl:saturation scale=1.1\ngegl:exposure exposure=0.65");
+   g_free(c_key);
+   g_assert_null(enhancer_chain_key(p_all, 0, d_s));
+   c_key = enhancer_chain_key(p_all, GGAZE_ENHANCE_BIT(20), NULL);
+   g_assert_cmpstr(c_key, ==, "gegl:exposure exposure=0.4"); /* default */
+   g_free(c_key);
+   GeglBuffer *p_in  = gradient_buffer();
+   GPtrArray  *p_res = enhancer_presets_resolve(p_all, d_s);
+   GeglBuffer *p_got =
+      enhancer_apply_chain(p_in, p_res, GGAZE_ENHANCE_BIT(20), NULL, NULL);
+   GeglBuffer *p_want = old_builtin(p_in, "gegl:exposure", "exposure", 0.65);
+   g_assert_true(same_pixels(p_got, p_want));
+   g_object_unref(p_got);
+   g_object_unref(p_want);
+   g_object_unref(p_in);
+   g_ptr_array_unref(p_res);
+   g_ptr_array_unref(p_pairs);
+   enhancer_delete(p_e);
+}
+
+/* The built-ins plus user presets (name, graph) pairs, as a list. */
+static GPtrArray *
+list_of(const char *const *c_pairs, guint u_n) {
+   Enhancer  *p_e     = enhancer_new();
+   GPtrArray *p_pairs = settings_pair_array_new();
+   for (guint u = 0; u < u_n; u++) {
+      g_ptr_array_add(p_pairs,
+                      settings_pair_new(c_pairs[2 * u], c_pairs[2 * u + 1]));
+   }
+   enhancer_set_user_presets(p_e, p_pairs);
+   GPtrArray *p_out = enhancer_presets_resolve(enhancer_get_presets(p_e), NULL);
+   g_ptr_array_unref(p_pairs);
+   enhancer_delete(p_e);
+   return (p_out);
+}
+
+#define _A "A", "gegl:exposure exposure={s:1:0..2:0.1}"
+#define _B "B", "gegl:color-enhance"
+#define _C "C", "gegl:saturation scale={s:1.2:0..2:0.1}"
+
+/* Map old -> new and check the user rows 8.. against i_want (u_n). */
+static gboolean
+map_is(const GPtrArray *p_old, const GPtrArray *p_new, const gint *i_want,
+       guint u_n) {
+   gint     i_map[GGAZE_ENHANCE_MAX_PRESETS];
+   gboolean b_same = enhancer_presets_map(p_old, p_new, i_map);
+   for (guint u = 0; u < 8; u++) {
+      g_assert_cmpint(i_map[u], ==, (gint)u); /* the built-ins stay */
+   }
+   for (guint u = 0; u < u_n; u++) {
+      g_assert_cmpint(i_map[8 + u], ==, i_want[u]);
+   }
+   return (b_same);
+}
+
+/* Each change Preferences makes carries every preset it did not remove:
+ * the same list, a reorder, a removal, an append, a graph edited (same
+ * name), a rename (same graph); both at once reads as removed; two
+ * identical presets keep their order. */
+static void
+test_presets_map(void) {
+   static const char *const ABC[]   = {_A, _B, _C};
+   static const char *const CAB[]   = {_C, _A, _B};
+   static const char *const AC[]    = {_A, _C};
+   static const char *const ABCD[]  = {_A, _B, _C, "D", "gegl:invert"};
+   static const char *const AEDIT[] = {"A", "gegl:exposure exposure=2", _B, _C};
+   static const char *const RENAMED[] = {"Z", "gegl:color-enhance", _A, _C};
+   static const char *const BOTH[]    = {_A, "Y", "gegl:invert", _C};
+   static const char *const AA[]      = {_A, _A};
+   GPtrArray               *p_abc     = list_of(ABC, 3);
+   GPtrArray               *p_new     = list_of(ABC, 3);
+   g_assert_true(map_is(p_abc, p_new, (const gint[]){8, 9, 10}, 3));
+   g_ptr_array_unref(p_new);
+   p_new = list_of(CAB, 3);
+   g_assert_false(map_is(p_abc, p_new, (const gint[]){9, 10, 8}, 3));
+   g_ptr_array_unref(p_new);
+   p_new = list_of(AC, 2);
+   g_assert_false(map_is(p_abc, p_new, (const gint[]){8, -1, 9}, 3));
+   g_ptr_array_unref(p_new);
+   p_new = list_of(ABCD, 4);
+   g_assert_false(map_is(p_abc, p_new, (const gint[]){8, 9, 10}, 3));
+   g_ptr_array_unref(p_new);
+   p_new = list_of(AEDIT, 3);
+   g_assert_false(map_is(p_abc, p_new, (const gint[]){8, 9, 10}, 3));
+   g_ptr_array_unref(p_new);
+   p_new = list_of(RENAMED, 3);
+   g_assert_false(map_is(p_abc, p_new, (const gint[]){9, 8, 10}, 3));
+   g_ptr_array_unref(p_new);
+   p_new = list_of(BOTH, 3);
+   g_assert_false(map_is(p_abc, p_new, (const gint[]){8, -1, 10}, 3));
+   g_ptr_array_unref(p_new);
+   GPtrArray *p_aa = list_of(AA, 2);
+   p_new           = list_of(AA, 2);
+   g_assert_true(map_is(p_aa, p_new, (const gint[]){8, 9}, 2));
+   g_ptr_array_unref(p_new);
+   p_new = list_of(AC, 2); /* one A removed: the first stays */
+   g_assert_false(map_is(p_aa, p_new, (const gint[]){8, -1}, 2));
+   g_ptr_array_unref(p_new);
+   g_ptr_array_unref(p_aa);
+   g_assert_true(enhancer_presets_map(NULL, NULL, (gint[1]){0}));
+   g_ptr_array_unref(p_abc);
+}
+
+/* The state follows its presets: bits and strengths move with a reorder;
+ * a removed preset's go; a new row is off at its default; an edited
+ * placeholder clamps the kept strength into its new range; a preset that
+ * gains a placeholder starts at its default. */
+static void
+test_state_remap(void) {
+   static const char *const ABC[] = {_A, _B, _C};
+   static const char *const CBA[] = {
+      "C", "gegl:saturation scale={s:1.2:0..2:0.1}",
+      "B", "gegl:color-enhance scale={s:3:1..5}",
+      "A", "gegl:exposure exposure={s:0.5:0..1:0.1}"};
+   GPtrArray *p_old = list_of(ABC, 3);
+   GPtrArray *p_new = list_of(CBA, 3);
+   gint       i_map[GGAZE_ENHANCE_MAX_PRESETS];
+   g_assert_false(enhancer_presets_map(p_old, p_new, i_map));
+   gdouble d_old[GGAZE_ENHANCE_MAX_PRESETS];
+   gdouble d_new[GGAZE_ENHANCE_MAX_PRESETS];
+   enhancer_default_strengths(p_old, d_old);
+   d_old[1]  = 1.2; /* Brightness, a built-in */
+   d_old[8]  = 1.8; /* A: clamped into its new 0..1 */
+   d_old[10] = 0.4; /* C */
+   guint32 u_mask =
+      GGAZE_ENHANCE_BIT(1) | GGAZE_ENHANCE_BIT(8) | GGAZE_ENHANCE_BIT(10);
+   guint32 u_out =
+      enhancer_state_remap(p_old, p_new, i_map, u_mask, d_old, d_new);
+   g_assert_cmpuint(u_out, ==,
+                    GGAZE_ENHANCE_BIT(1) | GGAZE_ENHANCE_BIT(8) |
+                       GGAZE_ENHANCE_BIT(10));
+   g_assert_cmpfloat(d_new[1], ==, 1.2);
+   g_assert_cmpfloat(d_new[8], ==, 0.4);  /* C, now row 8 */
+   g_assert_cmpfloat(d_new[9], ==, 3.0);  /* B gained a number: default */
+   g_assert_cmpfloat(d_new[10], ==, 1.0); /* A, clamped */
+   /* Removed and added: A goes (its bit too), the new row is off. */
+   static const char *const BCD[] = {_B, _C, "D",
+                                     "gegl:exposure exposure={s:0.2:0..1}"};
+   g_ptr_array_unref(p_new);
+   p_new = list_of(BCD, 3);
+   g_assert_false(enhancer_presets_map(p_old, p_new, i_map));
+   u_out = enhancer_state_remap(p_old, p_new, i_map, u_mask, d_old, d_new);
+   g_assert_cmpuint(u_out, ==, GGAZE_ENHANCE_BIT(1) | GGAZE_ENHANCE_BIT(9));
+   g_assert_cmpfloat(d_new[8], ==, 0.0);  /* B: nothing to tune */
+   g_assert_cmpfloat(d_new[9], ==, 0.4);  /* C kept its strength */
+   g_assert_cmpfloat(d_new[10], ==, 0.2); /* D: its default */
+   g_assert_cmpfloat(d_new[11], ==, 0.0); /* no row */
+   g_ptr_array_unref(p_new);
+   g_ptr_array_unref(p_old);
+}
+
 int
 main(int argc, char **argv) {
    gegl_init(&argc, &argv);
@@ -1395,5 +1618,9 @@ main(int argc, char **argv) {
    g_test_add_func("/enhancer/describe_state", test_describe_state);
    g_test_add_func("/enhancer/user_placeholder_presets",
                    test_user_placeholder_presets);
+   g_test_add_func("/enhancer/user_presets_capped", test_user_presets_capped);
+   g_test_add_func("/enhancer/wide_mask_rows", test_wide_mask_rows);
+   g_test_add_func("/enhancer/presets_map", test_presets_map);
+   g_test_add_func("/enhancer/state_remap", test_state_remap);
    return g_test_run();
 }

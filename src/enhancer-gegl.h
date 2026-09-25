@@ -43,7 +43,7 @@ GeglBuffer *enhancer_apply(GeglBuffer *p_in, const EnhancerPreset *p_preset,
  * size), which is what lets the crop tool lay out its rectangle before the
  * preview has rendered. */
 GeglBuffer *enhancer_apply_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
-                                 guint8 u_mask, const Transform *p_xf,
+                                 guint32 u_mask, const Transform *p_xf,
                                  GError **p_err);
 
 /* Export the enhanced buffer to a file. The saver is chosen from p_out's
@@ -65,7 +65,7 @@ gboolean enhancer_export(GeglBuffer *p_in, const EnhancerPreset *p_preset,
 /* Export p_in with the enabled-preset chain (u_mask) and the transform p_xf
  * (nullable) composed, to p_out. */
 gboolean enhancer_export_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
-                               guint8 u_mask, const Transform *p_xf,
+                               guint32 u_mask, const Transform *p_xf,
                                GFile *p_out, GError **p_err);
 
 /* Async export: load p_src, apply the chain + transform, save to p_out --
@@ -74,7 +74,7 @@ gboolean enhancer_export_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
  * (AGENTS.md: decode runs in GTask threads). p_presets and p_xf (nullable)
  * are snapshotted. Finish returns TRUE on a real write. */
 void     enhancer_export_chain_async(GFile *p_src, const GPtrArray *p_presets,
-                                     guint8 u_mask, const Transform *p_xf,
+                                     guint32 u_mask, const Transform *p_xf,
                                      GFile *p_out, GCancellable *p_cancel,
                                      GAsyncReadyCallback p_cb, gpointer p_data);
 gboolean enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err);
@@ -129,7 +129,7 @@ GdkTexture *enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err);
  * newer apply superseding this one) must still check that on its own
  * before using the finished result. */
 void enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
-                                guint8 u_mask, const Transform *p_xf,
+                                guint32 u_mask, const Transform *p_xf,
                                 GCancellable       *p_cancel,
                                 GAsyncReadyCallback p_cb, gpointer p_data);
 

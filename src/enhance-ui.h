@@ -13,14 +13,18 @@
  *              flat close button showing its keys (a/Esc);
  *   Original   a small reference thumbnail, "hold Space to compare" --
  *              dim and frameless, visibly not a preset;
- *   Presets    one ROW card per preset: a small preview thumbnail (or
- *              none when thumbnails are disabled in Preferences), "1
- *              Auto-fix", the strength of a tunable preset ("+0.5",
+ *   Presets    one ROW card per preset -- the eight built-ins, then the
+ *              user's own from Preferences (ai2) -- in a list that
+ *              scrolls when it does not fit: a small preview thumbnail
+ *              (or none when thumbnails are disabled in Preferences),
+ *              "1  Auto-fix" (the first GGAZE_ENHANCE_DIGIT_PRESETS rows
+ *              show their digit; a row past them has none and shows its
+ *              name alone), the strength of a tunable preset ("+0.5",
  *              8i2) and a check mark -- an enabled card is highlighted
  *              and checked, the SELECTED card (j / k) wears a ring, and
  *              under the selected card of a tunable preset its strength
- *              slider shows (one slider at a time, so all eight rows
- *              still fit an 800 px tall window);
+ *              slider shows (one slider at a time, so the eight built-in
+ *              rows still fit an 800 px tall window unscrolled);
  *   Transform  one row of four icon buttons: crop, straighten, rotate
  *              left, rotate right, each with its key badge and a tooltip;
  *   actions    a one-line save state, then Save copy (naming the file it
@@ -33,6 +37,12 @@
  * the panel, the key-hint bar and the `?` help say the same thing. The
  * buttons are GtkActionables on the win.* actions the keys fire: a click
  * and a key press are one path.
+ *
+ * Only the preset list scrolls: the title, the Original, Transform and
+ * the Actions stay where they are, so "how do I keep this" never scrolls
+ * away however many presets there are. Each card and its slider sit in
+ * one ROW box (p_rows), which is what the caller scrolls into view when
+ * the selection moves (enhance_ui_scroll_to_row).
  *
  * This module builds that panel and owns NO state; it depends on no
  * GgazeWindow, no GEGL, and wires no signal of its own. The caller passes
@@ -61,6 +71,7 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "enhancer.h" /* GGAZE_ENHANCE_MAX_PRESETS: a card per row */
 #include "preset-strength.h"
 
 G_BEGIN_DECLS
@@ -95,26 +106,36 @@ G_BEGIN_DECLS
  * card buttons + preview pictures, the save-state and save-target labels,
  * the Save button). Picture entries are NULL in label-only mode.
  * u_n_presets is the number of p_btns/p_pics entries actually filled
- * (<= 8). */
+ * (<= GGAZE_ENHANCE_MAX_PRESETS: one per row the mask can reach). */
 typedef struct {
    GtkWidget *p_panel;        /* the panel root (a vertical box) */
    GtkWidget *p_original;     /* the Original reference (not a button) */
    GtkWidget *p_original_pic; /* its GtkPicture (thumbnail mode only) */
-   GtkWidget *p_btns[8];      /* preset cards (idx 0..n-1) */
-   GtkWidget *p_pics[8];      /* preset preview pictures (thumbnail mode) */
-   GtkWidget *p_scales[8];    /* each tunable preset's strength slider,
-                               * NULL for one without a tunable number;
-                               * built hidden (the caller shows the
-                               * selected card's) */
-   GtkWidget *p_values[8];    /* its strength label on the card, likewise
-                               * NULL; the caller sets the text */
-   guint      u_n_presets;    /* number of p_btns/p_pics entries filled */
-   GtkWidget *p_state;        /* save-state line ("Unsaved edits ...") */
-   GtkWidget *p_save_btn;     /* Save button, bound to win.enhance-save */
-   GtkWidget *p_save_target;  /* the file Save would write, under it */
-   GtkWidget *p_undo_btn;     /* Undo, bound to win.edit-undo (the caller
-                               * keeps it insensitive with nothing to undo) */
-   GtkWidget *p_redo_btn;     /* Redo, bound to win.edit-redo (likewise) */
+   GtkWidget *p_scroll;       /* the preset list's GtkScrolledWindow */
+   GtkWidget *p_rows[GGAZE_ENHANCE_MAX_PRESETS];   /* row i: its card and,
+                                                    * under it, its slider */
+   GtkWidget *p_btns[GGAZE_ENHANCE_MAX_PRESETS];   /* preset cards (idx
+                                                    * 0..n-1) */
+   GtkWidget *p_pics[GGAZE_ENHANCE_MAX_PRESETS];   /* preset preview pictures
+                                                    * (thumbnail mode) */
+   GtkWidget *p_scales[GGAZE_ENHANCE_MAX_PRESETS]; /* each tunable preset's
+                                                    * strength slider, NULL
+                                                    * for one without a
+                                                    * tunable number; built
+                                                    * hidden (the caller
+                                                    * shows the selected
+                                                    * card's) */
+   GtkWidget *p_values[GGAZE_ENHANCE_MAX_PRESETS]; /* its strength label on
+                                                    * the card, likewise
+                                                    * NULL; the caller sets
+                                                    * the text */
+   guint      u_n_presets;   /* number of p_btns/p_pics entries filled */
+   GtkWidget *p_state;       /* save-state line ("Unsaved edits ...") */
+   GtkWidget *p_save_btn;    /* Save button, bound to win.enhance-save */
+   GtkWidget *p_save_target; /* the file Save would write, under it */
+   GtkWidget *p_undo_btn;    /* Undo, bound to win.edit-undo (the caller
+                              * keeps it insensitive with nothing to undo) */
+   GtkWidget *p_redo_btn;    /* Redo, bound to win.edit-redo (likewise) */
 } EnhanceUIWidgets;
 
 /* Build the side panel (see the header) and return its root, filling
@@ -134,7 +155,7 @@ typedef struct {
  * its toggle and slider handlers and stores the widgets; the action
  * buttons resolve their win.* actions once the panel is inside the
  * window. */
-GtkWidget *enhance_ui_build_panel(const GPtrArray *p_presets, guint8 u_mask,
+GtkWidget *enhance_ui_build_panel(const GPtrArray *p_presets, guint32 u_mask,
                                   gboolean          b_thumbnails,
                                   EnhanceUIWidgets *p_out);
 
@@ -152,6 +173,14 @@ void enhance_ui_set_save_state(GtkWidget *p_state, GtkWidget *p_save_btn,
  * Pure widget update; the caller blocks its own value-changed handler. */
 void enhance_ui_set_strength(GtkWidget *p_value, GtkWidget *p_scale,
                              const PresetStrength *p_s, gdouble d_value);
+
+/* Scroll the preset list p_scroll (EnhanceUIWidgets.p_scroll) the least
+ * that brings p_row (one of p_rows) wholly into view -- its card and, when
+ * shown, its slider; a row taller than the view shows its top. Reads the
+ * current layout, so the caller runs it once the row is laid out (after a
+ * slider showed or hid, on the next layout). No-op when either is NULL or
+ * p_row is not inside p_scroll. */
+void enhance_ui_scroll_to_row(GtkWidget *p_scroll, GtkWidget *p_row);
 
 /* Name the file the next Save writes under the Save button ("as <name>"),
  * or clear it (c_name NULL: no file open, or no free name). Plain ASCII
