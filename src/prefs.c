@@ -19,6 +19,7 @@
 #include <gtk/gtk.h>
 
 #include "ggaze-config.h"
+#include "preset-strength.h"
 
 /* --- enum <-> combo mapping ---------------------------------------------- */
 
@@ -176,6 +177,10 @@ typedef struct {
    const char *c_description; /* what the list is for, under the title */
    const char *c_placeholder; /* value entry placeholder (per list) */
    gboolean    b_require_path;
+   /* An extra check of the value beyond settings_pair_valid (NULL: none):
+    * FALSE with *c_why_out (freed by the caller) saying what is wrong. The
+    * enhance presets check their strength placeholder with it (8i2). */
+   gboolean (*check)(const char *c_value, char **c_why_out);
    GPtrArray *(*get)(Settings *);
    guint (*set)(Settings *, const GPtrArray *);
 } ListSpec;
@@ -314,27 +319,54 @@ typedef struct {
    gint         i_index; /* row being edited, -1 = adding */
 } EditCtx;
 
+#if GGAZE_HAVE_GEGL
+/* The enhance presets' extra check: a strength placeholder, if the graph
+ * has one, must be well formed -- the message says what is wrong. (GEGL
+ * builds only, like the preset list itself.) */
+static gboolean
+_check_preset_graph(const char *c_value, char **c_why_out) {
+   GError *p_err = NULL;
+   if (preset_strength_parse(c_value, NULL, NULL, &p_err)) {
+      return (TRUE);
+   }
+   *c_why_out = g_strdup(p_err->message);
+   g_error_free(p_err);
+   return (FALSE);
+}
+#endif
+
+/* TRUE iff (c_name, c_value) may be stored in p_spec's list; otherwise
+ * *c_why_out (caller frees) says why, for the hint line. */
+static gboolean
+_pair_ok(const ListSpec *p_spec, const char *c_name, const char *c_value,
+         char **c_why_out) {
+   *c_why_out = NULL;
+   if (c_name == NULL || *c_name == '\0') {
+      *c_why_out = g_strdup("A name is required.");
+   } else if (c_value == NULL || *c_value == '\0') {
+      *c_why_out =
+         g_strdup(p_spec->b_require_path ? "A folder path is required."
+                                         : "A command is required.");
+   } else if (!settings_pair_valid(c_name, c_value, p_spec->b_require_path)) {
+      *c_why_out = g_strdup("The path must be absolute (start with /).");
+   } else if (p_spec->check != NULL) {
+      p_spec->check(c_value, c_why_out);
+   }
+   return (*c_why_out == NULL);
+}
+
 /* Live validation: the OK response is enabled only for a valid pair, and
  * the hint says what is missing, instead of the dialog silently dropping an
  * invalid entry on OK (which read as "Add does nothing"). */
 static void
 _edit_validate(GtkEditable *p_e, gpointer p_data) {
    (void)p_e;
-   EditCtx    *p_ctx   = (EditCtx *)p_data;
-   const char *c_name  = gtk_editable_get_text(p_ctx->p_name);
-   const char *c_value = gtk_editable_get_text(p_ctx->p_value);
-   gboolean    b_ok =
-      settings_pair_valid(c_name, c_value, p_ctx->p_spec->b_require_path);
-   const char *c_why = NULL;
-   if (c_name == NULL || *c_name == '\0') {
-      c_why = "A name is required.";
-   } else if (c_value == NULL || *c_value == '\0') {
-      c_why = p_ctx->p_spec->b_require_path ? "A folder path is required."
-                                            : "A command is required.";
-   } else if (!b_ok) {
-      c_why = "The path must be absolute (start with /).";
-   }
+   EditCtx *p_ctx = (EditCtx *)p_data;
+   char    *c_why = NULL;
+   gboolean b_ok = _pair_ok(p_ctx->p_spec, gtk_editable_get_text(p_ctx->p_name),
+                            gtk_editable_get_text(p_ctx->p_value), &c_why);
    gtk_label_set_text(GTK_LABEL(p_ctx->p_hint), c_why != NULL ? c_why : "");
+   g_free(c_why);
    adw_alert_dialog_set_response_enabled(ADW_ALERT_DIALOG(p_ctx->p_dlg), "ok",
                                          b_ok);
 }
@@ -347,7 +379,10 @@ _edit_confirm_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    if (c_resp != NULL && g_str_equal(c_resp, "ok")) {
       const char *c_name  = gtk_editable_get_text(p_ctx->p_name);
       const char *c_value = gtk_editable_get_text(p_ctx->p_value);
-      if (settings_pair_valid(c_name, c_value, p_ctx->p_spec->b_require_path)) {
+      char       *c_why   = NULL;
+      gboolean    b_ok    = _pair_ok(p_ctx->p_spec, c_name, c_value, &c_why);
+      g_free(c_why);
+      if (b_ok) {
          GPtrArray *p_cur = p_ctx->p_spec->get(p_ctx->p_spec->p_s);
          if (p_ctx->i_index >= 0 && (guint)p_ctx->i_index < p_cur->len) {
             settings_pair_free(g_ptr_array_index(p_cur, p_ctx->i_index));
@@ -530,9 +565,16 @@ _init_lists(PrefsLists *p_l, Settings *p_s) {
                  .c_title       = "Enhance presets",
                  .c_description = "Extra presets for the a "
                                   "chooser: GEGL operations with "
-                                  "prop=value settings, in order",
-                 .c_placeholder = "e.g. gegl:saturation scale=1.3 "
+                                  "prop=value settings, in order. "
+                                  "One number may be tunable (h / l "
+                                  "and a slider in the panel): write "
+                                  "{s:DEFAULT:MIN..MAX} or "
+                                  "{s:DEFAULT:MIN..MAX:STEP} in its "
+                                  "place",
+                 .c_placeholder = "e.g. gegl:saturation "
+                                  "scale={s:1.3:0..2:0.1} "
                                   "gegl:unsharp-mask std-dev=1.5",
+                 .check         = _check_preset_graph,
                  .get           = settings_get_enhance_presets,
                  .set           = settings_set_enhance_presets};
 #endif
