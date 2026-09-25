@@ -1334,6 +1334,21 @@ _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    _show_status(p_win, "Press Esc again or q to quit");
 }
 
+/* The edit panel's selection / strength actions (8i2), one row each: j / k
+ * move the selection (i_select), h / l tune the selected preset (i_steps;
+ * Shift five steps), Enter toggles it (both 0). Their keys are the panel
+ * rows of shortcuts.c's table. */
+static const struct {
+   const char *c_name;
+   gint        i_select;
+   gint        i_steps;
+} _PANEL_OPS[] = {
+   {"edit-select-next", 1, 0},     {"edit-select-prev", -1, 0},
+   {"edit-toggle-selected", 0, 0}, {"edit-strength-down", 0, -1},
+   {"edit-strength-up", 0, 1},     {"edit-strength-down-5", 0, -5},
+   {"edit-strength-up-5", 0, 5},
+};
+
 /* --- Enhance controller host ops + action routing ----------------------- *
  * The GgazeWindow forwards only the a/s/digit/Space actions and a few
  * choke-point queries to the EnhanceCtrl (see enhance-ctrl.h); these ops are
@@ -1598,6 +1613,39 @@ _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       return;
    }
    enhance_ctrl_toggle_preset(p_win->p_enhance_ctrl, i_idx);
+}
+
+/* The edit panel's selection / strength actions (8i2): j / k move the
+ * selected card, Enter toggles it, h / l lower / raise its strength one
+ * step (Shift: five), turning it on -- the vi keys alone; the arrows stay
+ * navigation and pan. Their keys are rows scoped to the panel's key mode
+ * (edit-mode.c routes them only while it is open and on screen, and not
+ * under a crop / straighten tool); fired any other way -- a script, a
+ * future menu entry -- they only say where they work. */
+static void
+_action_panel_op(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   gsize        u_op =
+      GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(p_a), "ggaze-panel-op"));
+   if (!_require_folder(p_win)) {
+      return;
+   }
+   if (_get_view(p_win) != GGAZE_VIEW_LARGE ||
+       !enhance_ctrl_is_open(p_win->p_enhance_ctrl)) {
+      _show_status(p_win, "Presets are picked and tuned in the edit panel "
+                          "\u2014 press a in the large view");
+      return;
+   }
+   if (_PANEL_OPS[u_op].i_select != 0) {
+      enhance_ctrl_select_step(p_win->p_enhance_ctrl,
+                               _PANEL_OPS[u_op].i_select);
+   } else if (_PANEL_OPS[u_op].i_steps != 0) {
+      enhance_ctrl_nudge_strength(p_win->p_enhance_ctrl,
+                                  _PANEL_OPS[u_op].i_steps);
+   } else {
+      enhance_ctrl_toggle_selected(p_win->p_enhance_ctrl);
+   }
 }
 
 /* win.enhance-save (keys 's' / Ctrl+S, and the panel's Save button): export
@@ -1968,6 +2016,14 @@ _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    /* Silent no-op: no key reaches it (1-8 are the open panel's keys, and
     * there is no panel without GEGL -- `a` reports "GEGL not built in"),
     * but the actions exist in every build so the table's rows resolve. */
+   (void)p_a;
+   (void)p_v;
+   (void)p_data;
+}
+/* The panel's selection / strength actions: silent for the same reason
+ * (their keys are the open panel's, and there is no panel). */
+static void
+_action_panel_op(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    (void)p_data;
@@ -3006,17 +3062,19 @@ static const ViewLoadHostOps _VIEWLOAD_OPS = {
 };
 
 #if GGAZE_HAVE_GEGL
-/* The title's preview suffix: "Auto-fix,Sharpen  \u00b7  90\u00b0 CW, crop"
- * -- the enabled presets and the transform, each only when present, NULL
- * when neither. Caller frees. */
+/* The title's preview suffix: "Auto-fix, Brightness +0.6  \u00b7  90\u00b0
+ * CW, crop" -- the enabled presets (a strength that is not the preset's
+ * default named with it, 8i2) and the transform, each only when present,
+ * NULL when neither. Caller frees. */
 static char *
 _enhance_suffix(GgazeWindow *p_win) {
    if (p_win->p_enhance_ctrl == NULL) {
       return (NULL);
    }
-   char *c_presets =
-      enhancer_describe_mask(enhance_ctrl_get_presets(p_win->p_enhance_ctrl),
-                             enhance_ctrl_get_mask(p_win->p_enhance_ctrl));
+   char *c_presets = enhancer_describe_state(
+      enhance_ctrl_get_presets(p_win->p_enhance_ctrl),
+      enhance_ctrl_get_mask(p_win->p_enhance_ctrl),
+      enhance_ctrl_get_strengths(p_win->p_enhance_ctrl));
    /* The original's size (0x0 while unknown) lets the suffix tell a crop
     * the chain applies from one lying outside the straightened view. */
    gint i_ow = 0;
@@ -3231,6 +3289,20 @@ static const char _GGAZE_CSS[] =
    "}\n"
    ".ggaze-enhance-on .ggaze-enhance-check {\n"
    "  opacity: 1;\n"
+   "}\n"
+   "/* the selected card (j / k, 8i2): a ring in the text colour, so it\n"
+   " * reads on an off card and on an on card's fill alike. */\n"
+   ".ggaze-enhance-selected {\n"
+   "  outline: 2px solid currentColor;\n"
+   "  outline-offset: -2px;\n"
+   "}\n"
+   "/* a tunable card's strength and slider: compact. */\n"
+   ".ggaze-enhance-value {\n"
+   "  opacity: 0.8;\n"
+   "}\n"
+   ".ggaze-enhance-scale {\n"
+   "  margin: 0 6px;\n"
+   "  padding: 0;\n"
    "}\n"
    "/* the key a panel button fires (a dim badge). */\n"
    ".ggaze-key {\n"
@@ -3650,9 +3722,18 @@ _init_stack_and_viewer(GgazeWindow *p_win) {
 
 /* One win.enhance-N action per addressable preset (1..GGAZE_ENHANCE_MAX_
  * PRESETS), all sharing one handler that reads the index from the action's
- * data -- so the cap lives in enhancer.h and no handler parses its name. */
+ * data -- so the cap lives in enhancer.h and no handler parses its name;
+ * and the edit panel's selection / strength actions (8i2), likewise one
+ * handler reading its _PANEL_OPS row. */
 static void
 _add_enhance_actions(GgazeWindow *p_win) {
+   for (gsize u = 0; u < G_N_ELEMENTS(_PANEL_OPS); u++) {
+      GSimpleAction *p_act = g_simple_action_new(_PANEL_OPS[u].c_name, NULL);
+      g_object_set_data(G_OBJECT(p_act), "ggaze-panel-op", GSIZE_TO_POINTER(u));
+      g_signal_connect(p_act, "activate", G_CALLBACK(_action_panel_op), p_win);
+      g_action_map_add_action(G_ACTION_MAP(p_win), G_ACTION(p_act));
+      g_object_unref(p_act);
+   }
    for (gint i = 0; i < GGAZE_ENHANCE_MAX_PRESETS; i++) {
       char          *c_name = g_strdup_printf("enhance-%d", i + 1);
       GSimpleAction *p_act  = g_simple_action_new(c_name, NULL);

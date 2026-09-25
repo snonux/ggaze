@@ -440,8 +440,10 @@ test_help_window_from_table(void) {
     * move / grow / shrink / aspect / apply / cancel (6) and the
     * Straighten tool group ccw / cw / auto-crop / apply / cancel (5)
     * = 54, + 7i2's edit undo (u, Ctrl+z) and redo (U, Ctrl+Shift+Z)
-    * rows in the Edit panel group (+2) = 56. */
-   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 56);
+    * rows in the Edit panel group (+2) = 56, + 8i2's card rows (select
+    * next / previous, toggle the selected, strength down / up, five
+    * steps down / up: +7) = 63. */
+   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 63);
    gtk_window_destroy(GTK_WINDOW(p_w));
    drain_main(200);
 }

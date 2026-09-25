@@ -19,6 +19,7 @@
 #include <gio/gio.h>
 #include <glib.h>
 
+#include "preset-strength.h"
 #include "settings-pair.h"
 
 G_BEGIN_DECLS
@@ -28,11 +29,19 @@ G_BEGIN_DECLS
  * shows them) but cannot be toggled. */
 #define GGAZE_ENHANCE_MAX_PRESETS 8
 
+/* One preset. Built-ins and user presets alike are GEGL graph strings --
+ * "op:name prop=value ..." chains, see enhancer.c -- and either may mark
+ * one number as tunable with a {s:DEFAULT:MIN..MAX[:STEP]} placeholder
+ * (preset-strength.h, 8i2): b_tunable and t_strength are what parsing the
+ * graph said when the preset was made. A graph whose placeholder is
+ * malformed is kept, not tunable, and fails with the parse message when
+ * rendered. */
 typedef struct {
-   char *c_name;
-   char *c_graph; /* GEGL graph string (user presets) or NULL (built-in);
-                   * "op:name prop=value ..." chains, see enhancer.c */
-   int i_builtin; /* 1 if built-in (programmatic), 0 if user (graph text) */
+   char          *c_name;
+   char          *c_graph;    /* the GEGL graph string (never NULL) */
+   int            i_builtin;  /* 1 if one of BUILTINS[], 0 if the user's */
+   gboolean       b_tunable;  /* the graph has a well-formed placeholder */
+   PresetStrength t_strength; /* its range (valid iff b_tunable) */
 } EnhancerPreset;
 
 typedef struct Enhancer Enhancer;
@@ -53,8 +62,32 @@ const GPtrArray *enhancer_get_presets(Enhancer *p_e);
 void enhancer_set_user_presets(Enhancer *p_e, const GPtrArray *p_pairs);
 
 /* Comma-joined names of the presets enabled in u_mask (for the title), or
- * NULL when none is. Caller frees. */
+ * NULL when none is. Caller frees. enhancer_describe_state with every
+ * strength at its default. */
 char *enhancer_describe_mask(const GPtrArray *p_presets, guint8 u_mask);
+
+/* Like enhancer_describe_mask, but a tunable preset whose strength
+ * (pd_strength[i], GGAZE_ENHANCE_MAX_PRESETS of them; NULL: all at the
+ * default) is not its default is named with it, "Brightness +0.6" -- so
+ * the title tells two strengths of one preset apart, and at the defaults
+ * reads exactly as before 8i2. Caller frees. */
+char *enhancer_describe_state(const GPtrArray *p_presets, guint8 u_mask,
+                              const gdouble *pd_strength);
+
+/* Each addressable preset's default strength into pd_out[0 ..
+ * GGAZE_ENHANCE_MAX_PRESETS - 1] -- 0 for a preset without a tunable
+ * number, or a slot with no preset. */
+void enhancer_default_strengths(const GPtrArray *p_presets, gdouble *pd_out);
+
+/* A deep copy of p_presets whose tunable presets (the first
+ * GGAZE_ENHANCE_MAX_PRESETS) have their placeholder replaced by
+ * pd_strength[i] (clamped) -- what the render and the export run, so the
+ * GEGL chain never sees a placeholder and the worker gets a snapshot no
+ * later strength change can race. pd_strength NULL: a plain copy (the
+ * chain then writes each default in). A malformed graph is copied as it
+ * is. Caller unrefs. */
+GPtrArray *enhancer_presets_resolve(const GPtrArray *p_presets,
+                                    const gdouble   *pd_strength);
 
 /* The non-colliding export destination for p_src in its own folder:
  * "<stem>-enhanced<ext>", then "<stem>-enhanced-<n><ext>", where <ext> is

@@ -90,24 +90,42 @@ _thumb_box(GtkWidget **p_pic_out) {
    return (p_wide);
 }
 
+/* A tunable card's strength label: small, dim, right of the name; the
+ * caller writes the value in (enhance_ui_set_strength). */
+static GtkWidget *
+_value_label(void) {
+   GtkWidget *p_value = gtk_label_new(NULL);
+   gtk_widget_add_css_class(p_value, "caption");
+   gtk_widget_add_css_class(p_value, "numeric");
+   gtk_widget_add_css_class(p_value, GGAZE_ENHANCE_VALUE_CLASS);
+   return (p_value);
+}
+
 /* One preset card (idx u_idx): a row -- the thumbnail (thumbnail mode),
- * "1  Auto-fix", and a check mark that the "ggaze-enhance-on" class shows
+ * "1  Auto-fix", the strength label of a tunable preset (*p_value_out,
+ * else NULL), and a check mark that the "ggaze-enhance-on" class shows
  * (window.c's CSS) along with the highlight, so on / off reads at a glance
  * and needs no state here. Not focusable -- see the header: a focused
  * button activates on Space, which is hold-to-compare. */
 static GtkWidget *
-_build_preset_card(guint u_idx, const char *c_name, gboolean b_thumbnail,
-                   gboolean b_on, GtkWidget **p_pic_out) {
+_build_preset_card(guint u_idx, const EnhancerPreset *p_pr,
+                   gboolean b_thumbnail, gboolean b_on, GtkWidget **p_pic_out,
+                   GtkWidget **p_value_out) {
    GtkWidget *p_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
    *p_pic_out       = NULL;
+   *p_value_out     = NULL;
    if (b_thumbnail) {
       gtk_box_append(GTK_BOX(p_row), _thumb_box(p_pic_out));
    }
-   char      *c_lbl   = popup_list_row_label(u_idx, c_name);
+   char      *c_lbl   = popup_list_row_label(u_idx, p_pr->c_name);
    GtkWidget *p_label = _line_label(c_lbl, PANGO_ELLIPSIZE_END);
    g_free(c_lbl);
    gtk_widget_set_hexpand(p_label, TRUE);
    gtk_box_append(GTK_BOX(p_row), p_label);
+   if (p_pr->b_tunable) {
+      *p_value_out = _value_label();
+      gtk_box_append(GTK_BOX(p_row), *p_value_out);
+   }
    GtkWidget *p_check = gtk_image_new_from_icon_name("object-select-symbolic");
    gtk_widget_add_css_class(p_check, GGAZE_ENHANCE_CHECK_CLASS);
    gtk_box_append(GTK_BOX(p_row), p_check);
@@ -120,6 +138,49 @@ _build_preset_card(guint u_idx, const char *c_name, gboolean b_thumbnail,
       gtk_widget_add_css_class(p_btn, "ggaze-enhance-on");
    }
    return (p_btn);
+}
+
+/* Take the wheel away from a slider: GtkRange answers scroll events with
+ * its own GtkEventControllerScroll, so a wheel turned over the selected
+ * card's slider moved the strength instead of scrolling the cards' list
+ * -- a mouse user scrolling down the panel tuned a preset in passing.
+ * With that controller switched off (GTK_PHASE_NONE) the event bubbles
+ * on to the scrolled window like one over any other card. The slider is
+ * dragged or clicked; h / l are its keys. */
+static void
+_scale_ignore_scroll(GtkWidget *p_scale) {
+   GListModel *p_ctrls = gtk_widget_observe_controllers(p_scale);
+   guint       u_n     = g_list_model_get_n_items(p_ctrls);
+   for (guint u = 0; u < u_n; u++) {
+      GObject *p_c = g_list_model_get_item(p_ctrls, u);
+      if (GTK_IS_EVENT_CONTROLLER_SCROLL(p_c)) {
+         gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(p_c),
+                                                    GTK_PHASE_NONE);
+      }
+      g_object_unref(p_c);
+   }
+   g_object_unref(p_ctrls);
+}
+
+/* The strength slider of a tunable preset (idx u_idx): its own range and
+ * step, a tick at the default (where x brings it back), no value drawn
+ * (the card's label has it). Built hidden -- the caller shows the selected
+ * card's -- not focusable, like every panel control (Space compares;
+ * h / l are its keys), and deaf to the wheel (_scale_ignore_scroll). */
+static GtkWidget *
+_build_scale(guint u_idx, const PresetStrength *p_s) {
+   GtkWidget *p_scale = gtk_scale_new_with_range(
+      GTK_ORIENTATION_HORIZONTAL, p_s->d_min, p_s->d_max, p_s->d_step);
+   gtk_scale_set_draw_value(GTK_SCALE(p_scale), FALSE);
+   gtk_scale_add_mark(GTK_SCALE(p_scale), p_s->d_default, GTK_POS_BOTTOM, NULL);
+   gtk_range_set_value(GTK_RANGE(p_scale), p_s->d_default);
+   gtk_widget_set_can_focus(p_scale, FALSE);
+   gtk_widget_set_focusable(p_scale, FALSE);
+   gtk_widget_add_css_class(p_scale, GGAZE_ENHANCE_SCALE_CLASS);
+   gtk_widget_set_visible(p_scale, FALSE);
+   _scale_ignore_scroll(p_scale);
+   g_object_set_data(G_OBJECT(p_scale), "idx", GINT_TO_POINTER((gint)u_idx));
+   return (p_scale);
 }
 
 /* The Original reference: the untouched image as the cards see it, to
@@ -148,7 +209,8 @@ _build_original(gboolean b_thumbnail, GtkWidget **p_pic_out) {
 }
 
 /* Append one card per preset (capped at the mask's 8 bits) to p_box,
- * recording each in p_out. */
+ * each tunable one followed by its (hidden) slider, recording each in
+ * p_out. */
 static void
 _build_cards(GtkWidget *p_box, const GPtrArray *p_presets, guint8 u_mask,
              gboolean b_thumbnails, EnhanceUIWidgets *p_out) {
@@ -158,10 +220,14 @@ _build_cards(GtkWidget *p_box, const GPtrArray *p_presets, guint8 u_mask,
    }
    for (guint i = 0; i < u_n; i++) {
       const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_presets, i);
-      p_out->p_btns[i] = _build_preset_card(i, p_pr->c_name, b_thumbnails,
-                                            (u_mask & (guint8)(1u << i)) != 0,
-                                            &p_out->p_pics[i]);
+      p_out->p_btns[i]           = _build_preset_card(
+         i, p_pr, b_thumbnails, (u_mask & (guint8)(1u << i)) != 0,
+         &p_out->p_pics[i], &p_out->p_values[i]);
       gtk_box_append(GTK_BOX(p_box), p_out->p_btns[i]);
+      if (p_pr->b_tunable) {
+         p_out->p_scales[i] = _build_scale(i, &p_pr->t_strength);
+         gtk_box_append(GTK_BOX(p_box), p_out->p_scales[i]);
+      }
    }
    p_out->u_n_presets = u_n;
 }
@@ -394,4 +460,18 @@ enhance_ui_set_save_target(GtkWidget *p_target, const char *c_name) {
    /* The label middle-ellipsizes a long name; the tooltip has all of it. */
    gtk_widget_set_tooltip_text(p_target, c_name);
    g_free(c_text);
+}
+
+void
+enhance_ui_set_strength(GtkWidget *p_value, GtkWidget *p_scale,
+                        const PresetStrength *p_s, gdouble d_value) {
+   g_return_if_fail(p_s != NULL);
+   if (p_value != NULL) {
+      char *c_text = preset_strength_label(p_s, d_value);
+      gtk_label_set_text(GTK_LABEL(p_value), c_text);
+      g_free(c_text);
+   }
+   if (p_scale != NULL) {
+      gtk_range_set_value(GTK_RANGE(p_scale), d_value);
+   }
 }

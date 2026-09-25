@@ -42,6 +42,46 @@ test_snapshot_init_and_equal(void) {
    g_assert_false(edit_snapshot_equal(&t_a, &t_b));
 }
 
+/* 8i2: the strengths are part of the state -- every slot starts at 0,
+ * and a strength that differs in any one slot is another state. */
+static void
+test_snapshot_strengths(void) {
+   EditSnapshot t_a, t_b;
+   edit_snapshot_init(&t_a);
+   for (guint u = 0; u < EDIT_SNAPSHOT_PRESETS; u++) {
+      g_assert_cmpfloat(t_a.d_strength[u], ==, 0.0);
+   }
+   for (guint u = 0; u < EDIT_SNAPSHOT_PRESETS; u++) {
+      t_b               = t_a;
+      t_b.d_strength[u] = 0.6;
+      g_assert_false(edit_snapshot_equal(&t_a, &t_b));
+      t_a.d_strength[u] = 0.6;
+      g_assert_true(edit_snapshot_equal(&t_a, &t_b));
+   }
+}
+
+/* A run of strength nudges on one preset (h / l held on its card) is one
+ * step whose before is the state ahead of the first nudge, turning the
+ * preset on included: one undo takes the whole run back. */
+static void
+test_strength_run(void) {
+   EditHistory *p_h = edit_history_new(0);
+   EditSnapshot t_s[4];
+   edit_snapshot_init(&t_s[0]);
+   t_s[0].d_strength[1] = 0.5; /* the default, preset off */
+   for (guint u = 1; u < G_N_ELEMENTS(t_s); u++) {
+      t_s[u]               = t_s[u - 1];
+      t_s[u].u_mask        = 0x02;
+      t_s[u].d_strength[1] = 0.5 + 0.1 * u;
+      g_assert_true(edit_history_push_run(p_h, EDIT_STEP_STRENGTH, 1, "b",
+                                          &t_s[u - 1], &t_s[u]));
+   }
+   g_assert_cmpuint(edit_history_undo_count(p_h), ==, 1);
+   g_assert_true(edit_snapshot_equal(edit_history_undo(p_h, NULL), &t_s[0]));
+   g_assert_true(edit_snapshot_equal(edit_history_redo(p_h, NULL), &t_s[3]));
+   edit_history_delete(p_h);
+}
+
 /* Undo walks back through the befores, redo forward through the afters,
  * each with its label; both stop at the ends. */
 static void
@@ -331,6 +371,8 @@ main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
    g_test_add_func("/edit_history/snapshot_init_and_equal",
                    test_snapshot_init_and_equal);
+   g_test_add_func("/edit_history/snapshot_strengths", test_snapshot_strengths);
+   g_test_add_func("/edit_history/strength_run", test_strength_run);
    g_test_add_func("/edit_history/push_undo_redo", test_push_undo_redo);
    g_test_add_func("/edit_history/push_drops_redo", test_push_drops_redo);
    g_test_add_func("/edit_history/noop_step_is_ignored",

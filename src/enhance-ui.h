@@ -15,8 +15,12 @@
  *              dim and frameless, visibly not a preset;
  *   Presets    one ROW card per preset: a small preview thumbnail (or
  *              none when thumbnails are disabled in Preferences), "1
- *              Auto-fix", and a check mark -- an enabled card is
- *              highlighted and checked;
+ *              Auto-fix", the strength of a tunable preset ("+0.5",
+ *              8i2) and a check mark -- an enabled card is highlighted
+ *              and checked, the SELECTED card (j / k) wears a ring, and
+ *              under the selected card of a tunable preset its strength
+ *              slider shows (one slider at a time, so all eight rows
+ *              still fit an 800 px tall window);
  *   Transform  one row of four icon buttons: crop, straighten, rotate
  *              left, rotate right, each with its key badge and a tooltip;
  *   actions    a one-line save state, then Save copy (naming the file it
@@ -57,6 +61,8 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "preset-strength.h"
+
 G_BEGIN_DECLS
 
 /* The panel's requested width in px: a row card's thumbnail beside a
@@ -77,6 +83,13 @@ G_BEGIN_DECLS
 /* The CSS class on a card's check mark: window.c's stylesheet shows it
  * only on a card that also has the "ggaze-enhance-on" class. */
 #define GGAZE_ENHANCE_CHECK_CLASS "ggaze-enhance-check"
+/* The CSS class on the selected card (j / k move it, 8i2): a ring,
+ * distinct from the on state's fill. */
+#define GGAZE_ENHANCE_SELECTED_CLASS "ggaze-enhance-selected"
+/* The CSS class on a tunable card's strength slider (a GtkScale carrying
+ * the card's "idx" datum) and on its value label. */
+#define GGAZE_ENHANCE_SCALE_CLASS "ggaze-enhance-scale"
+#define GGAZE_ENHANCE_VALUE_CLASS "ggaze-enhance-value"
 
 /* Widgets built by enhance_ui_build_panel that the caller must store (the
  * card buttons + preview pictures, the save-state and save-target labels,
@@ -89,6 +102,12 @@ typedef struct {
    GtkWidget *p_original_pic; /* its GtkPicture (thumbnail mode only) */
    GtkWidget *p_btns[8];      /* preset cards (idx 0..n-1) */
    GtkWidget *p_pics[8];      /* preset preview pictures (thumbnail mode) */
+   GtkWidget *p_scales[8];    /* each tunable preset's strength slider,
+                               * NULL for one without a tunable number;
+                               * built hidden (the caller shows the
+                               * selected card's) */
+   GtkWidget *p_values[8];    /* its strength label on the card, likewise
+                               * NULL; the caller sets the text */
    guint      u_n_presets;    /* number of p_btns/p_pics entries filled */
    GtkWidget *p_state;        /* save-state line ("Unsaved edits ...") */
    GtkWidget *p_save_btn;     /* Save button, bound to win.enhance-save */
@@ -107,10 +126,14 @@ typedef struct {
  * "ggaze-enhance-on" CSS class at build time.
  * b_thumbnails selects thumbnail rows vs label-only rows.
  *
- * Every preset card carries its index in the "idx" GObject data (0..n-1).
+ * Every preset card carries its index in the "idx" GObject data (0..n-1),
+ * and so does its slider. A slider's range and step are the preset's own
+ * (EnhancerPreset.t_strength); its value, its visibility, the value label
+ * and the selection ring are the caller's to set.
  * This function connects NO signals and stores nothing -- the caller wires
- * its toggle handler and stores the widgets; the action buttons resolve
- * their win.* actions once the panel is inside the window. */
+ * its toggle and slider handlers and stores the widgets; the action
+ * buttons resolve their win.* actions once the panel is inside the
+ * window. */
 GtkWidget *enhance_ui_build_panel(const GPtrArray *p_presets, guint8 u_mask,
                                   gboolean          b_thumbnails,
                                   EnhanceUIWidgets *p_out);
@@ -123,6 +146,12 @@ GtkWidget *enhance_ui_build_panel(const GPtrArray *p_presets, guint8 u_mask,
 void enhance_ui_set_save_state(GtkWidget *p_state, GtkWidget *p_save_btn,
                                gboolean b_active, gboolean b_saved,
                                const char *c_saved);
+
+/* Show d_value on a tunable card: the label's text (p_value) and the
+ * slider's position (p_scale) -- both nullable, both the preset p_s's.
+ * Pure widget update; the caller blocks its own value-changed handler. */
+void enhance_ui_set_strength(GtkWidget *p_value, GtkWidget *p_scale,
+                             const PresetStrength *p_s, gdouble d_value);
 
 /* Name the file the next Save writes under the Save button ("as <name>"),
  * or clear it (c_name NULL: no file open, or no free name). Plain ASCII

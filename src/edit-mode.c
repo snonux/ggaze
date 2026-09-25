@@ -109,16 +109,29 @@ edit_mode_get_mode(EditMode *p_em) {
    return (_mode_for(p_em, p_em->b_large));
 }
 
+/* TRUE iff c_action is one of the selected card's actions (8i2): j / k
+ * select, Enter toggles the selection, h / l and Shift+H / L tune it. */
+static gboolean
+_is_card_action(const char *c_action) {
+   return (g_str_has_prefix(c_action, "win.edit-select-") ||
+           g_str_has_prefix(c_action, "win.edit-strength-") ||
+           g_str_equal(c_action, "win.edit-toggle-selected"));
+}
+
 /* A tool first -- its keys are the most transient thing on screen and
  * shadow the panel's (the crop tool's `a` cycles the aspect, it does not
  * close the panel) -- then, with the panel open and on screen, the panel's
  * own rows. A key a tool leaves alone still reaches the panel: a digit
- * toggles a preset under the straighten tool as it does beside it. */
+ * toggles a preset under the straighten tool as it does beside it. The
+ * selected card's keys do NOT (_is_card_action): the straighten tool
+ * leaves j / k alone, and a selection or strength stepped under a modal
+ * tool would re-render and record undo steps behind it -- they keep their
+ * global meaning there instead, as they did before the panel had them. */
 gboolean
 edit_mode_key(EditMode *p_em, guint u_keyval, GdkModifierType e_state) {
    g_return_val_if_fail(p_em != NULL, FALSE);
-   if (tool_ctrl_get_tool(p_em->p_tc) != GGAZE_TOOL_NONE &&
-       tool_ctrl_key(p_em->p_tc, u_keyval, e_state)) {
+   gboolean b_tool = tool_ctrl_get_tool(p_em->p_tc) != GGAZE_TOOL_NONE;
+   if (b_tool && tool_ctrl_key(p_em->p_tc, u_keyval, e_state)) {
       return (TRUE);
    }
    if (!_panel_live(p_em)) {
@@ -126,7 +139,7 @@ edit_mode_key(EditMode *p_em, guint u_keyval, GdkModifierType e_state) {
    }
    const char *c_action =
       shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, u_keyval, e_state);
-   if (c_action == NULL) {
+   if (c_action == NULL || (b_tool && _is_card_action(c_action))) {
       return (FALSE);
    }
    gtk_widget_activate_action(p_em->p_window, c_action, NULL);

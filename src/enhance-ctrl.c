@@ -14,11 +14,22 @@
 
 #include <glib.h>
 #include <gtk/gtk.h>
+#include <string.h>
 
 #include "edit-history.h"
 #include "enhance-ui.h"
 #include "enhancer-gegl.h"
+#include "preset-strength.h"
 #include "transform.h"
+
+/* The snapshot keeps one strength per mask bit. */
+G_STATIC_ASSERT(GGAZE_ENHANCE_MAX_PRESETS == EDIT_SNAPSHOT_PRESETS);
+
+/* The run keys of strength steps (edit_history_push_run): h / l presses on
+ * preset i coalesce under i, one drag of its slider under i plus this, so
+ * a drag right after a run of presses (or the other way round) is a step
+ * of its own. */
+#define _SLIDER_RUN GGAZE_ENHANCE_MAX_PRESETS
 
 /* Thin wrappers over the host vtable so the body reads like the old
  * window.c code (which called _show_texture / _update_header / ... directly).
@@ -36,11 +47,15 @@ static gboolean    _has_navigator(EnhanceCtrl *p_ctrl);
 static void     _sync_panel(EnhanceCtrl *p_ctrl);
 static void     _sync_save_target(EnhanceCtrl *p_ctrl);
 static void     _apply_async(EnhanceCtrl *p_ctrl);
+static void     _render(EnhanceCtrl *p_ctrl);
 static void     _discard(EnhanceCtrl *p_ctrl);
 static void     _throw_away(EnhanceCtrl *p_ctrl);
 static void     _destroy(EnhanceCtrl *p_ctrl);
 static void     _start_previews(EnhanceCtrl *p_ctrl);
 static void     _card_toggle(EnhanceCtrl *p_ctrl, GtkWidget *p_btn);
+static void     _scale_changed(GtkRange *p_range, gpointer p_data);
+static void     _scale_pressed(GtkGestureClick *p_click, gint i_n, gdouble d_x,
+                               gdouble d_y, gpointer p_data);
 static void     _sync_history(EnhanceCtrl *p_ctrl);
 static gboolean _orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
 static void     _drop_managed(EnhanceCtrl *p_ctrl);
@@ -55,24 +70,40 @@ struct EnhanceCtrl {
 
    Enhancer *p_enhancer;     /* GEGL preset engine (always non-NULL) */
    guint8    u_enhance_mask; /* bit i -> preset i enabled (layered) */
-   Transform t_xf;           /* the COMMITTED rotate 90 / straighten / crop,
-                              * applied after the presets in the same graph
-                              * (decision #35); the identity when none. What
-                              * `s` exports and dirty/active are judged on */
-   Transform t_preview;      /* a tool's rendering override (see the header:
-                              * the crop tool shows the base) ... */
-   gboolean b_preview;       /* ... in effect iff this is set */
-   gint     i_orig_w;        /* the ORIGINAL's upright size, from the
-                              * decode the viewer showed for it (learned
-                              * with p_orig_tex below) or the last landed
-                              * apply's (0 = not known yet); every LEARNED
-                              * change of it is told to the tool
-                              * (original_changed), since
-                              * transform_base_size of it is the image the
-                              * crop rectangle lives on. _forget_original
-                              * zeroes it without telling: the tool's draw
-                              * path re-reads it (_rect_on_base) and hides
-                              * the rectangle until it is learned again */
+   gdouble   d_strength
+      [GGAZE_ENHANCE_MAX_PRESETS]; /* preset i's tunable
+                                    * number (8i2), canonical; 0 for a preset
+                                    * without one. Part of the edit state like
+                                    * the mask: rendered (resolved into the
+                                    * preset graphs), exported, snapshotted for
+                                    * undo, compared for saved; back to each
+                                    * preset's default on another image and on
+                                    * a discard */
+   gint i_selected;     /* the panel's selected preset row (j / k move
+                         * it; Enter, h / l and the slider act on it;
+                         * a digit or a card click selects its row).
+                         * UI state, not an edit: it survives
+                         * navigation and is never undone */
+   gboolean b_syncing;  /* _sync_panel is moving the sliders: their
+                         * value-changed is not the user's */
+   Transform t_xf;      /* the COMMITTED rotate 90 / straighten / crop,
+                         * applied after the presets in the same graph
+                         * (decision #35); the identity when none. What
+                         * `s` exports and dirty/active are judged on */
+   Transform t_preview; /* a tool's rendering override (see the header:
+                         * the crop tool shows the base) ... */
+   gboolean b_preview;  /* ... in effect iff this is set */
+   gint     i_orig_w;   /* the ORIGINAL's upright size, from the
+                         * decode the viewer showed for it (learned
+                         * with p_orig_tex below) or the last landed
+                         * apply's (0 = not known yet); every LEARNED
+                         * change of it is told to the tool
+                         * (original_changed), since
+                         * transform_base_size of it is the image the
+                         * crop rectangle lives on. _forget_original
+                         * zeroes it without telling: the tool's draw
+                         * path re-reads it (_rect_on_base) and hides
+                         * the rectangle until it is learned again */
    gint     i_orig_h;
    gboolean b_apply_pending; /* an apply is in flight: what is on screen
                               * predates u_enhance_mask/t_xf */
@@ -87,21 +118,23 @@ struct EnhanceCtrl {
                               * active but no longer dirty, so moving on does
                               * not prompt for it (_refresh_saved keeps it
                               * in step with every state change) */
-   gboolean  b_have_saved;   /* an export succeeded for this file ... */
-   guint8    u_saved_mask;   /* ... with this mask ... */
-   Transform t_saved_xf;     /* ... and this transform */
-   char     *c_saved_name;   /* basename of that export, for the panel */
-   gboolean  b_hint_shown;   /* the "Space compares / s saves / a shows the
-                              * presets" status line was shown for this file
-                              * (it is shown once per file, and only when a
-                              * preset is applied with the panel closed) */
-   EditHistory *p_history;   /* the edit steps of THIS image (7i2): cleared
-                              * on another file and on every discard but
-                              * x's own (always non-NULL) */
-   Transform t_step_base;    /* a tool's starting transform ... */
-   gboolean  b_step_base;    /* ... which a step taken under the tool
-                              * records in place of t_xf, iff set
-                              * (enhance_ctrl_set_step_base) */
+   gboolean b_have_saved;    /* an export succeeded for this file ... */
+   guint8   u_saved_mask;    /* ... with this mask ... */
+   gdouble  d_saved_strength[GGAZE_ENHANCE_MAX_PRESETS]; /* ... these
+                                                          * strengths ... */
+   Transform t_saved_xf;   /* ... and this transform */
+   char     *c_saved_name; /* basename of that export, for the panel */
+   gboolean  b_hint_shown; /* the "Space compares / s saves / a shows the
+                            * presets" status line was shown for this file
+                            * (it is shown once per file, and only when a
+                            * preset is applied with the panel closed) */
+   EditHistory *p_history; /* the edit steps of THIS image (7i2): cleared
+                            * on another file and on every discard but
+                            * x's own (always non-NULL) */
+   Transform t_step_base;  /* a tool's starting transform ... */
+   gboolean  b_step_base;  /* ... which a step taken under the tool
+                            * records in place of t_xf, iff set
+                            * (enhance_ctrl_set_step_base) */
 
    /* The side panel and the widgets in it that change after the build. All
     * NULL while closed (_destroy clears them), so every sync helper can run
@@ -109,9 +142,12 @@ struct EnhanceCtrl {
    gboolean   b_thumbnails; /* the open panel has picture cards */
    GtkWidget *p_panel;      /* the panel root, parented in the host's slot */
    GtkWidget *p_original_pic;
-   GtkWidget *p_btns[GGAZE_ENHANCE_MAX_PRESETS]; /* preset cards */
-   GtkWidget *p_pics[GGAZE_ENHANCE_MAX_PRESETS]; /* their pictures */
-   GtkWidget *p_state;                           /* save-state line */
+   GtkWidget *p_btns[GGAZE_ENHANCE_MAX_PRESETS];   /* preset cards */
+   GtkWidget *p_pics[GGAZE_ENHANCE_MAX_PRESETS];   /* their pictures */
+   GtkWidget *p_scales[GGAZE_ENHANCE_MAX_PRESETS]; /* strength sliders
+                                                    * (NULL: not tunable) */
+   GtkWidget *p_values[GGAZE_ENHANCE_MAX_PRESETS]; /* strength labels */
+   GtkWidget *p_state;                             /* save-state line */
    GtkWidget *p_save_btn;
    GtkWidget *p_save_target; /* "as <name>" the next Save writes */
    GtkWidget *p_undo_btn;    /* insensitive with nothing to undo ... */
@@ -254,7 +290,46 @@ enhance_ctrl_new(const EnhanceUIHostOps *p_ops, gpointer p_host) {
    p_ctrl->p_enhance_cancel = g_cancellable_new();
    p_ctrl->p_history        = edit_history_new(0);
    transform_init(&p_ctrl->t_xf);
+   enhancer_default_strengths(enhancer_get_presets(p_ctrl->p_enhancer),
+                              p_ctrl->d_strength);
    return (p_ctrl);
+}
+
+/* Every preset back at its default strength (another image, a discard,
+ * a new preset list). */
+static void
+_reset_strengths(EnhanceCtrl *p_ctrl) {
+   enhancer_default_strengths(p_ctrl->p_enhancer != NULL
+                                 ? enhancer_get_presets(p_ctrl->p_enhancer)
+                                 : NULL,
+                              p_ctrl->d_strength);
+}
+
+/* TRUE iff two strength sets agree on every preset enabled in u_mask
+ * (canonical values: exact). A disabled preset's strength renders nothing,
+ * so it cannot make a state differ from what was saved. */
+static gboolean
+_strengths_equal(const gdouble *pd_a, const gdouble *pd_b, guint8 u_mask) {
+   for (guint u = 0; u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
+      if ((u_mask & (1u << u)) != 0 && pd_a[u] != pd_b[u]) {
+         return (FALSE);
+      }
+   }
+   return (TRUE);
+}
+
+/* Preset i_idx of the engine's list (borrowed), or NULL when there is no
+ * such addressable preset. */
+static const EnhancerPreset *
+_preset_at(EnhanceCtrl *p_ctrl, gint i_idx) {
+   const GPtrArray *p_presets = p_ctrl->p_enhancer != NULL
+                                   ? enhancer_get_presets(p_ctrl->p_enhancer)
+                                   : NULL;
+   if (p_presets == NULL || i_idx < 0 || (guint)i_idx >= p_presets->len ||
+       i_idx >= GGAZE_ENHANCE_MAX_PRESETS) {
+      return (NULL);
+   }
+   return (g_ptr_array_index((GPtrArray *)p_presets, (guint)i_idx));
 }
 
 /* TRUE iff there is anything to preview: a preset enabled or a transform
@@ -281,25 +356,35 @@ _render_has_work(EnhanceCtrl *p_ctrl) {
            !transform_is_identity(_render_transform(p_ctrl)));
 }
 
-/* Saved iff the committed state is exactly the pair the last export wrote
- * (see the header): re-derived after every state change rather than
- * cleared by it, so coming back to the saved state counts as saved. */
+/* Saved iff the committed state renders exactly what the last export
+ * wrote (see the header): the same mask, the same strengths on the presets
+ * that mask enables (a strength tuned on a preset that is off changes no
+ * pixel), the same transform. Re-derived after every state change rather
+ * than cleared by it, so coming back to the saved state counts as saved.
+ * (The undo history's no-op test, edit_snapshot_equal, still compares
+ * every strength: a step that only moved a disabled preset's strength is
+ * a step the card shows.) */
 static void
 _refresh_saved(EnhanceCtrl *p_ctrl) {
-   p_ctrl->b_saved = p_ctrl->b_have_saved &&
-                     p_ctrl->u_enhance_mask == p_ctrl->u_saved_mask &&
-                     transform_equal(&p_ctrl->t_xf, &p_ctrl->t_saved_xf);
+   p_ctrl->b_saved =
+      p_ctrl->b_have_saved && p_ctrl->u_enhance_mask == p_ctrl->u_saved_mask &&
+      _strengths_equal(p_ctrl->d_strength, p_ctrl->d_saved_strength,
+                       p_ctrl->u_enhance_mask) &&
+      transform_equal(&p_ctrl->t_xf, &p_ctrl->t_saved_xf);
 }
 
-/* The edit state an undo would come back to: the mask and the committed
- * transform -- or, under a tool, the transform the tool started from
- * (t_step_base), since the straighten tool commits every nudge only to
- * preview it. */
+/* The edit state an undo would come back to: the mask, the strengths and
+ * the committed transform -- or, under a tool, the transform the tool
+ * started from (t_step_base), since the straighten tool commits every
+ * nudge only to preview it. */
 static void
 _snapshot(EnhanceCtrl *p_ctrl, EditSnapshot *p_out) {
    edit_snapshot_init(p_out);
    p_out->u_mask = p_ctrl->u_enhance_mask;
-   p_out->t_xf   = p_ctrl->b_step_base ? p_ctrl->t_step_base : p_ctrl->t_xf;
+   for (guint u = 0; u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
+      p_out->d_strength[u] = p_ctrl->d_strength[u];
+   }
+   p_out->t_xf = p_ctrl->b_step_base ? p_ctrl->t_step_base : p_ctrl->t_xf;
 }
 
 /* Record the step from *p_before to the state now (a no-op step is
@@ -358,12 +443,52 @@ enhance_ctrl_dispose(EnhanceCtrl *p_ctrl) {
 
 /* --- engine presets ------------------------------------------------------ */
 
+/* Every strength clamped into its preset's range in the list now (0 for
+ * a preset without a tunable number, as everywhere). The mask bits whose
+ * value that changed. */
+static guint8
+_reclamp_strengths(EnhanceCtrl *p_ctrl) {
+   guint8 u_changed = 0;
+   for (gint i = 0; i < GGAZE_ENHANCE_MAX_PRESETS; i++) {
+      const EnhancerPreset *p_pr  = _preset_at(p_ctrl, i);
+      gdouble               d_new = 0.0;
+      if (p_pr != NULL && p_pr->b_tunable) {
+         d_new =
+            preset_strength_clamp(&p_pr->t_strength, p_ctrl->d_strength[i]);
+      }
+      if (d_new != p_ctrl->d_strength[i]) {
+         p_ctrl->d_strength[i] = d_new;
+         u_changed |= (guint8)(1u << i);
+      }
+   }
+   return (u_changed);
+}
+
+/* A new list arrives on EVERY Preferences change (the window reloads the
+ * engine lists whatever key moved), so the strengths are NOT reset: that
+ * silently threw a tuned strength away while the card, the slider, the
+ * title and the render still showed it (the export then wrote the reset
+ * value). Each is only clamped into its preset's range as the list now
+ * has it; the built-ins, rows 0..7, never change at run time, so in
+ * practice nothing moves. When something does, the panel, the title and
+ * -- if that preset is on -- the render follow. */
 void
 enhance_ctrl_set_user_presets(EnhanceCtrl *p_ctrl, const GPtrArray *p_pairs) {
    g_return_if_fail(p_ctrl != NULL);
-   if (p_ctrl->p_enhancer != NULL) {
-      enhancer_set_user_presets(p_ctrl->p_enhancer, p_pairs);
+   if (p_ctrl->p_enhancer == NULL) {
+      return;
    }
+   enhancer_set_user_presets(p_ctrl->p_enhancer, p_pairs);
+   guint8 u_changed = _reclamp_strengths(p_ctrl);
+   if (u_changed == 0) {
+      return;
+   }
+   _refresh_saved(p_ctrl);
+   _sync_panel(p_ctrl);
+   if ((u_changed & p_ctrl->u_enhance_mask) != 0) {
+      _render(p_ctrl);
+   }
+   _update_header(p_ctrl);
 }
 
 const GPtrArray *
@@ -557,15 +682,16 @@ enhance_ctrl_can_save(EnhanceCtrl *p_ctrl) {
 }
 
 /* Per-export context: the destination (for the report), the (mask,
- * transform) pair the export writes (so the completion records exactly what
- * is on disk, whatever the state did meanwhile), the caller's continuation,
- * and a ref on the host so the completion can run after a dispose without
- * dangling (it then only releases). */
+ * strengths, transform) state the export writes (so the completion records
+ * exactly what is on disk, whatever the state did meanwhile), the caller's
+ * continuation, and a ref on the host so the completion can run after a dispose
+ * without dangling (it then only releases). */
 typedef struct {
    gpointer          p_host; /* ref'd window */
    EnhanceCtrl      *p_ctrl; /* borrowed, valid while p_host is alive */
    GFile            *p_out;  /* owned */
    guint8            u_mask;
+   gdouble           d_strength[GGAZE_ENHANCE_MAX_PRESETS];
    Transform         t_xf;
    EnhanceSaveDoneFn fn_done;
    gpointer          p_done_data;
@@ -588,6 +714,8 @@ _save_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
          p_ctrl->b_have_saved = TRUE;
          p_ctrl->u_saved_mask = p_req->u_mask;
          p_ctrl->t_saved_xf   = p_req->t_xf;
+         memcpy(p_ctrl->d_saved_strength, p_req->d_strength,
+                sizeof(p_ctrl->d_saved_strength));
          g_free(p_ctrl->c_saved_name);
          p_ctrl->c_saved_name = g_file_get_basename(p_req->p_out);
          _refresh_saved(p_ctrl);
@@ -628,6 +756,10 @@ enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
       }
       return;
    }
+   /* The value written is a point undo must be able to stop at: close
+    * the strength run, so l after the save is a step of its own rather
+    * than one that undoes past the saved value. */
+   edit_history_end_run(p_ctrl->p_history);
    g_cancellable_cancel(p_ctrl->p_save_cancel);
    g_clear_object(&p_ctrl->p_save_cancel);
    p_ctrl->p_save_cancel = g_cancellable_new();
@@ -637,37 +769,72 @@ enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
    p_req->p_out          = p_out;
    p_req->u_mask         = p_ctrl->u_enhance_mask;
    p_req->t_xf           = p_ctrl->t_xf;
-   p_req->fn_done        = fn_done;
-   p_req->p_done_data    = p_done_data;
-   char *c_name          = g_file_get_basename(p_out);
-   char *c_msg           = g_strdup_printf("Saving %s…", c_name);
+   memcpy(p_req->d_strength, p_ctrl->d_strength, sizeof(p_req->d_strength));
+   p_req->fn_done     = fn_done;
+   p_req->p_done_data = p_done_data;
+   char *c_name       = g_file_get_basename(p_out);
+   char *c_msg        = g_strdup_printf("Saving %s…", c_name);
    _show_status(p_ctrl, c_msg);
    g_free(c_msg);
    g_free(c_name);
-   enhancer_export_chain_async(p_ctrl->p_enhance_file,
-                               enhancer_get_presets(p_ctrl->p_enhancer),
+   /* The strengths go in as resolved graphs; the export snapshots the
+    * list, so it is released right away. */
+   GPtrArray *p_resolved = enhancer_presets_resolve(
+      enhancer_get_presets(p_ctrl->p_enhancer), p_ctrl->d_strength);
+   enhancer_export_chain_async(p_ctrl->p_enhance_file, p_resolved,
                                p_ctrl->u_enhance_mask, &p_ctrl->t_xf, p_out,
                                p_ctrl->p_save_cancel, _save_done_cb, p_req);
+   g_ptr_array_unref(p_resolved);
 }
 
 /* --- panel sync ----------------------------------------------------------- */
 
-/* Bring the open panel in line with the state: each preset card's
- * "ggaze-enhance-on" highlight from the mask, and the save-state line +
- * Save button from active/saved. A no-op while the panel is closed (every
- * widget pointer is NULL then), so callers never check p_panel first. */
+/* p_widget has c_class iff b_on. */
+static void
+_set_class(GtkWidget *p_widget, const char *c_class, gboolean b_on) {
+   if (b_on) {
+      gtk_widget_add_css_class(p_widget, c_class);
+   } else {
+      gtk_widget_remove_css_class(p_widget, c_class);
+   }
+}
+
+/* Card i in line with the state: on / off, selected, and -- for a
+ * tunable preset -- its strength on the label and the slider, which shows
+ * under the selected card alone. The slider moves under b_syncing, so its
+ * value-changed does not read as the user's. */
+static void
+_sync_card(EnhanceCtrl *p_ctrl, guint i) {
+   GtkWidget *p_btn = p_ctrl->p_btns[i];
+   if (p_btn == NULL) {
+      return;
+   }
+   gboolean b_selected = (gint)i == p_ctrl->i_selected;
+   _set_class(p_btn, "ggaze-enhance-on",
+              (p_ctrl->u_enhance_mask & (guint8)(1u << i)) != 0);
+   _set_class(p_btn, GGAZE_ENHANCE_SELECTED_CLASS, b_selected);
+   const EnhancerPreset *p_pr = _preset_at(p_ctrl, (gint)i);
+   if (p_pr == NULL || !p_pr->b_tunable) {
+      return;
+   }
+   p_ctrl->b_syncing = TRUE;
+   enhance_ui_set_strength(p_ctrl->p_values[i], p_ctrl->p_scales[i],
+                           &p_pr->t_strength, p_ctrl->d_strength[i]);
+   p_ctrl->b_syncing = FALSE;
+   if (p_ctrl->p_scales[i] != NULL) {
+      gtk_widget_set_visible(p_ctrl->p_scales[i], b_selected);
+   }
+}
+
+/* Bring the open panel in line with the state: each preset card
+ * (_sync_card: its highlight from the mask, the selection ring, the
+ * strength), and the save-state line + Save button from active/saved. A no-op
+ * while the panel is closed (every widget pointer is NULL then), so callers
+ * never check p_panel first. */
 static void
 _sync_panel(EnhanceCtrl *p_ctrl) {
    for (guint i = 0; i < G_N_ELEMENTS(p_ctrl->p_btns); i++) {
-      GtkWidget *p_btn = p_ctrl->p_btns[i];
-      if (p_btn == NULL) {
-         continue;
-      }
-      if ((p_ctrl->u_enhance_mask & (guint8)(1u << i)) != 0) {
-         gtk_widget_add_css_class(p_btn, "ggaze-enhance-on");
-      } else {
-         gtk_widget_remove_css_class(p_btn, "ggaze-enhance-on");
-      }
+      _sync_card(p_ctrl, i);
    }
    if (p_ctrl->p_state != NULL) {
       enhance_ui_set_save_state(p_ctrl->p_state, p_ctrl->p_save_btn,
@@ -813,8 +980,6 @@ _req_free(_Req *p_req) {
    g_free(p_req);
 }
 
-static void _render(EnhanceCtrl *p_ctrl);
-
 /* A render landed and is still wanted: show it. The worker decoded the
  * original, so its size is known here even before the viewer has shown a
  * decode of it -- after a rewrite in place the render may land BEFORE the
@@ -919,12 +1084,17 @@ _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
    p_req->u_gen         = p_ctrl->u_enhance_gen;
    p_req->b_hint        = p_ctrl->p_panel == NULL && !p_ctrl->b_hint_shown;
    p_ctrl->b_hint_shown = p_ctrl->b_hint_shown || p_req->b_hint;
-   const GPtrArray *p_presets = enhancer_get_presets(p_ctrl->p_enhancer);
-   p_ctrl->b_apply_pending    = TRUE;
+   /* The strengths as of NOW, resolved into the graphs: a nudge after
+    * this launch is the next render's (the coalescing slot). The worker
+    * snapshots the list, so it is released right away. */
+   GPtrArray *p_presets = enhancer_presets_resolve(
+      enhancer_get_presets(p_ctrl->p_enhancer), p_ctrl->d_strength);
+   p_ctrl->b_apply_pending = TRUE;
    p_ctrl->u_render_count++;
    enhancer_apply_chain_async(p_file, p_presets, p_ctrl->u_enhance_mask,
                               _render_transform(p_ctrl),
                               p_ctrl->p_enhance_cancel, _apply_done_cb, p_req);
+   g_ptr_array_unref(p_presets);
 }
 
 /* Canonical "nothing to render" site -- every path that clears the state
@@ -966,6 +1136,7 @@ _render(EnhanceCtrl *p_ctrl) {
    GFile *p_file = _current_file(p_ctrl);
    if (p_file == NULL) {
       p_ctrl->u_enhance_mask = 0;
+      _reset_strengths(p_ctrl);
       transform_init(&p_ctrl->t_xf);
       p_ctrl->b_preview       = FALSE;
       p_ctrl->b_hold_original = FALSE; /* see _restore_original */
@@ -1011,6 +1182,7 @@ static void
 _discard(EnhanceCtrl *p_ctrl) {
    p_ctrl->p_ops->abandon_tool(p_ctrl->p_host);
    p_ctrl->u_enhance_mask = 0;
+   _reset_strengths(p_ctrl);        /* the strengths are edits too */
    transform_init(&p_ctrl->t_xf);   /* a discard drops the turn/crop too */
    p_ctrl->b_preview       = FALSE; /* and a tool's override with it */
    p_ctrl->b_hold_original = FALSE; /* belt-and-braces: _restore_original
@@ -1246,15 +1418,18 @@ enhance_ctrl_revert_all(EnhanceCtrl *p_ctrl) {
 /* Put *p_s back as THE edit state and render it the way a toggle does
  * (_apply_async: last-write-wins, saved/dirty re-derived, panel and
  * title). A state that renders the same as the screen (the auto-crop flag
- * at 0 degrees) only refreshes the names, as enhance_ctrl_set_transform
- * does. */
+ * at 0 degrees, a strength of a preset that is off) only refreshes the
+ * cards and names, as enhance_ctrl_set_transform does. */
 static void
 _restore_snapshot(EnhanceCtrl *p_ctrl, const EditSnapshot *p_s) {
-   gboolean b_same = p_ctrl->u_enhance_mask == p_s->u_mask &&
-                     transform_equal(_render_transform(p_ctrl), &p_s->t_xf);
+   gboolean b_same =
+      p_ctrl->u_enhance_mask == p_s->u_mask &&
+      _strengths_equal(p_ctrl->d_strength, p_s->d_strength, p_s->u_mask) &&
+      transform_equal(_render_transform(p_ctrl), &p_s->t_xf);
    p_ctrl->u_enhance_mask = p_s->u_mask;
-   p_ctrl->t_xf           = p_s->t_xf;
-   p_ctrl->b_preview      = FALSE;
+   memcpy(p_ctrl->d_strength, p_s->d_strength, sizeof(p_ctrl->d_strength));
+   p_ctrl->t_xf      = p_s->t_xf;
+   p_ctrl->b_preview = FALSE;
    if (b_same) {
       _refresh_saved(p_ctrl);
       _sync_panel(p_ctrl);
@@ -1342,7 +1517,8 @@ enhance_ctrl_record_tool_step(EnhanceCtrl *p_ctrl, EditStepKind e_kind,
 /* Synchronously take the panel out of the host's slot and clear the
  * now-dangling widget pointers. Safe to call when none is open. Closing it
  * never touches u_enhance_mask -- the preview persists until explicitly
- * discarded. */
+ * discarded -- but it closes a strength run: h / l after the panel comes
+ * back is a step of its own, so undo can stop at the value it closed on. */
 static void
 _destroy(EnhanceCtrl *p_ctrl) {
    p_ctrl->u_preview_gen++;
@@ -1351,11 +1527,16 @@ _destroy(EnhanceCtrl *p_ctrl) {
    if (p_ctrl->p_panel == NULL) {
       return;
    }
+   if (p_ctrl->p_history != NULL) {
+      edit_history_end_run(p_ctrl->p_history);
+   }
    GtkWidget *p_panel = p_ctrl->p_panel;
    p_ctrl->p_panel    = NULL;
    for (guint i = 0; i < G_N_ELEMENTS(p_ctrl->p_btns); i++) {
-      p_ctrl->p_btns[i] = NULL;
-      p_ctrl->p_pics[i] = NULL;
+      p_ctrl->p_btns[i]   = NULL;
+      p_ctrl->p_pics[i]   = NULL;
+      p_ctrl->p_scales[i] = NULL;
+      p_ctrl->p_values[i] = NULL;
    }
    p_ctrl->p_original_pic = NULL;
    p_ctrl->p_state        = NULL;
@@ -1434,6 +1615,21 @@ _start_previews(EnhanceCtrl *p_ctrl) {
       p_ctrl->p_preview_cancel, _preview_done_cb, p_ctx);
 }
 
+/* A slider's handlers: value-changed sets the strength (_scale_changed),
+ * and a press -- caught in the capture phase, ahead of the slider's own
+ * drag -- closes the strength run, so each drag is one undo step even on
+ * the same preset. */
+static void
+_wire_scale(EnhanceCtrl *p_ctrl, GtkWidget *p_scale) {
+   g_signal_connect(p_scale, "value-changed", G_CALLBACK(_scale_changed),
+                    p_ctrl);
+   GtkGesture *p_click = gtk_gesture_click_new();
+   gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(p_click),
+                                              GTK_PHASE_CAPTURE);
+   g_signal_connect(p_click, "pressed", G_CALLBACK(_scale_pressed), p_ctrl);
+   gtk_widget_add_controller(p_scale, GTK_EVENT_CONTROLLER(p_click));
+}
+
 /* Build the panel and wire it into the controller's state. The pure widget
  * construction lives in enhance-ui.c (enhance_ui_build_panel); this thin
  * wrapper owns the controller-side glue -- storing the built widgets into
@@ -1453,12 +1649,15 @@ _build_panel(EnhanceCtrl *p_ctrl) {
    p_ctrl->p_undo_btn     = ui.p_undo_btn;
    p_ctrl->p_redo_btn     = ui.p_redo_btn;
    for (guint i = 0; i < ui.u_n_presets; i++) {
-      p_ctrl->p_btns[i] = ui.p_btns[i];
-      p_ctrl->p_pics[i] = ui.p_pics[i];
-   }
-   for (guint i = 0; i < ui.u_n_presets; i++) {
+      p_ctrl->p_btns[i]   = ui.p_btns[i];
+      p_ctrl->p_pics[i]   = ui.p_pics[i];
+      p_ctrl->p_scales[i] = ui.p_scales[i];
+      p_ctrl->p_values[i] = ui.p_values[i];
       g_signal_connect_swapped(ui.p_btns[i], "clicked",
                                G_CALLBACK(_card_toggle), p_ctrl);
+      if (ui.p_scales[i] != NULL) {
+         _wire_scale(p_ctrl, ui.p_scales[i]);
+      }
    }
    return (p_panel);
 }
@@ -1534,16 +1733,35 @@ _preset_label(EnhanceCtrl *p_ctrl, gint i_idx, gboolean b_on) {
    return (g_strdup_printf("preset %d %s", i_idx + 1, c_on));
 }
 
+/* Select row i_idx. Another row closes a strength run: h / l on the next
+ * row is a step of its own. Only the cards change. */
+static void
+_select(EnhanceCtrl *p_ctrl, gint i_idx) {
+   if (i_idx == p_ctrl->i_selected) {
+      return;
+   }
+   edit_history_end_run(p_ctrl->p_history);
+   p_ctrl->i_selected = i_idx;
+   for (guint i = 0; i < G_N_ELEMENTS(p_ctrl->p_btns); i++) {
+      _sync_card(p_ctrl, i);
+   }
+}
+
 /* enhance-N (keys 1-8, routed here only while the panel is open --
- * edit-mode.c) and a card click: toggle preset N on/off (layered), record
- * it as an undoable step, then re-apply asynchronously. Out-of-range
- * i_idx is a silent no-op. */
+ * edit-mode.c), a card click and Enter on the selected card: toggle preset
+ * N on/off (layered), record it as an undoable step, then re-apply
+ * asynchronously. The row becomes the selected one (8i2), so a digit or a
+ * click followed by h / l tunes that preset. Out-of-range i_idx is a
+ * silent no-op. */
 void
 enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx) {
    g_return_if_fail(p_ctrl != NULL);
    if (p_ctrl->p_enhancer == NULL || i_idx < 0 ||
        i_idx >= (gint)G_N_ELEMENTS(p_ctrl->p_btns)) {
       return;
+   }
+   if (_preset_at(p_ctrl, i_idx) != NULL) {
+      _select(p_ctrl, i_idx);
    }
    EditSnapshot t_before;
    _snapshot(p_ctrl, &t_before);
@@ -1553,6 +1771,167 @@ enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx) {
    _push_step(p_ctrl, EDIT_STEP_PRESET, c_label, &t_before);
    g_free(c_label);
    _apply_async(p_ctrl);
+}
+
+/* --- selection and strength (8i2) ---------------------------------------- */
+
+gint
+enhance_ctrl_get_selected(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, 0);
+   return (p_ctrl->i_selected);
+}
+
+gdouble
+enhance_ctrl_get_strength(EnhanceCtrl *p_ctrl, gint i_idx) {
+   g_return_val_if_fail(p_ctrl != NULL, 0.0);
+   if (i_idx < 0 || i_idx >= GGAZE_ENHANCE_MAX_PRESETS) {
+      return (0.0);
+   }
+   return (p_ctrl->d_strength[i_idx]);
+}
+
+const gdouble *
+enhance_ctrl_get_strengths(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, NULL);
+   return (p_ctrl->d_strength);
+}
+
+/* j / k stop at the first and last row rather than wrap: holding k to get
+ * to the top must not land at the bottom. */
+void
+enhance_ctrl_select_step(EnhanceCtrl *p_ctrl, gint i_dir) {
+   g_return_if_fail(p_ctrl != NULL);
+   const GPtrArray *p_presets = enhance_ctrl_get_presets(p_ctrl);
+   gint             i_n       = p_presets != NULL ? (gint)p_presets->len : 0;
+   i_n                        = MIN(i_n, GGAZE_ENHANCE_MAX_PRESETS);
+   if (i_n > 0) {
+      _select(p_ctrl, CLAMP(p_ctrl->i_selected + i_dir, 0, i_n - 1));
+   }
+}
+
+void
+enhance_ctrl_toggle_selected(EnhanceCtrl *p_ctrl) {
+   g_return_if_fail(p_ctrl != NULL);
+   if (_preset_at(p_ctrl, p_ctrl->i_selected) != NULL) {
+      enhance_ctrl_toggle_preset(p_ctrl, p_ctrl->i_selected);
+   }
+}
+
+/* "Brightness +0.6": the step label (the status line after an undo names
+ * it, "Undid: Brightness +0.6") and the status line of the change. */
+static char *
+_strength_text(const EnhancerPreset *p_pr, gdouble d_value) {
+   char *c_value = preset_strength_label(&p_pr->t_strength, d_value);
+   char *c_text  = g_strdup_printf("%s %s", p_pr->c_name, c_value);
+   g_free(c_value);
+   return (c_text);
+}
+
+/* Set tunable preset i_idx's strength to d_value (canonical) and turn it
+ * on, as a step of the run i_key -- a burst of h / l presses, or one
+ * slider drag, undoes as one (edit_history_push_run) -- then re-render
+ * (coalesced by _render while a render is in flight: holding l costs the
+ * render in flight and one more, and the last value always lands). */
+static void
+_set_strength(EnhanceCtrl *p_ctrl, gint i_idx, gdouble d_value, gint i_key) {
+   const EnhancerPreset *p_pr = _preset_at(p_ctrl, i_idx);
+   EditSnapshot          t_before;
+   EditSnapshot          t_after;
+   _snapshot(p_ctrl, &t_before);
+   p_ctrl->d_strength[i_idx] = d_value;
+   p_ctrl->u_enhance_mask |= (guint8)(1u << i_idx);
+   _snapshot(p_ctrl, &t_after);
+   char *c_text = _strength_text(p_pr, d_value);
+   edit_history_push_run(p_ctrl->p_history, EDIT_STEP_STRENGTH, i_key, c_text,
+                         &t_before, &t_after);
+   _show_status(p_ctrl, c_text);
+   g_free(c_text);
+   _apply_async(p_ctrl);
+}
+
+/* The status line of a nudge that hit the end of the range. */
+static void
+_say_limit(EnhanceCtrl *p_ctrl, const EnhancerPreset *p_pr, gint i_steps) {
+   char *c_value = preset_strength_label(
+      &p_pr->t_strength, p_ctrl->d_strength[p_ctrl->i_selected]);
+   char *c_msg = g_strdup_printf("%s is at its %s (%s)", p_pr->c_name,
+                                 i_steps > 0 ? "maximum" : "minimum", c_value);
+   _show_status(p_ctrl, c_msg);
+   g_free(c_msg);
+   g_free(c_value);
+}
+
+gboolean
+enhance_ctrl_nudge_strength(EnhanceCtrl *p_ctrl, gint i_steps) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   gint                  i_idx = p_ctrl->i_selected;
+   const EnhancerPreset *p_pr  = _preset_at(p_ctrl, i_idx);
+   if (!_has_navigator(p_ctrl) || p_pr == NULL) {
+      return (FALSE);
+   }
+   if (!p_pr->b_tunable) {
+      char *c_msg = g_strdup_printf("%s has no strength to adjust "
+                                    "(on / off only \u2014 Enter toggles it; "
+                                    "\u2190/\u2192 or PgUp/PgDn change image)",
+                                    p_pr->c_name);
+      _show_status(p_ctrl, c_msg);
+      g_free(c_msg);
+      return (FALSE);
+   }
+   gdouble d_new = preset_strength_nudge(&p_pr->t_strength,
+                                         p_ctrl->d_strength[i_idx], i_steps);
+   if (d_new == p_ctrl->d_strength[i_idx] &&
+       (p_ctrl->u_enhance_mask & (1u << i_idx)) != 0) {
+      _say_limit(p_ctrl, p_pr, i_steps);
+      return (TRUE);
+   }
+   _set_strength(p_ctrl, i_idx, d_new, i_idx);
+   return (TRUE);
+}
+
+/* A slider moved (by the user: _sync_card moves it under b_syncing): its
+ * value snapped onto the preset's step grid becomes the strength, as one
+ * step per drag (the run key _SLIDER_RUN + idx, closed by the next press,
+ * _scale_pressed). The slider only shows under the selected card, but its
+ * row is made the selected one all the same. */
+static void
+_scale_changed(GtkRange *p_range, gpointer p_data) {
+   EnhanceCtrl *p_ctrl = p_data;
+   if (p_ctrl->b_syncing || _disposed(p_ctrl)) {
+      return;
+   }
+   gint i_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(p_range), "idx"));
+   const EnhancerPreset *p_pr = _preset_at(p_ctrl, i_idx);
+   if (p_pr == NULL || !p_pr->b_tunable) {
+      return;
+   }
+   if (i_idx != p_ctrl->i_selected) {
+      edit_history_end_run(p_ctrl->p_history);
+      p_ctrl->i_selected = i_idx;
+   }
+   gdouble d_new =
+      preset_strength_snap(&p_pr->t_strength, gtk_range_get_value(p_range));
+   if (d_new == p_ctrl->d_strength[i_idx] &&
+       (p_ctrl->u_enhance_mask & (1u << i_idx)) != 0) {
+      _sync_panel(p_ctrl); /* back onto the grid, nothing changed */
+      return;
+   }
+   _set_strength(p_ctrl, i_idx, d_new, _SLIDER_RUN + i_idx);
+}
+
+/* A press on a slider starts a new drag: close any strength run, so the
+ * drag is an undo step of its own. */
+static void
+_scale_pressed(GtkGestureClick *p_click, gint i_n, gdouble d_x, gdouble d_y,
+               gpointer p_data) {
+   (void)p_click;
+   (void)i_n;
+   (void)d_x;
+   (void)d_y;
+   EnhanceCtrl *p_ctrl = p_data;
+   if (!_disposed(p_ctrl)) {
+      edit_history_end_run(p_ctrl->p_history);
+   }
 }
 
 /* --- choke points -------------------------------------------------------- */
@@ -1648,6 +2027,7 @@ enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl) {
       }
    } else {
       p_ctrl->u_enhance_mask = 0;
+      _reset_strengths(p_ctrl); /* per image, like the mask */
       transform_init(&p_ctrl->t_xf);
       p_ctrl->b_preview = FALSE; /* a tool's override goes with it */
       _forget_original(p_ctrl);  /* another image, another size */

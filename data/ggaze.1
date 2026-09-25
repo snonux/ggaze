@@ -65,7 +65,17 @@ GEGL edit panel (optional): presets, crop, straighten, rotate, save, revert;
 a key-hint bar under the image lists the live keys
 .TP
 .B 1 \- 8
-Toggle preset N (only while the edit panel is open, in the large view)
+Toggle preset N (only while the edit panel is open, in the large view); the
+digit also selects that preset's card
+.TP
+.B j / k / Enter / h / l
+With the edit panel open: select the next / previous preset card, toggle
+the selected preset, lower / raise its strength one step (Shift: five
+steps), turning it on. A preset with nothing to tune (Auto\-fix, Warm) says
+so. The selected card shows its strength slider. The arrows are not the
+panel's: Left / Right (and Page Up / Page Down) still change the image and
+Up / Down pan. Under a crop or straighten tool these keys do not reach the
+panel
 .TP
 .B c / r / [ / ]
 Crop / straighten / rotate 90\[de] counter-clockwise / clockwise (open the
@@ -77,8 +87,9 @@ panel cancels the tool. Caps Lock does not change these keys
 .B s / x
 Save an edited copy (never the original) / revert every edit (edit panel
 open, large view; u undoes it). Esc closes the panel and keeps the edit.
-An edit step (preset toggle, quarter turn, crop or straighten applied, x)
-is undone with u and redone with U; the last 64 steps of the image are
+An edit step (preset toggle, a run of strength steps or one slider drag,
+quarter turn, crop or straighten applied, x) is undone with u and redone
+with U; the last 64 steps of the image are
 kept, and another image clears them
 .TP
 .B f / S

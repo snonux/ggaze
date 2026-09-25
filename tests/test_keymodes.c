@@ -5,8 +5,9 @@
  * generates the key-hint bars from them (6i2). These are pure table
  * lookups and string building -- gdk_keyval_* need no display -- so they
  * run in every lane, the minimal one included: which key does what in
- * which mode, the modifier matching (Shift only for letters, Ctrl only
- * when a row names it, Caps Lock never read as Shift), and the exact hint
+ * which mode, the modifier matching (Shift for letters, and on a key that
+ * prints nothing only against an explicit Shift twin; Ctrl only when a
+ * row names it; Caps Lock never read as Shift), and the exact hint
  * lines (the preset digits as many as there are presets), so a
  * table edit that changes what the bar or the panel buttons say shows up
  * here.
@@ -31,12 +32,106 @@ test_panel_keys_are_scoped(void) {
    g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_9, 0));
    g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_NONE, GDK_KEY_1, 0));
    g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_CROP, GDK_KEY_1, 0));
-   /* h / l / j / k stay free in the panel (navigation now, strength
-    * later). */
-   g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_h, 0));
+   /* 8i2: h / j / k / l are the panel's (test_panel_card_keys); nothing
+    * else takes them while browsing. */
+   g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_NONE, GDK_KEY_h, 0));
    /* A chord is not the digit. */
    g_assert_null(
       shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_1, GDK_CONTROL_MASK));
+}
+
+/* 8i2: the selected card's keys -- in the panel's mode alone, and the vi
+ * keys alone: j / k select, Enter toggles, h / l step the strength, Shift
+ * five steps; Caps Lock is not Shift (`H` + Lock is the one-step `h`).
+ * The arrows are NOT the panel's: Left / Right still change the image and
+ * Up / Down / Shift+arrows pan, so flicking through a folder with the
+ * arrows never moves a strength. Outside the panel the vi keys keep their
+ * global meaning (h is win.prev). CARD_KEYS is the panel's answer to
+ * each press; test_panel_card_keys checks it and the global side. */
+static const struct {
+   guint           u_key;
+   GdkModifierType e_mods;
+   const char     *c_action;
+} CARD_KEYS[] = {
+   {GDK_KEY_j, 0, "win.edit-select-next"},
+   {GDK_KEY_k, 0, "win.edit-select-prev"},
+   {GDK_KEY_Return, 0, "win.edit-toggle-selected"},
+   {GDK_KEY_KP_Enter, 0, "win.edit-toggle-selected"},
+   {GDK_KEY_h, 0, "win.edit-strength-down"},
+   {GDK_KEY_l, 0, "win.edit-strength-up"},
+   {GDK_KEY_H, GDK_SHIFT_MASK, "win.edit-strength-down-5"},
+   {GDK_KEY_h, GDK_SHIFT_MASK, "win.edit-strength-down-5"},
+   {GDK_KEY_L, GDK_SHIFT_MASK, "win.edit-strength-up-5"},
+   {GDK_KEY_L, 0, "win.edit-strength-up-5"}, /* a real Shift+l */
+   {GDK_KEY_H, GDK_LOCK_MASK, "win.edit-strength-down"},
+   {GDK_KEY_L, GDK_LOCK_MASK, "win.edit-strength-up"},
+   {GDK_KEY_J, GDK_LOCK_MASK, "win.edit-select-next"},
+   {GDK_KEY_H, GDK_SHIFT_MASK | GDK_LOCK_MASK, "win.edit-strength-down-5"},
+   {GDK_KEY_J, GDK_SHIFT_MASK, NULL}, /* Shift+j is nothing */
+   /* Enter has no Shift twin here: Shift is noise on it. */
+   {GDK_KEY_Return, GDK_SHIFT_MASK, "win.edit-toggle-selected"},
+   {GDK_KEY_h, GDK_CONTROL_MASK, NULL},
+   {GDK_KEY_Left, 0, NULL}, /* the arrows stay global */
+   {GDK_KEY_Right, 0, NULL},
+   {GDK_KEY_Up, 0, NULL},
+   {GDK_KEY_Down, 0, NULL},
+   {GDK_KEY_Left, GDK_SHIFT_MASK, NULL},
+   {GDK_KEY_Right, GDK_SHIFT_MASK, NULL},
+};
+
+static void
+test_panel_card_keys(void) {
+   for (gsize u = 0; u < G_N_ELEMENTS(CARD_KEYS); u++) {
+      const char *c_got = shortcuts_mode_action(
+         GGAZE_KEY_MODE_PANEL, CARD_KEYS[u].u_key, CARD_KEYS[u].e_mods);
+      if (g_strcmp0(c_got, CARD_KEYS[u].c_action) != 0) {
+         g_error("case %" G_GSIZE_FORMAT ": %s", u, c_got);
+      }
+   }
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_h, 0), ==, "win.prev");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_Left, 0), ==, "win.prev");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_Right, 0), ==, "win.next");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_Down, 0), ==,
+                   "win.cursor-down");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_Page_Down, 0), ==,
+                   "win.next");
+   /* The tools keep theirs: the crop tool's h still moves, Enter applies. */
+   g_assert_cmpint(shortcuts_mode_op(GGAZE_KEY_MODE_CROP, GDK_KEY_h, 0), ==,
+                   GGAZE_KEY_OP_CROP_MOVE_LEFT);
+   g_assert_null(shortcuts_mode_action(GGAZE_KEY_MODE_CROP, GDK_KEY_h, 0));
+}
+
+/* Shift on a key that prints nothing counts only where the same scope has
+ * an explicit Shift twin of that key: the global Shift+Left / Shift+Right
+ * pan while Left / Right change the image; with no twin Shift is ignored,
+ * so Shift+Enter still applies and Shift+Esc still cancels a crop or a
+ * straighten (a matcher that always compared Shift there broke both). */
+static void
+test_shift_on_non_printing_keys(void) {
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_Left, GDK_SHIFT_MASK), ==,
+                   "win.pan-left");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_Right, GDK_SHIFT_MASK), ==,
+                   "win.pan-right");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_Delete, GDK_SHIFT_MASK), ==,
+                   "win.delete");
+   g_assert_cmpstr(shortcuts_global_action(GDK_KEY_Delete, 0), ==, "win.trash");
+   static const GgazeKeyMode MODES[] = {GGAZE_KEY_MODE_CROP,
+                                        GGAZE_KEY_MODE_STRAIGHTEN};
+   for (gsize u = 0; u < G_N_ELEMENTS(MODES); u++) {
+      g_assert_cmpint(
+         shortcuts_mode_op(MODES[u], GDK_KEY_Return, GDK_SHIFT_MASK), ==,
+         GGAZE_KEY_OP_TOOL_APPLY);
+      g_assert_cmpint(
+         shortcuts_mode_op(MODES[u], GDK_KEY_KP_Enter, GDK_SHIFT_MASK), ==,
+         GGAZE_KEY_OP_TOOL_APPLY);
+      g_assert_cmpint(
+         shortcuts_mode_op(MODES[u], GDK_KEY_Escape, GDK_SHIFT_MASK), ==,
+         GGAZE_KEY_OP_TOOL_CANCEL);
+      /* Caps Lock stays out of it. */
+      g_assert_cmpint(shortcuts_mode_op(MODES[u], GDK_KEY_Escape,
+                                        GDK_SHIFT_MASK | GDK_LOCK_MASK),
+                      ==, GGAZE_KEY_OP_TOOL_CANCEL);
+   }
 }
 
 /* 7i2: u / Ctrl+z undo and U / Ctrl+Shift+Z redo an edit step -- in the
@@ -229,7 +324,8 @@ static void
 test_hint_lines(void) {
    char *c_panel = hint(GGAZE_KEY_MODE_PANEL, 8, FALSE);
    g_assert_cmpstr(c_panel, ==,
-                   "1–8 presets  ·  c crop  ·  r straighten  "
+                   "1–8 presets  ·  j/k select  ·  Enter toggle  ·  "
+                   "h/l strength  ·  c crop  ·  r straighten  "
                    "·  [/] rotate  ·  s save copy  ·  "
                    "x revert  ·  u/Shift+u undo/redo  ·  "
                    "Space hold: original  ·  a/Esc close");
@@ -261,13 +357,13 @@ test_hint_preset_count(void) {
       guint       u_n;
       const char *c_prefix;
    } CASES[] = {
-      {8, "1–8 presets  ·  c crop"},
-      {12, "1–8 presets  ·  c crop"}, /* the mask stops at 8 */
-      {5, "1–5 presets  ·  c crop"},
-      {3, "1–3 presets  ·  c crop"},
-      {2, "1/2 presets  ·  c crop"},
-      {1, "1 preset  ·  c crop"},
-      {0, "c crop  ·  r straighten"},
+      {8, "1–8 presets  ·  j/k select"},
+      {12, "1–8 presets  ·  j/k select"}, /* the mask stops at 8 */
+      {5, "1–5 presets  ·  j/k select"},
+      {3, "1–3 presets  ·  j/k select"},
+      {2, "1/2 presets  ·  j/k select"},
+      {1, "1 preset  ·  j/k select"},
+      {0, "j/k select  ·  Enter toggle"},
    };
    for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
       char *c_line = hint(GGAZE_KEY_MODE_PANEL, CASES[u].u_n, FALSE);
@@ -430,6 +526,9 @@ int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
    g_log_set_always_fatal(G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL);
+   g_test_add_func("/keymodes/panel_card_keys", test_panel_card_keys);
+   g_test_add_func("/keymodes/shift_on_non_printing_keys",
+                   test_shift_on_non_printing_keys);
    g_test_add_func("/keymodes/panel_keys_are_scoped",
                    test_panel_keys_are_scoped);
    g_test_add_func("/keymodes/global_keys", test_global_keys);

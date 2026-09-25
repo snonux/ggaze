@@ -341,6 +341,20 @@ test_edit_history = executable(
 )
 test('edit_history', test_edit_history, suite : 'unit', env : fixtures_env)
 
+# 8i2: the tunable-number placeholder of an enhance preset is plain C (no
+# GTK, no GEGL): Preferences validates with it in every build, so it runs
+# in every lane, the minimal one included.
+test_preset_strength = executable(
+   'test_preset_strength',
+   ['test_preset_strength.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, gio_dep, m_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('preset_strength', test_preset_strength, suite : 'unit',
+   env : fixtures_env)
+
 test_thumbnail = executable(
    'test_thumbnail',
    ['test_thumbnail.c', ggaze_conf_h],

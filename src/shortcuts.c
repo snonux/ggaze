@@ -98,6 +98,13 @@ typedef struct {
     .c_label = (label)}
 
 #define _UNDO_TITLE "Undo the last edit step (panel open)"
+#define _NEXT_TITLE "Select the next preset card (panel open)"
+#define _PREV_TITLE "Select the previous preset card (panel open)"
+#define _TOGGLE_TITLE "Toggle the selected preset (panel open)"
+#define _DOWN_TITLE "Lower the selected preset's strength (turns it on)"
+#define _UP_TITLE "Raise the selected preset's strength (turns it on)"
+#define _DOWN5_TITLE "Lower the selected preset's strength five steps"
+#define _UP5_TITLE "Raise the selected preset's strength five steps"
 #define _REDO_TITLE "Redo the edit step undone last (panel open)"
 
 #define _CROP_GROUP "Crop tool (c)"
@@ -211,6 +218,30 @@ static const ShortcutEntry SHORTCUTS[] = {
    _PRESET_ROW(GDK_KEY_6, 6),
    _PRESET_ROW(GDK_KEY_7, 7),
    _PRESET_ROW(GDK_KEY_8, 8),
+   /* The selected card (8i2): with the panel open j / k move the
+    * selection, Enter toggles it, h / l lower / raise its strength (Shift:
+    * five steps) -- shadowing the vi navigation and pan keys only while
+    * the panel is the key mode. The vi keys ALONE: the arrows stay global
+    * (Left / Right and Page Up / Page Down change the image, Up / Down and
+    * Shift+arrows pan), so flicking through a folder with the arrows while
+    * the panel is open never moves a strength. One hint segment each:
+    * "j/k select", "Enter toggle", "h/l strength"; Shift is in `?`. */
+   _PANEL_ROW(GDK_KEY_j, 0, "win.edit-select-next", _NEXT_TITLE, "select", 11,
+              NULL),
+   _PANEL_ROW(GDK_KEY_k, 0, "win.edit-select-prev", _PREV_TITLE, "select", 12,
+              NULL),
+   _PANEL_ROW(GDK_KEY_Return, 0, "win.edit-toggle-selected", _TOGGLE_TITLE,
+              "toggle", 13, NULL),
+   _PANEL_ROW(GDK_KEY_KP_Enter, 0, "win.edit-toggle-selected", _TOGGLE_TITLE,
+              NULL, 13, NULL),
+   _PANEL_ROW(GDK_KEY_h, 0, "win.edit-strength-down", _DOWN_TITLE, "strength",
+              14, NULL),
+   _PANEL_ROW(GDK_KEY_l, 0, "win.edit-strength-up", _UP_TITLE, "strength", 15,
+              NULL),
+   _PANEL_ROW(GDK_KEY_H, GDK_SHIFT_MASK, "win.edit-strength-down-5",
+              _DOWN5_TITLE, NULL, 16, NULL),
+   _PANEL_ROW(GDK_KEY_L, GDK_SHIFT_MASK, "win.edit-strength-up-5", _UP5_TITLE,
+              NULL, 17, NULL),
    {GDK_KEY_c, 0, "win.crop", "Crop tool (Enter applies, Esc cancels)",
     "Edit panel", _PANEL_HINT("crop", 20), .c_label = "Crop"},
    {GDK_KEY_r, 0, "win.straighten",
@@ -433,16 +464,23 @@ _letter_shifted(guint u_keyval, GdkModifierType e_mods) {
            u_keyval != gdk_keyval_to_lower(u_keyval));
 }
 
-/* Shift is compared only for letters, where it is the difference between
- * `h` (move) and `Shift+h` (grow) whether the keyval arrives upper-cased
- * (`H`, a real key press) or with the modifier (`h` + Shift). For any other
- * key the layout decides what Shift produces (`+`, `?`), so it is part of
- * the keyval and the state's Shift bit says nothing more. */
+/* Shift is compared for letters, where it is the difference between `h`
+ * (move) and `Shift+h` (grow) whether the keyval arrives upper-cased (`H`,
+ * a real key press) or with the modifier (`h` + Shift). For a key that
+ * prints something else (`+`, `?`) the layout decides what Shift produces,
+ * so it is part of the keyval and the state's Shift bit says nothing more.
+ * For a key that prints nothing (the arrows, Enter, Esc) Shift does not
+ * change the keyval: there it counts only in the STRICT pass of _find_row,
+ * which lets a mode's explicit Shift twin win (the global `Shift+Left`
+ * pans where `Left` is the previous image); the lenient pass after it
+ * ignores Shift, so a key with no twin keeps working when Shift is held
+ * (`Shift+Enter` still applies a crop, `Shift+Esc` still cancels it). */
 static gboolean
 _shift_matches(const ShortcutEntry *p_row, guint u_keyval,
-               GdkModifierType e_state) {
+               GdkModifierType e_state, gboolean b_strict) {
    if (!_is_letter(u_keyval)) {
-      return (TRUE);
+      return (!b_strict || g_unichar_isprint(gdk_keyval_to_unicode(u_keyval)) ||
+              (p_row->e_mods & GDK_SHIFT_MASK) == (e_state & GDK_SHIFT_MASK));
    }
    return (_letter_shifted(u_keyval, e_state) ==
            _letter_shifted(p_row->u_keyval, p_row->e_mods));
@@ -451,14 +489,14 @@ _shift_matches(const ShortcutEntry *p_row, guint u_keyval,
 /* TRUE iff a press of u_keyval with e_state is p_row's key. */
 static gboolean
 _row_matches(const ShortcutEntry *p_row, guint u_keyval,
-             GdkModifierType e_state) {
+             GdkModifierType e_state, gboolean b_strict) {
    if (gdk_keyval_to_lower(p_row->u_keyval) != gdk_keyval_to_lower(u_keyval)) {
       return (FALSE);
    }
    if ((p_row->e_mods & _CHORD_MASK) != (e_state & _CHORD_MASK)) {
       return (FALSE);
    }
-   return (_shift_matches(p_row, u_keyval, e_state));
+   return (_shift_matches(p_row, u_keyval, e_state, b_strict));
 }
 
 /* Caps Lock without Shift delivers a letter upper-cased (`H` + Lock for a
@@ -477,23 +515,38 @@ _unlocked_keyval(guint u_keyval, GdkModifierType e_state) {
 }
 
 /* The first row scoped to e_mode (0: a global row) that u_keyval + e_state
- * matches and that has an action (b_action) or an op (!b_action). */
+ * matches -- Shift compared strictly or leniently (_shift_matches) -- and
+ * that has an action (b_action) or an op (!b_action). */
 static const ShortcutEntry *
-_find_row(GgazeKeyMode e_mode, gboolean b_action, guint u_keyval,
-          GdkModifierType e_state) {
+_scan_rows(GgazeKeyMode e_mode, gboolean b_action, guint u_keyval,
+           GdkModifierType e_state, gboolean b_strict) {
    guint u_bit = e_mode == GGAZE_KEY_MODE_NONE ? 0 : GGAZE_KEY_MODE_BIT(e_mode);
-   u_keyval    = _unlocked_keyval(u_keyval, e_state);
    for (gsize u_i = 0; u_i < G_N_ELEMENTS(SHORTCUTS); u_i++) {
       const ShortcutEntry *p_row = &SHORTCUTS[u_i];
       gboolean             b_scoped =
          u_bit == 0 ? p_row->u_scope == 0 : (p_row->u_scope & u_bit) != 0;
       gboolean b_has =
          b_action ? p_row->c_action != NULL : p_row->e_op != GGAZE_KEY_OP_NONE;
-      if (b_scoped && b_has && _row_matches(p_row, u_keyval, e_state)) {
+      if (b_scoped && b_has &&
+          _row_matches(p_row, u_keyval, e_state, b_strict)) {
          return (p_row);
       }
    }
    return (NULL);
+}
+
+/* The row of e_mode that u_keyval + e_state is: an exact match first (a
+ * key that prints nothing matches its Shift twin when the mode has one),
+ * then one that ignores Shift on such a key (no twin: Shift is noise). */
+static const ShortcutEntry *
+_find_row(GgazeKeyMode e_mode, gboolean b_action, guint u_keyval,
+          GdkModifierType e_state) {
+   u_keyval = _unlocked_keyval(u_keyval, e_state);
+   const ShortcutEntry *p_row =
+      _scan_rows(e_mode, b_action, u_keyval, e_state, TRUE);
+   return (p_row != NULL
+              ? p_row
+              : _scan_rows(e_mode, b_action, u_keyval, e_state, FALSE));
 }
 
 const char *

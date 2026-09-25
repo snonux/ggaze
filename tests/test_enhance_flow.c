@@ -556,11 +556,45 @@ test_panel_opens_beside_viewer_with_thumbnails(void) {
    close_presented(p_win, c_dir, c_path);
 }
 
+/* The GtkScale strength slider of card i_idx under p_root, or NULL. */
+static GtkWidget *
+find_scale(GtkWidget *p_root, gint i_idx) {
+   if (GTK_IS_SCALE(p_root) &&
+       gtk_widget_has_css_class(p_root, GGAZE_ENHANCE_SCALE_CLASS) &&
+       GPOINTER_TO_INT(g_object_get_data(G_OBJECT(p_root), "idx")) == i_idx) {
+      return (p_root);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
+   while (p_child != NULL) {
+      GtkWidget *p_found = find_scale(p_child, i_idx);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (NULL);
+}
+
+/* Card i_idx's strength slider is on screen: visible, mapped, laid out,
+ * and not focusable (Space compares). */
+static void
+assert_scale_shown(GtkWidget *p_panel, gint i_idx) {
+   GtkWidget *p_scale = find_scale(p_panel, i_idx);
+   g_assert_nonnull(p_scale);
+   g_assert_true(gtk_widget_get_mapped(p_scale));
+   g_assert_cmpint(gtk_widget_get_height(p_scale), >, 0);
+   g_assert_false(gtk_widget_get_focusable(p_scale));
+   graphene_rect_t r_scale;
+   g_assert_true(gtk_widget_compute_bounds(p_scale, p_panel, &r_scale));
+   g_assert_cmpfloat(r_scale.origin.y, >=, 0.0f);
+}
+
 /* The panel is compact (6i2 review): in a 1280x800 window every one of the
  * eight built-in presets is on screen without scrolling -- the card
  * scroller's content fits its page -- and the Transform and Save rows sit
  * inside the panel below them. The old full-width cards showed one and a
- * half presets there. */
+ * half presets there. 8i2: with a tunable card selected (j), its strength
+ * slider shows under it and all of that still fits. */
 static void
 test_panel_fits_eight_presets_at_1280x800(void) {
    char        *c_dir  = NULL;
@@ -568,6 +602,7 @@ test_panel_fits_eight_presets_at_1280x800(void) {
    GgazeWindow *p_win  = open_presented_sized(TRUE, "ggaze-enhance-fit-XXXXXX",
                                               1280, 800, &c_dir, &c_path);
    fire(p_win, "win.enhance");
+   g_assert_true(ggaze_window_edit_key(p_win, GDK_KEY_j, 0)); /* Brightness */
    GtkWidget *p_panel = find_panel(p_win);
    GtkWidget *p_last  = find_card(p_panel, 7);
    GtkWidget *p_sw = gtk_widget_get_ancestor(p_last, GTK_TYPE_SCROLLED_WINDOW);
@@ -595,6 +630,7 @@ test_panel_fits_eight_presets_at_1280x800(void) {
    g_assert_cmpfloat(r_redo.origin.y, >=, r_save.origin.y + r_save.size.height);
    g_assert_cmpfloat(r_redo.origin.y + r_redo.size.height, <=,
                      r_panel.size.height);
+   assert_scale_shown(p_panel, 1);
    close_presented(p_win, c_dir, c_path);
 }
 
@@ -4026,7 +4062,8 @@ activate_shortcut(GgazeWindow *p_win, guint u_keyval) {
 /* The window's capture-phase key controller (window.c _tool_key_cb) is what
  * keeps `h` from reaching win.prev while a tool is active: with the crop
  * tool up it STOPS the key (the rectangle moves, the file stays); with no
- * tool it PROPAGATES and the same key's shortcut navigates as usual. */
+ * tool -- and, since 8i2, no panel -- it PROPAGATES and the same key's
+ * shortcut navigates as usual. */
 static void
 test_tool_key_controller_claims_keys_only_while_active(void) {
    ToolFx fx;
@@ -4041,8 +4078,13 @@ test_tool_key_controller_claims_keys_only_while_active(void) {
    g_assert_false(emit_capture_key(fx.p_win, GDK_KEY_x));
    g_assert_true(emit_capture_key(fx.p_win, GDK_KEY_Escape));
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
-   g_assert_false(emit_capture_key(fx.p_win, GDK_KEY_h)); /* no tool */
-   activate_shortcut(fx.p_win, GDK_KEY_h);                /* -> win.prev */
+   /* The panel the tool opened is still up, and h is its strength key
+    * (8i2); closed, h is win.prev's again. */
+   g_assert_true(emit_capture_key(fx.p_win, GDK_KEY_h));
+   fire(fx.p_win, "win.enhance");
+   g_assert_false(
+      emit_capture_key(fx.p_win, GDK_KEY_h)); /* no tool, no panel */
+   activate_shortcut(fx.p_win, GDK_KEY_h);    /* -> win.prev */
    ggtest_drain_main(300);
    g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "a.jpg"));
    tool_fx_close(&fx);
@@ -4074,9 +4116,11 @@ test_digits_are_inert_with_the_panel_closed(void) {
    wait_for_texture_change(fx.p_win, fx.p_orig);
    g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
    g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "Auto-fix"));
-   /* h / l / j / k are not the panel's: they navigate as before. */
-   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_h, 0));
-   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_j, 0));
+   /* 8i2: h / j / k are the panel's now (strength, selection); Page
+    * Down, which the panel leaves alone, still navigates. */
+   g_assert_true(ggaze_window_edit_key(fx.p_win, GDK_KEY_h, 0));
+   g_assert_true(ggaze_window_edit_key(fx.p_win, GDK_KEY_j, 0));
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_Page_Down, 0));
    tool_fx_close(&fx);
 }
 
@@ -6913,6 +6957,622 @@ add_open_many_tests(void) {
                    test_open_many_re_points_the_panel_once);
 }
 
+/* --- 8i2: the selected card and preset strengths ---------------------------
+ *
+ * With the edit panel open, j / k move a selection between the preset
+ * cards, Enter toggles the selected one, and h / l (Shift: five steps)
+ * lower / raise its strength, turning it on -- the vi keys alone: the
+ * arrows keep changing the image and panning; a tunable
+ * card shows its strength, and the selected one's slider is the mouse
+ * path to the same number. Keys go through the window's edit-key router
+ * (ggaze_window_edit_key), the path a real key press takes. */
+
+/* The first label with c_class under p_root, or NULL. */
+static GtkWidget *
+find_class_label(GtkWidget *p_root, const char *c_class) {
+   if (GTK_IS_LABEL(p_root) && gtk_widget_has_css_class(p_root, c_class)) {
+      return (p_root);
+   }
+   GtkWidget *p_child = gtk_widget_get_first_child(p_root);
+   while (p_child != NULL) {
+      GtkWidget *p_found = find_class_label(p_child, c_class);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+      p_child = gtk_widget_get_next_sibling(p_child);
+   }
+   return (NULL);
+}
+
+/* Card i_idx of the open panel (asserted present). */
+static GtkWidget *
+panel_card(GgazeWindow *p_win, gint i_idx) {
+   GtkWidget *p_card = find_card(find_panel(p_win), i_idx);
+   g_assert_nonnull(p_card);
+   return (p_card);
+}
+
+/* The strength card i_idx shows ("+0.6"), or NULL for a card without. */
+static const char *
+card_value(GgazeWindow *p_win, gint i_idx) {
+   GtkWidget *p_lbl =
+      find_class_label(panel_card(p_win, i_idx), GGAZE_ENHANCE_VALUE_CLASS);
+   return (p_lbl != NULL ? gtk_label_get_text(GTK_LABEL(p_lbl)) : NULL);
+}
+
+/* Exactly card i_idx wears the selection ring, and only a selected tunable
+ * card shows its slider. */
+static void
+assert_selected(GgazeWindow *p_win, gint i_idx) {
+   for (gint i = 0; i < 8; i++) {
+      GtkWidget *p_card = panel_card(p_win, i);
+      g_assert_cmpint(
+         gtk_widget_has_css_class(p_card, GGAZE_ENHANCE_SELECTED_CLASS), ==,
+         i == i_idx);
+      GtkWidget *p_scale = find_scale(find_panel(p_win), i);
+      if (p_scale != NULL) {
+         g_assert_cmpint(gtk_widget_get_visible(p_scale), ==, i == i_idx);
+      }
+   }
+}
+
+/* Pump until the window title contains c_part (up to 10 s), then assert
+ * it does. A strength change re-renders, and the title follows the render
+ * that lands. */
+static void
+wait_for_title(GgazeWindow *p_win, const char *c_part) {
+   for (guint u = 0;
+        u < 10000 && g_strstr_len(window_title(p_win), -1, c_part) == NULL;
+        u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   if (g_strstr_len(window_title(p_win), -1, c_part) == NULL) {
+      g_error("title \"%s\", wanted \"%s\"", window_title(p_win), c_part);
+   }
+}
+
+/* Pump until the window title no longer contains c_part (up to 10 s),
+ * then assert so. */
+static void
+wait_for_title_without(GgazeWindow *p_win, const char *c_part) {
+   for (guint u = 0;
+        u < 10000 && g_strstr_len(window_title(p_win), -1, c_part) != NULL;
+        u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   if (g_strstr_len(window_title(p_win), -1, c_part) != NULL) {
+      g_error("title \"%s\" still has \"%s\"", window_title(p_win), c_part);
+   }
+}
+
+/* j / k move the selection (stopping at the ends, Caps Lock no matter), a
+ * digit selects its own row, and Enter toggles the selected preset
+ * exactly as its digit does. The hint bar lists the new keys. */
+static void
+test_strength_select_and_enter(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   char *c_hint = plain_hint(fx.p_win);
+   g_assert_nonnull(
+      g_strstr_len(c_hint, -1, "j/k select  ·  Enter toggle  ·  h/l strength"));
+   g_free(c_hint);
+   assert_selected(fx.p_win, 0);
+   edit_key(fx.p_win, GDK_KEY_k, 0); /* stops at the top */
+   assert_selected(fx.p_win, 0);
+   edit_key(fx.p_win, GDK_KEY_j, 0);
+   assert_selected(fx.p_win, 1);
+   edit_key(fx.p_win, GDK_KEY_j, 0);
+   assert_selected(fx.p_win, 2);
+   edit_key(fx.p_win, GDK_KEY_J, GDK_LOCK_MASK); /* Caps Lock: still j */
+   assert_selected(fx.p_win, 3);
+   edit_key(fx.p_win, GDK_KEY_k, 0);
+   assert_selected(fx.p_win, 2);
+   for (guint u = 0; u < 9; u++) {
+      edit_key(fx.p_win, GDK_KEY_j, 0);
+   }
+   assert_selected(fx.p_win, 7); /* stops at the bottom */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win)); /* no edit */
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, 0);
+
+   edit_key_and_wait(fx.p_win, GDK_KEY_Return, 0);
+   g_assert_true(
+      gtk_widget_has_css_class(panel_card(fx.p_win, 7), "ggaze-enhance-on"));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_KP_Enter, 0); /* off again */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_3, 0); /* the digit selects too */
+   assert_selected(fx.p_win, 2);
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Undid: Contrast on");
+   assert_selected(fx.p_win, 2); /* the selection is no edit */
+   tool_fx_close(&fx);
+}
+
+/* h / l step the selected preset's strength and turn it on; the card, the
+ * slider and the title show the value (a default is not named in the
+ * title); Shift steps five, and the range ends with a status line. */
+static void
+test_strength_keys_turn_on_and_name_it(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.5");
+   g_assert_null(card_value(fx.p_win, 0)); /* Auto-fix: nothing to tune */
+   edit_key(fx.p_win, GDK_KEY_j, 0);       /* Brightness */
+   edit_key_and_wait(fx.p_win, GDK_KEY_l, 0);
+   g_assert_true(
+      gtk_widget_has_css_class(panel_card(fx.p_win, 1), "ggaze-enhance-on"));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   wait_for_title(fx.p_win, "Brightness +0.6");
+   assert_status_prefix(fx.p_win, "Brightness +0.6");
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.6");
+   GtkWidget *p_scale = find_scale(find_panel(fx.p_win), 1);
+   g_assert_cmpfloat(gtk_range_get_value(GTK_RANGE(p_scale)), ==, 0.6);
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   edit_key(fx.p_win, GDK_KEY_H, GDK_LOCK_MASK); /* Caps Lock: one step */
+   wait_for_title(fx.p_win, "Brightness +0.3");
+   edit_key(fx.p_win, GDK_KEY_L, GDK_SHIFT_MASK);
+   wait_for_title(fx.p_win, "Brightness +0.8");
+   edit_key(fx.p_win, GDK_KEY_l, GDK_SHIFT_MASK); /* Shift by the modifier */
+   edit_key(fx.p_win, GDK_KEY_l, 0);
+   wait_for_title(fx.p_win, "Brightness +1.4");
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   edit_key(fx.p_win, GDK_KEY_h, 0); /* back at the default, 0.5 */
+   wait_for_title_without(fx.p_win, "Brightness +");
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "Brightness"));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win)); /* still on */
+   for (guint u = 0; u < 6; u++) {
+      edit_key(fx.p_win, GDK_KEY_L, GDK_SHIFT_MASK);
+   }
+   assert_status_prefix(fx.p_win, "Brightness is at its maximum (+2)");
+   wait_for_title(fx.p_win, "Brightness +2");
+   tool_fx_close(&fx);
+}
+
+/* A preset without a tunable number refuses h / l with a status line: no
+ * render, no edit, no undo step. */
+static void
+test_strength_refused_without_placeholder(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   guint u_renders = ggaze_window_enhance_render_count(fx.p_win);
+   edit_key(fx.p_win, GDK_KEY_l, 0); /* Auto-fix, selected */
+   assert_status_prefix(fx.p_win, "Auto-fix has no strength to adjust");
+   /* ... and says how to change image instead, which l no longer does. */
+   g_assert_nonnull(g_strstr_len(status_text(fx.p_win), -1,
+                                 "\u2190/\u2192 or PgUp/PgDn change image"));
+   edit_key(fx.p_win, GDK_KEY_H, GDK_SHIFT_MASK);
+   ggtest_drain_main(200);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, u_renders);
+   assert_history_buttons(fx.p_win, FALSE, FALSE);
+   for (guint u = 0; u < 4; u++) {
+      edit_key(fx.p_win, GDK_KEY_j, 0); /* 5 Warm */
+   }
+   edit_key(fx.p_win, GDK_KEY_h, 0);
+   assert_status_prefix(fx.p_win, "Warm has no strength to adjust");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   tool_fx_close(&fx);
+}
+
+/* A run of h / l on one card is ONE undo step (back to the preset off at
+ * its default), redone as one; another card, or a key of another kind,
+ * starts a new step. A burst of presses costs at most two renders
+ * (coalesced, the last value lands). */
+static void
+test_strength_run_undoes_as_one_step(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   edit_key(fx.p_win, GDK_KEY_j, 0);
+   guint u_before = ggaze_window_enhance_render_count(fx.p_win);
+   for (guint u = 0; u < 5; u++) {
+      edit_key(fx.p_win, GDK_KEY_l, 0);
+   }
+   wait_for_title(fx.p_win, "Brightness +1");
+   ggtest_drain_main(300); /* nothing else lands after the last value */
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win) - u_before, <=,
+                    2);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "+1"));
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Undid: Brightness +1");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.5");
+   assert_history_buttons(fx.p_win, FALSE, TRUE);
+   edit_key_and_wait(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
+   wait_for_title(fx.p_win, "Brightness +1");
+   /* Another card closes the run: its h / l is a step of its own ... */
+   edit_key(fx.p_win, GDK_KEY_j, 0);
+   edit_key(fx.p_win, GDK_KEY_j, 0); /* Saturation */
+   edit_key_and_wait(fx.p_win, GDK_KEY_l, 0);
+   wait_for_title(fx.p_win, "Saturation 1.5");
+   /* ... and so does coming back to the first card. */
+   edit_key(fx.p_win, GDK_KEY_k, 0);
+   edit_key(fx.p_win, GDK_KEY_k, 0);
+   edit_key_and_wait(fx.p_win, GDK_KEY_h, 0);
+   wait_for_title(fx.p_win, "Brightness +0.9");
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0);
+   wait_for_title(fx.p_win, "Brightness +1, Saturation 1.5");
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Undid: Saturation 1.5");
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "Saturation"));
+   tool_fx_close(&fx);
+}
+
+/* Set the slider of card i_idx to d_value the way a drag moves it. */
+static void
+drag_scale_to(GgazeWindow *p_win, gint i_idx, gdouble d_value) {
+   GtkWidget *p_scale = find_scale(find_panel(p_win), i_idx);
+   g_assert_nonnull(p_scale);
+   gtk_range_set_value(GTK_RANGE(p_scale), d_value);
+}
+
+/* The slider: dragging it sets the strength (snapped onto the preset's
+ * step grid), selects its row and turns the preset on; one drag is one
+ * undo step; it takes no focus (Space compares, h / l are its keys). */
+static void
+test_strength_slider_drag(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, TRUE);
+   fire(fx.p_win, "win.enhance");
+   GtkWidget *p_scale = find_scale(find_panel(fx.p_win), 3); /* Saturation */
+   g_assert_nonnull(p_scale);
+   g_assert_false(gtk_widget_get_focusable(p_scale));
+   g_assert_false(gtk_widget_get_can_focus(p_scale));
+   g_assert_null(find_scale(find_panel(fx.p_win), 0)); /* Auto-fix: none */
+   GdkTexture *p_before = ref_viewer_texture(fx.p_win);
+   drag_scale_to(fx.p_win, 3, 1.52);
+   drag_scale_to(fx.p_win, 3, 1.74);
+   drag_scale_to(fx.p_win, 3, 1.66); /* snaps to 1.7 */
+   wait_for_texture_change(fx.p_win, p_before);
+   g_clear_object(&p_before);
+   wait_for_title(fx.p_win, "Saturation 1.7");
+   assert_selected(fx.p_win, 3);
+   g_assert_cmpfloat(gtk_range_get_value(GTK_RANGE(p_scale)), ==, 1.7);
+   g_assert_cmpstr(card_value(fx.p_win, 3), ==, "1.7");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0); /* the drag, as one step */
+   assert_status_prefix(fx.p_win, "Undid: Saturation 1.7");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_cmpfloat(gtk_range_get_value(GTK_RANGE(p_scale)), ==, 1.4);
+   tool_fx_close(&fx);
+}
+
+/* The strengths are part of what `s` writes and what saved means: the
+ * export renders them (a copy at +0.6 differs from one at the default),
+ * a strength moved off the saved value is dirty, and moved back is saved
+ * again. */
+static void
+test_strength_saved_and_dirty(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   edit_key_and_wait(fx.p_win, GDK_KEY_2, 0); /* Brightness at 0.5 */
+   fire(fx.p_win, "win.enhance-save");
+   char *c_def = g_build_filename(fx.c_dir, "tool-enhanced.png", NULL);
+   wait_for_file(c_def);
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_l, 0); /* row 2 is selected */
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_h, 0);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win)); /* saved again */
+   g_assert_nonnull(find_label_prefix(find_panel(fx.p_win), "Saved as "));
+   edit_key_and_wait(fx.p_win, GDK_KEY_l, 0);
+   fire(fx.p_win, "win.enhance-save");
+   char *c_up = g_build_filename(fx.c_dir, "tool-enhanced-1.png", NULL);
+   wait_for_file(c_up);
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   gsize u_def = 0;
+   gsize u_up  = 0;
+   char *c_a   = load_bytes(c_def, &u_def);
+   char *c_b   = load_bytes(c_up, &u_up);
+   g_assert_false(u_def == u_up && memcmp(c_a, c_b, u_def) == 0);
+   g_free(c_a);
+   g_free(c_b);
+   g_free(c_def);
+   g_free(c_up);
+   tool_fx_close(&fx);
+}
+
+/* Strengths are per image, like the mask: x puts every preset back at its
+ * default (undoably), and so does moving to another file. */
+static void
+test_strength_resets_on_revert_and_navigation(void) {
+   ToolFx fx;
+   tool_fx_open_with_sibling(&fx);
+   fire(fx.p_win, "win.enhance");
+   edit_key(fx.p_win, GDK_KEY_j, 0);
+   edit_key_and_wait(fx.p_win, GDK_KEY_l, 0);
+   wait_for_title(fx.p_win, "Brightness +0.6");
+   fire(fx.p_win, "win.edit-revert");
+   ggtest_drain_main(200);
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.5");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0); /* x is a step */
+   wait_for_title(fx.p_win, "Brightness +0.6");
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.6");
+   fire(fx.p_win, "win.enhance-save"); /* clean, so no prompt below */
+   char *c_out = g_build_filename(fx.c_dir, "tool-enhanced.png", NULL);
+   wait_for_file(c_out);
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   g_free(c_out);
+   fire(fx.p_win, "win.prev");
+   wait_for_load(fx.p_win, PLAIN_JPG_W, PLAIN_JPG_H);
+   assert_showing(fx.p_win, "a.jpg");
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.5");
+   assert_selected(fx.p_win, 1); /* the selection is no edit: it stays */
+   edit_key_and_wait(fx.p_win, GDK_KEY_2, 0);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "Brightness"));
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "+0."));
+   tool_fx_close(&fx);
+}
+
+/* 8i2 review: a Preferences change -- ANY key: the window reloads the
+ * engine lists on every one -- keeps a tuned strength. It used to reset
+ * every strength to its default behind the card, the slider, the title
+ * and the render, which all still showed the tuned value: the state went
+ * dirty with nothing changed on screen and `s` exported the default. */
+static void
+test_strength_survives_a_preference_change(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   edit_key(fx.p_win, GDK_KEY_j, 0); /* Brightness */
+   edit_key_and_wait(fx.p_win, GDK_KEY_l, 0);
+   wait_for_title(fx.p_win, "Brightness +0.6");
+   fire(fx.p_win, "win.enhance-save");
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   guint       u_renders = ggaze_window_enhance_render_count(fx.p_win);
+   GdkTexture *p_shown   = ref_viewer_texture(fx.p_win);
+   Settings   *p_s       = settings_new();
+   settings_set_background(p_s, settings_get_background(p_s) == GGAZE_BG_GREY
+                                   ? GGAZE_BG_DARK
+                                   : GGAZE_BG_GREY);
+   ggtest_drain_main(300);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, u_renders);
+   g_assert_true(viewer_texture(fx.p_win) == p_shown);
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.6");
+   g_assert_cmpfloat(
+      gtk_range_get_value(GTK_RANGE(find_scale(find_panel(fx.p_win), 1))), ==,
+      0.6);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "+0.6"));
+   /* The next step starts from the tuned value, not from a reset one. */
+   edit_key_and_wait(fx.p_win, GDK_KEY_l, 0);
+   wait_for_title(fx.p_win, "Brightness +0.7");
+   g_object_unref(p_shown);
+   g_settings_reset(settings_get_gsettings(p_s), "background");
+   settings_delete(p_s);
+   tool_fx_close(&fx);
+}
+
+/* 8i2 review: the selected card's keys wait for a crop / straighten tool.
+ * The straighten tool leaves j / k and Shift+H / L alone; they used to
+ * reach the panel under it, moving the selection or a strength (a render
+ * and an undo step) behind the modal tool. Now the router passes them on
+ * to the global table; a digit still toggles a preset under it. */
+static void
+test_card_keys_wait_for_the_tool(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   edit_key(fx.p_win, GDK_KEY_j, 0); /* Brightness */
+   fire(fx.p_win, "win.straighten");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   ggtest_drain_main(100);
+   guint u_renders = ggaze_window_enhance_render_count(fx.p_win);
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_j, 0));
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_k, 0));
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_L, GDK_SHIFT_MASK));
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_H, GDK_SHIFT_MASK));
+   ggtest_drain_main(200);
+   assert_selected(fx.p_win, 1);
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.5");
+   g_assert_false(
+      gtk_widget_has_css_class(panel_card(fx.p_win, 1), "ggaze-enhance-on"));
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==, u_renders);
+   assert_history_buttons(fx.p_win, FALSE, FALSE);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   /* The digits are still the panel's under the tool. */
+   edit_key_and_wait(fx.p_win, GDK_KEY_1, 0);
+   g_assert_true(
+      gtk_widget_has_css_class(panel_card(fx.p_win, 0), "ggaze-enhance-on"));
+   tool_fx_close(&fx);
+}
+
+/* 8i2 review: the arrows are not the panel's. With it open, Left / Right
+ * still change the image and Up / Down / Shift+arrows pan -- flicking
+ * through a folder with the arrows never moves a strength. */
+static void
+test_arrows_stay_global_with_the_panel_open(void) {
+   ToolFx fx;
+   tool_fx_open_with_sibling(&fx);
+   fire(fx.p_win, "win.enhance");
+   edit_key(fx.p_win, GDK_KEY_j, 0); /* Brightness, tunable */
+   static const guint KEYS[] = {GDK_KEY_Left, GDK_KEY_Right, GDK_KEY_Up,
+                                GDK_KEY_Down};
+   for (gsize u = 0; u < G_N_ELEMENTS(KEYS); u++) {
+      g_assert_false(ggaze_window_edit_key(fx.p_win, KEYS[u], 0));
+      g_assert_false(ggaze_window_edit_key(fx.p_win, KEYS[u], GDK_SHIFT_MASK));
+   }
+   assert_selected(fx.p_win, 1);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_false(emit_capture_key(fx.p_win, GDK_KEY_Left));
+   activate_shortcut(fx.p_win, GDK_KEY_Left); /* -> win.prev */
+   wait_for_load(fx.p_win, PLAIN_JPG_W, PLAIN_JPG_H);
+   assert_showing(fx.p_win, "a.jpg");
+   g_assert_nonnull(find_panel(fx.p_win)); /* the panel stays open */
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.5");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   tool_fx_close(&fx);
+}
+
+/* 8i2 review: Shift held on Enter / Esc still applies / cancels a tool --
+ * no tool has a Shift twin of either, so Shift is noise on them (a matcher
+ * that compared Shift on every key that prints nothing refused both). */
+static void
+test_shift_enter_and_esc_finish_a_tool(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.crop");
+   crop_shrink_right(fx.p_win);
+   edit_key(fx.p_win, GDK_KEY_Escape, GDK_SHIFT_MASK);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_cmpstr(status_text(fx.p_win), ==, "Crop cancelled");
+   fire(fx.p_win, "win.crop");
+   for (guint u = 0; u < 10; u++) {
+      crop_shrink_right(fx.p_win);
+      crop_shrink_bottom(fx.p_win);
+   }
+   GdkTexture *p_before = ref_viewer_texture(fx.p_win);
+   edit_key(fx.p_win, GDK_KEY_Return, GDK_SHIFT_MASK);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   wait_for_texture_change(fx.p_win, p_before);
+   g_object_unref(p_before);
+   assert_texture_size(fx.p_win, TOOL_W - 30, TOOL_H - 30);
+   fire(fx.p_win, "win.straighten");
+   tool_key_and_wait(fx.p_win, GDK_KEY_l);
+   edit_key(fx.p_win, GDK_KEY_Escape, GDK_SHIFT_MASK);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   wait_for_title_without(fx.p_win, "straighten");
+   fire(fx.p_win, "win.straighten");
+   tool_key_and_wait(fx.p_win, GDK_KEY_l);
+   edit_key(fx.p_win, GDK_KEY_KP_Enter, GDK_SHIFT_MASK);
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
+   wait_for_title(fx.p_win, "straighten");
+   tool_fx_close(&fx);
+}
+
+/* 8i2 review: saved compares the strengths of the presets that are ON --
+ * a disabled preset's strength renders nothing. Contrast on and saved,
+ * Brightness tuned (on) and switched off again: the render is the saved
+ * one, so the state is saved again, whatever Brightness's number is. */
+static void
+test_strength_of_a_disabled_preset_is_not_unsaved(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   edit_key_and_wait(fx.p_win, GDK_KEY_3, 0); /* Contrast */
+   fire(fx.p_win, "win.enhance-save");
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key(fx.p_win, GDK_KEY_k, 0); /* Brightness */
+   edit_key_and_wait(fx.p_win, GDK_KEY_l, 0);
+   wait_for_title(fx.p_win, "Brightness +0.6");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_2, 0); /* Brightness off */
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.6");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_nonnull(find_label_prefix(find_panel(fx.p_win), "Saved as "));
+   tool_fx_close(&fx);
+}
+
+/* 8i2 review: a save and the panel closing end a strength run, so undo
+ * can stop at the value saved / closed on rather than jump past it. */
+static void
+test_save_and_close_end_the_strength_run(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   edit_key(fx.p_win, GDK_KEY_j, 0); /* Brightness */
+   edit_key(fx.p_win, GDK_KEY_l, 0);
+   edit_key(fx.p_win, GDK_KEY_l, 0);
+   wait_for_title(fx.p_win, "Brightness +0.7");
+   fire(fx.p_win, "win.enhance-save");
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   edit_key(fx.p_win, GDK_KEY_l, 0);
+   wait_for_title(fx.p_win, "Brightness +0.8");
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   wait_for_title(fx.p_win, "Brightness +0.7"); /* the saved value */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   /* The undo closed that run; open a new one, then close the panel on
+    * it: the press after it opens again is a step of its own. */
+   edit_key(fx.p_win, GDK_KEY_l, 0);
+   wait_for_title(fx.p_win, "Brightness +0.8");
+   fire(fx.p_win, "win.enhance"); /* close ... */
+   fire(fx.p_win, "win.enhance"); /* ... and open again */
+   edit_key(fx.p_win, GDK_KEY_l, 0);
+   wait_for_title(fx.p_win, "Brightness +0.9");
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   wait_for_title(fx.p_win, "Brightness +0.8");
+   g_assert_cmpstr(card_value(fx.p_win, 1), ==, "+0.8");
+   tool_fx_close(&fx);
+}
+
+/* 8i2 review: the wheel over the selected card's slider scrolls the cards'
+ * list, not the strength: the slider's own scroll controller (GtkRange's)
+ * is switched off, so the event bubbles on to the scrolled window. */
+static void
+test_strength_slider_ignores_the_wheel(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   GtkWidget  *p_scale = find_scale(find_panel(fx.p_win), 1);
+   GListModel *p_ctrls = gtk_widget_observe_controllers(p_scale);
+   guint       u_found = 0;
+   for (guint u = 0; u < g_list_model_get_n_items(p_ctrls); u++) {
+      GtkEventController *p_c = g_list_model_get_item(p_ctrls, u);
+      if (GTK_IS_EVENT_CONTROLLER_SCROLL(p_c)) {
+         g_assert_cmpint(gtk_event_controller_get_propagation_phase(p_c), ==,
+                         GTK_PHASE_NONE);
+         u_found++;
+      }
+      g_object_unref(p_c);
+   }
+   g_object_unref(p_ctrls);
+   g_assert_cmpuint(u_found, >, 0); /* GtkRange's own is there, and off */
+   tool_fx_close(&fx);
+}
+
+/* 8i2: the selected card, its strength keys and its slider. */
+static void
+add_strength_tests(void) {
+   g_test_add_func("/enhance_flow/strength_select_and_enter",
+                   test_strength_select_and_enter);
+   g_test_add_func("/enhance_flow/strength_keys_turn_on_and_name_it",
+                   test_strength_keys_turn_on_and_name_it);
+   g_test_add_func("/enhance_flow/strength_refused_without_placeholder",
+                   test_strength_refused_without_placeholder);
+   g_test_add_func("/enhance_flow/strength_run_undoes_as_one_step",
+                   test_strength_run_undoes_as_one_step);
+   g_test_add_func("/enhance_flow/strength_slider_drag",
+                   test_strength_slider_drag);
+   g_test_add_func("/enhance_flow/strength_saved_and_dirty",
+                   test_strength_saved_and_dirty);
+   g_test_add_func("/enhance_flow/strength_resets_on_revert_and_navigation",
+                   test_strength_resets_on_revert_and_navigation);
+   g_test_add_func("/enhance_flow/strength_survives_a_preference_change",
+                   test_strength_survives_a_preference_change);
+   g_test_add_func("/enhance_flow/card_keys_wait_for_the_tool",
+                   test_card_keys_wait_for_the_tool);
+   g_test_add_func("/enhance_flow/arrows_stay_global_with_the_panel_open",
+                   test_arrows_stay_global_with_the_panel_open);
+   g_test_add_func("/enhance_flow/shift_enter_and_esc_finish_a_tool",
+                   test_shift_enter_and_esc_finish_a_tool);
+   g_test_add_func("/enhance_flow/strength_of_a_disabled_preset_is_not_unsaved",
+                   test_strength_of_a_disabled_preset_is_not_unsaved);
+   g_test_add_func("/enhance_flow/save_and_close_end_the_strength_run",
+                   test_save_and_close_end_the_strength_run);
+   g_test_add_func("/enhance_flow/strength_slider_ignores_the_wheel",
+                   test_strength_slider_ignores_the_wheel);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -6946,6 +7606,7 @@ main(int i_argc, char **c_argv) {
    add_tool_tests();
    add_tool_review_tests();
    add_edit_undo_tests();
+   add_strength_tests();
    add_tool_review2_tests();
    add_tool_review3_tests();
    add_tool_review4_tests();
