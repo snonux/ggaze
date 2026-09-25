@@ -18,8 +18,8 @@
 #include "shortcuts.h"
 
 /* The box every thumbnail (the Original's and each card's) is drawn in.
- * Small on purpose: the cards are ROWS, so all eight fit a 800 px tall
- * window without scrolling, and the picture only has to say "warmer" or
+ * Small on purpose: the cards are ROWS, so the eight built-ins fit a 800 px
+ * tall window without scrolling, and the picture only has to say "warmer" or
  * "more contrast" next to its neighbours -- the large view shows the real
  * thing. */
 #define _THUMB_W 60
@@ -101,11 +101,23 @@ _value_label(void) {
    return (p_value);
 }
 
+/* The card's name: "1  Auto-fix" on a row a digit reaches, the name alone
+ * past them (ai2) -- a user preset in row 9 must not show "9", which no
+ * key toggles (and popup_list's labels go on to 0 and letters). Caller
+ * frees. */
+static char *
+_card_label(guint u_idx, const char *c_name) {
+   if (u_idx < GGAZE_ENHANCE_DIGIT_PRESETS) {
+      return (popup_list_row_label(u_idx, c_name));
+   }
+   return (g_strdup(c_name != NULL ? c_name : "(unnamed)"));
+}
+
 /* One preset card (idx u_idx): a row -- the thumbnail (thumbnail mode),
- * "1  Auto-fix", the strength label of a tunable preset (*p_value_out,
- * else NULL), and a check mark that the "ggaze-enhance-on" class shows
- * (window.c's CSS) along with the highlight, so on / off reads at a glance
- * and needs no state here. Not focusable -- see the header: a focused
+ * "1  Auto-fix" (_card_label), the strength label of a tunable preset
+ * (*p_value_out, else NULL), and a check mark that the "ggaze-enhance-on" class
+ * shows (window.c's CSS) along with the highlight, so on / off reads at a
+ * glance and needs no state here. Not focusable -- see the header: a focused
  * button activates on Space, which is hold-to-compare. */
 static GtkWidget *
 _build_preset_card(guint u_idx, const EnhancerPreset *p_pr,
@@ -117,7 +129,7 @@ _build_preset_card(guint u_idx, const EnhancerPreset *p_pr,
    if (b_thumbnail) {
       gtk_box_append(GTK_BOX(p_row), _thumb_box(p_pic_out));
    }
-   char      *c_lbl   = popup_list_row_label(u_idx, p_pr->c_name);
+   char      *c_lbl   = _card_label(u_idx, p_pr->c_name);
    GtkWidget *p_label = _line_label(c_lbl, PANGO_ELLIPSIZE_END);
    g_free(c_lbl);
    gtk_widget_set_hexpand(p_label, TRUE);
@@ -208,26 +220,30 @@ _build_original(gboolean b_thumbnail, GtkWidget **p_pic_out) {
    return (p_row);
 }
 
-/* Append one card per preset (capped at the mask's 8 bits) to p_box,
- * each tunable one followed by its (hidden) slider, recording each in
- * p_out. */
+/* Append one ROW per preset (every row the mask reaches) to p_box: its
+ * card and, for a tunable one, its (hidden) slider under it, in a box of
+ * their own so that scrolling the row into view brings the slider along.
+ * Each is recorded in p_out. */
 static void
-_build_cards(GtkWidget *p_box, const GPtrArray *p_presets, guint8 u_mask,
+_build_cards(GtkWidget *p_box, const GPtrArray *p_presets, guint32 u_mask,
              gboolean b_thumbnails, EnhanceUIWidgets *p_out) {
    guint u_n = p_presets != NULL ? p_presets->len : 0;
    if (u_n > G_N_ELEMENTS(p_out->p_btns)) {
-      u_n = G_N_ELEMENTS(p_out->p_btns); /* the mask is 8 bits wide */
+      u_n = G_N_ELEMENTS(p_out->p_btns); /* a bit of the mask per row */
    }
    for (guint i = 0; i < u_n; i++) {
       const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_presets, i);
-      p_out->p_btns[i]           = _build_preset_card(
-         i, p_pr, b_thumbnails, (u_mask & (guint8)(1u << i)) != 0,
+      GtkWidget            *p_row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+      p_out->p_rows[i]            = p_row;
+      p_out->p_btns[i]            = _build_preset_card(
+         i, p_pr, b_thumbnails, (u_mask & GGAZE_ENHANCE_BIT(i)) != 0,
          &p_out->p_pics[i], &p_out->p_values[i]);
-      gtk_box_append(GTK_BOX(p_box), p_out->p_btns[i]);
+      gtk_box_append(GTK_BOX(p_row), p_out->p_btns[i]);
       if (p_pr->b_tunable) {
          p_out->p_scales[i] = _build_scale(i, &p_pr->t_strength);
-         gtk_box_append(GTK_BOX(p_box), p_out->p_scales[i]);
+         gtk_box_append(GTK_BOX(p_row), p_out->p_scales[i]);
       }
+      gtk_box_append(GTK_BOX(p_box), p_row);
    }
    p_out->u_n_presets = u_n;
 }
@@ -393,12 +409,13 @@ _panel_root(void) {
 
 /* The preset cards in a vertical scroller as tall as the cards when there
  * is room (propagate-natural-height) and shorter when there is not: the
- * eight built-in rows fit an 800 px window, but user presets or a short
- * window can outgrow it, and then the cards scroll rather than the tools
- * and the save below them. Nothing expands, so the sections stay packed
- * together at the top and any spare height is left below them. */
+ * eight built-in rows fit an 800 px window, but user presets (ai2: every
+ * one of them is a row) or a short window can outgrow it, and then the
+ * cards scroll rather than the tools and the save below them. Nothing
+ * expands, so the sections stay packed together at the top and any spare
+ * height is left below them. */
 static GtkWidget *
-_build_card_scroller(const GPtrArray *p_presets, guint8 u_mask,
+_build_card_scroller(const GPtrArray *p_presets, guint32 u_mask,
                      gboolean b_thumbnails, EnhanceUIWidgets *p_out) {
    GtkWidget *p_cards = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
    _build_cards(p_cards, p_presets, u_mask, b_thumbnails, p_out);
@@ -408,11 +425,12 @@ _build_card_scroller(const GPtrArray *p_presets, guint8 u_mask,
    gtk_scrolled_window_set_propagate_natural_height(
       GTK_SCROLLED_WINDOW(p_scroll), TRUE);
    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(p_scroll), p_cards);
+   p_out->p_scroll = p_scroll;
    return (p_scroll);
 }
 
 GtkWidget *
-enhance_ui_build_panel(const GPtrArray *p_presets, guint8 u_mask,
+enhance_ui_build_panel(const GPtrArray *p_presets, guint32 u_mask,
                        gboolean b_thumbnails, EnhanceUIWidgets *p_out) {
    g_return_val_if_fail(p_out != NULL, NULL);
    memset(p_out, 0, sizeof(*p_out)); /* label-only mode leaves pics NULL */
@@ -448,6 +466,33 @@ enhance_ui_set_save_state(GtkWidget *p_state, GtkWidget *p_save_btn,
    g_free(c_text);
    if (p_save_btn != NULL) {
       gtk_widget_set_sensitive(p_save_btn, b_active);
+   }
+}
+
+/* The row's bounds are read against the viewport the scroller wraps the
+ * cards in, which moves its child by the scroll offset: a row above the
+ * view has a negative y, one below it a y past the page. */
+void
+enhance_ui_scroll_to_row(GtkWidget *p_scroll, GtkWidget *p_row) {
+   if (!GTK_IS_SCROLLED_WINDOW(p_scroll) || p_row == NULL) {
+      return;
+   }
+   GtkWidget *p_view =
+      gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(p_scroll));
+   graphene_rect_t r_row;
+   if (p_view == NULL || !gtk_widget_compute_bounds(p_row, p_view, &r_row)) {
+      return;
+   }
+   GtkAdjustment *p_adj =
+      gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(p_scroll));
+   gdouble d_value  = gtk_adjustment_get_value(p_adj);
+   gdouble d_page   = gtk_adjustment_get_page_size(p_adj);
+   gdouble d_top    = d_value + r_row.origin.y;
+   gdouble d_bottom = d_top + r_row.size.height;
+   if (d_top < d_value) {
+      gtk_adjustment_set_value(p_adj, d_top);
+   } else if (d_bottom > d_value + d_page) {
+      gtk_adjustment_set_value(p_adj, MIN(d_top, d_bottom - d_page));
    }
 }
 

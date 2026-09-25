@@ -3720,9 +3720,11 @@ _init_stack_and_viewer(GgazeWindow *p_win) {
    _set_view(p_win, GGAZE_VIEW_EMPTY);
 }
 
-/* One win.enhance-N action per addressable preset (1..GGAZE_ENHANCE_MAX_
- * PRESETS), all sharing one handler that reads the index from the action's
- * data -- so the cap lives in enhancer.h and no handler parses its name;
+/* One win.enhance-N action per preset row a digit reaches (1..GGAZE_
+ * ENHANCE_DIGIT_PRESETS -- the rows past them, user presets, are the
+ * panel's j / k / Enter and card clicks alone, ai2), all sharing one
+ * handler that reads the index from the action's data -- so the count
+ * lives in enhancer.h and no handler parses its name;
  * and the edit panel's selection / strength actions (8i2), likewise one
  * handler reading its _PANEL_OPS row. */
 static void
@@ -3734,7 +3736,7 @@ _add_enhance_actions(GgazeWindow *p_win) {
       g_action_map_add_action(G_ACTION_MAP(p_win), G_ACTION(p_act));
       g_object_unref(p_act);
    }
-   for (gint i = 0; i < GGAZE_ENHANCE_MAX_PRESETS; i++) {
+   for (gint i = 0; i < GGAZE_ENHANCE_DIGIT_PRESETS; i++) {
       char          *c_name = g_strdup_printf("enhance-%d", i + 1);
       GSimpleAction *p_act  = g_simple_action_new(c_name, NULL);
       g_object_set_data(G_OBJECT(p_act), "ggaze-preset-idx",

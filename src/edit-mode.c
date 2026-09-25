@@ -146,13 +146,15 @@ edit_mode_key(EditMode *p_em, guint u_keyval, GdkModifierType e_state) {
    return (TRUE);
 }
 
-/* How many presets the digits reach: the panel's cards, at most the 8
- * bits of the mask. */
+/* How many presets the digits reach: the panel's first rows, at most the
+ * GGAZE_ENHANCE_DIGIT_PRESETS that have a digit (ai2: the rows past them,
+ * user presets, have no digit, so the hint bar's "1–8 presets" never
+ * promises one). */
 static guint
 _preset_count(EditMode *p_em) {
    const GPtrArray *p_presets = enhance_ctrl_get_presets(p_em->p_ec);
    guint            u_n       = p_presets != NULL ? p_presets->len : 0;
-   return (MIN(u_n, 8u));
+   return (MIN(u_n, (guint)GGAZE_ENHANCE_DIGIT_PRESETS));
 }
 
 void

@@ -6,7 +6,10 @@
  * so there is no hand-mirrored nick table to keep in step. The four ordered
  * a(ss) lists (destinations, editors, scripts, enhance presets) get a list
  * group each with add / edit / move / remove, validated live in the entry
- * dialog. All per-dialog state is allocated per dialog and freed with it.
+ * dialog. A list may have a cap (the enhance presets: the edit panel's
+ * rows, ai2): at the cap Add is refused with the reason, and entries
+ * stored past it (another tool wrote the setting) say they are ignored.
+ * All per-dialog state is allocated per dialog and freed with it.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -18,6 +21,7 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "enhancer.h" /* GGAZE_ENHANCE_MAX_USER_PRESETS (GEGL-agnostic) */
 #include "ggaze-config.h"
 #include "preset-strength.h"
 
@@ -181,6 +185,11 @@ typedef struct {
     * FALSE with *c_why_out (freed by the caller) saying what is wrong. The
     * enhance presets check their strength placeholder with it (8i2). */
    gboolean (*check)(const char *c_value, char **c_why_out);
+   /* The most entries the list's consumer takes (0: no cap), and what an
+    * entry is called in the messages about it ("presets"). */
+   guint       u_max;
+   const char *c_what;
+   GtkWidget  *p_add; /* the group's Add button (refused at the cap) */
    GPtrArray *(*get)(Settings *);
    guint (*set)(Settings *, const GPtrArray *);
 } ListSpec;
@@ -273,6 +282,46 @@ _row_button(ListSpec *p_spec, guint u_index, gint i_delta, const char *c_icon,
    return (p_b);
 }
 
+/* TRUE iff p_spec's list holds u_len entries and may take no more. */
+static gboolean
+_list_full(const ListSpec *p_spec, guint u_len) {
+   return (p_spec->u_max > 0 && u_len >= p_spec->u_max);
+}
+
+/* Why an Add is refused at the cap. Caller frees. */
+static char *
+_full_text(const ListSpec *p_spec) {
+   return (g_strdup_printf("At most %u %s -- remove one to add another.",
+                           p_spec->u_max, p_spec->c_what));
+}
+
+/* Row u's subtitle: its value, and for an entry past the cap (stored by
+ * something other than this dialog) that it is ignored. Caller frees. */
+static char *
+_row_subtitle(const ListSpec *p_spec, guint u, const char *c_value) {
+   if (p_spec->u_max == 0 || u < p_spec->u_max) {
+      return (g_markup_escape_text(c_value, -1));
+   }
+   char *c_esc = g_markup_escape_text(c_value, -1);
+   char *c_out = g_strdup_printf("Ignored: over the limit of %u %s -- %s",
+                                 p_spec->u_max, p_spec->c_what, c_esc);
+   g_free(c_esc);
+   return (c_out);
+}
+
+/* The Add button follows the cap: insensitive at it, saying why. */
+static void
+_sync_add(ListSpec *p_spec, guint u_len) {
+   if (p_spec->p_add == NULL) {
+      return;
+   }
+   gboolean b_full = _list_full(p_spec, u_len);
+   char    *c_tip  = b_full ? _full_text(p_spec) : g_strdup("Add entry");
+   gtk_widget_set_sensitive(p_spec->p_add, !b_full);
+   gtk_widget_set_tooltip_text(p_spec->p_add, c_tip);
+   g_free(c_tip);
+}
+
 static void
 _list_refresh(ListSpec *p_spec) {
    /* Remove previously-added rows (tracked in p_rows) before rebuilding;
@@ -288,7 +337,9 @@ _list_refresh(ListSpec *p_spec) {
       const SettingsPair *p_pr  = g_ptr_array_index(p_cur, u);
       AdwActionRow       *p_row = ADW_ACTION_ROW(adw_action_row_new());
       adw_preferences_row_set_title(ADW_PREFERENCES_ROW(p_row), p_pr->c_name);
-      adw_action_row_set_subtitle(p_row, p_pr->c_value);
+      char *c_sub = _row_subtitle(p_spec, u, p_pr->c_value);
+      adw_action_row_set_subtitle(p_row, c_sub);
+      g_free(c_sub);
       adw_action_row_add_suffix(
          p_row, _row_button(p_spec, u, 0, "document-edit-symbolic", "Edit",
                             G_CALLBACK(_list_edit)));
@@ -305,6 +356,7 @@ _list_refresh(ListSpec *p_spec) {
                                 GTK_WIDGET(p_row));
       g_ptr_array_add(p_spec->p_rows, p_row);
    }
+   _sync_add(p_spec, p_cur->len);
    g_ptr_array_unref(p_cur);
 }
 
@@ -335,13 +387,29 @@ _check_preset_graph(const char *c_value, char **c_why_out) {
 }
 #endif
 
-/* TRUE iff (c_name, c_value) may be stored in p_spec's list; otherwise
- * *c_why_out (caller frees) says why, for the hint line. */
+/* TRUE iff an Add to p_spec's list would go past its cap (another dialog
+ * or tool filled it while this one was open). */
 static gboolean
-_pair_ok(const ListSpec *p_spec, const char *c_name, const char *c_value,
-         char **c_why_out) {
+_add_refused(const ListSpec *p_spec) {
+   if (p_spec->u_max == 0) {
+      return (FALSE);
+   }
+   GPtrArray *p_cur  = p_spec->get(p_spec->p_s);
+   gboolean   b_full = _list_full(p_spec, p_cur->len);
+   g_ptr_array_unref(p_cur);
+   return (b_full);
+}
+
+/* TRUE iff (c_name, c_value) may be stored in p_spec's list as row
+ * i_index (-1: added); otherwise *c_why_out (caller frees) says why, for
+ * the hint line. */
+static gboolean
+_pair_ok(const ListSpec *p_spec, gint i_index, const char *c_name,
+         const char *c_value, char **c_why_out) {
    *c_why_out = NULL;
-   if (c_name == NULL || *c_name == '\0') {
+   if (i_index < 0 && _add_refused(p_spec)) {
+      *c_why_out = _full_text(p_spec);
+   } else if (c_name == NULL || *c_name == '\0') {
       *c_why_out = g_strdup("A name is required.");
    } else if (c_value == NULL || *c_value == '\0') {
       *c_why_out =
@@ -363,8 +431,9 @@ _edit_validate(GtkEditable *p_e, gpointer p_data) {
    (void)p_e;
    EditCtx *p_ctx = (EditCtx *)p_data;
    char    *c_why = NULL;
-   gboolean b_ok = _pair_ok(p_ctx->p_spec, gtk_editable_get_text(p_ctx->p_name),
-                            gtk_editable_get_text(p_ctx->p_value), &c_why);
+   gboolean b_ok  = _pair_ok(p_ctx->p_spec, p_ctx->i_index,
+                             gtk_editable_get_text(p_ctx->p_name),
+                             gtk_editable_get_text(p_ctx->p_value), &c_why);
    gtk_label_set_text(GTK_LABEL(p_ctx->p_hint), c_why != NULL ? c_why : "");
    g_free(c_why);
    adw_alert_dialog_set_response_enabled(ADW_ALERT_DIALOG(p_ctx->p_dlg), "ok",
@@ -380,7 +449,8 @@ _edit_confirm_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       const char *c_name  = gtk_editable_get_text(p_ctx->p_name);
       const char *c_value = gtk_editable_get_text(p_ctx->p_value);
       char       *c_why   = NULL;
-      gboolean    b_ok    = _pair_ok(p_ctx->p_spec, c_name, c_value, &c_why);
+      gboolean    b_ok =
+         _pair_ok(p_ctx->p_spec, p_ctx->i_index, c_name, c_value, &c_why);
       g_free(c_why);
       if (b_ok) {
          GPtrArray *p_cur = p_ctx->p_spec->get(p_ctx->p_spec->p_s);
@@ -483,6 +553,7 @@ _build_list_group(ListSpec *p_spec) {
    gtk_widget_add_css_class(p_add, "flat");
    gtk_widget_set_tooltip_text(p_add, "Add entry");
    g_signal_connect(p_add, "clicked", G_CALLBACK(_list_add), p_spec);
+   p_spec->p_add = p_add;
    adw_preferences_group_set_header_suffix(
       ADW_PREFERENCES_GROUP(p_spec->p_group), p_add);
    _list_refresh(p_spec);
@@ -528,6 +599,35 @@ _build_general_page(GSettings *p_gs) {
    return (ADW_PREFERENCES_PAGE(p_page));
 }
 
+#if GGAZE_HAVE_GEGL
+/* The enhance presets' list: each one a row of the edit panel after the
+ * built-ins, at most GGAZE_ENHANCE_MAX_USER_PRESETS of them (ai2). */
+static ListSpec
+_preset_list_spec(Settings *p_s) {
+   return ((ListSpec){.p_s           = p_s,
+                      .c_title       = "Enhance presets",
+                      .c_description = "Your own presets: rows of the "
+                                       "edit panel (a) after the eight "
+                                       "built-ins, in this order (j/k "
+                                       "select, Enter toggles). GEGL "
+                                       "operations with prop=value "
+                                       "settings; one number may be "
+                                       "marked tunable with "
+                                       "{s:DEFAULT:MIN..MAX} or "
+                                       "{s:DEFAULT:MIN..MAX:STEP} in its "
+                                       "place (h/l or its slider tune "
+                                       "it)",
+                      .c_placeholder = "e.g. gegl:saturation "
+                                       "scale={s:1.3:0..2:0.1} "
+                                       "gegl:unsharp-mask std-dev=1.5",
+                      .check         = _check_preset_graph,
+                      .u_max         = GGAZE_ENHANCE_MAX_USER_PRESETS,
+                      .c_what        = "presets",
+                      .get           = settings_get_enhance_presets,
+                      .set           = settings_set_enhance_presets});
+}
+#endif
+
 /* The four list editors. The GEGL preset list only appears in a GEGL build:
  * configuring presets that can never run was a trap. */
 static void
@@ -560,23 +660,7 @@ _init_lists(PrefsLists *p_l, Settings *p_s) {
                  .get           = settings_get_scripts,
                  .set           = settings_set_scripts};
 #if GGAZE_HAVE_GEGL
-   p_l->t_specs[p_l->u_n++] =
-      (ListSpec){.p_s           = p_s,
-                 .c_title       = "Enhance presets",
-                 .c_description = "Extra presets for the a "
-                                  "chooser: GEGL operations with "
-                                  "prop=value settings, in order. "
-                                  "One number may be marked tunable "
-                                  "with {s:DEFAULT:MIN..MAX} or "
-                                  "{s:DEFAULT:MIN..MAX:STEP} in its "
-                                  "place (tunable in the panel once "
-                                  "it lists user presets)",
-                 .c_placeholder = "e.g. gegl:saturation "
-                                  "scale={s:1.3:0..2:0.1} "
-                                  "gegl:unsharp-mask std-dev=1.5",
-                 .check         = _check_preset_graph,
-                 .get           = settings_get_enhance_presets,
-                 .set           = settings_set_enhance_presets};
+   p_l->t_specs[p_l->u_n++] = _preset_list_spec(p_s);
 #endif
 }
 

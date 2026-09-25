@@ -104,6 +104,11 @@ static const struct {
    {"Denoise", "gegl:noise-reduction iterations={s:4:1..12:1}"},
 };
 
+/* The header's row budget counts these rows (enhancer.h), and the mask
+ * holds a bit per row. */
+G_STATIC_ASSERT(G_N_ELEMENTS(BUILTINS) == GGAZE_ENHANCE_N_BUILTINS);
+G_STATIC_ASSERT(GGAZE_ENHANCE_MAX_PRESETS <= 32);
+
 /* --- preset list --------------------------------------------------------- */
 
 static void
@@ -139,7 +144,8 @@ _preset_new(const char *c_name, const char *c_graph, int i_builtin) {
 static GPtrArray *
 _presets_copy(const GPtrArray *p_src) {
    GPtrArray *p_out = g_ptr_array_new_with_free_func(_preset_free);
-   for (guint u = 0; p_src != NULL && u < p_src->len; u++) {
+   for (guint u = 0;
+        p_src != NULL && u < p_src->len && u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
       const EnhancerPreset *p_s = g_ptr_array_index((GPtrArray *)p_src, u);
       g_ptr_array_add(p_out,
                       _preset_new(p_s->c_name, p_s->c_graph, p_s->i_builtin));
@@ -185,7 +191,9 @@ enhancer_set_user_presets(Enhancer *p_e, const GPtrArray *p_pairs) {
    g_return_if_fail(p_e != NULL);
    GPtrArray *p_list = g_ptr_array_new_with_free_func(_preset_free);
    _add_builtins(p_list);
-   for (guint u = 0; p_pairs != NULL && u < p_pairs->len; u++) {
+   for (guint u = 0; p_pairs != NULL && u < p_pairs->len &&
+                     u < GGAZE_ENHANCE_MAX_USER_PRESETS;
+        u++) {
       const SettingsPair *p_pr = g_ptr_array_index((GPtrArray *)p_pairs, u);
       g_ptr_array_add(p_list, _preset_new(p_pr->c_name, p_pr->c_value, 0));
    }
@@ -199,7 +207,7 @@ enhancer_get_presets(Enhancer *p_e) {
 }
 
 char *
-enhancer_describe_mask(const GPtrArray *p_presets, guint8 u_mask) {
+enhancer_describe_mask(const GPtrArray *p_presets, guint32 u_mask) {
    return (enhancer_describe_state(p_presets, u_mask, NULL));
 }
 
@@ -220,14 +228,14 @@ _append_name(GString *p_str, const EnhancerPreset *p_pr, gdouble d_value) {
 }
 
 char *
-enhancer_describe_state(const GPtrArray *p_presets, guint8 u_mask,
+enhancer_describe_state(const GPtrArray *p_presets, guint32 u_mask,
                         const gdouble *pd_strength) {
    if (p_presets == NULL || u_mask == 0) {
       return (NULL);
    }
    GString *p_str = g_string_new(NULL);
    for (guint u = 0; u < p_presets->len && u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
-      if ((u_mask & (guint8)(1u << u)) != 0) {
+      if ((u_mask & GGAZE_ENHANCE_BIT(u)) != 0) {
          _append_name(p_str, g_ptr_array_index((GPtrArray *)p_presets, u),
                       pd_strength != NULL ? pd_strength[u] : NAN);
       }
@@ -273,6 +281,143 @@ enhancer_presets_resolve(const GPtrArray *p_presets,
       }
    }
    return (p_out);
+}
+
+/* Row u's graph as the chain runs it: its strength written in (the
+ * default when pd_strength is NULL), or the graph as it is when it has no
+ * well-formed placeholder. Caller frees. */
+static char *
+_resolved_graph(const EnhancerPreset *p_pr, const gdouble *pd_strength,
+                guint u) {
+   char *c_out = NULL;
+   if (p_pr->b_tunable) {
+      c_out = preset_strength_substitute(
+         p_pr->c_graph, pd_strength != NULL ? pd_strength[u] : NAN, NULL);
+   }
+   return (c_out != NULL ? c_out : g_strdup(p_pr->c_graph));
+}
+
+char *
+enhancer_chain_key(const GPtrArray *p_presets, guint32 u_mask,
+                   const gdouble *pd_strength) {
+   if (p_presets == NULL || u_mask == 0) {
+      return (NULL);
+   }
+   GString *p_key = NULL;
+   for (guint u = 0; u < p_presets->len && u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
+      if ((u_mask & GGAZE_ENHANCE_BIT(u)) == 0) {
+         continue;
+      }
+      char *c_graph = _resolved_graph(
+         g_ptr_array_index((GPtrArray *)p_presets, u), pd_strength, u);
+      if (p_key == NULL) {
+         p_key = g_string_new(c_graph);
+      } else {
+         g_string_append_printf(p_key, "\n%s", c_graph);
+      }
+      g_free(c_graph);
+   }
+   return (p_key != NULL ? g_string_free(p_key, FALSE) : NULL);
+}
+
+/* --- carrying an edit across a new preset list (ai2) ---------------------- */
+
+/* How two presets are "the same one" in each pass of enhancer_presets_map. */
+typedef gboolean (*_SameFn)(const EnhancerPreset *p_a,
+                            const EnhancerPreset *p_b);
+
+static gboolean
+_same_both(const EnhancerPreset *p_a, const EnhancerPreset *p_b) {
+   return (g_strcmp0(p_a->c_name, p_b->c_name) == 0 &&
+           g_strcmp0(p_a->c_graph, p_b->c_graph) == 0);
+}
+
+static gboolean
+_same_name(const EnhancerPreset *p_a, const EnhancerPreset *p_b) {
+   return (g_strcmp0(p_a->c_name, p_b->c_name) == 0);
+}
+
+static gboolean
+_same_graph(const EnhancerPreset *p_a, const EnhancerPreset *p_b) {
+   return (g_strcmp0(p_a->c_graph, p_b->c_graph) == 0);
+}
+
+/* The rows a mask can address in p (NULL: none). */
+static guint
+_rows(const GPtrArray *p) {
+   return (p != NULL ? MIN(p->len, (guint)GGAZE_ENHANCE_MAX_PRESETS) : 0);
+}
+
+/* One matching pass: every old row still unmatched takes the first new
+ * row not taken yet that fn calls the same. Old rows in order, so two
+ * identical presets keep their order. */
+static void
+_map_pass(const GPtrArray *p_old, const GPtrArray *p_new, gint *pi_map,
+          gboolean *pb_taken, _SameFn fn) {
+   for (guint i = 0; i < _rows(p_old); i++) {
+      const EnhancerPreset *p_o = g_ptr_array_index((GPtrArray *)p_old, i);
+      for (guint j = 0; pi_map[i] < 0 && j < _rows(p_new); j++) {
+         if (!pb_taken[j] &&
+             fn(p_o, g_ptr_array_index((GPtrArray *)p_new, j))) {
+            pi_map[i]   = (gint)j;
+            pb_taken[j] = TRUE;
+         }
+      }
+   }
+}
+
+gboolean
+enhancer_presets_map(const GPtrArray *p_old, const GPtrArray *p_new,
+                     gint *pi_map) {
+   g_return_val_if_fail(pi_map != NULL, FALSE);
+   gboolean b_taken[GGAZE_ENHANCE_MAX_PRESETS] = {FALSE};
+   gboolean b_same                             = _rows(p_old) == _rows(p_new);
+   for (guint i = 0; i < _rows(p_old); i++) {
+      pi_map[i] = -1;
+   }
+   _map_pass(p_old, p_new, pi_map, b_taken, _same_both);
+   for (guint i = 0; i < _rows(p_old); i++) {
+      b_same = b_same && pi_map[i] == (gint)i;
+   }
+   _map_pass(p_old, p_new, pi_map, b_taken, _same_name);
+   _map_pass(p_old, p_new, pi_map, b_taken, _same_graph);
+   return (b_same);
+}
+
+/* Old row i's strength in its new row p_to: the value kept when both
+ * have a tunable number (clamped into the new range: an edited
+ * placeholder may have moved it), the new default when only the new one
+ * has, 0 when the new one has none. */
+static gdouble
+_carried_strength(const EnhancerPreset *p_from, const EnhancerPreset *p_to,
+                  gdouble d_old) {
+   if (!p_to->b_tunable) {
+      return (0.0);
+   }
+   return (preset_strength_clamp(&p_to->t_strength,
+                                 p_from->b_tunable ? d_old : NAN));
+}
+
+guint32
+enhancer_state_remap(const GPtrArray *p_old, const GPtrArray *p_new,
+                     const gint *pi_map, guint32 u_mask, const gdouble *pd_old,
+                     gdouble *pd_new) {
+   g_return_val_if_fail(pi_map != NULL && pd_old != NULL && pd_new != NULL, 0);
+   enhancer_default_strengths(p_new, pd_new); /* every new row, off */
+   guint32 u_out = 0;
+   for (guint i = 0; i < _rows(p_old); i++) {
+      gint j = pi_map[i];
+      if (j < 0 || (guint)j >= _rows(p_new)) {
+         continue; /* gone: its bit and strength with it */
+      }
+      pd_new[j] =
+         _carried_strength(g_ptr_array_index((GPtrArray *)p_old, i),
+                           g_ptr_array_index((GPtrArray *)p_new, j), pd_old[i]);
+      if ((u_mask & GGAZE_ENHANCE_BIT(i)) != 0) {
+         u_out |= GGAZE_ENHANCE_BIT(j);
+      }
+   }
+   return (u_out);
 }
 
 /* --- export destination --------------------------------------------------- */
@@ -513,9 +658,9 @@ _append_transform(GeglNode *p_graph, GeglNode *p_prev, const Transform *p_xf) {
  * or NULL with p_err. *p_any is set when at least one was appended. */
 static GeglNode *
 _append_presets(GeglNode *p_graph, GeglNode *p_prev, const GPtrArray *p_presets,
-                guint8 u_mask, gboolean *p_any, GError **p_err) {
+                guint32 u_mask, gboolean *p_any, GError **p_err) {
    for (guint u = 0; u < p_presets->len && u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
-      if ((u_mask & (guint8)(1u << u)) == 0) {
+      if ((u_mask & GGAZE_ENHANCE_BIT(u)) == 0) {
          continue;
       }
       p_prev = _append_preset(
@@ -528,12 +673,12 @@ _append_presets(GeglNode *p_graph, GeglNode *p_prev, const GPtrArray *p_presets,
    return (p_prev);
 }
 
-/* Run p_in through the presets enabled in u_mask (all of them when p_mask is
- * ~0) and then the transform p_xf (nullable), and return the sink buffer.
+/* Run p_in through the presets enabled in u_mask (bit i: row i, in row
+ * order) and then the transform p_xf (nullable), and return the sink buffer.
  * gegl:buffer-sink allocates the output itself: handing it a pre-created
  * buffer leaked one GeglBuffer per apply (the sink replaced the pointer). */
 static GeglBuffer *
-_run_chain(GeglBuffer *p_in, const GPtrArray *p_presets, guint8 u_mask,
+_run_chain(GeglBuffer *p_in, const GPtrArray *p_presets, guint32 u_mask,
            const Transform *p_xf, GError **p_err) {
    GeglNode *p_graph = gegl_node_new();
    GeglNode *p_prev  = gegl_node_new_child(
@@ -569,7 +714,7 @@ _run_chain(GeglBuffer *p_in, const GPtrArray *p_presets, guint8 u_mask,
 
 GeglBuffer *
 enhancer_apply_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
-                     guint8 u_mask, const Transform *p_xf, GError **p_err) {
+                     guint32 u_mask, const Transform *p_xf, GError **p_err) {
    g_return_val_if_fail(p_in != NULL, NULL);
    g_return_val_if_fail(p_presets != NULL, NULL);
    return (_run_chain(p_in, p_presets, u_mask, p_xf, p_err));
@@ -715,7 +860,7 @@ enhancer_export(GeglBuffer *p_in, const EnhancerPreset *p_preset, GFile *p_out,
  * composed, to p_out. */
 gboolean
 enhancer_export_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
-                      guint8 u_mask, const Transform *p_xf, GFile *p_out,
+                      guint32 u_mask, const Transform *p_xf, GFile *p_out,
                       GError **p_err) {
    g_return_val_if_fail(p_in != NULL, FALSE);
    g_return_val_if_fail(p_out != NULL, FALSE);
@@ -736,7 +881,7 @@ typedef struct {
    GFile     *p_src;     /* owned */
    GFile     *p_out;     /* owned */
    GPtrArray *p_presets; /* owned deep copy */
-   guint8     u_mask;
+   guint32    u_mask;
    Transform  t_xf; /* by value: a snapshot the tools cannot nudge under
                      * the worker */
 } _ExportReq;
@@ -789,7 +934,7 @@ _snapshot_transform(Transform *p_dst, const Transform *p_xf) {
 
 void
 enhancer_export_chain_async(GFile *p_src, const GPtrArray *p_presets,
-                            guint8 u_mask, const Transform *p_xf, GFile *p_out,
+                            guint32 u_mask, const Transform *p_xf, GFile *p_out,
                             GCancellable *p_cancel, GAsyncReadyCallback p_cb,
                             gpointer p_data) {
    g_return_if_fail(G_IS_FILE(p_src));
@@ -1792,7 +1937,7 @@ enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err) {
 typedef struct {
    GFile     *p_file;    /* owned */
    GPtrArray *p_presets; /* owned deep copy (thread-safe snapshot) */
-   guint8     u_mask;
+   guint32    u_mask;
    Transform  t_xf; /* by value: a snapshot (see _ExportReq) */
 } _AsyncApplyReq;
 
@@ -1855,7 +2000,7 @@ _apply_chain_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
 
 void
 enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
-                           guint8 u_mask, const Transform *p_xf,
+                           guint32 u_mask, const Transform *p_xf,
                            GCancellable *p_cancel, GAsyncReadyCallback p_cb,
                            gpointer p_data) {
    g_return_if_fail(p_file != NULL);
@@ -2070,11 +2215,8 @@ enhancer_preview_thumbnails_async(GFile *p_file, const GPtrArray *p_presets,
    g_return_if_fail(G_IS_FILE(p_file));
    _PreviewReq *p_req = g_new0(_PreviewReq, 1);
    p_req->p_file      = (GFile *)g_object_ref(p_file);
-   p_req->p_presets   = _presets_copy(p_presets);
-   if (p_req->p_presets->len > GGAZE_ENHANCE_MAX_PRESETS) {
-      g_ptr_array_set_size(p_req->p_presets, GGAZE_ENHANCE_MAX_PRESETS);
-   }
-   GTask *p_task = g_task_new(p_file, p_cancel, p_cb, p_data);
+   p_req->p_presets   = _presets_copy(p_presets); /* the rows a mask reaches */
+   GTask *p_task      = g_task_new(p_file, p_cancel, p_cb, p_data);
    g_task_set_task_data(p_task, p_req, (GDestroyNotify)_preview_req_free);
    g_task_run_in_thread(p_task, _preview_thread);
    g_object_unref(p_task);

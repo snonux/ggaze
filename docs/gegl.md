@@ -29,8 +29,10 @@ editing remains a non-goal.
   showing its key from `shortcuts.c`'s table (docs/ui-and-interactions.md
   "Quick enhance"). The image keeps the whole viewer; the cards are the
   choices: a small, dim `Original` reference first (a picture, not a
-  button), then one row card per preset with its auto-assigned hotkey
-  (`1`, `2`, …, capped at the mask's 8 slots), highlighted and checked
+  button), then one row card per preset — the eight built-ins, then the
+  user's own `enhance-presets` in their order (ai2), 32 rows at most —
+  the first eight with their hotkey (`1`–`8`), the rows after them by
+  name alone (`j`/`k` + `Enter`; the list scrolls), highlighted and checked
   while it is on, showing its **strength** when it has a tunable number
   (8i2, below); the selected card (`j`/`k`) wears a ring and shows its
   strength slider. By default each card carries a small preview thumbnail
@@ -39,7 +41,7 @@ editing remains a non-goal.
   cards (no batch at all) for slower systems. The thumbnails and the
   Original reference ignore the geometric transform (crop / straighten / rotate):
   they are per-preset colour references, rendered once per image from the
-  untransformed original, and re-rendering nine of them on every nudge
+  untransformed original, and re-rendering every one of them on every nudge
   would cost more than it tells — the large view is where the composition
   is judged. Documented as a deliberate limit, not an oversight.
 - Selecting a preset toggles a **GEGL graph** on/off and re-renders the
@@ -132,8 +134,35 @@ editing remains a non-goal.
   instead of blocking on an unanswerable prompt.
 - Export format: defaults to the original extension (JPEG quality 95).
 - Presets are configurable: `enhance-presets` GSettings `a(ss)` — ordered
-  `(name, gegl-graph)` pairs. Order = hotkey order. Ships with sensible
-  built-in defaults; user can add/edit in Preferences (`,`).
+  `(name, gegl-graph)` pairs, added / edited / moved / removed in
+  Preferences (`,`). Each one is a **row of the edit panel** after the
+  eight built-ins, in this order (ai2): selected with `j`/`k`, toggled with
+  `Enter` or a click, tuned with `h`/`l` or its slider, part of the title,
+  the saved / dirty rule, the export and undo like a built-in. Only the
+  built-ins' rows carry digits (`1`–`8`). The layered mask is a `guint32`
+  (bit *i* = row *i*), so the panel holds **32 rows: 24 user presets**
+  (`GGAZE_ENHANCE_MAX_USER_PRESETS`) — Preferences refuses an Add at that
+  many, and entries stored past it are listed as *Ignored* and never
+  loaded. 32 is far more than a side panel is pleasant with (it scrolls
+  past ~10 rows) and keeps the mask one machine word.
+- **Editing the list while presets are on (ai2).** Every Preferences write
+  delivers a new list. The edit refers to presets by row, so a changed
+  list is *carried*, not reset: `enhancer_presets_map` matches each old
+  row to a new one — the same name and graph (untouched, wherever it
+  moved), else the same name (graph edited), else the same graph
+  (renamed) — and `enhancer_state_remap` moves every on/off bit and
+  strength with its preset (a kept strength clamped into an edited
+  placeholder's range; a removed preset's state dropped; a new row off at
+  its default). The same carry is applied to the saved state and, through
+  `edit_history_remap`, to every undo snapshot (a step that only toggled
+  a removed preset is dropped). What the chain renders is compared as text
+  (`enhancer_chain_key`: each enabled graph with its strength written in,
+  in row order): the preview re-renders only when that changed, and the
+  saved copy stays saved only while its key is unchanged. A list equal to
+  the old one (any other Preferences key moved) changes nothing at all.
+  An export still running when the rows move wrote a state named in the
+  old rows: it is reported, but not recorded as the saved state (a prompt
+  too many at worst, never a lost edit).
 - **Adjustable strength (8i2).** A preset graph may mark **one** number as
   tunable with a placeholder that also declares its range:
   `{s:DEFAULT:MIN..MAX}` (step: a twentieth of the range) or
@@ -348,10 +377,10 @@ portrait phone JPEGs etc.
 ```c
 const GPtrArray *enhancer_get_presets(Enhancer *p_e);
 GeglBuffer      *enhancer_apply_chain(GeglBuffer *p_in,
-                                      const GPtrArray *p_presets, guint8 u_mask,
+                                      const GPtrArray *p_presets, guint32 u_mask,
                                       const Transform *p_xf, GError **p_err);
 gboolean         enhancer_export_chain(GeglBuffer *p_in,
-                                       const GPtrArray *p_presets, guint8 u_mask,
+                                       const GPtrArray *p_presets, guint32 u_mask,
                                        const Transform *p_xf, GFile *p_out,
                                        GError **p_err);
 
@@ -359,7 +388,7 @@ gboolean         enhancer_export_chain(GeglBuffer *p_in,
  * also reports the original's upright size (the crop tool's base) and
  * whether the decode was colour-managed. */
 void       enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
-                                      guint8 u_mask, const Transform *p_xf,
+                                      guint32 u_mask, const Transform *p_xf,
                                       GCancellable *p_cancel,
                                       GAsyncReadyCallback p_cb, gpointer p_data);
 GdkTexture *enhancer_apply_chain_finish(GAsyncResult *p_res, gint *p_orig_w,

@@ -48,17 +48,19 @@
 
 G_BEGIN_DECLS
 
-/* The presets a snapshot holds a strength for: the mask's 8 bits (the
- * enhancer's GGAZE_ENHANCE_MAX_PRESETS, which enhance-ctrl.c asserts
- * equal; this plain-C module does not include the GEGL-side header). */
-#define EDIT_SNAPSHOT_PRESETS 8
+/* The presets a snapshot holds a strength for: one per bit of the 32-bit
+ * mask (ai2: the built-ins and the user's presets alike; the enhancer's
+ * GGAZE_ENHANCE_MAX_PRESETS, which enhance-ctrl.c asserts equal -- this
+ * plain-C module is compiled in every build and does not depend on the
+ * enhancer). */
+#define EDIT_SNAPSHOT_PRESETS 32
 
 /* The whole edit state of one image: what undo / redo restore. Plain data
  * (copied by assignment). Adding a field means adding it here, setting it
  * in edit_snapshot_init and comparing it in edit_snapshot_equal -- nothing
  * else in this module looks inside. */
 typedef struct {
-   guint8  u_mask; /* bit i: preset i enabled (layered) */
+   guint32 u_mask; /* bit i: preset row i enabled (layered) */
    gdouble d_strength[EDIT_SNAPSHOT_PRESETS]; /* preset i's tunable number
                                                * (8i2), canonical
                                                * (preset-strength.h) so ==
@@ -144,6 +146,16 @@ guint edit_history_redo_count(const EditHistory *p_h);
 
 /* Forget every step (another image, a discard). */
 void edit_history_clear(EditHistory *p_h);
+
+/* Rewrite every snapshot the history holds with fn (in place; p_data is
+ * fn's): the preset list changed under the edit (ai2, a Preferences
+ * reorder / edit / removal) and the rows the snapshots name moved with
+ * it. A step whose before and after come out equal (it only toggled a
+ * preset that is gone now) is no step any more and is dropped, wherever
+ * it was; the undo / redo split point moves with the steps around it. An
+ * open run is closed. */
+typedef void (*EditSnapshotFn)(EditSnapshot *p_s, gpointer p_data);
+void edit_history_remap(EditHistory *p_h, EditSnapshotFn fn, gpointer p_data);
 
 G_END_DECLS
 

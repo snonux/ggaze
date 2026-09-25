@@ -5,8 +5,9 @@
  * ggaze — Enhance/GEGL UI orchestration controller
  *
  * Owns the entire GEGL "enhance" feature's state and orchestration: the
- * preset mask, the geometric Transform (rotate 90 / straighten / crop,
- * decision #35 -- the same live preview graph, so a turn and a preset
+ * preset mask (a guint32: a bit per preset row, the built-ins and the
+ * user's own alike, ai2), the geometric Transform (rotate 90 / straighten /
+ * crop, decision #35 -- the same live preview graph, so a turn and a preset
  * compose and one Save exports both), the in-flight apply/preview
  * cancellables and generation counters, the cached enhanced texture, the
  * hold-Space compare flag, the file the preview applies to, the
@@ -179,13 +180,18 @@ void enhance_ctrl_dispose(EnhanceCtrl *p_ctrl);
 /* --- engine presets --- */
 /* Feed the Preferences user presets (SettingsPair*) to the engine, which
  * rebuilds built-ins + user presets itself (enhancer_set_user_presets).
- * Called on every Preferences change, so the edit is kept: each strength
- * is only clamped into its preset's range as the new list has it, and
- * the panel, title and render follow only when that moved one. */
+ * Called on every Preferences change, so the edit is kept: the same list
+ * changes nothing at all, and a list Preferences changed (ai2: a user
+ * preset added, edited, moved or removed) carries the edit to the rows
+ * its presets have now -- on / off, strengths, the saved state, every
+ * undo snapshot and the selection follow their preset
+ * (enhancer_presets_map), a removed preset's part of it is dropped; an
+ * open panel is built again for the new rows, and the picture renders
+ * again only when the chain it runs changed. */
 void             enhance_ctrl_set_user_presets(EnhanceCtrl     *p_ctrl,
                                                const GPtrArray *p_pairs);
 const GPtrArray *enhance_ctrl_get_presets(EnhanceCtrl *p_ctrl);
-guint8           enhance_ctrl_get_mask(EnhanceCtrl *p_ctrl);
+guint32          enhance_ctrl_get_mask(EnhanceCtrl *p_ctrl);
 
 /* --- the geometric transform (rotate 90 / straighten / crop) ------------- */
 /* The current Transform (borrowed; the identity when none is active). */
@@ -331,15 +337,17 @@ void enhance_ctrl_toggle_open(EnhanceCtrl *p_ctrl, gboolean b_thumbnails);
  * discards an edit). Returns TRUE iff a panel was open, so the window's
  * Esc can stop there. */
 gboolean enhance_ctrl_close(EnhanceCtrl *p_ctrl);
-/* enhance-N (keys 1-8, live only while the panel is open -- edit-mode.c
- * routes them -- and the cards): toggle preset i_idx (0..7) on/off
- * (layered), then re-apply asynchronously. Out-of-range i_idx is a silent
- * no-op. */
+/* enhance-N (keys 1-8 for the first eight rows, live only while the panel
+ * is open -- edit-mode.c routes them), a card click and Enter on the
+ * selected row (any row, ai2): toggle preset i_idx on/off (layered), then
+ * re-apply asynchronously. A row with no preset is a silent no-op. */
 void enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx);
 /* --- the selected card and preset strengths (8i2) ----------------------- */
-/* The panel's selected preset row (0-based): j / k move it, Enter toggles
- * it, h / l tune it; a digit or a card click selects its row too. UI
- * state, not an edit: navigation keeps it and undo never moves it. */
+/* The panel's selected preset row (0-based, any row -- the user presets
+ * past the digits' eight included, ai2): j / k move it, Enter toggles
+ * it, h / l tune it; a digit or a card click selects its row too, and the
+ * list scrolls it into view. UI state, not an edit: navigation keeps it
+ * and undo never moves it; a Preferences edit keeps it on its preset. */
 gint enhance_ctrl_get_selected(EnhanceCtrl *p_ctrl);
 /* j (i_dir > 0) / k (i_dir < 0): move the selection, stopping at the
  * first and last preset. */

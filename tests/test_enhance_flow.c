@@ -28,6 +28,10 @@
  *   - win.enhance-save exports a NEW file next to the original
  *     (<stem>-enhanced[-<n>].<ext>, collision-suffixed like mover.c), never
  *     overwriting the original or a pre-existing same-named export.
+ *   - ai2: the user's own presets are rows of the panel after the eight
+ *     built-ins (j / k reach them, the list scrolls, digits stay 1-8), and
+ *     a Preferences change of them carries the edit to their new rows
+ *     (the "ai2" section).
  *   - wb2: the crop (c) / straighten (r, R before 6i2) / rotate-90 ([ ])
  *     tools on the same preview graph -- see the "wb2" section before the
  *     registrations; 6i2: the edit panel's modal keys and the key-hint bar
@@ -7573,6 +7577,404 @@ add_strength_tests(void) {
                    test_strength_slider_ignores_the_wheel);
 }
 
+/* --- ai2: the user's presets are panel rows -------------------------------
+ *
+ * The enhance-presets setting's presets follow the eight built-ins as rows
+ * of the edit panel: j / k reach every one (the list scrolls it into
+ * view), Enter toggles it, h / l and its slider tune a tunable one, and it
+ * is part of the title, dirty / saved and undo like a built-in; the digits
+ * stay 1-8. A Preferences change of the list carries the edit to the rows
+ * its presets have now. The setting lives in the memory GSettings backend
+ * the suite runs on; every subtest that sets it resets it. */
+
+/* Set the enhance-presets setting to u_n (name, graph) pairs. The window
+ * picks the change up live (its settings "changed" handler). */
+static void
+set_user_presets(const char *const *c_pairs, guint u_n) {
+   Settings  *p_s     = settings_new();
+   GPtrArray *p_pairs = settings_pair_array_new();
+   for (guint u = 0; u < u_n; u++) {
+      g_ptr_array_add(p_pairs,
+                      settings_pair_new(c_pairs[2 * u], c_pairs[2 * u + 1]));
+   }
+   settings_set_enhance_presets(p_s, p_pairs);
+   g_ptr_array_unref(p_pairs);
+   settings_delete(p_s);
+}
+
+/* u_n generated presets "User 1" .. "User <u_n>" (distinct graphs). */
+static void
+set_many_user_presets(guint u_n) {
+   GPtrArray *p_strs = g_ptr_array_new_with_free_func(g_free);
+   for (guint u = 0; u < u_n; u++) {
+      g_ptr_array_add(p_strs, g_strdup_printf("User %u", u + 1));
+      g_ptr_array_add(p_strs,
+                      g_strdup_printf("gegl:saturation scale=1.%02u", u + 1));
+   }
+   set_user_presets((const char *const *)p_strs->pdata, u_n);
+   g_ptr_array_unref(p_strs);
+}
+
+static void
+reset_user_presets(void) {
+   Settings *p_s = settings_new();
+   g_settings_reset(settings_get_gsettings(p_s), "enhance-presets");
+   settings_delete(p_s);
+}
+
+/* The first label under p_root that is not a strength value, or NULL. */
+static GtkWidget *
+find_name_label(GtkWidget *p_root) {
+   if (GTK_IS_LABEL(p_root) &&
+       !gtk_widget_has_css_class(p_root, GGAZE_ENHANCE_VALUE_CLASS)) {
+      return (p_root);
+   }
+   for (GtkWidget *p_c = gtk_widget_get_first_child(p_root); p_c != NULL;
+        p_c            = gtk_widget_get_next_sibling(p_c)) {
+      GtkWidget *p_found = find_name_label(p_c);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+   }
+   return (NULL);
+}
+
+/* Card i_idx's name ("1  Auto-fix", or a user preset's bare name). */
+static const char *
+card_name(GgazeWindow *p_win, gint i_idx) {
+   GtkWidget *p_lbl = find_name_label(panel_card(p_win, i_idx));
+   g_assert_nonnull(p_lbl);
+   return (gtk_label_get_text(GTK_LABEL(p_lbl)));
+}
+
+/* Exactly row i_idx of u_rows is selected (the ring), and only its
+ * slider, if it has one, shows. */
+static void
+assert_selected_row(GgazeWindow *p_win, gint i_idx, gint i_rows) {
+   for (gint i = 0; i < i_rows; i++) {
+      GtkWidget *p_card = panel_card(p_win, i);
+      g_assert_cmpint(
+         gtk_widget_has_css_class(p_card, GGAZE_ENHANCE_SELECTED_CLASS), ==,
+         i == i_idx);
+      GtkWidget *p_scale = find_scale(find_panel(p_win), i);
+      if (p_scale != NULL) {
+         g_assert_cmpint(gtk_widget_get_visible(p_scale), ==, i == i_idx);
+      }
+   }
+   g_assert_null(find_card(find_panel(p_win), i_rows)); /* no row past */
+}
+
+/* TRUE iff card i_idx is on (highlighted). */
+static gboolean
+card_on(GgazeWindow *p_win, gint i_idx) {
+   return (
+      gtk_widget_has_css_class(panel_card(p_win, i_idx), "ggaze-enhance-on"));
+}
+
+#define _ALPHA "Alpha", "gegl:exposure exposure={s:0.3:0..1:0.1}"
+#define _BETA "Beta", "gegl:brightness-contrast contrast=0.5"
+#define _GAMMA "Gamma", "gegl:saturation scale={s:0.5:0..2:0.1}"
+
+/* Row 8 (Gamma, the first user preset, tunable) is reached by j past the
+ * built-ins, toggled by Enter, tuned by l (the title and the card name
+ * the value) and by its slider, which shows under it. */
+static void
+rows_tune_gamma(GgazeWindow *p_win) {
+   for (guint u = 0; u < 8; u++) {
+      edit_key(p_win, GDK_KEY_j, 0);
+   }
+   assert_selected_row(p_win, 8, 10);
+   edit_key_and_wait(p_win, GDK_KEY_Return, 0);
+   g_assert_true(card_on(p_win, 8));
+   g_assert_true(ggaze_window_enhance_is_dirty(p_win));
+   wait_for_title(p_win, "Gamma");
+   edit_key_and_wait(p_win, GDK_KEY_l, 0);
+   wait_for_title(p_win, "Gamma 0.6");
+   g_assert_cmpstr(card_value(p_win, 8), ==, "0.6");
+   GtkWidget *p_scale = find_scale(find_panel(p_win), 8);
+   g_assert_true(gtk_widget_get_visible(p_scale));
+   drag_scale_to(p_win, 8, 1.04); /* snaps to 1 */
+   wait_for_title(p_win, "Gamma 1");
+   g_assert_cmpfloat(gtk_range_get_value(GTK_RANGE(p_scale)), ==, 1.0);
+}
+
+/* Two user presets, one tunable and one plain, are rows 9 and 10 after
+ * the built-ins: named without a digit, reached by j, toggled by Enter,
+ * the tunable one tuned by h / l and its slider; both in the title, dirty
+ * / saved and undo like a built-in. Digits stay 1-8: 9 is not the panel's,
+ * and the hint bar still says 1–8. */
+static void
+test_user_presets_are_panel_rows(void) {
+   static const char *const PAIRS[] = {_GAMMA, _BETA};
+   set_user_presets(PAIRS, 2);
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   g_assert_cmpstr(card_name(fx.p_win, 7), ==, "8  Denoise");
+   g_assert_cmpstr(card_name(fx.p_win, 8), ==, "Gamma"); /* no digit */
+   g_assert_cmpstr(card_name(fx.p_win, 9), ==, "Beta");
+   g_assert_cmpstr(card_value(fx.p_win, 8), ==, "0.5");
+   g_assert_null(card_value(fx.p_win, 9));
+   char *c_hint = plain_hint(fx.p_win);
+   g_assert_nonnull(g_strstr_len(c_hint, -1, "1\u20138 presets"));
+   g_free(c_hint);
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_9, 0));
+   rows_tune_gamma(fx.p_win);
+   edit_key(fx.p_win, GDK_KEY_j, 0);
+   assert_selected_row(fx.p_win, 9, 10);
+   edit_key(fx.p_win, GDK_KEY_l, 0);
+   assert_status_prefix(fx.p_win, "Beta has no strength to adjust");
+   edit_key_and_wait(fx.p_win, GDK_KEY_KP_Enter, 0);
+   g_assert_true(card_on(fx.p_win, 9));
+   wait_for_title(fx.p_win, "Gamma 1, Beta");
+   fire(fx.p_win, "win.enhance-save");
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Undid: Beta on");
+   g_assert_false(card_on(fx.p_win, 9));
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win)); /* saved again */
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0);
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0); /* the drag */
+   assert_status_prefix(fx.p_win, "Undid: Gamma 1");
+   /* The digits still toggle the built-ins, and select their row. */
+   edit_key_and_wait(fx.p_win, GDK_KEY_8, 0);
+   g_assert_true(card_on(fx.p_win, 7));
+   assert_selected_row(fx.p_win, 7, 10);
+   tool_fx_close(&fx);
+   reset_user_presets();
+}
+
+/* TRUE iff card i_idx lies wholly inside its list's scrolled view. */
+static gboolean
+card_in_view(GgazeWindow *p_win, gint i_idx) {
+   GtkWidget *p_card = panel_card(p_win, i_idx);
+   GtkWidget *p_sw = gtk_widget_get_ancestor(p_card, GTK_TYPE_SCROLLED_WINDOW);
+   graphene_rect_t r_card;
+   if (p_sw == NULL || !gtk_widget_compute_bounds(p_card, p_sw, &r_card)) {
+      return (FALSE);
+   }
+   return (r_card.origin.y >= -0.5f &&
+           r_card.origin.y + r_card.size.height <=
+              (gfloat)gtk_widget_get_height(p_sw) + 0.5f);
+}
+
+/* Pump until card i_idx is in view (up to 5 s), then assert it is. */
+static void
+wait_card_in_view(GgazeWindow *p_win, gint i_idx) {
+   for (guint u = 0; u < 5000 && !card_in_view(p_win, i_idx); u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(card_in_view(p_win, i_idx));
+}
+
+/* The cap: 25 user presets, the 25th ignored -- 32 rows. At 1280x800 they
+ * do not fit, so the preset list scrolls while Transform and the Actions
+ * stay on screen; j to the last row scrolls it into view (the first one
+ * out), k back to the top brings the first back. */
+static void
+test_user_presets_scroll_and_cap(void) {
+   set_many_user_presets(GGAZE_ENHANCE_MAX_USER_PRESETS + 1);
+   char        *c_dir  = NULL;
+   char        *c_path = NULL;
+   GgazeWindow *p_win = open_presented_sized(FALSE, "ggaze-enhance-many-XXXXXX",
+                                             1280, 800, &c_dir, &c_path);
+   fire(p_win, "win.enhance");
+   GtkWidget *p_panel = find_panel(p_win);
+   g_assert_nonnull(find_card(p_panel, GGAZE_ENHANCE_MAX_PRESETS - 1));
+   g_assert_null(find_card(p_panel, GGAZE_ENHANCE_MAX_PRESETS)); /* capped */
+   gint i_last = GGAZE_ENHANCE_MAX_PRESETS - 1;
+   wait_card_in_view(p_win, 0);
+   g_assert_false(card_in_view(p_win, i_last)); /* the list does scroll */
+   for (gint i = 0; i < i_last + 3; i++) {
+      edit_key(p_win, GDK_KEY_j, 0); /* stops at the last row */
+   }
+   assert_selected_row(p_win, i_last, GGAZE_ENHANCE_MAX_PRESETS);
+   wait_card_in_view(p_win, i_last);
+   g_assert_false(card_in_view(p_win, 0));
+   g_assert_cmpstr(card_name(p_win, i_last), ==, "User 24");
+   /* Transform and the Actions never scrolled away. */
+   graphene_rect_t r_redo, r_panel;
+   g_assert_true(gtk_widget_compute_bounds(
+      find_action_button(p_panel, "win.edit-redo"), p_panel, &r_redo));
+   g_assert_true(gtk_widget_compute_bounds(p_panel, p_panel, &r_panel));
+   g_assert_cmpfloat(r_redo.origin.y + r_redo.size.height, <=,
+                     r_panel.size.height);
+   g_assert_cmpint(gtk_widget_get_height(GTK_WIDGET(p_win)), <=, 800);
+   edit_key_and_wait(p_win, GDK_KEY_Return, 0); /* the last row toggles */
+   g_assert_true(card_on(p_win, i_last));
+   wait_for_title(p_win, "User 24");
+   for (gint i = 0; i < i_last; i++) {
+      edit_key(p_win, GDK_KEY_k, 0);
+   }
+   wait_card_in_view(p_win, 0);
+   g_assert_false(card_in_view(p_win, i_last));
+   /* A dirty preview would prompt on close: throw it away first. */
+   fire(p_win, "win.edit-revert");
+   ggtest_drain_main(100);
+   close_presented(p_win, c_dir, c_path);
+   reset_user_presets();
+}
+
+/* Set the presets and wait for the render that change causes -- one
+ * launched by the change itself (the render count), not a texture that
+ * happened to change. */
+static void
+set_user_presets_and_wait(GgazeWindow *p_win, const char *const *c_pairs,
+                          guint u_n) {
+   guint       u_renders = ggaze_window_enhance_render_count(p_win);
+   GdkTexture *p_before  = ref_viewer_texture(p_win);
+   set_user_presets(c_pairs, u_n);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(p_win), ==,
+                    u_renders + 1);
+   wait_for_texture_change(p_win, p_before);
+   g_assert_true(viewer_texture(p_win) != p_before); /* (the wait is silent) */
+   g_object_unref(p_before);
+}
+
+/* Over Alpha / Beta / Gamma: Beta on, Gamma tuned to 0.6 (on, selected),
+ * saved. Returns the render count after it. */
+static guint
+carry_setup(GgazeWindow *p_win) {
+   fire(p_win, "win.enhance");
+   for (guint u = 0; u < 9; u++) {
+      edit_key(p_win, GDK_KEY_j, 0);
+   }
+   edit_key_and_wait(p_win, GDK_KEY_Return, 0); /* Beta on */
+   edit_key(p_win, GDK_KEY_j, 0);
+   edit_key_and_wait(p_win, GDK_KEY_l, 0); /* Gamma 0.6, on */
+   wait_for_title(p_win, "Beta, Gamma 0.6");
+   fire(p_win, "win.enhance-save");
+   wait_for_status_prefix(p_win, "Saved ");
+   return (ggaze_window_enhance_render_count(p_win));
+}
+
+/* An added preset, then a reorder that keeps Beta before Gamma (Alpha,
+ * off, to the end; the added one removed): no render, still saved, each
+ * preset's state and the selection in its new row, and undo / redo walk
+ * the steps taken before. */
+static void
+carry_add_and_reorder(GgazeWindow *p_win, guint u_renders) {
+   static const char *const ABGD[] = {_ALPHA, _BETA, _GAMMA, "Delta",
+                                      "gegl:saturation scale=0.2"};
+   static const char *const BGA[]  = {_BETA, _GAMMA, _ALPHA};
+   set_user_presets(ABGD, 4);
+   ggtest_drain_main(300);
+   g_assert_cmpstr(card_name(p_win, 11), ==, "Delta");
+   g_assert_false(card_on(p_win, 11));
+   g_assert_cmpuint(ggaze_window_enhance_render_count(p_win), ==, u_renders);
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+   assert_selected_row(p_win, 10, 12);
+   set_user_presets(BGA, 3);
+   ggtest_drain_main(300);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(p_win), ==, u_renders);
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+   g_assert_nonnull(find_label_prefix(find_panel(p_win), "Saved as "));
+   g_assert_true(card_on(p_win, 8) && card_on(p_win, 9));
+   g_assert_false(card_on(p_win, 10));
+   g_assert_cmpstr(card_name(p_win, 9), ==, "Gamma");
+   g_assert_cmpstr(card_value(p_win, 9), ==, "0.6");
+   g_assert_cmpstr(card_value(p_win, 10), ==, "0.3");
+   assert_selected_row(p_win, 9, 11); /* on Gamma still */
+   wait_for_title(p_win, "Beta, Gamma 0.6");
+   edit_key_and_wait(p_win, GDK_KEY_u, 0);
+   assert_status_prefix(p_win, "Undid: Gamma 0.6");
+   g_assert_false(card_on(p_win, 9));
+   g_assert_cmpstr(card_value(p_win, 9), ==, "0.5");
+   edit_key_and_wait(p_win, GDK_KEY_U, GDK_SHIFT_MASK);
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win)); /* saved again */
+}
+
+/* Two enabled presets swapped (and Alpha removed): a render, and the
+ * saved copy no longer counts (another chain); Beta's graph edited in
+ * place: still on, rendered anew; Beta removed while on: gone, with the
+ * undo step that only toggled it -- Gamma's step still undoes. */
+static void
+carry_swap_edit_remove(GgazeWindow *p_win, GdkTexture *p_orig) {
+   static const char *const GB[]  = {_GAMMA, _BETA};
+   static const char *const GB2[] = {_GAMMA, "Beta",
+                                     "gegl:brightness-contrast contrast=0.7"};
+   static const char *const G[]   = {_GAMMA};
+   set_user_presets_and_wait(p_win, GB, 2);
+   wait_for_title(p_win, "Gamma 0.6, Beta");
+   g_assert_true(ggaze_window_enhance_is_dirty(p_win));
+   g_assert_null(find_card(find_panel(p_win), 10));
+   set_user_presets_and_wait(p_win, GB2, 2);
+   g_assert_true(card_on(p_win, 9));
+   wait_for_title(p_win, "Gamma 0.6, Beta");
+   set_user_presets_and_wait(p_win, G, 1);
+   wait_for_title_without(p_win, "Beta");
+   g_assert_null(find_card(find_panel(p_win), 9));
+   edit_key_and_wait(p_win, GDK_KEY_u, 0);
+   assert_status_prefix(p_win, "Undid: Gamma 0.6");
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   assert_history_buttons(p_win, FALSE, TRUE);
+}
+
+/* Preferences edits the user presets while some are on: the edit follows
+ * its presets to their new rows (see the steps above). */
+static void
+test_preferences_carry_the_edit(void) {
+   static const char *const ABG[] = {_ALPHA, _BETA, _GAMMA};
+   set_user_presets(ABG, 3);
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   guint u_renders = carry_setup(fx.p_win);
+   carry_add_and_reorder(fx.p_win, u_renders);
+   carry_swap_edit_remove(fx.p_win, fx.p_orig);
+   tool_fx_close(&fx);
+   reset_user_presets();
+}
+
+/* An export still running when Preferences moves the rows wrote the
+ * state in the old rows: it is reported, but it does not become the saved
+ * state. Here the two enabled presets swap: the same mask and strengths in
+ * the new rows, another chain -- recording the old export would call the
+ * swapped picture saved. */
+static void
+test_preferences_change_during_a_save(void) {
+   static const char *const BD[] = {_BETA, "Delta",
+                                    "gegl:saturation scale=0.2"};
+   static const char *const DB[] = {"Delta", "gegl:saturation scale=0.2",
+                                    _BETA};
+   set_user_presets(BD, 2);
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   for (guint u = 0; u < 8; u++) {
+      edit_key(fx.p_win, GDK_KEY_j, 0);
+   }
+   edit_key_and_wait(fx.p_win, GDK_KEY_Return, 0); /* Beta */
+   edit_key(fx.p_win, GDK_KEY_j, 0);
+   edit_key_and_wait(fx.p_win, GDK_KEY_Return, 0); /* Delta */
+   wait_for_title(fx.p_win, "Beta, Delta");
+   fire(fx.p_win, "win.enhance-save"); /* the worker runs ... */
+   set_user_presets(DB, 2);            /* ... while the rows move */
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   wait_for_title(fx.p_win, "Delta, Beta");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_null(find_label_prefix(find_panel(fx.p_win), "Saved as "));
+   tool_fx_close(&fx);
+   reset_user_presets();
+}
+
+/* ai2: the user presets as panel rows. */
+static void
+add_user_preset_tests(void) {
+   g_test_add_func("/enhance_flow/user_presets_are_panel_rows",
+                   test_user_presets_are_panel_rows);
+   g_test_add_func("/enhance_flow/user_presets_scroll_and_cap",
+                   test_user_presets_scroll_and_cap);
+   g_test_add_func("/enhance_flow/preferences_carry_the_edit",
+                   test_preferences_carry_the_edit);
+   g_test_add_func("/enhance_flow/preferences_change_during_a_save",
+                   test_preferences_change_during_a_save);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -7607,6 +8009,7 @@ main(int i_argc, char **c_argv) {
    add_tool_review_tests();
    add_edit_undo_tests();
    add_strength_tests();
+   add_user_preset_tests();
    add_tool_review2_tests();
    add_tool_review3_tests();
    add_tool_review4_tests();
