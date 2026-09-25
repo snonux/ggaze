@@ -7831,6 +7831,7 @@ set_user_presets_and_wait(GgazeWindow *p_win, const char *const *c_pairs,
    g_assert_cmpuint(ggaze_window_enhance_render_count(p_win), ==,
                     u_renders + 1);
    wait_for_texture_change(p_win, p_before);
+   g_assert_true(viewer_texture(p_win) != p_before); /* (the wait is silent) */
    g_object_unref(p_before);
 }
 
