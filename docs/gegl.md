@@ -138,8 +138,9 @@ editing remains a non-goal.
   tunable with a placeholder that also declares its range:
   `{s:DEFAULT:MIN..MAX}` (step: a twentieth of the range) or
   `{s:DEFAULT:MIN..MAX:STEP}`, e.g. `gegl:exposure
-  exposure={s:0.5:-2..2:0.1}`. In the panel `h` / `l` (`Left` / `Right`;
-  `Shift` five steps) move the selected preset's strength by a step and
+  exposure={s:0.5:-2..2:0.1}`. In the panel `h` / `l` (`Shift` five
+  steps; the arrows stay navigation) move the selected preset's strength
+  by a step and
   turn it on, and its slider does the same for the mouse; the title names
   a strength that is not the default (*Brightness +0.6*). The strength is
   part of the edit state — rendered, exported, compared for saved / dirty,
@@ -163,10 +164,15 @@ editing remains a non-goal.
   built-in at its default renders from the exact graph text it had before;
   values are clamped into the range and **canonical** (equal to the
   parse of their own text), so equal strengths compare equal and a step up
-  and back down lands on the start; `h` / `l` step from the current value
-  and a slider snaps onto the grid through the default. Refused, with a
+  and back down lands on the start; `h` / `l` step along the same grid
+  through the default that a slider snaps onto (from an end of the range
+  that is off the grid, the first step lands on the nearest grid point),
+  so keys and slider agree on every value. Refused, with a
   message: a second placeholder, a stray brace, a name other than `s`, a
-  missing field or a non-number (`1,5`, `nan`, ` 1`), an empty or inverted
+  missing field or a non-number (`1,5`, `nan`, ` 1`), a number beyond
+  ±1e15 or needing more than 6 decimals (the default, an end, or the
+  step — given, or implied as a twentieth of the range — could not be
+  written exactly: `{s:0:0..1:1e-300}`), an empty or inverted
   range, a default outside it, a step that is not above 0 or wider than
   the range. A malformed preset is kept (Preferences lists it) but is not
   tunable, and rendering it fails with the message instead of GEGL

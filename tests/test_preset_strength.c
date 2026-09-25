@@ -73,8 +73,10 @@ test_parse_fields(void) {
    g_assert_cmpuint(t_s.u_decimals, ==, 2);
    t_s = parse_ok("gegl:noise-reduction iterations={s:4:1..16:1}");
    g_assert_cmpuint(t_s.u_decimals, ==, 0);
-   t_s = parse_ok("x={s:0.1234567:0..1:0.5}");
-   g_assert_cmpuint(t_s.u_decimals, ==, 6); /* capped */
+   t_s = parse_ok("x={s:0.123456:0..1:0.5}");
+   g_assert_cmpuint(t_s.u_decimals, ==, 6); /* the most there may be */
+   t_s = parse_ok("x={s:0:-1e15..1e15:1e14}");
+   g_assert_cmpfloat(t_s.d_max, ==, 1e15); /* the largest there may be */
    /* NULL outs are fine. */
    g_assert_true(preset_strength_parse("a={s:1:0..2}", NULL, NULL, NULL));
 }
@@ -128,6 +130,27 @@ test_nudge_clamp_snap(void) {
    g_assert_cmpfloat(preset_strength_snap(&t_c, 1.5), ==, 1.55);
 }
 
+/* A key steps on the very grid the slider snaps to (the one through the
+ * default), so both agree on every value between the ends: from the
+ * maximum of {s:0.3:0..1:0.25} (1, off the grid) one step down is the grid
+ * point 0.8 the slider snaps to -- not 0.75 -- and from the minimum 0 one
+ * step up is 0.05, the first grid point, none skipped. */
+static void
+test_nudge_on_the_slider_grid(void) {
+   PresetStrength t_s   = parse_ok("s={s:0.3:0..1:0.25}");
+   gdouble        d_max = preset_strength_nudge(&t_s, 0.3, 5);
+   g_assert_cmpfloat(d_max, ==, 1.0);
+   gdouble d_down = preset_strength_nudge(&t_s, d_max, -1);
+   g_assert_cmpfloat(d_down, ==, preset_strength_snap(&t_s, 0.8));
+   g_assert_cmpfloat(d_down, ==, 0.8);
+   g_assert_cmpfloat(preset_strength_nudge(&t_s, d_down, -1), ==, 0.55);
+   g_assert_cmpfloat(preset_strength_nudge(&t_s, d_down, 1), ==, 1.0);
+   g_assert_cmpfloat(preset_strength_nudge(&t_s, 0.0, 1), ==, 0.05);
+   g_assert_cmpfloat(preset_strength_nudge(&t_s, 0.05, -1), ==, 0.0);
+   /* A zero step count only snaps. */
+   g_assert_cmpfloat(preset_strength_nudge(&t_s, 0.7, 0), ==, 0.8);
+}
+
 /* The card / title label: signed when the range reaches below zero. */
 static void
 test_label(void) {
@@ -148,50 +171,61 @@ test_label(void) {
    }
 }
 
+/* Every malformed placeholder, and what its message must name. */
+static const struct {
+   const char *c_graph;
+   const char *c_why;
+} MALFORMED[] = {
+   {"a={s}", "is not {s:DEFAULT"},
+   {"a={s:1}", "is not {s:DEFAULT"},
+   {"a={s:1:0..2:0.1:9}", "is not {s:DEFAULT"},
+   {"a={t:1:0..2}", "is not {s:DEFAULT"},
+   {"a={s:1:0..2", "no '}' closes"},
+   {"a=s:1:0..2}", "a '}' without a '{'"},
+   {"a=} b={s:1:0..2}", "a '}' without a '{'"},
+   {"a={s:1:0..2} b={s:1:0..2}", "only one tunable number"},
+   {"a={s:{s:1:0..2}}", "only one tunable number"},
+   {"a={s:x:0..2}", "default 'x' is not a number"},
+   {"a={s:1,5:0..2}", "default '1,5' is not a number"},
+   {"a={s: 1:0..2}", "default ' 1' is not a number"},
+   {"a={s:nan:0..2}", "is not a number"},
+   {"a={s:1:0-2}", "range '0-2' is not MIN..MAX"},
+   {"a={s:1:..2}", "range '..2' is not MIN..MAX"},
+   {"a={s:1:0..inf}", "is not MIN..MAX"},
+   {"a={s:1:2..0}", "the range is empty"},
+   {"a={s:1:1..1}", "the range is empty"},
+   {"a={s:3:0..2}", "the default lies outside"},
+   {"a={s:1:0..2:0}", "the step must be above 0"},
+   {"a={s:1:0..2:-1}", "the step must be above 0"},
+   {"a={s:1:0..2:3}", "the step must be above 0"},
+   {"a={s:1:0..2:y}", "step 'y' is not a number"},
+   /* Numbers 6 decimals cannot write, or too large to write at all. */
+   {"a={s:1e-7:0..1e-6:1e-7}", "needs more than 6 decimals"},
+   {"a={s:0.1234567:0..1:0.5}", "needs more than 6 decimals"},
+   {"a={s:0:0..1:1e-300}", "needs more than 6 decimals (the step"},
+   {"a={s:0:0..0.00001}", "needs more than 6 decimals (the step"},
+   {"a={s:0:0..1e40}", "is too large"},
+   {"a={s:0:-1e16..1}", "is too large"},
+};
+
 /* Every malformed placeholder is refused, and the message names what is
  * wrong. */
 static void
 test_malformed(void) {
-   static const struct {
-      const char *c_graph;
-      const char *c_why;
-   } CASES[] = {
-      {"a={s}", "is not {s:DEFAULT"},
-      {"a={s:1}", "is not {s:DEFAULT"},
-      {"a={s:1:0..2:0.1:9}", "is not {s:DEFAULT"},
-      {"a={t:1:0..2}", "is not {s:DEFAULT"},
-      {"a={s:1:0..2", "no '}' closes"},
-      {"a=s:1:0..2}", "a '}' without a '{'"},
-      {"a=} b={s:1:0..2}", "a '}' without a '{'"},
-      {"a={s:1:0..2} b={s:1:0..2}", "only one tunable number"},
-      {"a={s:{s:1:0..2}}", "only one tunable number"},
-      {"a={s:x:0..2}", "default 'x' is not a number"},
-      {"a={s:1,5:0..2}", "default '1,5' is not a number"},
-      {"a={s: 1:0..2}", "default ' 1' is not a number"},
-      {"a={s:nan:0..2}", "is not a number"},
-      {"a={s:1:0-2}", "range '0-2' is not MIN..MAX"},
-      {"a={s:1:..2}", "range '..2' is not MIN..MAX"},
-      {"a={s:1:0..inf}", "is not MIN..MAX"},
-      {"a={s:1:2..0}", "the range is empty"},
-      {"a={s:1:1..1}", "the range is empty"},
-      {"a={s:3:0..2}", "the default lies outside"},
-      {"a={s:1:0..2:0}", "the step must be above 0"},
-      {"a={s:1:0..2:-1}", "the step must be above 0"},
-      {"a={s:1:0..2:3}", "the step must be above 0"},
-      {"a={s:1:0..2:y}", "step 'y' is not a number"},
-   };
-   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+   for (gsize u = 0; u < G_N_ELEMENTS(MALFORMED); u++) {
       GError  *p_err     = NULL;
       gboolean b_tunable = TRUE;
-      if (preset_strength_parse(CASES[u].c_graph, &b_tunable, NULL, &p_err)) {
-         g_error("\"%s\" parsed", CASES[u].c_graph);
+      if (preset_strength_parse(MALFORMED[u].c_graph, &b_tunable, NULL,
+                                &p_err)) {
+         g_error("\"%s\" parsed", MALFORMED[u].c_graph);
       }
       g_assert_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
-      if (g_strstr_len(p_err->message, -1, CASES[u].c_why) == NULL) {
-         g_error("\"%s\": \"%s\"", CASES[u].c_graph, p_err->message);
+      if (g_strstr_len(p_err->message, -1, MALFORMED[u].c_why) == NULL) {
+         g_error("\"%s\": \"%s\"", MALFORMED[u].c_graph, p_err->message);
       }
       g_clear_error(&p_err);
-      g_assert_null(preset_strength_substitute(CASES[u].c_graph, 1.0, &p_err));
+      g_assert_null(
+         preset_strength_substitute(MALFORMED[u].c_graph, 1.0, &p_err));
       g_assert_nonnull(p_err);
       g_clear_error(&p_err);
    }
@@ -232,6 +266,8 @@ main(int argc, char **argv) {
    g_test_add_func("/preset_strength/parse_fields", test_parse_fields);
    g_test_add_func("/preset_strength/substitute", test_substitute);
    g_test_add_func("/preset_strength/nudge_clamp_snap", test_nudge_clamp_snap);
+   g_test_add_func("/preset_strength/nudge_on_the_slider_grid",
+                   test_nudge_on_the_slider_grid);
    g_test_add_func("/preset_strength/label", test_label);
    g_test_add_func("/preset_strength/malformed", test_malformed);
    g_test_add_func("/preset_strength/locale_independent",

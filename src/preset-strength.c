@@ -18,8 +18,15 @@
 
 /* The most decimals a value is written with: finer than any GEGL property
  * a preset tunes needs, coarse enough that a sum of steps never shows its
- * binary rounding error. */
+ * binary rounding error. A range or step needing more is refused (_check):
+ * written at 6 decimals it would round to other numbers, or to 0. */
 #define _MAX_DECIMALS 6u
+
+/* The largest magnitude a range may reach: its values are then written in
+ * at most 16 integer digits plus _MAX_DECIMALS, well inside the
+ * G_ASCII_DTOSTR_BUF_SIZE buffer of preset_strength_format, and a double
+ * still holds every step of it exactly enough to compare canonically. */
+#define _MAX_MAGNITUDE 1e15
 
 /* The syntax, for the error messages. */
 #define _SYNTAX "{s:DEFAULT:MIN..MAX} or {s:DEFAULT:MIN..MAX:STEP}"
@@ -46,17 +53,21 @@ _number(const char *c_text, gdouble *pd_out) {
    return (TRUE);
 }
 
-/* The fewest decimals (<= _MAX_DECIMALS) that write d exactly. */
+/* The fewest decimals that write d exactly, or _MAX_DECIMALS + 1 when
+ * even _MAX_DECIMALS do not. A non-zero number that would be written as
+ * 0 is not written exactly, however close to it (1e-300 is no 0). */
 static guint
 _decimals(gdouble d) {
    gdouble d_scaled = fabs(d);
-   for (guint u = 0; u < _MAX_DECIMALS; u++) {
-      if (fabs(d_scaled - round(d_scaled)) < 1e-9 * fmax(1.0, d_scaled)) {
+   for (guint u = 0; u <= _MAX_DECIMALS; u++) {
+      gdouble d_round = round(d_scaled);
+      if ((d_round != 0.0 || d == 0.0) &&
+          fabs(d_scaled - d_round) < 1e-9 * fmax(1.0, d_scaled)) {
          return (u);
       }
       d_scaled *= 10.0;
    }
-   return (_MAX_DECIMALS);
+   return (_MAX_DECIMALS + 1);
 }
 
 /* Find the one placeholder: *pc_open at its '{' and *pc_close at its '}',
@@ -103,9 +114,34 @@ _range(const char *c_text, PresetStrength *p_s, GError **p_err) {
    return (TRUE);
 }
 
+/* The number rules: every number of the range within +-_MAX_MAGNITUDE,
+ * and written exactly in at most _MAX_DECIMALS decimals. */
+static gboolean
+_check_numbers(const PresetStrength *p_s, GError **p_err) {
+   const gdouble d_nums[] = {p_s->d_default, p_s->d_min, p_s->d_max,
+                             p_s->d_step};
+   for (guint u = 0; u < G_N_ELEMENTS(d_nums); u++) {
+      if (fabs(d_nums[u]) > _MAX_MAGNITUDE) {
+         return (_FAIL(p_err, "%g is too large (at most 1e15 either way)",
+                       d_nums[u]));
+      }
+      if (_decimals(d_nums[u]) > _MAX_DECIMALS) {
+         return (_FAIL(p_err, "%g needs more than %u decimals%s", d_nums[u],
+                       _MAX_DECIMALS,
+                       u == 3 ? " (the step; without one it is a "
+                                "twentieth of the range)"
+                              : ""));
+      }
+   }
+   return (TRUE);
+}
+
 /* The rules a parsed range must keep (see the header). */
 static gboolean
 _check(const PresetStrength *p_s, GError **p_err) {
+   if (!_check_numbers(p_s, p_err)) {
+      return (FALSE);
+   }
    if (!(p_s->d_min < p_s->d_max)) {
       return (_FAIL(p_err, "the range is empty (MIN must be below MAX)"));
    }
@@ -220,12 +256,25 @@ preset_strength_clamp(const PresetStrength *p_s, gdouble d_value) {
    return (d_out);
 }
 
+/* Steps on the grid of preset_strength_snap -- default + n * step -- so
+ * a key and the slider agree on every value between the ends: from
+ * {s:0.3:0..1:0.25}'s maximum 1, one step down is 0.8 (the grid point the
+ * slider snaps to), not 0.75. A value off the grid (an end of the range,
+ * which the grid need not hit) counts from the grid point on the far side
+ * of it, so the first step always moves toward the next grid point and
+ * never skips one. The tolerance absorbs the binary error of a value
+ * that is a grid point. */
 gdouble
 preset_strength_nudge(const PresetStrength *p_s, gdouble d_value,
                       gint i_steps) {
    g_return_val_if_fail(p_s != NULL, 0.0);
-   return (preset_strength_clamp(p_s, preset_strength_clamp(p_s, d_value) +
-                                         i_steps * p_s->d_step));
+   gdouble d_n =
+      (preset_strength_clamp(p_s, d_value) - p_s->d_default) / p_s->d_step;
+   gdouble d_base = i_steps > 0   ? floor(d_n + 1e-6)
+                    : i_steps < 0 ? ceil(d_n - 1e-6)
+                                  : round(d_n);
+   return (preset_strength_clamp(p_s, p_s->d_default +
+                                         (d_base + i_steps) * p_s->d_step));
 }
 
 gdouble

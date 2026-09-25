@@ -38,7 +38,9 @@
  *
  * Malformed placeholders are rejected with a message saying what is
  * wrong (G_IO_ERROR_INVALID_ARGUMENT): a second placeholder, a stray
- * brace, an unknown name, a missing field, a number that is not one, an
+ * brace, an unknown name, a missing field, a number that is not one, a
+ * number beyond +-1e15 or needing more than 6 decimals (the default, an
+ * end, the step -- given or implied -- could not be written exactly), an
  * empty or inverted range, a default outside it, a step that is not
  * positive. Preferences shows the message while the preset is typed;
  * a render of a malformed graph fails with it.
@@ -74,7 +76,10 @@ gboolean preset_strength_parse(const char *c_graph, gboolean *pb_tunable,
  * NaN is the default. */
 gdouble preset_strength_clamp(const PresetStrength *p_s, gdouble d_value);
 
-/* d_value moved by i_steps steps (negative: down), clamped, canonical. */
+/* d_value moved by i_steps steps (negative: down) on the grid through
+ * the default that preset_strength_snap uses (from a value off that grid,
+ * an end of the range, the first step lands on the nearest grid point
+ * that way), clamped, canonical. */
 gdouble preset_strength_nudge(const PresetStrength *p_s, gdouble d_value,
                               gint i_steps);
 
