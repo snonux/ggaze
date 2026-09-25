@@ -82,6 +82,24 @@ typedef struct {
     .u_rank  = (rank),                                                         \
     .e_op    = (op)}
 
+/* A key of the open edit panel that fires a win.* action (the panel's
+ * rows beside the digits), in the "Edit panel" help group; hint NULL
+ * leaves it out of the bar (a second key for the same thing). */
+#define _PANEL_ROW(key, mods, action, title, hint, rank, label)                \
+   {key,                                                                       \
+    mods,                                                                      \
+    action,                                                                    \
+    title,                                                                     \
+    "Edit panel",                                                              \
+    .u_scope = _PANEL,                                                         \
+    .u_hints = _PANEL,                                                         \
+    .c_hint  = (hint),                                                         \
+    .u_rank  = (rank),                                                         \
+    .c_label = (label)}
+
+#define _UNDO_TITLE "Undo the last edit step (panel open)"
+#define _REDO_TITLE "Redo the edit step undone last (panel open)"
+
 #define _CROP_GROUP "Crop tool (c)"
 #define _STR_GROUP "Straighten tool (r)"
 
@@ -210,6 +228,18 @@ static const ShortcutEntry SHORTCUTS[] = {
     "Save an edited copy (never the original)", "Edit panel"},
    {GDK_KEY_x, 0, "win.edit-revert", "Revert every edit (panel open)",
     "Edit panel", _PANEL_HINT("revert", 31), .c_label = "Revert all edits"},
+   /* Undo / redo of edit steps (7i2): the open panel's own u and Ctrl+z,
+    * which shadow the global file undo only while it is the key mode --
+    * with the panel closed or hidden they are win.undo again. One hint
+    * segment for both ("u/Shift+u undo/redo"). */
+   _PANEL_ROW(GDK_KEY_u, 0, "win.edit-undo", _UNDO_TITLE, "undo/redo", 32,
+              "Undo edit"),
+   _PANEL_ROW(GDK_KEY_z, GDK_CONTROL_MASK, "win.edit-undo", _UNDO_TITLE, NULL,
+              32, "Undo edit"),
+   _PANEL_ROW(GDK_KEY_U, GDK_SHIFT_MASK, "win.edit-redo", _REDO_TITLE,
+              "undo/redo", 33, "Redo edit"),
+   _PANEL_ROW(GDK_KEY_Z, GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.edit-redo",
+              _REDO_TITLE, NULL, 33, "Redo edit"),
    {GDK_KEY_space, 0, NULL, "Hold to compare with the original", "Edit panel",
     _PANEL_HINT("hold: original", 40)},
    /* Crop tool: modal -- answered by the tool (edit-mode.c routes the key

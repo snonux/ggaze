@@ -1509,9 +1509,70 @@ _action_edit_revert(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       _show_status(p_win, "Nothing to revert — this is the original");
       return;
    }
-   enhance_ctrl_discard(p_win->p_enhance_ctrl); /* ends a tool first */
-   _show_status(p_win, "Reverted — every edit dropped, the original is "
-                       "back");
+   /* Ends a tool first. Offer u only when the revert was recorded: a
+    * straighten tool's live, unapplied angle goes without a step. */
+   if (enhance_ctrl_revert_all(p_win->p_enhance_ctrl)) {
+      _show_status(p_win, "Reverted — every edit dropped, the original is "
+                          "back (u undoes)");
+   } else {
+      _show_status(p_win, "Reverted — the original is back");
+   }
+}
+
+/* Where win.edit-undo / win.edit-redo may act, else a status line saying
+ * why not -- the same places x reverts: the open panel in the large view
+ * (a real u / Ctrl+z reaches these only there, edit-mode.c; the menu can
+ * fire them anywhere). A tool is REFUSED rather than cancelled: the
+ * natural reading of u under the crop / straighten tool is "take back my
+ * last nudge", which the history does not hold -- cancelling the tool
+ * instead would silently throw the laid-out rectangle or the levelled
+ * angle away. Enter or Esc first, as for the quarter turns. */
+static gboolean
+_edit_history_ready(GgazeWindow *p_win) {
+   if (!_require_folder(p_win)) {
+      return (FALSE);
+   }
+   if (_get_view(p_win) != GGAZE_VIEW_LARGE) {
+      _show_status(p_win, "u undoes edits in the large view — open the "
+                          "image first (Enter or t)");
+      return (FALSE);
+   }
+   if (!enhance_ctrl_is_open(p_win->p_enhance_ctrl)) {
+      _show_status(p_win, "u undoes edits in the edit panel — press a "
+                          "to open it (outside it u undoes a trash or "
+                          "move)");
+      return (FALSE);
+   }
+   if (tool_ctrl_get_tool(p_win->p_tool_ctrl) != GGAZE_TOOL_NONE) {
+      _show_status(p_win, "Finish the current tool first (Enter applies, "
+                          "Esc cancels)");
+      return (FALSE);
+   }
+   return (TRUE);
+}
+
+/* win.edit-undo (`u` / Ctrl+z with the panel open, its Undo button, the
+ * menu): put the state before the last edit step back. */
+static void
+_action_edit_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (_edit_history_ready(p_win)) {
+      enhance_ctrl_undo(p_win->p_enhance_ctrl);
+   }
+}
+
+/* win.edit-redo (`U` / Ctrl+Shift+Z with the panel open, its Redo button,
+ * the menu): do the step undone last again. */
+static void
+_action_edit_redo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (_edit_history_ready(p_win)) {
+      enhance_ctrl_redo(p_win->p_enhance_ctrl);
+   }
 }
 
 /* win.enhance-N: toggle preset N on/off (layered), then re-apply
@@ -1795,6 +1856,20 @@ _action_enhance(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 /* x reverts GEGL edits, and there are none to revert: say so, like `a`. */
 static void
 _action_edit_revert(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
+}
+/* The edit undo / redo (the menu's; no key reaches them without the panel,
+ * so u / Ctrl+z stay the file undo here): nothing to step through. */
+static void
+_action_edit_undo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
+}
+static void
+_action_edit_redo(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    _show_status(GGAZE_WINDOW(p_data), "GEGL not built in");
@@ -2633,6 +2708,8 @@ static const GActionEntry ACTIONS[] = {
    {.name = "enhance", .activate = _action_enhance},
    {.name = "enhance-save", .activate = _action_enhance_save},
    {.name = "edit-revert", .activate = _action_edit_revert},
+   {.name = "edit-undo", .activate = _action_edit_undo},
+   {.name = "edit-redo", .activate = _action_edit_redo},
    {.name = "crop", .activate = _action_crop},
    {.name = "straighten", .activate = _action_straighten},
    {.name = "rotate-cw", .activate = _action_rotate_cw},
@@ -3466,6 +3543,8 @@ _build_main_menu(void) {
    _menu_add(p_edit, "win.rotate-cw", "Rotate right");
    _menu_add(p_edit, "win.enhance-save", "Save edited copy");
    _menu_add(p_edit, "win.edit-revert", "Revert all edits");
+   _menu_add(p_edit, "win.edit-undo", "Undo edit");
+   _menu_add(p_edit, "win.edit-redo", "Redo edit");
    GMenu *p_trash = g_menu_new();
    _menu_add(p_trash, "win.trash", "Trash");
    _menu_add(p_trash, "win.delete", "Delete permanently");

@@ -41,8 +41,12 @@ Info overlay (EXIF)
 .B d / D
 Trash to .Trash (undoable) / permanent delete
 .TP
-.B u
-Undo last trash or delete
+.B u / Ctrl+z
+Undo last trash or move; with the edit panel open (large view), undo the
+last edit step instead
+.TP
+.B U / Ctrl+Shift+Z
+Redo the edit step undone last (edit panel open, large view)
 .TP
 .B v / V / Ctrl+a
 Toggle mark / range mark / mark all
@@ -72,7 +76,10 @@ panel cancels the tool. Caps Lock does not change these keys
 .TP
 .B s / x
 Save an edited copy (never the original) / revert every edit (edit panel
-open, large view). Esc closes the panel and keeps the edit
+open, large view; u undoes it). Esc closes the panel and keeps the edit.
+An edit step (preset toggle, quarter turn, crop or straighten applied, x)
+is undone with u and redone with U; the last 64 steps of the image are
+kept, and another image clears them
 .TP
 .B f / S
 Fullscreen / slideshow

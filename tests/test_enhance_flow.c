@@ -482,6 +482,7 @@ assert_panel_buttons(GtkWidget *p_panel) {
       {"win.crop", "c"},         {"win.straighten", "r"},
       {"win.rotate-ccw", "["},   {"win.rotate-cw", "]"},
       {"win.enhance-save", "s"}, {"win.edit-revert", "x"},
+      {"win.edit-undo", "u"},    {"win.edit-redo", "Shift+u"},
       {"win.enhance", "a/Esc"},
    };
    for (gsize u = 0; u < G_N_ELEMENTS(BUTTONS); u++) {
@@ -582,11 +583,17 @@ test_panel_fits_eight_presets_at_1280x800(void) {
    g_assert_cmpint(gtk_widget_get_height(GTK_WIDGET(p_win)), <=, 800);
    g_assert_cmpfloat(gtk_adjustment_get_upper(p_adj), <=,
                      gtk_adjustment_get_page_size(p_adj) + 0.5);
-   graphene_rect_t r_save, r_panel;
+   graphene_rect_t r_save, r_panel, r_redo;
    g_assert_true(gtk_widget_compute_bounds(
       find_action_button(p_panel, "win.enhance-save"), p_panel, &r_save));
    g_assert_true(gtk_widget_compute_bounds(p_panel, p_panel, &r_panel));
    g_assert_cmpfloat(r_save.origin.y + r_save.size.height, <=,
+                     r_panel.size.height);
+   /* 7i2: the Undo / Redo row under it fits too, all presets still on. */
+   g_assert_true(gtk_widget_compute_bounds(
+      find_action_button(p_panel, "win.edit-redo"), p_panel, &r_redo));
+   g_assert_cmpfloat(r_redo.origin.y, >=, r_save.origin.y + r_save.size.height);
+   g_assert_cmpfloat(r_redo.origin.y + r_redo.size.height, <=,
                      r_panel.size.height);
    close_presented(p_win, c_dir, c_path);
 }
@@ -4312,6 +4319,397 @@ test_closing_the_panel_cancels_the_tool(void) {
    tool_fx_close(&fx);
 }
 
+/* --- 7i2: undo / redo of edit steps ----------------------------------------
+ *
+ * With the edit panel open, u / Ctrl+z undo the last edit step and U /
+ * Ctrl+Shift+Z redo it -- a preset toggled (digit or card), a quarter
+ * turn, a crop or straighten applied, x -- through the same render path a
+ * toggle takes. The keys go through the window's edit-key router
+ * (ggaze_window_edit_key), the path a real key press takes; outside the
+ * panel u is the file undo as before. */
+
+/* Press a key through the edit-key router and assert it was claimed. */
+static void
+edit_key(GgazeWindow *p_win, guint u_keyval, GdkModifierType e_mods) {
+   g_assert_true(ggaze_window_edit_key(p_win, u_keyval, e_mods));
+}
+
+/* Press a key through the router and wait for the texture it changes. */
+static void
+edit_key_and_wait(GgazeWindow *p_win, guint u_keyval, GdkModifierType e_mods) {
+   GdkTexture *p_before = ref_viewer_texture(p_win);
+   edit_key(p_win, u_keyval, e_mods);
+   wait_for_texture_change(p_win, p_before);
+   g_object_unref(p_before);
+}
+
+/* The open panel's button on c_action (asserted present). */
+static GtkWidget *
+panel_button(GgazeWindow *p_win, const char *c_action) {
+   GtkWidget *p_panel = find_panel(p_win);
+   g_assert_nonnull(p_panel);
+   GtkWidget *p_btn = find_action_button(p_panel, c_action);
+   g_assert_nonnull(p_btn);
+   return (p_btn);
+}
+
+/* The Undo / Redo buttons are sensitive exactly when there is something to
+ * undo / redo. */
+static void
+assert_history_buttons(GgazeWindow *p_win, gboolean b_undo, gboolean b_redo) {
+   g_assert_cmpint(
+      gtk_widget_get_sensitive(panel_button(p_win, "win.edit-undo")), ==,
+      b_undo);
+   g_assert_cmpint(
+      gtk_widget_get_sensitive(panel_button(p_win, "win.edit-redo")), ==,
+      b_redo);
+}
+
+static void
+assert_status_prefix(GgazeWindow *p_win, const char *c_prefix) {
+   if (!g_str_has_prefix(status_text(p_win), c_prefix)) {
+      g_error("status \"%s\", wanted \"%s...\"", status_text(p_win), c_prefix);
+   }
+}
+
+/* A preset toggled by its digit: u takes it back (the original, clean),
+ * U does it again (dirty) -- the status line names the step, the Undo /
+ * Redo buttons follow, and Caps Lock changes nothing (U + Lock is undo,
+ * Shift+u under Lock redo). The hint bar lists both keys. */
+static void
+test_undo_redo_a_preset(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   assert_history_buttons(fx.p_win, FALSE, FALSE);
+   char *c_hint = plain_hint(fx.p_win);
+   g_assert_nonnull(g_strstr_len(c_hint, -1, "u/Shift+u undo/redo"));
+   g_free(c_hint);
+   edit_key_and_wait(fx.p_win, GDK_KEY_1, 0);
+   GdkTexture *p_mod = ref_viewer_texture(fx.p_win);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   assert_history_buttons(fx.p_win, TRUE, FALSE);
+
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Undid: Auto-fix on");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "Auto-fix"));
+   assert_history_buttons(fx.p_win, FALSE, TRUE);
+   edit_key(fx.p_win, GDK_KEY_u, 0); /* nothing left */
+   assert_status_prefix(fx.p_win, "No edit to undo");
+
+   edit_key_and_wait(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
+   assert_status_prefix(fx.p_win, "Redid: Auto-fix on");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "Auto-fix"));
+   assert_history_buttons(fx.p_win, TRUE, FALSE);
+   edit_key(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
+   assert_status_prefix(fx.p_win, "Nothing to redo");
+
+   /* Caps Lock: `u` arrives as U + Lock and is undo; Shift+u is redo. */
+   edit_key_and_wait(fx.p_win, GDK_KEY_U, GDK_LOCK_MASK);
+   assert_status_prefix(fx.p_win, "Undid: ");
+   edit_key_and_wait(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK | GDK_LOCK_MASK);
+   assert_status_prefix(fx.p_win, "Redid: ");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_object_unref(p_mod);
+   tool_fx_close(&fx);
+}
+
+/* Ctrl+z / Ctrl+Shift+Z and the panel's buttons are the same undo / redo,
+ * and a card click is a step like its digit. A new step after an undo
+ * drops the redo. */
+static void
+test_undo_redo_chords_buttons_and_cards(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   GtkWidget  *p_card   = find_card(find_panel(fx.p_win), 1);
+   GdkTexture *p_before = ref_viewer_texture(fx.p_win);
+   ggtest_click_button(p_card);
+   wait_for_texture_change(fx.p_win, p_before);
+   g_clear_object(&p_before);
+   g_assert_true(gtk_widget_has_css_class(p_card, "ggaze-enhance-on"));
+
+   edit_key_and_wait(fx.p_win, GDK_KEY_z, GDK_CONTROL_MASK);
+   assert_status_prefix(fx.p_win, "Undid: ");
+   g_assert_false(gtk_widget_has_css_class(p_card, "ggaze-enhance-on"));
+   edit_key_and_wait(fx.p_win, GDK_KEY_Z, GDK_CONTROL_MASK | GDK_SHIFT_MASK);
+   assert_status_prefix(fx.p_win, "Redid: ");
+   g_assert_true(gtk_widget_has_css_class(p_card, "ggaze-enhance-on"));
+
+   p_before = ref_viewer_texture(fx.p_win);
+   ggtest_click_button(panel_button(fx.p_win, "win.edit-undo"));
+   wait_for_texture_change(fx.p_win, p_before);
+   g_clear_object(&p_before);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   assert_history_buttons(fx.p_win, FALSE, TRUE);
+   p_before = ref_viewer_texture(fx.p_win);
+   ggtest_click_button(panel_button(fx.p_win, "win.edit-redo"));
+   wait_for_texture_change(fx.p_win, p_before);
+   g_clear_object(&p_before);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0);
+   assert_history_buttons(fx.p_win, FALSE, TRUE);
+   edit_key_and_wait(fx.p_win, GDK_KEY_1, 0);     /* a new step ... */
+   assert_history_buttons(fx.p_win, TRUE, FALSE); /* ... drops the redo */
+   tool_fx_close(&fx);
+}
+
+/* Each quarter turn is a step: u turns back one, U turns again. */
+static void
+test_undo_redo_a_quarter_turn(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.rotate-cw"); /* opens the panel */
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   assert_texture_size(fx.p_win, TOOL_W, TOOL_H); /* 180 degrees */
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Undid: rotate right");
+   wait_for_texture_size(fx.p_win, TOOL_H, TOOL_W); /* 90 */
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   wait_for_texture_size(fx.p_win, TOOL_W, TOOL_H); /* 0 */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
+   assert_status_prefix(fx.p_win, "Redid: rotate right");
+   wait_for_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   fire_and_wait(fx.p_win, "win.rotate-ccw");
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Undid: rotate left");
+   wait_for_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   tool_fx_close(&fx);
+}
+
+/* A crop applied with Enter is one step, whatever the nudges before it:
+ * u shows the whole image again, U the crop. */
+static void
+test_undo_redo_a_crop(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.crop");
+   crop_shrink_right(fx.p_win);
+   crop_shrink_right(fx.p_win);
+   tool_key(fx.p_win, GDK_KEY_Return);
+   wait_for_texture_size(fx.p_win, TOOL_W - 6, TOOL_H);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Undid: crop");
+   wait_for_texture_size(fx.p_win, TOOL_W, TOOL_H);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
+   assert_status_prefix(fx.p_win, "Redid: crop");
+   wait_for_texture_size(fx.p_win, TOOL_W - 6, TOOL_H);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   tool_fx_close(&fx);
+}
+
+/* A straighten applied with Enter is one step (its nudges are not): u
+ * levels the image back to 0 degrees, U to the applied angle. */
+static void
+test_undo_redo_a_straighten(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.straighten");
+   tool_key_and_wait(fx.p_win, GDK_KEY_l);
+   tool_key_and_wait(fx.p_win, GDK_KEY_l);
+   tool_key(fx.p_win, GDK_KEY_Return);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "1.0°"));
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Undid: straighten 1.0° CW");
+   wait_for_texture_size(fx.p_win, TOOL_W, TOOL_H);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "1.0°"));
+   edit_key_and_wait(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
+   assert_status_prefix(fx.p_win, "Redid: straighten 1.0° CW");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   /* The title names the state once its render has landed. */
+   g_assert_cmpint(gdk_texture_get_width(viewer_texture(fx.p_win)), <, TOOL_W);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "1.0°"));
+   tool_fx_close(&fx);
+}
+
+/* Under a tool u is refused, not a cancel: the tool stays up with its
+ * work, and the status line says how to end it. A preset toggled under
+ * the straighten tool is a step of its own that records the angle the
+ * tool STARTED from -- undoing it later never brings back a nudge that
+ * was not applied. */
+static void
+test_undo_under_a_tool(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.straighten");
+   tool_key_and_wait(fx.p_win, GDK_KEY_l);
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Finish the current tool first");
+   g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_STRAIGHTEN);
+   edit_key_and_wait(fx.p_win, GDK_KEY_1, 0); /* Auto-fix under the tool */
+   tool_key(fx.p_win, GDK_KEY_Return);        /* straighten 0.5° */
+   edit_key(fx.p_win, GDK_KEY_u, 0);          /* the straighten */
+   assert_status_prefix(fx.p_win, "Undid: straighten 0.5° CW");
+   edit_key(fx.p_win, GDK_KEY_u, 0); /* Auto-fix, at the STARTING angle */
+   assert_status_prefix(fx.p_win, "Undid: Auto-fix on");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   wait_for_texture_size(fx.p_win, TOOL_W, TOOL_H);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "0.5°"));
+   tool_fx_close(&fx);
+}
+
+/* x is a step too: u after x puts every edit back at once (the preset AND
+ * the turn), U reverts again. */
+static void
+test_undo_brings_back_a_revert(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   edit_key_and_wait(fx.p_win, GDK_KEY_1, 0);
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   fire(fx.p_win, "win.edit-revert");
+   wait_for_texture_size(fx.p_win, TOOL_W, TOOL_H);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "Undid: revert all");
+   wait_for_texture_size(fx.p_win, TOOL_H, TOOL_W);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "Auto-fix"));
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "90° CW"));
+   edit_key(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
+   assert_status_prefix(fx.p_win, "Redid: revert all");
+   wait_for_texture_size(fx.p_win, TOOL_W, TOOL_H);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   tool_fx_close(&fx);
+}
+
+/* Undo keeps the saved/dirty rule: coming back to the state `s` wrote is
+ * saved again (no prompt on navigation), leaving it is dirty. */
+static void
+test_undo_to_the_saved_state_is_clean(void) {
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   edit_key_and_wait(fx.p_win, GDK_KEY_1, 0);
+   fire(fx.p_win, "win.enhance-save");
+   char *c_out = g_build_filename(fx.c_dir, "tool-enhanced.png", NULL);
+   wait_for_file(c_out);
+   wait_for_status_prefix(fx.p_win, "Saved ");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_2, 0);
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win)); /* saved again */
+   g_assert_nonnull(find_label_prefix(find_panel(fx.p_win), "Saved as "));
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0); /* the original: clean */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK); /* saved state */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   edit_key_and_wait(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK); /* +preset 2 */
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_free(c_out);
+   tool_fx_close(&fx);
+}
+
+/* The history is the image's: moving to another file clears it (nothing
+ * to undo or redo there, the buttons insensitive), and so does the gate's
+ * Discard. */
+static void
+test_navigation_clears_the_history(void) {
+   ToolFx fx;
+   tool_fx_open_with_sibling(&fx);
+   fire(fx.p_win, "win.enhance");
+   edit_key_and_wait(fx.p_win, GDK_KEY_1, 0);
+   edit_key_and_wait(fx.p_win, GDK_KEY_1, 0);
+   edit_key_and_wait(fx.p_win, GDK_KEY_2, 0);
+   edit_key_and_wait(fx.p_win, GDK_KEY_u, 0); /* clean, undo + redo left */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   assert_history_buttons(fx.p_win, TRUE, TRUE);
+   fire(fx.p_win, "win.prev"); /* clean: no prompt */
+   wait_for_load(fx.p_win, PLAIN_JPG_W, PLAIN_JPG_H);
+   assert_showing(fx.p_win, "a.jpg");
+   assert_history_buttons(fx.p_win, FALSE, FALSE);
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "No edit to undo");
+   edit_key(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
+   assert_status_prefix(fx.p_win, "Nothing to redo");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   tool_fx_close(&fx);
+}
+
+/* The gate's Discard throws the edit away with its history: after it
+ * (answered on a navigation) nothing is undone back onto the new file. */
+static void
+test_discard_clears_the_history(void) {
+   DirtyFixture fx = {0};
+   fixture_open(&fx, "ggaze-enhance-undodiscard-XXXXXX");
+   fire(fx.p_win, "win.enhance");
+   fire(fx.p_win, "win.next");
+   answer_prompt(&fx, "Discard");
+   assert_showing(fx.p_win, "rot6.jpg");
+   assert_history_buttons(fx.p_win, FALSE, FALSE);
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "No edit to undo");
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   fixture_teardown(&fx);
+}
+
+/* The slideshow's silent discard throws the history away too. A one-file
+ * folder: the tick's navigator_next is a no-op, so nothing but the
+ * discard could have cleared it (the gate's Discard above is followed by
+ * a navigation that clears it anyway). */
+static void
+test_slideshow_discard_clears_the_history(void) {
+   Settings *p_s = settings_new();
+   settings_set_slideshow_delay(p_s, 0.2);
+   ToolFx fx;
+   tool_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   edit_key_and_wait(fx.p_win, GDK_KEY_1, 0);
+   assert_history_buttons(fx.p_win, TRUE, FALSE);
+   fire(fx.p_win, "win.slideshow");
+   ggtest_drain_main(600);          /* at least one tick */
+   fire(fx.p_win, "win.slideshow"); /* stop it */
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   assert_history_buttons(fx.p_win, FALSE, FALSE);
+   edit_key(fx.p_win, GDK_KEY_u, 0);
+   assert_status_prefix(fx.p_win, "No edit to undo");
+   g_settings_reset(settings_get_gsettings(p_s), "slideshow-delay");
+   settings_delete(p_s);
+   tool_fx_close(&fx);
+}
+
+/* Outside the panel u is the file undo, exactly as before 7i2: the router
+ * leaves it to the global table (win.undo) with the panel closed, while
+ * with it open the same key is the edit undo and never restores a trashed
+ * file. */
+static void
+test_u_outside_the_panel_undoes_a_trash(void) {
+   DirtyFixture             fx        = {0};
+   static const char *const c_three[] = {"plain.jpg", "rgba.png", "rot6.jpg",
+                                         NULL};
+   fixture_open_clean(&fx, "ggaze-enhance-undotrash-XXXXXX", c_three);
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_u, 0));
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_z, GDK_CONTROL_MASK));
+   fire(fx.p_win, "win.trash"); /* clean: no prompt */
+   ggtest_drain_main(300);
+   g_assert_false(g_file_test(fx.c_path, G_FILE_TEST_EXISTS));
+   fire(fx.p_win, "win.enhance");
+   edit_key(fx.p_win, GDK_KEY_u, 0); /* the panel's: an edit undo */
+   assert_status_prefix(fx.p_win, "No edit to undo");
+   ggtest_drain_main(200);
+   g_assert_false(g_file_test(fx.c_path, G_FILE_TEST_EXISTS));
+   fire(fx.p_win, "win.enhance"); /* close the panel */
+   g_assert_false(ggaze_window_edit_key(fx.p_win, GDK_KEY_u, 0));
+   fire(fx.p_win, "win.undo"); /* what the global u then fires */
+   ggtest_drain_main(300);
+   g_assert_true(g_file_test(fx.c_path, G_FILE_TEST_EXISTS));
+   /* The menu's "Undo edit" with the panel closed only says where it
+    * works. */
+   fire(fx.p_win, "win.edit-undo");
+   assert_status_prefix(fx.p_win, "u undoes edits in the edit panel");
+   fixture_teardown(&fx);
+}
+
 /* --- touch swipe (zb2) ---------------------------------------------------- */
 
 /* The window's GgazeViewer (its stack's "large" child), borrowed. */
@@ -5684,6 +6082,32 @@ add_tool_tests(void) {
                    test_tool_abandoned_on_navigation_and_view_change);
 }
 
+/* 7i2: undo / redo of edit steps in the open panel. */
+static void
+add_edit_undo_tests(void) {
+   g_test_add_func("/enhance_flow/undo_redo_a_preset", test_undo_redo_a_preset);
+   g_test_add_func("/enhance_flow/undo_redo_chords_buttons_and_cards",
+                   test_undo_redo_chords_buttons_and_cards);
+   g_test_add_func("/enhance_flow/undo_redo_a_quarter_turn",
+                   test_undo_redo_a_quarter_turn);
+   g_test_add_func("/enhance_flow/undo_redo_a_crop", test_undo_redo_a_crop);
+   g_test_add_func("/enhance_flow/undo_redo_a_straighten",
+                   test_undo_redo_a_straighten);
+   g_test_add_func("/enhance_flow/undo_under_a_tool", test_undo_under_a_tool);
+   g_test_add_func("/enhance_flow/undo_brings_back_a_revert",
+                   test_undo_brings_back_a_revert);
+   g_test_add_func("/enhance_flow/undo_to_the_saved_state_is_clean",
+                   test_undo_to_the_saved_state_is_clean);
+   g_test_add_func("/enhance_flow/navigation_clears_the_history",
+                   test_navigation_clears_the_history);
+   g_test_add_func("/enhance_flow/discard_clears_the_history",
+                   test_discard_clears_the_history);
+   g_test_add_func("/enhance_flow/slideshow_discard_clears_the_history",
+                   test_slideshow_discard_clears_the_history);
+   g_test_add_func("/enhance_flow/u_outside_the_panel_undoes_a_trash",
+                   test_u_outside_the_panel_undoes_a_trash);
+}
+
 /* wb2 review round: the crop tool's preview override, the saved pair, the
  * drag guard, render coalescing, a crop following the base, and the tools'
  * capture-phase key controller. */
@@ -6521,6 +6945,7 @@ main(int i_argc, char **c_argv) {
    add_dispose_prompt_tests();
    add_tool_tests();
    add_tool_review_tests();
+   add_edit_undo_tests();
    add_tool_review2_tests();
    add_tool_review3_tests();
    add_tool_review4_tests();

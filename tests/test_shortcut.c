@@ -439,8 +439,9 @@ test_help_window_from_table(void) {
     * Edit panel group gains c, r, [, ], x (+5), the Crop tool group has
     * move / grow / shrink / aspect / apply / cancel (6) and the
     * Straighten tool group ccw / cw / auto-crop / apply / cancel (5)
-    * = 54. */
-   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 54);
+    * = 54, + 7i2's edit undo (u, Ctrl+z) and redo (U, Ctrl+Shift+Z)
+    * rows in the Edit panel group (+2) = 56. */
+   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 56);
    gtk_window_destroy(GTK_WINDOW(p_w));
    drain_main(200);
 }

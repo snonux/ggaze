@@ -60,7 +60,8 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `v` / `V` / `Ctrl+a` | mark / range-mark / mark all |
 | `d` / `Delete`     | trash to `.Trash` (undoable), then next |
 | `D` / `Shift+Delete` | delete permanently |
-| `u` / `Ctrl+z`     | undo last `d` or `m` |
+| `u` / `Ctrl+z`     | undo last `d` or `m` — with the edit panel open, undo the last **edit step** instead |
+| `U` / `Ctrl+Shift+Z` | redo the edit step undone last (edit panel open) |
 | `E`               | empty this folder's `.Trash` (asks first) |
 | `m`               | move marks → destination popup (`1`, `2`, …) |
 | `e`               | open in external program popup |
@@ -71,7 +72,7 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `c`               | crop tool (GEGL; opens the panel): drag, or `h`/`j`/`k`/`l` move, `Shift+h/j/k/l` grow / `Ctrl+h/j/k/l` shrink that side, `a` cycles the aspect (free, 1:1, 3:2, 4:3, 16:9, original); `Enter` applies, `Esc` cancels |
 | `r`               | straighten tool (GEGL; opens the panel): drag along the horizon or `h`/`l` nudge ±0.5°, `a` auto-crop; `Enter` / `Esc` |
 | `]` / `[`         | rotate 90° clockwise / counter-clockwise (GEGL, non-destructive; opens the panel; repeat for 180°/270°) |
-| `x`               | revert every edit (edit panel open, large view) — `Esc` closes the panel and **keeps** the edit |
+| `x`               | revert every edit (edit panel open, large view; `u` undoes it) — `Esc` closes the panel and **keeps** the edit |
 | `s` / `Ctrl+S`     | save an edited copy — presets, crop, straighten and rotation composed (original is never modified; a saved preview no longer prompts; with GEGL a PNG/JPEG copy keeps its embedded ICC profile) |
 | `Space` (hold)     | compare original vs modified |
 | `f` / `F11`        | fullscreen |

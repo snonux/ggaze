@@ -344,6 +344,7 @@ _leave(ToolCtrl *p_tc) {
    p_tc->e_hit        = CROPRECT_HIT_NONE;
    p_tc->b_revertable = FALSE;
    g_clear_object(&p_tc->p_file);
+   enhance_ctrl_set_step_base(p_tc->p_ec, NULL); /* the session is over */
    GgazeViewer *p_v = _viewer(p_tc);
    if (p_v != NULL) {
       ggaze_viewer_set_overlay(p_v, NULL, NULL, NULL);
@@ -366,6 +367,9 @@ _begin(ToolCtrl *p_tc, GgazeTool e_tool) {
    g_set_object(&p_tc->p_file, p_cur);
    p_tc->t_saved = *enhance_ctrl_get_transform(p_tc->p_ec);
    p_tc->t_work  = p_tc->t_saved;
+   /* A step taken under the tool (a preset digit) records the transform
+    * the tool started from, never the straighten tool's live angle. */
+   enhance_ctrl_set_step_base(p_tc->p_ec, &p_tc->t_saved);
    ggaze_viewer_set_overlay(_viewer(p_tc), _draw_cb, _drag_cb, p_tc);
    /* The tool frames and applies against the first frame of an animation
     * (the texture the controller renders from), so that is what it shows
@@ -742,10 +746,14 @@ _apply_crop(ToolCtrl *p_tc) {
       t_new.b_crop = TRUE;
       t_new.t_crop = t_r;
    }
+   Transform t_from = p_tc->t_saved; /* _leave ends the session */
    _leave(p_tc);
    enhance_ctrl_set_transform(p_tc->p_ec, &t_new);
-   _status(p_tc, t_new.b_crop ? "Cropped — s saves a copy, x reverts "
-                                "every edit"
+   enhance_ctrl_record_tool_step(p_tc->p_ec, EDIT_STEP_CROP,
+                                 t_new.b_crop ? "crop" : "crop removed",
+                                 &t_from);
+   _status(p_tc, t_new.b_crop ? "Cropped — s saves a copy, u undoes, x "
+                                "reverts every edit"
                               : "Crop removed (the whole image)");
    return (TRUE);
 }
@@ -868,16 +876,23 @@ _straighten_drag(ToolCtrl *p_tc, GgazeViewerDragPhase e_phase, gdouble d_ix,
 }
 
 /* Enter in the straighten tool: the angle is already on the preview (every
- * nudge pushed it), so committing is leaving. */
+ * nudge pushed it), so committing is leaving -- and recording the one
+ * undoable step from the angle the tool started at (the nudges in between
+ * are not steps: u takes the whole straighten back). */
 static gboolean
 _apply_straighten(ToolCtrl *p_tc) {
-   char *c_angle = _angle_text(p_tc->t_work.d_degrees);
+   char     *c_angle = _angle_text(p_tc->t_work.d_degrees);
+   char     *c_label = g_strdup_printf("straighten %s", c_angle);
+   Transform t_from  = p_tc->t_saved; /* _leave ends the session */
 
-   char *c_msg = g_strdup_printf("Straightened %s — s saves a "
-                                 "copy, x reverts every edit",
+   char *c_msg = g_strdup_printf("Straightened %s — s saves a copy, u "
+                                 "undoes, x reverts every edit",
                                  c_angle);
    _leave(p_tc);
+   enhance_ctrl_record_tool_step(p_tc->p_ec, EDIT_STEP_STRAIGHTEN, c_label,
+                                 &t_from);
    _status(p_tc, c_msg);
+   g_free(c_label);
    g_free(c_msg);
    g_free(c_angle);
    return (TRUE);

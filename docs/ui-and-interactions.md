@@ -148,7 +148,8 @@ drift from the live bindings.
 | `r`            | straighten tool (GEGL; opens the edit panel first): horizon drag / `h` `l` nudge ±0.5°, `a` auto-crop; `Enter` / `Esc` |
 | `]` / `[`      | rotate 90° clockwise / counter-clockwise (GEGL, one-shot; opens the edit panel first; repeat for 180°/270°) |
 | `x`            | revert every edit — presets and transform (edit panel open, large view; with it closed or in the grid a status line says where it works) |
-| `u` / `Ctrl+z` | undo last `d` / `m` (restore from `.Trash` or move back) |
+| `u` / `Ctrl+z` | undo last `d` / `m` (restore from `.Trash` or move back) — **with the edit panel open and on screen, undo the last edit step instead** (see "Undo / redo of edit steps") |
+| `U` / `Ctrl+Shift+Z` | redo the edit step undone last (edit panel open, large view only; elsewhere nothing) |
 | `o` / `Ctrl+o` | open image dialog (image filter) |
 | `O` / `Ctrl+Shift+o` | open folder dialog |
 | `,` / `Ctrl+,` | preferences (destinations, editors, scripts, presets, sort, …) |
@@ -164,7 +165,9 @@ the grid it quits. `q` always quits outright (exiting fullscreen first).
 Caps Lock never turns a letter into its Shift chord: with it on, `h` still
 moves the crop rectangle (`Shift+h` grows it), `a` is still the tool's
 aspect / auto-crop key, `c` still the crop tool — the key table matches a
-letter Caps Lock upper-cased as the plain letter.
+letter Caps Lock upper-cased as the plain letter. So in the edit panel
+`u` with Caps Lock on is still undo, and `Shift+u` (whatever case it
+arrives in) redo.
 
 ### Edit modes and the key-hint bar
 
@@ -173,7 +176,7 @@ and each owns them only while it is on screen:
 
 | Mode | Live while | Its own keys |
 |------|------------|--------------|
-| **Edit** | the edit panel is open and on screen (large view), no tool up | `1`–`N` presets — one digit per configured preset, at most 8 (plus the global `c` `r` `[` `]` `s` `x` `Space` `a`/`Esc` it lists) |
+| **Edit** | the edit panel is open and on screen (large view), no tool up | `1`–`N` presets — one digit per configured preset, at most 8 · `u` / `Ctrl+z` undo and `U` / `Ctrl+Shift+Z` redo an edit step (plus the global `c` `r` `[` `]` `s` `x` `Space` `a`/`Esc` it lists) |
 | **Crop** | the crop tool is up | `h`/`j`/`k`/`l` move · `Shift+h/j/k/l` grow that side · `Ctrl+h/j/k/l` shrink that side · `a` aspect cycle (free → 1:1 → 3:2 → 4:3 → 16:9 → original) · `Enter` apply · `Esc` cancel |
 | **Straighten** | the straighten tool is up | `h`/`l` (and `-`/`+`) nudge ½° · `a` auto-crop · `Enter` apply · `Esc` cancel |
 
@@ -184,7 +187,7 @@ along the bottom of the large view listing exactly that mode's live keys,
 e.g.
 
 ```
-Edit   1–8 presets · c crop · r straighten · [/] rotate · s save copy · x revert · Space hold: original · a/Esc close
+Edit   1–8 presets · c crop · r straighten · [/] rotate · s save copy · x revert · u/Shift+u undo/redo · Space hold: original · a/Esc close
 Crop   h/j/k/l move · Shift+h/j/k/l grow · Ctrl+h/j/k/l shrink · a aspect · Enter apply · Esc cancel
 ```
 
@@ -195,9 +198,12 @@ tooltips and the `F10` menu are all generated from `shortcuts.c`'s one
 table (rows scoped to a mode, each with a short hint label and, for the
 menu, a short label such as *Crop* where the help says "Crop tool (Enter
 applies, Esc cancels)"), so they cannot drift from the keys that actually
-work. Inside the panel `h`/`j`/`k`/`l` keep their
-navigation meaning and `u` is still the file undo: those are reserved for
-the panel's later strength and undo keys.
+work. Inside the panel `h`/`j`/`k`/`l` keep their navigation meaning
+(reserved for the panel's later strength keys), while `u` / `Ctrl+z` are
+the panel's own undo — the file undo again the moment the panel closes or
+hides with the grid. Under a crop / straighten tool the panel is still
+open, so `u` reaches it, and is refused with "Finish the current tool
+first" (see "Undo / redo of edit steps").
 
 ## Mouse / touch
 
@@ -485,7 +491,8 @@ image's histogram.
   - **Save state and actions** — one line saying *No edits yet*, *Unsaved
     edits · original kept* or *Saved as …*, then **Save copy** `s` (naming
     the file it will write, `as IMG_0001-enhanced.jpg`) beside **Revert**
-    `x`.
+    `x`, and under them **Undo** `u` and **Redo** `Shift+u`, each
+    insensitive while there is nothing to undo / redo.
 
   Example:
   ```
@@ -500,8 +507,9 @@ image's histogram.
   TRANSFORM
   [✂ c] [⟳ r] [↶ [] [↷ ]]
   Unsaved edits · original kept
-  [⤓ Save copy   s] [↶ Revert x]
+  [⤓ Save copy   s] [⟲ Revert x]
      as IMG_0001-enhanced.jpg
+  [↶ Undo      u] [↷ Redo Shift+u]
   ```
   While the panel is open the key-hint bar under the image lists its keys
   (see "Edit modes and the key-hint bar"). Presets are **layered**:
@@ -522,6 +530,33 @@ image's histogram.
   and is **hidden** with the grid, back with the large view — while hidden
   it is no key mode: digits do nothing, `x` says it works in the large
   view, `Esc` goes straight on to the grid's marks / quit steps.
+- **Undo / redo of edit steps.** With the panel open and on screen, `u` /
+  `Ctrl+z` (or *Undo*) undo the last **edit step** and `U` /
+  `Ctrl+Shift+Z` (or *Redo*) redo it; the status line names it — *Undid:
+  Auto-fix on*, *Redid: crop*, *Undid: rotate right*, *Undid: straighten
+  1.0° CW*, *Undid: revert all* — or says *Nothing to undo* / *Nothing to
+  redo*. An edit step is a preset toggled (digit or card), one quarter
+  turn (each `[` / `]`), a crop applied with `Enter`, a straighten applied
+  with `Enter` (one step, however many nudges it took), and **`x`** — so a
+  revert is undoable: `u` right after `x` puts every edit back at once.
+  Opening or cancelling a tool is no step. A new step after an undo drops
+  what could have been redone; the history keeps the last **64** steps,
+  forgetting the oldest. It belongs to **the image**: another image (a
+  navigation, an open, the folder running on), the Save/Discard gate's
+  *Discard*, the slideshow's silent discard and a failed render all
+  clear it — only `x` is itself a step. Undo and redo put the whole edit
+  state back through the same live-preview path a toggle takes, so the
+  saved / dirty rule holds exactly: stepping back to the combination `s`
+  wrote is *saved* again (no prompt on moving on), stepping off it is
+  unsaved. Under a crop or straighten tool `u` / `U` are **refused** with
+  "Finish the current tool first (Enter applies, Esc cancels)", like `[` /
+  `]`: the tool's own nudges are not steps, and cancelling the tool on a
+  `u` meant as "take my last nudge back" would silently drop the whole
+  rectangle or angle. A preset toggled *under* a tool is a step that
+  records the transform the tool started from, never its unapplied
+  working angle. Outside the panel — closed, or hidden with the grid —
+  `u` / `Ctrl+z` undo the last trash or move exactly as before, and the
+  menu's *Undo edit* / *Redo edit* only say where they work.
 - **Hold `Space`** shows the original; release shows the current edit — with
   or without the panel.
 - Presets are GEGL op graphs (e.g. Auto-fix = `gegl:stretch-contrast` →
@@ -598,8 +633,10 @@ image's histogram.
 - GEGL runs only when a preset is active or on export; the fast decode path
   is unchanged, and enhance is **not** applied during `h`/`l` scrubbing (only
   when settled on an image). If the build has no GEGL, `a`, `c`, `r`, `[`,
-  `]`, `s` and `x` show a "GEGL not built in" status message instead of
-  opening anything (the digits, which belong to the panel, do nothing). See
+  `]`, `s` and `x` (and the menu's *Undo edit* / *Redo edit*) show a "GEGL
+  not built in" status message instead of opening anything (the digits,
+  which belong to the panel, do nothing; `u` / `Ctrl+z` are the file undo
+  as ever). See
   [gegl.md](gegl.md).
 
 ## Crop, straighten & rotate tools (GEGL)

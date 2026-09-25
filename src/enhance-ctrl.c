@@ -3,8 +3,9 @@
  *
  * See enhance-ctrl.h. The preset mask, the in-flight apply/preview/export
  * requests, the cached enhanced texture, the hold-Space flag, the saved
- * flag and the side panel live here; the window reaches it through a few
- * action entry points and it reaches the window through EnhanceUIHostOps.
+ * flag, the undo history and the side panel live here; the window reaches it
+ * through a few action entry points and it reaches the window through
+ * EnhanceUIHostOps.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -14,6 +15,7 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#include "edit-history.h"
 #include "enhance-ui.h"
 #include "enhancer-gegl.h"
 #include "transform.h"
@@ -35,9 +37,11 @@ static void     _sync_panel(EnhanceCtrl *p_ctrl);
 static void     _sync_save_target(EnhanceCtrl *p_ctrl);
 static void     _apply_async(EnhanceCtrl *p_ctrl);
 static void     _discard(EnhanceCtrl *p_ctrl);
+static void     _throw_away(EnhanceCtrl *p_ctrl);
 static void     _destroy(EnhanceCtrl *p_ctrl);
 static void     _start_previews(EnhanceCtrl *p_ctrl);
 static void     _card_toggle(EnhanceCtrl *p_ctrl, GtkWidget *p_btn);
+static void     _sync_history(EnhanceCtrl *p_ctrl);
 static gboolean _orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
 static void     _drop_managed(EnhanceCtrl *p_ctrl);
 static void     _drop_managed_orig(EnhanceCtrl *p_ctrl);
@@ -91,6 +95,13 @@ struct EnhanceCtrl {
                               * presets" status line was shown for this file
                               * (it is shown once per file, and only when a
                               * preset is applied with the panel closed) */
+   EditHistory *p_history;   /* the edit steps of THIS image (7i2): cleared
+                              * on another file and on every discard but
+                              * x's own (always non-NULL) */
+   Transform t_step_base;    /* a tool's starting transform ... */
+   gboolean  b_step_base;    /* ... which a step taken under the tool
+                              * records in place of t_xf, iff set
+                              * (enhance_ctrl_set_step_base) */
 
    /* The side panel and the widgets in it that change after the build. All
     * NULL while closed (_destroy clears them), so every sync helper can run
@@ -103,6 +114,8 @@ struct EnhanceCtrl {
    GtkWidget *p_state;                           /* save-state line */
    GtkWidget *p_save_btn;
    GtkWidget *p_save_target; /* "as <name>" the next Save writes */
+   GtkWidget *p_undo_btn;    /* insensitive with nothing to undo ... */
+   GtkWidget *p_redo_btn;    /* ... or to redo */
 
    GCancellable *p_preview_cancel; /* thumbnail-preview batch */
    guint         u_preview_gen;    /* invalidates stale batch completions */
@@ -239,6 +252,7 @@ enhance_ctrl_new(const EnhanceUIHostOps *p_ops, gpointer p_host) {
    p_ctrl->p_host           = p_host;
    p_ctrl->p_enhancer       = enhancer_new();
    p_ctrl->p_enhance_cancel = g_cancellable_new();
+   p_ctrl->p_history        = edit_history_new(0);
    transform_init(&p_ctrl->t_xf);
    return (p_ctrl);
 }
@@ -277,6 +291,28 @@ _refresh_saved(EnhanceCtrl *p_ctrl) {
                      transform_equal(&p_ctrl->t_xf, &p_ctrl->t_saved_xf);
 }
 
+/* The edit state an undo would come back to: the mask and the committed
+ * transform -- or, under a tool, the transform the tool started from
+ * (t_step_base), since the straighten tool commits every nudge only to
+ * preview it. */
+static void
+_snapshot(EnhanceCtrl *p_ctrl, EditSnapshot *p_out) {
+   edit_snapshot_init(p_out);
+   p_out->u_mask = p_ctrl->u_enhance_mask;
+   p_out->t_xf   = p_ctrl->b_step_base ? p_ctrl->t_step_base : p_ctrl->t_xf;
+}
+
+/* Record the step from *p_before to the state now (a no-op step is
+ * dropped by the history) and bring the panel's Undo / Redo in line. */
+static void
+_push_step(EnhanceCtrl *p_ctrl, EditStepKind e_kind, const char *c_label,
+           const EditSnapshot *p_before) {
+   EditSnapshot t_after;
+   _snapshot(p_ctrl, &t_after);
+   edit_history_push(p_ctrl->p_history, e_kind, c_label, p_before, &t_after);
+   _sync_history(p_ctrl);
+}
+
 void
 enhance_ctrl_delete(EnhanceCtrl *p_ctrl) {
    if (p_ctrl == NULL) {
@@ -292,6 +328,7 @@ enhance_ctrl_delete(EnhanceCtrl *p_ctrl) {
    g_clear_object(&p_ctrl->p_orig_cancel);
    g_clear_object(&p_ctrl->p_enhance_file);
    g_clear_pointer(&p_ctrl->p_enhancer, enhancer_delete);
+   g_clear_pointer(&p_ctrl->p_history, edit_history_delete);
    g_free(p_ctrl->c_saved_name);
    g_free(p_ctrl);
 }
@@ -637,6 +674,21 @@ _sync_panel(EnhanceCtrl *p_ctrl) {
                                 _has_work(p_ctrl), p_ctrl->b_saved,
                                 p_ctrl->c_saved_name);
    }
+   _sync_history(p_ctrl);
+}
+
+/* The Undo / Redo buttons are sensitive only while there is something to
+ * undo / redo. A no-op while the panel is closed. */
+static void
+_sync_history(EnhanceCtrl *p_ctrl) {
+   if (p_ctrl->p_undo_btn != NULL) {
+      gtk_widget_set_sensitive(p_ctrl->p_undo_btn,
+                               edit_history_can_undo(p_ctrl->p_history));
+   }
+   if (p_ctrl->p_redo_btn != NULL) {
+      gtk_widget_set_sensitive(p_ctrl->p_redo_btn,
+                               edit_history_can_redo(p_ctrl->p_history));
+   }
 }
 
 /* Name the file the next Save would write under the Save button: the
@@ -823,8 +875,8 @@ _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
                 p_err != NULL ? p_err->message : "(no detail)");
       g_clear_error(&p_err);
       _show_status(p_ctrl, "Enhance failed");
-      _discard(p_ctrl); /* back to the original; also bumps the gen and
-                         * drops a queued relaunch (it would fail too) */
+      _throw_away(p_ctrl); /* back to the original; also bumps the gen and
+                            * drops a queued relaunch (it would fail too) */
    } else {
       _apply_landed(p_ctrl, p_req, p_tex, i_w, i_h);
       g_object_unref(p_tex);
@@ -948,8 +1000,9 @@ _apply_async(EnhanceCtrl *p_ctrl) {
  * (_apply_async's mask==0 path also invalidates any in-flight apply via
  * u_enhance_gen). Used by x / the Revert button (explicit, no prompt -- Esc no
  * longer discards, 6i2), the slideshow timer, a failed apply, and after
- * Save/Discard
- * in the navigate-away prompt. Never touches the file on disk -- discarding
+ * Save/Discard in the navigate-away prompt. The undo history is the
+ * callers' business (_throw_away forgets it, x records a step on top of
+ * it). Never touches the file on disk -- discarding
  * a preview only drops in-memory state. A crop / straighten session over
  * the preview ends FIRST (abandon_tool): the tool's working copy of the
  * transform would otherwise survive the reset and come back on its next
@@ -966,6 +1019,24 @@ _discard(EnhanceCtrl *p_ctrl) {
                                      * navigator/enhancer (issue 4) */
    _drop_managed(p_ctrl);           /* the same belt-and-braces */
    _apply_async(p_ctrl);
+}
+
+/* Forget the undo history: the steps belonged to another image, or to an
+ * edit that was thrown away. */
+static void
+_forget_history(EnhanceCtrl *p_ctrl) {
+   edit_history_clear(p_ctrl->p_history);
+   _sync_history(p_ctrl);
+}
+
+/* _discard as a throw-away, not a step back: the gate's Discard (another
+ * image follows), the slideshow, a failed render (its steps would only
+ * lead back to the state that failed). The history goes with the edit;
+ * x alone is undoable (enhance_ctrl_revert_all). */
+static void
+_throw_away(EnhanceCtrl *p_ctrl) {
+   _discard(p_ctrl);
+   _forget_history(p_ctrl);
 }
 
 /* --- the geometric transform --------------------------------------------- */
@@ -1074,7 +1145,11 @@ enhance_ctrl_rotate_quarter(EnhanceCtrl *p_ctrl, gint i_dir) {
       t_new.b_crop = FALSE;
    }
    transform_rotate_quarter(&t_new, i_dir, i_bw, i_bh);
+   EditSnapshot t_before;
+   _snapshot(p_ctrl, &t_before);
    enhance_ctrl_set_transform(p_ctrl, &t_new);
+   _push_step(p_ctrl, EDIT_STEP_ROTATE,
+              i_dir > 0 ? "rotate right" : "rotate left", &t_before);
 }
 
 gboolean
@@ -1144,7 +1219,122 @@ enhance_ctrl_is_hold_original(EnhanceCtrl *p_ctrl) {
 void
 enhance_ctrl_discard(EnhanceCtrl *p_ctrl) {
    g_return_if_fail(p_ctrl != NULL);
+   _throw_away(p_ctrl);
+}
+
+/* The "before" is taken ahead of the discard: under a tool it is the
+ * state the tool started from (the discard ends the tool, and a live
+ * straighten angle was never applied), so `u` brings back what the image
+ * was, not a half-made adjustment. x stacks on the steps before it, and
+ * undoing it puts every edit back at once. */
+gboolean
+enhance_ctrl_revert_all(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   EditSnapshot t_before;
+   EditSnapshot t_after;
+   _snapshot(p_ctrl, &t_before);
    _discard(p_ctrl);
+   _snapshot(p_ctrl, &t_after);
+   _push_step(p_ctrl, EDIT_STEP_REVERT, "revert all", &t_before);
+   /* No step when nothing the history holds changed: a straighten tool's
+    * live, unapplied angle is dropped without one. */
+   return (!edit_snapshot_equal(&t_before, &t_after));
+}
+
+/* --- undo / redo (7i2) ---------------------------------------------------- */
+
+/* Put *p_s back as THE edit state and render it the way a toggle does
+ * (_apply_async: last-write-wins, saved/dirty re-derived, panel and
+ * title). A state that renders the same as the screen (the auto-crop flag
+ * at 0 degrees) only refreshes the names, as enhance_ctrl_set_transform
+ * does. */
+static void
+_restore_snapshot(EnhanceCtrl *p_ctrl, const EditSnapshot *p_s) {
+   gboolean b_same = p_ctrl->u_enhance_mask == p_s->u_mask &&
+                     transform_equal(_render_transform(p_ctrl), &p_s->t_xf);
+   p_ctrl->u_enhance_mask = p_s->u_mask;
+   p_ctrl->t_xf           = p_s->t_xf;
+   p_ctrl->b_preview      = FALSE;
+   if (b_same) {
+      _refresh_saved(p_ctrl);
+      _sync_panel(p_ctrl);
+      _update_header(p_ctrl);
+      return;
+   }
+   _apply_async(p_ctrl);
+}
+
+/* Undo (b_redo FALSE) or redo one step and say which. */
+static gboolean
+_step(EnhanceCtrl *p_ctrl, gboolean b_redo) {
+   if (!_has_navigator(p_ctrl) || p_ctrl->p_enhancer == NULL) {
+      return (FALSE);
+   }
+   const char         *c_label = NULL;
+   const EditSnapshot *p_s =
+      b_redo ? edit_history_redo(p_ctrl->p_history, &c_label)
+             : edit_history_undo(p_ctrl->p_history, &c_label);
+   if (p_s == NULL) {
+      /* The panel stays open across files, and a trash / move always
+       * changes file (clearing this history), so "d, oops, u" lands here:
+       * say where the file undo lives rather than a bare refusal. */
+      _show_status(p_ctrl, b_redo ? "Nothing to redo"
+                                  : "No edit to undo \u2014 close the panel "
+                                    "(a) and u undoes the last trash / move");
+      return (FALSE);
+   }
+   /* Both borrowed from the history, which nothing below changes. */
+   char *c_msg = g_strdup_printf("%s: %s", b_redo ? "Redid" : "Undid", c_label);
+   _restore_snapshot(p_ctrl, p_s);
+   _sync_history(p_ctrl);
+   _show_status(p_ctrl, c_msg);
+   g_free(c_msg);
+   return (TRUE);
+}
+
+gboolean
+enhance_ctrl_undo(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   return (_step(p_ctrl, FALSE));
+}
+
+gboolean
+enhance_ctrl_redo(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   return (_step(p_ctrl, TRUE));
+}
+
+gboolean
+enhance_ctrl_can_undo(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   return (edit_history_can_undo(p_ctrl->p_history));
+}
+
+gboolean
+enhance_ctrl_can_redo(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   return (edit_history_can_redo(p_ctrl->p_history));
+}
+
+void
+enhance_ctrl_set_step_base(EnhanceCtrl *p_ctrl, const Transform *p_base) {
+   g_return_if_fail(p_ctrl != NULL);
+   p_ctrl->b_step_base = p_base != NULL;
+   if (p_base != NULL) {
+      p_ctrl->t_step_base = *p_base;
+   }
+}
+
+/* Called once the tool has left (its session base is cleared), with the
+ * applied state already committed. */
+void
+enhance_ctrl_record_tool_step(EnhanceCtrl *p_ctrl, EditStepKind e_kind,
+                              const char *c_label, const Transform *p_before) {
+   g_return_if_fail(p_ctrl != NULL && p_before != NULL);
+   EditSnapshot t_before;
+   _snapshot(p_ctrl, &t_before);
+   t_before.t_xf = *p_before;
+   _push_step(p_ctrl, e_kind, c_label, &t_before);
 }
 
 /* --- panel build / teardown ---------------------------------------------- */
@@ -1171,6 +1361,8 @@ _destroy(EnhanceCtrl *p_ctrl) {
    p_ctrl->p_state        = NULL;
    p_ctrl->p_save_btn     = NULL;
    p_ctrl->p_save_target  = NULL;
+   p_ctrl->p_undo_btn     = NULL;
+   p_ctrl->p_redo_btn     = NULL;
    GtkWidget *p_slot      = gtk_widget_get_parent(p_panel);
    if (GTK_IS_BOX(p_slot)) {
       gtk_box_remove(GTK_BOX(p_slot), p_panel);
@@ -1258,6 +1450,8 @@ _build_panel(EnhanceCtrl *p_ctrl) {
    p_ctrl->p_state        = ui.p_state;
    p_ctrl->p_save_btn     = ui.p_save_btn;
    p_ctrl->p_save_target  = ui.p_save_target;
+   p_ctrl->p_undo_btn     = ui.p_undo_btn;
+   p_ctrl->p_redo_btn     = ui.p_redo_btn;
    for (guint i = 0; i < ui.u_n_presets; i++) {
       p_ctrl->p_btns[i] = ui.p_btns[i];
       p_ctrl->p_pics[i] = ui.p_pics[i];
@@ -1325,10 +1519,25 @@ enhance_ctrl_close(EnhanceCtrl *p_ctrl) {
    return (TRUE);
 }
 
+/* The step label of preset i_idx turning on or off: "Auto-fix on" -- the
+ * status line after an undo names it ("Undid: Auto-fix on"). A digit past
+ * the presets that exist toggles a bit no chain reads: "preset 8 on". */
+static char *
+_preset_label(EnhanceCtrl *p_ctrl, gint i_idx, gboolean b_on) {
+   const GPtrArray *p_presets = enhancer_get_presets(p_ctrl->p_enhancer);
+   const char      *c_on      = b_on ? "on" : "off";
+   if (p_presets != NULL && (guint)i_idx < p_presets->len) {
+      const EnhancerPreset *p_pr =
+         g_ptr_array_index((GPtrArray *)p_presets, (guint)i_idx);
+      return (g_strdup_printf("%s %s", p_pr->c_name, c_on));
+   }
+   return (g_strdup_printf("preset %d %s", i_idx + 1, c_on));
+}
+
 /* enhance-N (keys 1-8, routed here only while the panel is open --
- * edit-mode.c; the action itself is also what a card click amounts to):
- * toggle preset N on/off (layered), then re-apply asynchronously.
- * Out-of-range i_idx is a silent no-op. */
+ * edit-mode.c) and a card click: toggle preset N on/off (layered), record
+ * it as an undoable step, then re-apply asynchronously. Out-of-range
+ * i_idx is a silent no-op. */
 void
 enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx) {
    g_return_if_fail(p_ctrl != NULL);
@@ -1336,7 +1545,13 @@ enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx) {
        i_idx >= (gint)G_N_ELEMENTS(p_ctrl->p_btns)) {
       return;
    }
+   EditSnapshot t_before;
+   _snapshot(p_ctrl, &t_before);
    p_ctrl->u_enhance_mask ^= (guint8)(1u << i_idx);
+   char *c_label = _preset_label(p_ctrl, i_idx,
+                                 (p_ctrl->u_enhance_mask & (1u << i_idx)) != 0);
+   _push_step(p_ctrl, EDIT_STEP_PRESET, c_label, &t_before);
+   g_free(c_label);
    _apply_async(p_ctrl);
 }
 
@@ -1436,9 +1651,10 @@ enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl) {
       transform_init(&p_ctrl->t_xf);
       p_ctrl->b_preview = FALSE; /* a tool's override goes with it */
       _forget_original(p_ctrl);  /* another image, another size */
-      p_ctrl->b_saved         = FALSE;
-      p_ctrl->b_have_saved    = FALSE; /* the saved pair was this file's */
-      p_ctrl->b_hint_shown    = FALSE;
+      p_ctrl->b_saved      = FALSE;
+      p_ctrl->b_have_saved = FALSE; /* the saved pair was this file's */
+      p_ctrl->b_hint_shown = FALSE;
+      _forget_history(p_ctrl);         /* the steps were the other image's */
       p_ctrl->b_hold_original = FALSE; /* mask cleared without going through
                                         * _render, so reset the hold flag
                                         * here too (issue 4) */
@@ -1455,17 +1671,14 @@ enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl) {
 
 /* --- internal: card toggle (clicked handler for the built cards) --------- */
 
-/* Clicked card: idx 0..7 toggles that preset's bit, then re-apply the
- * (possibly empty) chain, which also refreshes the highlights. Does NOT
- * close the panel -- toggling presets while comparing is the point of the
- * layered design (docs/gegl.md). The Original is a reference, not a card:
- * reverting everything is x / the Revert button (6i2), never a stray click
- * on a thumbnail. */
+/* Clicked card: idx 0..7 toggles that preset exactly as its digit does
+ * (an undoable step, then the re-apply that also refreshes the
+ * highlights). Does NOT close the panel -- toggling presets while
+ * comparing is the point of the layered design (docs/gegl.md). The
+ * Original is a reference, not a card: reverting everything is x / the
+ * Revert button (6i2), never a stray click on a thumbnail. */
 static void
 _card_toggle(EnhanceCtrl *p_ctrl, GtkWidget *p_btn) {
-   gint i_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(p_btn), "idx"));
-   if (i_idx >= 0 && i_idx < (gint)G_N_ELEMENTS(p_ctrl->p_btns)) {
-      p_ctrl->u_enhance_mask ^= (guint8)(1u << i_idx);
-   }
-   _apply_async(p_ctrl);
+   enhance_ctrl_toggle_preset(
+      p_ctrl, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(p_btn), "idx")));
 }

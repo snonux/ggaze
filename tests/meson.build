@@ -328,6 +328,19 @@ test_transform = executable(
 )
 test('transform', test_transform, suite : 'unit', env : fixtures_env)
 
+# 7i2: the edit panel's undo / redo history is plain C over the edit
+# snapshot (no GTK, no GEGL), so it runs in every lane, the minimal one
+# included.
+test_edit_history = executable(
+   'test_edit_history',
+   ['test_edit_history.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, m_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('edit_history', test_edit_history, suite : 'unit', env : fixtures_env)
+
 test_thumbnail = executable(
    'test_thumbnail',
    ['test_thumbnail.c', ggaze_conf_h],
