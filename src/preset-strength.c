@@ -24,9 +24,15 @@
 
 /* The largest magnitude a range may reach: its values are then written in
  * at most 16 integer digits plus _MAX_DECIMALS, well inside the
- * G_ASCII_DTOSTR_BUF_SIZE buffer of preset_strength_format, and a double
- * still holds every step of it exactly enough to compare canonically. */
+ * G_ASCII_DTOSTR_BUF_SIZE buffer of preset_strength_format. The magnitude
+ * alone does not keep a step representable, though: 1e12 + 0.000001 is
+ * 1e12 again in a double, so a nudge would stall mid-range. Hence also: */
 #define _MAX_MAGNITUDE 1e15
+
+/* The most steps a range may hold. A key press or slider notch per step,
+ * so no sane preset gets near it, and with it (max - min) / step stays far
+ * below the 2^52 at which a double stops telling a value from value+step. */
+#define _MAX_STEPS 1e6
 
 /* The syntax, for the error messages. */
 #define _SYNTAX "{s:DEFAULT:MIN..MAX} or {s:DEFAULT:MIN..MAX:STEP}"
@@ -132,6 +138,11 @@ _check_numbers(const PresetStrength *p_s, GError **p_err) {
                                 "twentieth of the range)"
                               : ""));
       }
+   }
+   if (p_s->d_step > 0.0 &&
+       (p_s->d_max - p_s->d_min) / p_s->d_step > _MAX_STEPS) {
+      return (_FAIL(p_err, "the range holds more than 1e6 steps of %g",
+                    p_s->d_step));
    }
    return (TRUE);
 }

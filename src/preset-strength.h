@@ -40,7 +40,8 @@
  * wrong (G_IO_ERROR_INVALID_ARGUMENT): a second placeholder, a stray
  * brace, an unknown name, a missing field, a number that is not one, a
  * number beyond +-1e15 or needing more than 6 decimals (the default, an
- * end, the step -- given or implied -- could not be written exactly), an
+ * end, the step -- given or implied -- could not be written exactly), a
+ * range of more than 1e6 steps (a double could not step through it), an
  * empty or inverted range, a default outside it, a step that is not
  * positive. Preferences shows the message while the preset is typed;
  * a render of a malformed graph fails with it.

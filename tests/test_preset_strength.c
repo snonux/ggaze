@@ -205,6 +205,8 @@ static const struct {
    {"a={s:0:0..1:1e-300}", "needs more than 6 decimals (the step"},
    {"a={s:0:0..0.00001}", "needs more than 6 decimals (the step"},
    {"a={s:0:0..1e40}", "is too large"},
+   /* a double cannot step 1e12 by 1e-6: capped by the step count */
+   {"a={s:0:0..1e15:0.000001}", "more than 1e6 steps"},
    {"a={s:0:-1e16..1}", "is too large"},
 };
 

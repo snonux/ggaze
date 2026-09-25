@@ -172,7 +172,8 @@ editing remains a non-goal.
   missing field or a non-number (`1,5`, `nan`, ` 1`), a number beyond
   ±1e15 or needing more than 6 decimals (the default, an end, or the
   step — given, or implied as a twentieth of the range — could not be
-  written exactly: `{s:0:0..1:1e-300}`), an empty or inverted
+  written exactly: `{s:0:0..1:1e-300}`), a range of more than 1e6 steps
+  (a double cannot step 1e12 by 0.000001), an empty or inverted
   range, a default outside it, a step that is not above 0 or wider than
   the range. A malformed preset is kept (Preferences lists it) but is not
   tunable, and rendering it fails with the message instead of GEGL
