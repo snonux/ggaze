@@ -369,8 +369,9 @@ void enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl);
 void enhance_ctrl_discard(EnhanceCtrl *p_ctrl);
 
 /* x / the Revert button: enhance_ctrl_discard as an UNDOABLE edit step --
- * `u` brings every edit back. */
-void enhance_ctrl_revert_all(EnhanceCtrl *p_ctrl);
+ * `u` brings every edit back. TRUE when that step was recorded; FALSE when
+ * nothing the history holds changed (only a tool's unapplied state went). */
+gboolean enhance_ctrl_revert_all(EnhanceCtrl *p_ctrl);
 
 /* --- undo / redo of edit steps (7i2) ------------------------------------ */
 /* `u` / Ctrl+z and `U` / Ctrl+Shift+Z with the panel open (the window

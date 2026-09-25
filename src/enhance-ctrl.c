@@ -1227,13 +1227,18 @@ enhance_ctrl_discard(EnhanceCtrl *p_ctrl) {
  * straighten angle was never applied), so `u` brings back what the image
  * was, not a half-made adjustment. x stacks on the steps before it, and
  * undoing it puts every edit back at once. */
-void
+gboolean
 enhance_ctrl_revert_all(EnhanceCtrl *p_ctrl) {
-   g_return_if_fail(p_ctrl != NULL);
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
    EditSnapshot t_before;
+   EditSnapshot t_after;
    _snapshot(p_ctrl, &t_before);
    _discard(p_ctrl);
+   _snapshot(p_ctrl, &t_after);
    _push_step(p_ctrl, EDIT_STEP_REVERT, "revert all", &t_before);
+   /* No step when nothing the history holds changed: a straighten tool's
+    * live, unapplied angle is dropped without one. */
+   return (!edit_snapshot_equal(&t_before, &t_after));
 }
 
 /* --- undo / redo (7i2) ---------------------------------------------------- */
@@ -1270,7 +1275,12 @@ _step(EnhanceCtrl *p_ctrl, gboolean b_redo) {
       b_redo ? edit_history_redo(p_ctrl->p_history, &c_label)
              : edit_history_undo(p_ctrl->p_history, &c_label);
    if (p_s == NULL) {
-      _show_status(p_ctrl, b_redo ? "Nothing to redo" : "Nothing to undo");
+      /* The panel stays open across files, and a trash / move always
+       * changes file (clearing this history), so "d, oops, u" lands here:
+       * say where the file undo lives rather than a bare refusal. */
+      _show_status(p_ctrl, b_redo ? "Nothing to redo"
+                                  : "No edit to undo \u2014 close the panel "
+                                    "(a) and u undoes the last trash / move");
       return (FALSE);
    }
    /* Both borrowed from the history, which nothing below changes. */

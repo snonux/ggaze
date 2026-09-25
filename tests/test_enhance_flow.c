@@ -4397,7 +4397,7 @@ test_undo_redo_a_preset(void) {
    g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "Auto-fix"));
    assert_history_buttons(fx.p_win, FALSE, TRUE);
    edit_key(fx.p_win, GDK_KEY_u, 0); /* nothing left */
-   assert_status_prefix(fx.p_win, "Nothing to undo");
+   assert_status_prefix(fx.p_win, "No edit to undo");
 
    edit_key_and_wait(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
    assert_status_prefix(fx.p_win, "Redid: Auto-fix on");
@@ -4629,7 +4629,7 @@ test_navigation_clears_the_history(void) {
    assert_showing(fx.p_win, "a.jpg");
    assert_history_buttons(fx.p_win, FALSE, FALSE);
    edit_key(fx.p_win, GDK_KEY_u, 0);
-   assert_status_prefix(fx.p_win, "Nothing to undo");
+   assert_status_prefix(fx.p_win, "No edit to undo");
    edit_key(fx.p_win, GDK_KEY_U, GDK_SHIFT_MASK);
    assert_status_prefix(fx.p_win, "Nothing to redo");
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
@@ -4648,7 +4648,7 @@ test_discard_clears_the_history(void) {
    assert_showing(fx.p_win, "rot6.jpg");
    assert_history_buttons(fx.p_win, FALSE, FALSE);
    edit_key(fx.p_win, GDK_KEY_u, 0);
-   assert_status_prefix(fx.p_win, "Nothing to undo");
+   assert_status_prefix(fx.p_win, "No edit to undo");
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
    fixture_teardown(&fx);
 }
@@ -4672,7 +4672,7 @@ test_slideshow_discard_clears_the_history(void) {
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
    assert_history_buttons(fx.p_win, FALSE, FALSE);
    edit_key(fx.p_win, GDK_KEY_u, 0);
-   assert_status_prefix(fx.p_win, "Nothing to undo");
+   assert_status_prefix(fx.p_win, "No edit to undo");
    g_settings_reset(settings_get_gsettings(p_s), "slideshow-delay");
    settings_delete(p_s);
    tool_fx_close(&fx);
@@ -4695,7 +4695,7 @@ test_u_outside_the_panel_undoes_a_trash(void) {
    g_assert_false(g_file_test(fx.c_path, G_FILE_TEST_EXISTS));
    fire(fx.p_win, "win.enhance");
    edit_key(fx.p_win, GDK_KEY_u, 0); /* the panel's: an edit undo */
-   assert_status_prefix(fx.p_win, "Nothing to undo");
+   assert_status_prefix(fx.p_win, "No edit to undo");
    ggtest_drain_main(200);
    g_assert_false(g_file_test(fx.c_path, G_FILE_TEST_EXISTS));
    fire(fx.p_win, "win.enhance"); /* close the panel */

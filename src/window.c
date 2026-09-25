@@ -1509,9 +1509,14 @@ _action_edit_revert(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       _show_status(p_win, "Nothing to revert — this is the original");
       return;
    }
-   enhance_ctrl_revert_all(p_win->p_enhance_ctrl); /* ends a tool first */
-   _show_status(p_win, "Reverted — every edit dropped, the original is "
-                       "back (u undoes)");
+   /* Ends a tool first. Offer u only when the revert was recorded: a
+    * straighten tool's live, unapplied angle goes without a step. */
+   if (enhance_ctrl_revert_all(p_win->p_enhance_ctrl)) {
+      _show_status(p_win, "Reverted — every edit dropped, the original is "
+                          "back (u undoes)");
+   } else {
+      _show_status(p_win, "Reverted — the original is back");
+   }
 }
 
 /* Where win.edit-undo / win.edit-redo may act, else a status line saying
