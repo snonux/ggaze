@@ -5,7 +5,9 @@
  * constructed GgazeWindow: changing thumbnail-size before opening a folder
  * changes the grid size the window builds with, and changing sort changes the
  * navigator sort. Also exercises the AdwPreferencesDialog end to end: build,
- * present on a window, close, and check it is really destroyed.
+ * present on a window, close, and check it is really destroyed; and (GEGL
+ * builds) the enhance-preset list's cap: Add refused at it, an entry
+ * stored past it marked ignored (ai2).
  * Uses the memory GSettings backend + build-tree schema (set in the meson
  * env), so no dconf is touched. Display-gated; skipped cleanly without a
  * display.
@@ -14,6 +16,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
 :*/
 
+#include "enhancer.h"
+#include "ggaze-config.h"
 #include "gridview.h"
 #include "prefs.h"
 #include "settings.h"
@@ -310,6 +314,108 @@ test_prefs_dialog_constructs(void) {
    settings_delete(p_cfg);
 }
 
+#if GGAZE_HAVE_GEGL
+/* The first AdwActionRow titled c_title under p_root, or NULL. */
+static GtkWidget *
+find_row(GtkWidget *p_root, const char *c_title) {
+   if (ADW_IS_ACTION_ROW(p_root) &&
+       g_strcmp0(adw_preferences_row_get_title(ADW_PREFERENCES_ROW(p_root)),
+                 c_title) == 0) {
+      return (p_root);
+   }
+   for (GtkWidget *p_c = gtk_widget_get_first_child(p_root); p_c != NULL;
+        p_c            = gtk_widget_get_next_sibling(p_c)) {
+      GtkWidget *p_found = find_row(p_c, c_title);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+   }
+   return (NULL);
+}
+
+/* The first button under p_root whose tooltip starts with c_tip. */
+static GtkWidget *
+find_tip_button(GtkWidget *p_root, const char *c_tip) {
+   const char *c_own = gtk_widget_get_tooltip_text(p_root);
+   if (GTK_IS_BUTTON(p_root) && c_own != NULL &&
+       g_str_has_prefix(c_own, c_tip)) {
+      return (p_root);
+   }
+   for (GtkWidget *p_c = gtk_widget_get_first_child(p_root); p_c != NULL;
+        p_c            = gtk_widget_get_next_sibling(p_c)) {
+      GtkWidget *p_found = find_tip_button(p_c, c_tip);
+      if (p_found != NULL) {
+         return (p_found);
+      }
+   }
+   return (NULL);
+}
+
+/* Store u_n presets "P1" .. "P<u_n>" and present a dialog over them on
+ * p_win (a dialog's pages only join its widget tree once presented);
+ * close_dialog takes it down. */
+static AdwPreferencesDialog *
+dialog_with_presets(Settings *p_cfg, guint u_n, GgazeWindow *p_win) {
+   GPtrArray *p_pairs = settings_pair_array_new();
+   for (guint u = 0; u < u_n; u++) {
+      char *c_name = g_strdup_printf("P%u", u + 1);
+      g_ptr_array_add(p_pairs,
+                      settings_pair_new(c_name, "gegl:saturation scale=1.2"));
+      g_free(c_name);
+   }
+   settings_set_enhance_presets(p_cfg, p_pairs);
+   g_ptr_array_unref(p_pairs);
+   AdwPreferencesDialog *p_dlg = prefs_build_dialog(p_cfg);
+   adw_dialog_present(ADW_DIALOG(p_dlg), GTK_WIDGET(p_win));
+   drain_main(200);
+   return (p_dlg);
+}
+
+/* Close a presented dialog and wait until it is really gone. */
+static void
+close_dialog(AdwPreferencesDialog *p_dlg) {
+   gboolean b_finalized = FALSE;
+   g_object_weak_ref(G_OBJECT(p_dlg), note_finalized, &b_finalized);
+   adw_dialog_close(ADW_DIALOG(p_dlg));
+   g_assert_true(wait_for_finalized(&b_finalized));
+}
+
+/* ai2: every user preset is a row of the edit panel, up to its cap. One
+ * short of it, Add is offered; at it, Add is refused and says why; an
+ * entry stored past it (by gsettings, say) is marked as ignored, the
+ * others are not. */
+static void
+test_prefs_preset_cap(void) {
+   Settings             *p_cfg = settings_new();
+   GgazeWindow          *p_win = new_window();
+   guint                 u_cap = GGAZE_ENHANCE_MAX_USER_PRESETS;
+   AdwPreferencesDialog *p_dlg = dialog_with_presets(p_cfg, u_cap - 1, p_win);
+   g_assert_nonnull(find_row(GTK_WIDGET(p_dlg), "P23"));
+   g_assert_nonnull(find_tip_button(GTK_WIDGET(p_dlg), "Add entry"));
+   /* not at the cap: an ordinary Add */
+   g_assert_null(find_tip_button(GTK_WIDGET(p_dlg), "At most "));
+   close_dialog(p_dlg);
+
+   p_dlg = dialog_with_presets(p_cfg, u_cap + 1, p_win);
+   GtkWidget *p_add;
+   p_add = find_tip_button(GTK_WIDGET(p_dlg), "At most 24 presets");
+   g_assert_nonnull(p_add);
+   g_assert_false(gtk_widget_get_sensitive(p_add));
+   GtkWidget *p_last = find_row(GTK_WIDGET(p_dlg), "P24");
+   GtkWidget *p_over = find_row(GTK_WIDGET(p_dlg), "P25");
+   g_assert_nonnull(p_last);
+   g_assert_nonnull(p_over);
+   g_assert_false(g_str_has_prefix(
+      adw_action_row_get_subtitle(ADW_ACTION_ROW(p_last)), "Ignored"));
+   g_assert_true(g_str_has_prefix(
+      adw_action_row_get_subtitle(ADW_ACTION_ROW(p_over)), "Ignored: over"));
+   close_dialog(p_dlg);
+   destroy_window_and_wait(p_win);
+   g_settings_reset(settings_get_gsettings(p_cfg), "enhance-presets");
+   settings_delete(p_cfg);
+}
+#endif
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -333,5 +439,8 @@ main(int i_argc, char **c_argv) {
                    test_open_applies_sort_setting);
    g_test_add_func("/settings/prefs_dialog_constructs",
                    test_prefs_dialog_constructs);
+#if GGAZE_HAVE_GEGL
+   g_test_add_func("/settings/prefs_preset_cap", test_prefs_preset_cap);
+#endif
    return (g_test_run());
 }
