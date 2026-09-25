@@ -1182,60 +1182,71 @@ old_builtin(GeglBuffer *p_in, const char *c_op, const char *c_prop,
    return (p_out);
 }
 
+/* What each built-in was before 8i2: its name, its graph text at the
+ * default (NULL: nothing to tune), and the node it was made as (c_prop
+ * NULL: the op's own defaults). */
+static const struct {
+   const char *c_name;
+   const char *c_graph;
+   const char *c_op;
+   const char *c_prop;
+   gdouble     d_value;
+} OLD_BUILTINS[] = {
+   {"Auto-fix", NULL, "gegl:stretch-contrast", NULL, 0},
+   {"Brightness", "gegl:exposure exposure=0.5", "gegl:exposure", "exposure",
+    0.5},
+   {"Contrast", "gegl:brightness-contrast contrast=1.3",
+    "gegl:brightness-contrast", "contrast", 1.3},
+   {"Saturation", "gegl:saturation scale=1.4", "gegl:saturation", "scale", 1.4},
+   {"Warm", NULL, "gegl:color-enhance", NULL, 0},
+   {"Cool", "gegl:exposure exposure=-0.3", "gegl:exposure", "exposure", -0.3},
+   {"Sharpen", "gegl:unsharp-mask scale=0.5", "gegl:unsharp-mask", NULL, 0},
+   {"Denoise", "gegl:noise-reduction iterations=4", "gegl:noise-reduction",
+    NULL, 0},
+};
+
+/* Built-in u (p_pr, default strength d_def) is OLD_BUILTINS[u]: the same
+ * name, tunable iff it had a number, the same graph text at the default,
+ * and the same pixels from p_in. */
+static void
+assert_old_builtin(guint u, const EnhancerPreset *p_pr, gdouble d_def,
+                   GeglBuffer *p_in) {
+   g_assert_cmpstr(p_pr->c_name, ==, OLD_BUILTINS[u].c_name);
+   g_assert_cmpint(p_pr->b_tunable, ==, OLD_BUILTINS[u].c_graph != NULL);
+   if (OLD_BUILTINS[u].c_graph != NULL) {
+      char *c_graph = preset_strength_substitute(p_pr->c_graph, d_def, NULL);
+      g_assert_cmpstr(c_graph, ==, OLD_BUILTINS[u].c_graph);
+      g_free(c_graph);
+   } else {
+      g_assert_cmpfloat(d_def, ==, 0.0);
+   }
+   GError     *p_err = NULL;
+   GeglBuffer *p_new = enhancer_apply(p_in, p_pr, &p_err);
+   g_assert_no_error(p_err);
+   GeglBuffer *p_old =
+      old_builtin(p_in, OLD_BUILTINS[u].c_op, OLD_BUILTINS[u].c_prop,
+                  OLD_BUILTINS[u].d_value);
+   if (!same_pixels(p_new, p_old)) {
+      g_error("%s renders differently from before 8i2", OLD_BUILTINS[u].c_name);
+   }
+   g_object_unref(p_new);
+   g_object_unref(p_old);
+}
+
 /* The built-in graphs at their default strength ARE the pre-8i2 presets:
  * the substituted text is the graph they had, and the pixels are the ones
  * the old programmatic nodes produced. Auto-fix and Warm have nothing to
  * tune. */
 static void
 test_builtin_defaults_reproduce(void) {
-   static const struct {
-      const char *c_name;
-      const char *c_graph; /* at the default; NULL: not tunable */
-      const char *c_op;
-      const char *c_prop; /* NULL: the op's own defaults */
-      gdouble     d_value;
-   } CASES[] = {
-      {"Auto-fix", NULL, "gegl:stretch-contrast", NULL, 0},
-      {"Brightness", "gegl:exposure exposure=0.5", "gegl:exposure", "exposure",
-       0.5},
-      {"Contrast", "gegl:brightness-contrast contrast=1.3",
-       "gegl:brightness-contrast", "contrast", 1.3},
-      {"Saturation", "gegl:saturation scale=1.4", "gegl:saturation", "scale",
-       1.4},
-      {"Warm", NULL, "gegl:color-enhance", NULL, 0},
-      {"Cool", "gegl:exposure exposure=-0.3", "gegl:exposure", "exposure",
-       -0.3},
-      {"Sharpen", "gegl:unsharp-mask scale=0.5", "gegl:unsharp-mask", NULL, 0},
-      {"Denoise", "gegl:noise-reduction iterations=4", "gegl:noise-reduction",
-       NULL, 0},
-   };
    Enhancer        *p_e   = enhancer_new();
    const GPtrArray *p_all = enhancer_get_presets(p_e);
    GeglBuffer      *p_in  = gradient_buffer();
    gdouble          d_def[GGAZE_ENHANCE_MAX_PRESETS];
    enhancer_default_strengths(p_all, d_def);
-   for (guint u = 0; u < G_N_ELEMENTS(CASES); u++) {
-      const EnhancerPreset *p_pr = g_ptr_array_index((GPtrArray *)p_all, u);
-      g_assert_cmpstr(p_pr->c_name, ==, CASES[u].c_name);
-      g_assert_cmpint(p_pr->b_tunable, ==, CASES[u].c_graph != NULL);
-      if (CASES[u].c_graph != NULL) {
-         char *c_graph = preset_strength_substitute(
-            p_pr->c_graph, p_pr->t_strength.d_default, NULL);
-         g_assert_cmpstr(c_graph, ==, CASES[u].c_graph);
-         g_free(c_graph);
-      } else {
-         g_assert_cmpfloat(d_def[u], ==, 0.0);
-      }
-      GError     *p_err = NULL;
-      GeglBuffer *p_new = enhancer_apply(p_in, p_pr, &p_err);
-      g_assert_no_error(p_err);
-      GeglBuffer *p_old =
-         old_builtin(p_in, CASES[u].c_op, CASES[u].c_prop, CASES[u].d_value);
-      if (!same_pixels(p_new, p_old)) {
-         g_error("%s renders differently from before 8i2", CASES[u].c_name);
-      }
-      g_object_unref(p_new);
-      g_object_unref(p_old);
+   for (guint u = 0; u < G_N_ELEMENTS(OLD_BUILTINS); u++) {
+      assert_old_builtin(u, g_ptr_array_index((GPtrArray *)p_all, u), d_def[u],
+                         p_in);
    }
    g_object_unref(p_in);
    enhancer_delete(p_e);

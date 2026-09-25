@@ -98,6 +98,13 @@ typedef struct {
     .c_label = (label)}
 
 #define _UNDO_TITLE "Undo the last edit step (panel open)"
+#define _NEXT_TITLE "Select the next preset card (panel open)"
+#define _PREV_TITLE "Select the previous preset card (panel open)"
+#define _TOGGLE_TITLE "Toggle the selected preset (panel open)"
+#define _DOWN_TITLE "Lower the selected preset's strength (turns it on)"
+#define _UP_TITLE "Raise the selected preset's strength (turns it on)"
+#define _DOWN5_TITLE "Lower the selected preset's strength five steps"
+#define _UP5_TITLE "Raise the selected preset's strength five steps"
 #define _REDO_TITLE "Redo the edit step undone last (panel open)"
 
 #define _CROP_GROUP "Crop tool (c)"
@@ -211,6 +218,40 @@ static const ShortcutEntry SHORTCUTS[] = {
    _PRESET_ROW(GDK_KEY_6, 6),
    _PRESET_ROW(GDK_KEY_7, 7),
    _PRESET_ROW(GDK_KEY_8, 8),
+   /* The selected card (8i2): with the panel open j / k and Up / Down
+    * move the selection, Enter toggles it, h / l and Left / Right lower /
+    * raise its strength (Shift: five steps) -- shadowing navigation, pan
+    * and zoom only while the panel is the key mode (Page Up / Page Down
+    * still change the image). One hint segment each: "j/k select",
+    * "Enter toggle", "h/l strength"; the arrows and Shift are in `?`. */
+   _PANEL_ROW(GDK_KEY_j, 0, "win.edit-select-next", _NEXT_TITLE, "select", 11,
+              NULL),
+   _PANEL_ROW(GDK_KEY_Down, 0, "win.edit-select-next", _NEXT_TITLE, NULL, 11,
+              NULL),
+   _PANEL_ROW(GDK_KEY_k, 0, "win.edit-select-prev", _PREV_TITLE, "select", 12,
+              NULL),
+   _PANEL_ROW(GDK_KEY_Up, 0, "win.edit-select-prev", _PREV_TITLE, NULL, 12,
+              NULL),
+   _PANEL_ROW(GDK_KEY_Return, 0, "win.edit-toggle-selected", _TOGGLE_TITLE,
+              "toggle", 13, NULL),
+   _PANEL_ROW(GDK_KEY_KP_Enter, 0, "win.edit-toggle-selected", _TOGGLE_TITLE,
+              NULL, 13, NULL),
+   _PANEL_ROW(GDK_KEY_h, 0, "win.edit-strength-down", _DOWN_TITLE, "strength",
+              14, NULL),
+   _PANEL_ROW(GDK_KEY_Left, 0, "win.edit-strength-down", _DOWN_TITLE, NULL, 14,
+              NULL),
+   _PANEL_ROW(GDK_KEY_l, 0, "win.edit-strength-up", _UP_TITLE, "strength", 15,
+              NULL),
+   _PANEL_ROW(GDK_KEY_Right, 0, "win.edit-strength-up", _UP_TITLE, NULL, 15,
+              NULL),
+   _PANEL_ROW(GDK_KEY_H, GDK_SHIFT_MASK, "win.edit-strength-down-5",
+              _DOWN5_TITLE, NULL, 16, NULL),
+   _PANEL_ROW(GDK_KEY_Left, GDK_SHIFT_MASK, "win.edit-strength-down-5",
+              _DOWN5_TITLE, NULL, 16, NULL),
+   _PANEL_ROW(GDK_KEY_L, GDK_SHIFT_MASK, "win.edit-strength-up-5", _UP5_TITLE,
+              NULL, 17, NULL),
+   _PANEL_ROW(GDK_KEY_Right, GDK_SHIFT_MASK, "win.edit-strength-up-5",
+              _UP5_TITLE, NULL, 17, NULL),
    {GDK_KEY_c, 0, "win.crop", "Crop tool (Enter applies, Esc cancels)",
     "Edit panel", _PANEL_HINT("crop", 20), .c_label = "Crop"},
    {GDK_KEY_r, 0, "win.straighten",
@@ -433,16 +474,20 @@ _letter_shifted(guint u_keyval, GdkModifierType e_mods) {
            u_keyval != gdk_keyval_to_lower(u_keyval));
 }
 
-/* Shift is compared only for letters, where it is the difference between
- * `h` (move) and `Shift+h` (grow) whether the keyval arrives upper-cased
- * (`H`, a real key press) or with the modifier (`h` + Shift). For any other
- * key the layout decides what Shift produces (`+`, `?`), so it is part of
- * the keyval and the state's Shift bit says nothing more. */
+/* Shift is compared for letters, where it is the difference between `h`
+ * (move) and `Shift+h` (grow) whether the keyval arrives upper-cased (`H`,
+ * a real key press) or with the modifier (`h` + Shift), and for keys that
+ * print nothing (the arrows, Enter), where Shift does not change the
+ * keyval and only the modifier tells `Left` (the panel's strength step)
+ * from `Shift+Left` (its five steps, 8i2). For any other key the layout
+ * decides what Shift produces (`+`, `?`), so it is part of the keyval and
+ * the state's Shift bit says nothing more. */
 static gboolean
 _shift_matches(const ShortcutEntry *p_row, guint u_keyval,
                GdkModifierType e_state) {
    if (!_is_letter(u_keyval)) {
-      return (TRUE);
+      return (g_unichar_isprint(gdk_keyval_to_unicode(u_keyval)) ||
+              (p_row->e_mods & GDK_SHIFT_MASK) == (e_state & GDK_SHIFT_MASK));
    }
    return (_letter_shifted(u_keyval, e_state) ==
            _letter_shifted(p_row->u_keyval, p_row->e_mods));

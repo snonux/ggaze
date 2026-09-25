@@ -329,6 +329,32 @@ gboolean enhance_ctrl_close(EnhanceCtrl *p_ctrl);
  * (layered), then re-apply asynchronously. Out-of-range i_idx is a silent
  * no-op. */
 void enhance_ctrl_toggle_preset(EnhanceCtrl *p_ctrl, gint i_idx);
+/* --- the selected card and preset strengths (8i2) ----------------------- */
+/* The panel's selected preset row (0-based): j / k move it, Enter toggles
+ * it, h / l tune it; a digit or a card click selects its row too. UI
+ * state, not an edit: navigation keeps it and undo never moves it. */
+gint enhance_ctrl_get_selected(EnhanceCtrl *p_ctrl);
+/* j (i_dir > 0) / k (i_dir < 0): move the selection, stopping at the
+ * first and last preset. */
+void enhance_ctrl_select_step(EnhanceCtrl *p_ctrl, gint i_dir);
+/* Enter: toggle the selected preset, exactly as its digit does. */
+void enhance_ctrl_toggle_selected(EnhanceCtrl *p_ctrl);
+/* h / l (i_steps -1 / +1; Shift: -5 / +5): move the selected preset's
+ * strength by i_steps steps within its range, turning the preset on, as an
+ * undoable step that coalesces with the presses before it on the same
+ * card (edit_history_push_run), and re-render (coalesced, last-write-
+ * wins). The status line names the new value ("Brightness +0.6"), or that
+ * the range ends there. A preset without a tunable number changes nothing
+ * and says so -- then FALSE. */
+gboolean enhance_ctrl_nudge_strength(EnhanceCtrl *p_ctrl, gint i_steps);
+/* Preset i_idx's strength now (canonical; 0 for a preset without a
+ * tunable number or out of range), and all of them
+ * (GGAZE_ENHANCE_MAX_PRESETS, borrowed): the title names them
+ * (enhancer_describe_state). Each is its preset's default on a new image
+ * and after a discard. */
+gdouble        enhance_ctrl_get_strength(EnhanceCtrl *p_ctrl, gint i_idx);
+const gdouble *enhance_ctrl_get_strengths(EnhanceCtrl *p_ctrl);
+
 /* `s` / Ctrl+S: export the previewed image with the enabled-preset chain to
  * a non-colliding <stem>-enhanced[-<n>].<ext>, in a worker (the full decode
  * + chain + encode takes seconds and used to freeze the UI). On success the
