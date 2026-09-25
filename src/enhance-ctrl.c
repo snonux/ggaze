@@ -740,11 +740,6 @@ enhance_ctrl_save_async(EnhanceCtrl *p_ctrl, EnhanceSaveDoneFn fn_done,
 
 /* --- panel sync ----------------------------------------------------------- */
 
-/* Bring the open panel in line with the state: each preset card
- * (_sync_card: its highlight from the mask, the selection ring, the
- * strength), and the save-state line + Save button from active/saved. A no-op
- * while the panel is closed (every widget pointer is NULL then), so callers
- * never check p_panel first. */
 /* p_widget has c_class iff b_on. */
 static void
 _set_class(GtkWidget *p_widget, const char *c_class, gboolean b_on) {
@@ -782,6 +777,11 @@ _sync_card(EnhanceCtrl *p_ctrl, guint i) {
    }
 }
 
+/* Bring the open panel in line with the state: each preset card
+ * (_sync_card: its highlight from the mask, the selection ring, the
+ * strength), and the save-state line + Save button from active/saved. A no-op
+ * while the panel is closed (every widget pointer is NULL then), so callers
+ * never check p_panel first. */
 static void
 _sync_panel(EnhanceCtrl *p_ctrl) {
    for (guint i = 0; i < G_N_ELEMENTS(p_ctrl->p_btns); i++) {

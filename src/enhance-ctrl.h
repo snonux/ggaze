@@ -26,20 +26,23 @@
  * with no second GtkRoot to bind anything onto. It is the one home of every
  * edit (6i2): the presets, the Transform buttons (c / r / [ / ]) and the
  * Actions (save, revert, close), each showing its key; the panel-only keys
- * (the digits) are routed to it by edit-mode.c while it is open. It stays
+ * (the digits, and since 8i2 j / k / Enter / h / l on the selected card)
+ * are routed to it by edit-mode.c while it is open. It stays
  * open across navigation and re-previews the new image, so a folder can be
  * worked through with `a` pressed once.
  *
  * Saving: `s` exports a copy and marks the preview SAVED; a saved preview is
  * no longer dirty, so moving on does not prompt for it. What was saved is
- * remembered as the (mask, transform) pair the export wrote: any state that
- * differs from it is unsaved, and a state that comes back to exactly it (a
- * tool cancelled back to it, a preset toggled off and on) is saved again --
+ * remembered as the (mask, strengths, transform) state the export wrote:
+ * any state that differs from it is unsaved, and a state that comes back
+ * to exactly it (a tool cancelled back to it, a preset toggled off and on,
+ * a strength stepped away and back) is saved again --
  * the file on disk is that state, whichever way it was reached. The gate's
  * prompt therefore only ever asks about work that has not been written
  * anywhere.
  *
  * Undo / redo (7i2): every EDIT STEP -- a preset toggled (key or card), a
+ * run of strength steps on one card or one slider drag (8i2), a
  * quarter turn, a crop or straighten applied (the tool reports it,
  * enhance_ctrl_record_tool_step), every edit reverted (x) -- is recorded
  * in an EditHistory (edit-history.h) as the whole edit state before and

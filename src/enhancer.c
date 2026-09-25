@@ -5,9 +5,13 @@
  * below plus the user's graph presets from Preferences) and the GEGL
  * operations that apply, chain, preview and export them. Every operation is
  * a pure function of its arguments; the Enhancer instance only owns the
- * list. A user preset is a whitespace-separated chain of GEGL operations,
- * each "op:name" optionally followed by "prop=value" pairs, e.g.
- * "gegl:saturation scale=1.3 gegl:unsharp-mask std-dev=1.5".
+ * list. A preset -- built-in or the user's -- is a whitespace-separated
+ * chain of GEGL operations, each "op:name" optionally followed by
+ * "prop=value" pairs, e.g. "gegl:saturation scale=1.3 gegl:unsharp-mask
+ * std-dev=1.5"; one value may be a tunable {s:DEFAULT:MIN..MAX[:STEP]}
+ * placeholder (8i2, preset-strength.h), which the caller's strengths
+ * replace (enhancer_presets_resolve) and the chain otherwise fills with
+ * its default.
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
