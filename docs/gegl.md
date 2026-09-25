@@ -31,8 +31,10 @@ editing remains a non-goal.
   choices: a small, dim `Original` reference first (a picture, not a
   button), then one row card per preset with its auto-assigned hotkey
   (`1`, `2`, …, capped at the mask's 8 slots), highlighted and checked
-  while it is on. By default each card carries a small preview thumbnail
-  of that preset applied *alone*, all generated as one cancellable background
+  while it is on, showing its **strength** when it has a tunable number
+  (8i2, below); the selected card (`j`/`k`) wears a ring and shows its
+  strength slider. By default each card carries a small preview thumbnail
+  of that preset applied *alone* at its default strength, all generated as one cancellable background
   batch; Preferences can turn the thumbnails off, which leaves label-only
   cards (no batch at all) for slower systems. The thumbnails and the
   Original reference ignore the geometric transform (crop / straighten / rotate):
@@ -132,6 +134,43 @@ editing remains a non-goal.
 - Presets are configurable: `enhance-presets` GSettings `a(ss)` — ordered
   `(name, gegl-graph)` pairs. Order = hotkey order. Ships with sensible
   built-in defaults; user can add/edit in Preferences (`,`).
+- **Adjustable strength (8i2).** A preset graph may mark **one** number as
+  tunable with a placeholder that also declares its range:
+  `{s:DEFAULT:MIN..MAX}` (step: a twentieth of the range) or
+  `{s:DEFAULT:MIN..MAX:STEP}`, e.g. `gegl:exposure
+  exposure={s:0.5:-2..2:0.1}`. In the panel `h` / `l` (`Left` / `Right`;
+  `Shift` five steps) move the selected preset's strength by a step and
+  turn it on, and its slider does the same for the mouse; the title names
+  a strength that is not the default (*Brightness +0.6*). The strength is
+  part of the edit state — rendered, exported, compared for saved / dirty,
+  undone as one step per run of presses or per drag — and every preset is
+  back at its default on another image and after `x`. A graph without a
+  placeholder is on / off only, exactly as before 8i2.
+
+  *Why the range lives in the graph string.* The setting is `a(ss)`, one
+  `(name, graph)` pair per preset. A third field would change the schema
+  type (every stored list would stop loading) and a separate key would
+  have to follow every rename, reorder and removal of a preset by hand.
+  Inline, a preset stays one string, old strings parse unchanged, and the
+  Preferences editor edits it as it always did — it only checks the
+  placeholder and names what is wrong.
+
+  *Rules* (`src/preset-strength.{c,h}`, plain C, unit-tested in every
+  lane): numbers are C-locale decimals, parsed with `g_ascii_strtod` and
+  written with `g_ascii_formatd`, so a comma-decimal `LC_NUMERIC` changes
+  nothing; a value is written with the fewest decimals that represent the
+  default, the range and the step (no trailing zeros, never `-0`), so a
+  built-in at its default renders from the exact graph text it had before;
+  values are clamped into the range and **canonical** (equal to the
+  parse of their own text), so equal strengths compare equal and a step up
+  and back down lands on the start; `h` / `l` step from the current value
+  and a slider snaps onto the grid through the default. Refused, with a
+  message: a second placeholder, a stray brace, a name other than `s`, a
+  missing field or a non-number (`1,5`, `nan`, ` 1`), an empty or inverted
+  range, a default outside it, a step that is not above 0 or wider than
+  the range. A malformed preset is kept (Preferences lists it) but is not
+  tunable, and rendering it fails with the message instead of GEGL
+  reading `{s:…` as 0.
 - GEGL runs **only** when a preset is active or on export. The default fast
   decode path (GdkPixbuf / direct libs) is unchanged — the "fast" goal holds.
 - Enhance is **not** applied during `h`/`l` scrubbing — only when settled on an
@@ -165,15 +204,32 @@ save a copy).
 | Softglow      | `gegl:softglow`                                           |
 
 **Tunable parameters:** every preset is a `gegl-graph` string in
-`enhance-presets` (`a(ss)`), so the exact strength (saturation amount,
-contrast level, exposure stops) is editable in Preferences or via
-`gsettings` — no slider UI needed. The Curves preset uses a fixed curve shape
-(also editable in the graph text); a full interactive curve editor is out of
-scope — hand off to GIMP (`e`) for that.
+`enhance-presets` (`a(ss)`), so any number in it is editable in
+Preferences or via `gsettings`, and one of them per preset can be marked
+`{s:…}` for the panel's `h` / `l` and slider (above). The Curves preset
+uses a fixed curve shape (also editable in the graph text); a full
+interactive curve editor is out of scope — hand off to GIMP (`e`) for
+that.
 
-Graph strings are illustrative. Built-in presets are built programmatically
-with `gegl_node_new_child`; user-authored presets can be stored as `gegl:gegl`
-graph text and parsed with `gegl_node_new_from_xml`.
+The table above is ideas. **The built-in presets** that ship are graph
+strings too (`BUILTINS[]` in `enhancer.c`), run by the same parser as a
+user's: whitespace-separated `gegl:op` names each followed by
+`prop=value` pairs. Each tunable default is the value the preset was
+built with before 8i2 (then programmatically, `gegl_node_new_child`), so
+the panel at its defaults renders the same pixels
+(`tests/test_enhancer.c` compares them); each range lies inside the op's
+own UI range (gegl 0.4.72):
+
+| # | Preset     | Graph                                                   | Default · range · step |
+|---|------------|---------------------------------------------------------|------------------------|
+| 1 | Auto-fix   | `gegl:stretch-contrast`                                 | — (nothing to tune) |
+| 2 | Brightness | `gegl:exposure exposure={s:0.5:-2..2:0.1}`              | 0.5 · −2..2 · 0.1 (stops) |
+| 3 | Contrast   | `gegl:brightness-contrast contrast={s:1.3:0..2:0.05}`   | 1.3 · 0..2 · 0.05 |
+| 4 | Saturation | `gegl:saturation scale={s:1.4:0..2:0.1}`                | 1.4 · 0..2 · 0.1 |
+| 5 | Warm       | `gegl:color-enhance`                                    | — (the op takes no property) |
+| 6 | Cool       | `gegl:exposure exposure={s:-0.3:-2..0:0.1}`             | −0.3 · −2..0 · 0.1 |
+| 7 | Sharpen    | `gegl:unsharp-mask scale={s:0.5:0..3:0.1}`              | 0.5 (the op's default) · 0..3 · 0.1 |
+| 8 | Denoise    | `gegl:noise-reduction iterations={s:4:1..12:1}`         | 4 (the op's default) · 1..12 · 1 |
 
 ## Crop, straighten & rotate tools
 
