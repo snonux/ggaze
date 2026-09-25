@@ -17,14 +17,19 @@
  *      AND on screen         fired as their win.* actions (the panel is
  *                            hidden, not closed, beside the grid: its
  *                            digits are dead there, not aimed at an image
- *                            that is not on screen);
+ *                            that is not on screen); under a tool only
+ *                            the rows the tool leaves alone, and never
+ *                            the selected card's j / k / Enter / h / l
+ *                            (a selection or strength moved behind a
+ *                            modal tool, 8i2);
  *   3. otherwise, or when neither claims the key -> nothing here: the key
  *      goes on to the global table (so `h` is win.prev again the moment the
  *      tool ends, and a digit with the panel closed does nothing).
  *
  * Adding a panel key (an undo, a strength nudge on a selected card) is a
  * table row scoped to GGAZE_KEY_MODE_PANEL plus its action: this router
- * does not change.
+ * does not change (unless the key must not reach the panel under a tool,
+ * like the card keys: _is_card_action).
  *
  * It also owns the KEY-HINT BAR: a strip under the large view, shown while
  * the panel or a tool is the key mode, listing that mode's live keys as

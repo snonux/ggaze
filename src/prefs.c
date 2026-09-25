@@ -566,11 +566,11 @@ _init_lists(PrefsLists *p_l, Settings *p_s) {
                  .c_description = "Extra presets for the a "
                                   "chooser: GEGL operations with "
                                   "prop=value settings, in order. "
-                                  "One number may be tunable (h / l "
-                                  "and a slider in the panel): write "
-                                  "{s:DEFAULT:MIN..MAX} or "
+                                  "One number may be marked tunable "
+                                  "with {s:DEFAULT:MIN..MAX} or "
                                   "{s:DEFAULT:MIN..MAX:STEP} in its "
-                                  "place",
+                                  "place (tunable in the panel once "
+                                  "it lists user presets)",
                  .c_placeholder = "e.g. gegl:saturation "
                                   "scale={s:1.3:0..2:0.1} "
                                   "gegl:unsharp-mask std-dev=1.5",

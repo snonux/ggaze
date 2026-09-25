@@ -107,9 +107,12 @@ const char *shortcuts_label_for_action(const char *c_action);
 
 /* The win.* action a PANEL-scoped row binds u_keyval + e_state to in
  * e_mode (borrowed), or NULL. Only scoped rows are consulted: a global key
- * is the shortcut controller's. Shift is compared for letters and for keys
- * that print nothing (`Left` vs `Shift+Left`), not for the rest (it is
- * part of the keyval for `+`, `?`, ...); NumLock is ignored, and so is
+ * is the shortcut controller's. Shift is compared for letters; on a key
+ * that prints nothing (arrows, Enter, Esc) it counts only when the mode
+ * has an explicit Shift twin of that key (the global `Shift+Left` pans,
+ * `Left` goes back), else it is ignored (`Shift+Enter` applies a crop as
+ * `Enter` does); for the rest it is part of the keyval (`+`, `?`, ...),
+ * so the modifier is not read. NumLock is ignored, and so is
  * Caps Lock: a letter it upper-cased without Shift matches as the plain
  * letter (`H` + Lock is `h`), with Shift as the Shift chord. */
 const char *shortcuts_mode_action(GgazeKeyMode e_mode, guint u_keyval,

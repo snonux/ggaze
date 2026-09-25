@@ -1615,12 +1615,13 @@ _action_enhance_n(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    enhance_ctrl_toggle_preset(p_win->p_enhance_ctrl, i_idx);
 }
 
-/* The edit panel's selection / strength actions (8i2): j / k and Up /
- * Down move the selected card, Enter toggles it, h / l and Left / Right
- * lower / raise its strength one step (Shift: five), turning it on. Their
- * keys are rows scoped to the panel's key mode (edit-mode.c routes them
- * only while it is open and on screen); fired any other way -- a script,
- * a future menu entry -- they only say where they work. */
+/* The edit panel's selection / strength actions (8i2): j / k move the
+ * selected card, Enter toggles it, h / l lower / raise its strength one
+ * step (Shift: five), turning it on -- the vi keys alone; the arrows stay
+ * navigation and pan. Their keys are rows scoped to the panel's key mode
+ * (edit-mode.c routes them only while it is open and on screen, and not
+ * under a crop / straighten tool); fired any other way -- a script, a
+ * future menu entry -- they only say where they work. */
 static void
 _action_panel_op(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_v;

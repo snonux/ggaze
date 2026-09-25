@@ -144,9 +144,9 @@ drift from the live bindings.
 | `!`            | run a shell script → popup (e.g. `usbimport`) |
 | `a`            | open / close the **edit panel** beside the image (GEGL) — presets, crop, straighten, rotate, save, revert; in the grid, where an open panel is hidden, `a` goes back to the large view and shows it (it never closes a panel you cannot see) |
 | `1`–`8`        | toggle preset N (layered) — **only while the edit panel is open and on screen** (large view); with it closed, or hidden beside the grid, a digit does nothing. The digit also selects that preset's card |
-| `j` / `k`, `Down` / `Up` | **edit panel open:** select the next / previous preset card (a ring marks it; stops at the first and last) — instead of panning |
+| `j` / `k`      | **edit panel open:** select the next / previous preset card (a ring marks it; stops at the first and last) — instead of panning (`Down` / `Up` still pan) |
 | `Enter`        | **edit panel open:** toggle the selected preset, as its digit does |
-| `h` / `l`, `Left` / `Right` | **edit panel open:** lower / raise the selected preset's **strength** one step, turning it on (`Shift`: five steps) — instead of previous / next image; `Page Up` / `Page Down` still change the image. A preset with nothing to tune (Auto-fix, Warm) says so and changes nothing |
+| `h` / `l`      | **edit panel open:** lower / raise the selected preset's **strength** one step, turning it on (`Shift`: five steps) — instead of previous / next image; `Left` / `Right` and `Page Up` / `Page Down` still change the image, so flicking through a folder with the arrows never moves a strength. A preset with nothing to tune (Auto-fix, Warm) says so (and that `←`/`→` or `PgUp`/`PgDn` change the image) and changes nothing |
 | `c`            | crop tool (GEGL; opens the edit panel first): rectangle overlay; `Enter` applies, `Esc` cancels — see "Crop, straighten & rotate tools" |
 | `r`            | straighten tool (GEGL; opens the edit panel first): horizon drag / `h` `l` nudge ±0.5°, `a` auto-crop; `Enter` / `Esc` |
 | `]` / `[`      | rotate 90° clockwise / counter-clockwise (GEGL, one-shot; opens the edit panel first; repeat for 180°/270°) |
@@ -179,7 +179,7 @@ and each owns them only while it is on screen:
 
 | Mode | Live while | Its own keys |
 |------|------------|--------------|
-| **Edit** | the edit panel is open and on screen (large view), no tool up | `1`–`N` presets — one digit per configured preset, at most 8 · `j`/`k` (`Down`/`Up`) select a preset card · `Enter` toggles it · `h`/`l` (`Left`/`Right`) its strength, `Shift` five steps · `u` / `Ctrl+z` undo and `U` / `Ctrl+Shift+Z` redo an edit step (plus the global `c` `r` `[` `]` `s` `x` `Space` `a`/`Esc` it lists) |
+| **Edit** | the edit panel is open and on screen (large view), no tool up | `1`–`N` presets — one digit per configured preset, at most 8 · `j`/`k` select a preset card · `Enter` toggles it · `h`/`l` its strength, `Shift` five steps (the vi keys only: the arrows stay global) · `u` / `Ctrl+z` undo and `U` / `Ctrl+Shift+Z` redo an edit step (plus the global `c` `r` `[` `]` `s` `x` `Space` `a`/`Esc` it lists) |
 | **Crop** | the crop tool is up | `h`/`j`/`k`/`l` move · `Shift+h/j/k/l` grow that side · `Ctrl+h/j/k/l` shrink that side · `a` aspect cycle (free → 1:1 → 3:2 → 4:3 → 16:9 → original) · `Enter` apply · `Esc` cancel |
 | **Straighten** | the straighten tool is up | `h`/`l` (and `-`/`+`) nudge ½° · `a` auto-crop · `Enter` apply · `Esc` cancel |
 
@@ -201,17 +201,22 @@ tooltips and the `F10` menu are all generated from `shortcuts.c`'s one
 table (rows scoped to a mode, each with a short hint label and, for the
 menu, a short label such as *Crop* where the help says "Crop tool (Enter
 applies, Esc cancels)"), so they cannot drift from the keys that actually
-work. Inside the panel `j`/`k` (and `Down`/`Up`) select a preset card,
-`Enter` toggles it and `h`/`l` (and `Left`/`Right`) tune its strength
-(8i2) — so while the panel is the key mode the image changes with `Page
-Up` / `Page Down` (or `g` / `G`), and panning a zoomed picture is the
-mouse's; `u` / `Ctrl+z` are the panel's own undo. All of them are the
-global keys again the moment the panel closes or hides with the grid.
+work. Inside the panel `j`/`k` select a preset card, `Enter` toggles it
+and `h`/`l` tune its strength (8i2) — the vi keys only: while the panel
+is the key mode the image still changes with `←` / `→` or `Page Up` /
+`Page Down`, and `Up` / `Down` and `Shift+←` / `Shift+→` still pan a
+zoomed picture; `u` / `Ctrl+z` are the panel's own undo. All of them are
+the global keys again the moment the panel closes or hides with the grid.
 Under a crop / straighten tool the tool's own `h`/`j`/`k`/`l` and `Enter`
-come first; a key the tool leaves alone (the arrows under the crop tool)
-still reaches the panel. Under a crop / straighten tool the panel is still
-open, so `u` reaches it, and is refused with "Finish the current tool
-first" (see "Undo / redo of edit steps").
+come first; of the keys the tool leaves alone the panel still gets the
+digits and `u` (refused with "Finish the current tool first", see "Undo /
+redo of edit steps"), but never the selected card's `j` / `k` / `Enter` /
+`h` / `l` — a selection or strength moved behind a modal tool would
+re-render and record steps behind it; there they keep their global
+meaning. `Shift` held on a key that prints nothing (`Enter`, `Esc`, the
+arrows) only matters where a mode binds its Shift chord (`Shift+←`
+pans); elsewhere it is ignored, so `Shift+Enter` applies a crop and
+`Shift+Esc` cancels it.
 
 ## Mouse / touch
 
@@ -549,8 +554,9 @@ image's histogram.
 - **Preset strength (8i2).** A preset may have **one tunable number** —
   Brightness's exposure, Contrast's contrast, Saturation's scale, Cool's
   exposure, Sharpen's amount, Denoise's iterations (Auto-fix and Warm have
-  none). With the panel open, `h` / `l` (or `Left` / `Right`) lower /
-  raise the **selected** preset's strength one step (`Shift`: five),
+  none). With the panel open, `h` / `l` lower / raise the **selected**
+  preset's strength one step (`Shift`: five) along the grid its slider
+  snaps to,
   within its range, and **turn it on** if it was off; its card and slider
   show the value, the status line says it (*Brightness +0.6*, or
   *Brightness is at its maximum (+2)*), and the title names it when it is
@@ -558,13 +564,18 @@ image's histogram.
   the selected card's slider instead (clicking a card toggles and selects
   it, showing its slider); the value snaps to the preset's steps. On a
   preset with nothing to tune `h` / `l` say *Auto-fix has no strength to
-  adjust (on / off only — Enter toggles it)* and change nothing. The
+  adjust (on / off only — Enter toggles it; ←/→ or PgUp/PgDn change
+  image)* and change nothing. The mouse wheel over a slider scrolls the
+  cards, never the strength. The
   strength is part of the edit: the render (coalesced while `l` is held —
   the one in flight and one more, the last value always lands), `s`'s
   export, the saved / dirty rule (a strength moved off the saved value is
-  unsaved, moved back saved again) and undo all include it; a run of `h` /
-  `l` presses on one card undoes as **one step**, as does one drag of the
-  slider. Every preset is back at its **default** on another image and
+  unsaved, moved back saved again; only presets that are on count — a
+  tuned preset switched off is no unsaved change) and undo all include
+  it; a run of `h` / `l` presses on one card undoes as **one step**
+  (another card, a save or closing the panel ends the run, so undo can
+  stop at the saved value), as does one drag of the slider. A
+  Preferences change keeps every strength. Every preset is back at its **default** on another image and
   after `x`. The cards' preview thumbnails show each preset at its
   default. The **selection** is not an edit: it survives navigation and
   undo never moves it.

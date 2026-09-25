@@ -34,7 +34,8 @@
  * Saving: `s` exports a copy and marks the preview SAVED; a saved preview is
  * no longer dirty, so moving on does not prompt for it. What was saved is
  * remembered as the (mask, strengths, transform) state the export wrote:
- * any state that differs from it is unsaved, and a state that comes back
+ * any state that renders differently (a strength counts only on a preset
+ * that is on) is unsaved, and a state that comes back
  * to exactly it (a tool cancelled back to it, a preset toggled off and on,
  * a strength stepped away and back) is saved again --
  * the file on disk is that state, whichever way it was reached. The gate's
@@ -177,7 +178,10 @@ void enhance_ctrl_dispose(EnhanceCtrl *p_ctrl);
 
 /* --- engine presets --- */
 /* Feed the Preferences user presets (SettingsPair*) to the engine, which
- * rebuilds built-ins + user presets itself (enhancer_set_user_presets). */
+ * rebuilds built-ins + user presets itself (enhancer_set_user_presets).
+ * Called on every Preferences change, so the edit is kept: each strength
+ * is only clamped into its preset's range as the new list has it, and
+ * the panel, title and render follow only when that moved one. */
 void             enhance_ctrl_set_user_presets(EnhanceCtrl     *p_ctrl,
                                                const GPtrArray *p_pairs);
 const GPtrArray *enhance_ctrl_get_presets(EnhanceCtrl *p_ctrl);
@@ -345,10 +349,12 @@ void enhance_ctrl_toggle_selected(EnhanceCtrl *p_ctrl);
 /* h / l (i_steps -1 / +1; Shift: -5 / +5): move the selected preset's
  * strength by i_steps steps within its range, turning the preset on, as an
  * undoable step that coalesces with the presses before it on the same
- * card (edit_history_push_run), and re-render (coalesced, last-write-
- * wins). The status line names the new value ("Brightness +0.6"), or that
- * the range ends there. A preset without a tunable number changes nothing
- * and says so -- then FALSE. */
+ * card (edit_history_push_run; another card, a save or the panel closing
+ * end the run), and re-render (coalesced, last-write-wins). The value
+ * steps on the preset's grid through its default, the one its slider
+ * snaps to. The status line names the new value ("Brightness +0.6"), or
+ * that the range ends there. A preset without a tunable number changes
+ * nothing and says so (and how to change image instead) -- then FALSE. */
 gboolean enhance_ctrl_nudge_strength(EnhanceCtrl *p_ctrl, gint i_steps);
 /* Preset i_idx's strength now (canonical; 0 for a preset without a
  * tunable number or out of range), and all of them

@@ -140,11 +140,33 @@ _build_preset_card(guint u_idx, const EnhancerPreset *p_pr,
    return (p_btn);
 }
 
+/* Take the wheel away from a slider: GtkRange answers scroll events with
+ * its own GtkEventControllerScroll, so a wheel turned over the selected
+ * card's slider moved the strength instead of scrolling the cards' list
+ * -- a mouse user scrolling down the panel tuned a preset in passing.
+ * With that controller switched off (GTK_PHASE_NONE) the event bubbles
+ * on to the scrolled window like one over any other card. The slider is
+ * dragged or clicked; h / l are its keys. */
+static void
+_scale_ignore_scroll(GtkWidget *p_scale) {
+   GListModel *p_ctrls = gtk_widget_observe_controllers(p_scale);
+   guint       u_n     = g_list_model_get_n_items(p_ctrls);
+   for (guint u = 0; u < u_n; u++) {
+      GObject *p_c = g_list_model_get_item(p_ctrls, u);
+      if (GTK_IS_EVENT_CONTROLLER_SCROLL(p_c)) {
+         gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(p_c),
+                                                    GTK_PHASE_NONE);
+      }
+      g_object_unref(p_c);
+   }
+   g_object_unref(p_ctrls);
+}
+
 /* The strength slider of a tunable preset (idx u_idx): its own range and
  * step, a tick at the default (where x brings it back), no value drawn
  * (the card's label has it). Built hidden -- the caller shows the selected
- * card's -- and not focusable, like every panel control (Space compares;
- * h / l are its keys). */
+ * card's -- not focusable, like every panel control (Space compares;
+ * h / l are its keys), and deaf to the wheel (_scale_ignore_scroll). */
 static GtkWidget *
 _build_scale(guint u_idx, const PresetStrength *p_s) {
    GtkWidget *p_scale = gtk_scale_new_with_range(
@@ -156,6 +178,7 @@ _build_scale(guint u_idx, const PresetStrength *p_s) {
    gtk_widget_set_focusable(p_scale, FALSE);
    gtk_widget_add_css_class(p_scale, GGAZE_ENHANCE_SCALE_CLASS);
    gtk_widget_set_visible(p_scale, FALSE);
+   _scale_ignore_scroll(p_scale);
    g_object_set_data(G_OBJECT(p_scale), "idx", GINT_TO_POINTER((gint)u_idx));
    return (p_scale);
 }
