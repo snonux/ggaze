@@ -149,7 +149,8 @@ when adding an optional backend — gate code with `GGAZE_HAVE_*` from
   `thumbnail`, `trash`, `mover`, `opener`, `runner`, `enhancer`, `info`,
   `histogram`, `texturecache`, `clipboard`, `viewload`, `pathutil`,
   `settings-pair`, `undo`, `croprect`, `transform`, `gesture-math`, `icc`,
-  `streamread`, `intact`, `edit-history`, `preset-strength`) own no
+  `streamread`, `intact`, `edit-history`, `preset-strength`,
+  `preview-scale`, `logical-size`) own no
   GtkWidget and are
   unit-tested standalone.
 - An animated GIF/WebP is **one texture per file** like any still: the
@@ -194,7 +195,10 @@ src/pathutil.{c,h}    stem/ext split, safe mkdir -p, non-colliding child names
 src/settings-pair.{c,h} the (name, value) pair of the a(ss) lists
 src/ggaze-enums.h     shared preference enums
 src/enhancer.{c,h}    optional GEGL presets (built-in table + user graphs), export naming, ICC-aware load/export
-src/enhancer-gegl.h   the GEGL buffer/texture/export operations (sync + async)
+src/enhancer-gegl.h   the GEGL buffer/texture/export operations (sync + async), the live preview's source API
+src/enhancer-preview.c optional live preview: per-image scaled-down source, its render, the card thumbnails (enhancer-private.h shares enhancer.c's load/chain)
+src/preview-scale.{c,h} how far the live preview is scaled down (view -> source scale, thumbnail scale, which GEGL props are pixel lengths), plain C
+src/logical-size.{c,h} the image size a (scaled-down) texture stands for, as qdata on the texture; the viewer lays textures out at it
 src/enhance-ctrl.{c,h} optional enhance feature controller (mask, previews, side panel, saved flag, async save, edit undo/redo)
 src/enhance-ui.{c,h}  optional pure edit side-panel widget construction (presets, transform, actions)
 src/croprect.{c,h}    crop rectangle rules (move/resize/aspect/hit/drag/quarter turn), plain C

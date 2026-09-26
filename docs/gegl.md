@@ -38,7 +38,13 @@ editing remains a non-goal.
   strength slider. By default each card carries a small preview thumbnail
   of that preset applied *alone* at its default strength, all generated as one cancellable background
   batch; Preferences can turn the thumbnails off, which leaves label-only
-  cards (no batch at all) for slower systems. The thumbnails and the
+  cards (no batch at all) for slower systems. The batch is cut from the
+  live preview's source (below, "The live preview renders at display
+  resolution": a 128 px copy made with it, no decode of its own) and
+  runs **after** the preview: it waits while a preview render is
+  pending, and a preview asked for while it runs pauses it (cancelled
+  between cards, started again once the preview has landed). The
+  thumbnails and the
   Original reference ignore the geometric transform (crop / straighten / rotate):
   they are per-preset colour references, rendered once per image from the
   untransformed original, and re-rendering every one of them on every nudge
@@ -57,10 +63,81 @@ editing remains a non-goal.
   is closed goes on to the grid, the edit still on screen). Applying the
   chain runs
   off the GTK main thread (a GTask worker; last-write-wins if superseded
-  before it finishes).
+  before it finishes), on a scaled-down copy of the image (next section);
+  a render still pending after 300 ms says so — a *Rendering…* pill over
+  the view and *· rendering…* on the panel's state line — until it lands,
+  fails or is superseded.
 - **Hold `Space`** to see the original; release to see the current edit. This
   works with or without the panel (the window binds it), and never touches
-  the mask.
+  the mask. A preview rendered from a scaled source compares against that
+  source itself (the same resolution and the same decode), so only the
+  presets differ between the two.
+
+### The live preview renders at display resolution (8l2, decision #53)
+
+The preview used to run the chain on the **full-resolution** image, decode
+included, on every key: on a 64 MP camera JPEG (9248x6936) a toggle left
+the view unchanged for ~10 s with no sign of work — and the card
+thumbnails, which did the same (their `gegl:scale-size` of the full decode
+alone took ~5 s), queued ahead of it. Now:
+
+- **A source per image.** The first render (or the panel's first card
+  batch) builds a SOURCE (`enhancer-preview.c`): the image decoded through
+  `enhancer_load`'s own paths — the managed decode when the file has a
+  profile to manage, else ggaze's loader, **except that the loader path
+  takes the decode the viewer already shows** instead of decoding the file
+  again — and scaled down with GEGL's box-filtered scaled read to the
+  view: fit-to-window x device scale x **1.5** (`preview-scale.h`:
+  headroom for a zoom step or a larger window), never upscaled, 512 to
+  4096 px on the long side. The controller keeps it while the image and
+  its decode stay; a window grown past it builds a new one. A 64 MP decode
+  is scaled to ~1500x1100 in ~0.26 s; a Brightness render on that takes
+  ~15 ms (the process's first chain pays ~0.25 s of babl setup once).
+- **The render on it** scales the geometric transform onto the source
+  (`transform_scale`: the crop from base to base; the turn, the angle and
+  the auto-crop are resolution-free) and every preset's **pixel lengths**
+  with it: the properties `preview-scale.c` lists — unsharp-mask's and
+  high-pass's `std-dev`, gaussian-blur's `std-dev-x`/`-y`, the blur /
+  median / snn / bilateral / lens / motion radii, pixelize's cell, the
+  drop shadow's offsets — are multiplied by the source's scale (clamped to
+  the property's range; an int rounds, so a 1 px box blur on a fifth-size
+  source is none, which is what it looks like at that size). Sharpen then
+  looks on the preview as it will on the export instead of five times too
+  wide. **Documented deviations:** counts are not scaled —
+  noise-reduction's and mean-curvature-blur's `iterations` (a 3x3 kernel
+  iterated has no scaled equivalent: Denoise looks a little stronger on
+  the preview than on the export); stretch-contrast's (Auto-fix's) min /
+  max come from the averaged source, so it may stretch a hair more;
+  the straighten's one-pixel auto-crop inset is one *source* pixel.
+- **The texture stands for the image.** The render comes back small but
+  tagged with the size the export will have (`logical-size.h`), and the
+  viewer lays a texture out at that size: fit, 100 %, the pan clamp and
+  the tool overlay's geometry stay in image pixels, so the crop rectangle,
+  the straighten horizon, the base size and zoom `0` are what they were at
+  full resolution (tests: `/enhance_flow/crop_on_a_scaled_preview`,
+  `/enhance_flow/straighten_on_a_scaled_preview`).
+- **Zooming past the preview's resolution** shows the preview magnified
+  (1.5x fit is sharp; 100 % of a 64 MP photo is not) — no second render at
+  the zoom: every landed render resets the view to fit anyway, and a
+  full-resolution render at 100 % costs the seconds this change removed.
+  The export is the full-resolution result; a lazy detail render at deep
+  zoom is left open.
+- **The export is unchanged**: `s` and the save gate's Save decode the file
+  and run the chain at full resolution, pixel lengths unscaled —
+  byte-identical to the export before this change
+  (`/enhance_flow/export_is_full_resolution_and_unchanged`,
+  `/enhancer_preview/full_resolution_chain_is_the_plain_graph`).
+- **Copy** (`Ctrl+c`) of an active preview copies the texture on screen,
+  i.e. the preview at its display resolution; `s` writes the full one.
+- A rewrite of the file the texture cache's stamp cannot tell (same size,
+  inode and nanosecond mtime) is now invisible to the preview as it is to
+  the view — the render used to decode the file; `s` still reads it.
+
+Measured in Xvfb (1280x800 window, key `2` after `a`, the time until the
+view changes): a 64 MP JPEG **8.6 s → 94 ms** (key 0.5 s after `a`, cards
+still rendering) and **6.6 s → 94 ms** (cards done); a 24 MP JPEG
+**1.9 s → 120 ms** and **1.5 s → 92 ms**. The colour-managed case still
+decodes the whole file through GEGL for its source — once per image.
 - The panel **stays open across navigation**: moving to the next image
   re-titles it and re-previews the new file, so a whole folder can be worked
   through with `a` pressed once. It is hidden (not closed) with the grid and
@@ -403,15 +480,40 @@ GdkTexture *enhancer_managed_original_finish(GAsyncResult *p_res,
                                              GError **p_err);
 ```
 
-Viewer integration: when a preset is active, the decoded pixels are imported
-into a `GeglBuffer` (GEGL's ICC-aware loader for a PNG/JPEG with a
-non-sRGB profile, the orientation-aware loader otherwise; see
-`enhancer_load` above), the enhancer processes
-it, and the output buffer is rendered back to a `GdkTexture` for display.
-This path is heavier, so it is strictly on-demand and off the main thread;
-the window compares a generation counter on completion so a superseded
-request (a newer toggle, navigation, or discard) is dropped instead of
-overwriting whatever the user is now looking at (last-write-wins).
+Viewer integration: when a preset is active, the image is imported into a
+`GeglBuffer` once per image (GEGL's ICC-aware loader for a PNG/JPEG with a
+non-sRGB profile, else the decode the viewer shows, or the
+orientation-aware loader; see `enhancer_load` above), scaled down to the
+view (the preview SOURCE, "The live preview renders at display
+resolution" above), the enhancer processes it, and the output buffer is
+rendered back to a `GdkTexture` for display that stands for the image's
+size. This path is heavier, so it is strictly on-demand and off the main
+thread; the window compares a generation counter on completion so a
+superseded request (a newer toggle, navigation, or discard) is dropped
+instead of overwriting whatever the user is now looking at
+(last-write-wins).
+
+`enhancer-preview.c` (declared in `enhancer-gegl.h`, sharing enhancer.c's
+load / chain / snapshot through `enhancer-private.h`) holds the source and
+its render:
+
+```c
+void            enhancer_source_new_async(GFile *p_file,
+                                          GdkTexture *p_decoded,
+                                          const PreviewView *p_view,
+                                          GCancellable *p_cancel,
+                                          GAsyncReadyCallback p_cb,
+                                          gpointer p_data);
+EnhancerSource *enhancer_source_new_finish(GAsyncResult *p_res,
+                                           GError **p_err);
+void            enhancer_source_render_async(const EnhancerSource *p_src,
+                                             const GPtrArray *p_presets,
+                                             guint32 u_mask,
+                                             const Transform *p_xf, ...);
+void            enhancer_preview_thumbnails_async(const EnhancerSource *p_src,
+                                                  const GPtrArray *p_presets,
+                                                  ...);
+```
 
 ## What else GEGL gives ggaze
 
@@ -895,7 +997,9 @@ WebP/AVIF/HEIF/JXL, a managed plain view, and non-sRGB displays.
 
 - Heavier deps: `gegl`, `babl` (and transitively more). Gate behind a meson
   `feature` so minimal builds and the core culling flow don't pay for it.
-- GEGL processing is slower than straight decode — keep it off the hot path.
+- GEGL processing is slower than straight decode — keep it off the hot path,
+  and off the full resolution until the export (decision #53: the live
+  preview runs on a source scaled to the view).
 - `gegl-gtk` (GeglGtkView) is separate and thinly maintained — **avoid**; keep
   the custom `GgazeViewer` widget and render GEGL output to `GdkTexture`.
 - GEGL does **not** demosaic RAW — RAW stays out of scope.
