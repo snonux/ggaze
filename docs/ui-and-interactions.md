@@ -321,7 +321,10 @@ pans); elsewhere it is ignored, so `Shift+Enter` applies a crop and
   yet stands for the image, so fit, `0`'s 100 % and the crop / straighten
   overlays are the image's. Zoomed past about 1.5x fit, the preview is
   shown **magnified** (soft at a 64 MP photo's 100 %); the saved copy is
-  the full-resolution result.
+  the full-resolution result. The status line says so when a zoom
+  crosses into that — *Preview at 17 % resolution — s saves full size* —
+  once per crossing (again after a trip back to fit), never at fit and
+  never for a full-resolution picture.
 
 ## Info overlay (`i`)
 
@@ -434,8 +437,10 @@ image's histogram.
   you can paste it into other apps (Katogram, GIMP, chat clients) — like gthumb.
 - **No marks** → copies the **displayed** image **pixels** as PNG (modified
   if a preview is active — at the preview's display resolution, since the
-  live preview renders a scaled copy (8l2); `s` saves the full-resolution
-  edit — else original) via `GdkClipboard` +
+  live preview renders a scaled copy (8l2), and the status line says so
+  with the size, *Copied edited preview (1600×1200) — s saves full size*;
+  `s` saves the full-resolution edit — else original, *Copied image*) via
+  `GdkClipboard` +
   `GdkContentProvider` for `image/png`; pastes as an image. Decoding runs in a
   `GTask` thread so the UI doesn't block.
 - **Marks present** → copies the marked **files** as `text/uri-list` (plus a
@@ -516,7 +521,9 @@ image's histogram.
     thumbnails render **after** the large preview (8l2): opening the panel
     and pressing a preset at once shows the preview first, the cards a
     moment later — they are cut from the preview's scaled source, so they
-    cost no decode of their own. The rows and the Original always show the
+    cost no decode of their own; a preview dropped before it lands (`x`,
+    `u` back to no edit, the save prompt's Discard) lets them start at
+    once. The rows and the Original always show the
     **untransformed** image —
     they are references for the colour presets alone and ignore a crop,
     straighten or turn. More presets than fit the window **scroll** — only

@@ -43,7 +43,9 @@ editing remains a non-goal.
   resolution": a 128 px copy made with it, no decode of its own) and
   runs **after** the preview: it waits while a preview render is
   pending, and a preview asked for while it runs pauses it (cancelled
-  between cards, started again once the preview has landed). The
+  between cards, started again once the preview has landed — or, when
+  the preview is dropped before it lands, by `x`, an undo back to no
+  edit or the save prompt's Discard, at once). The
   thumbnails and the
   Original reference ignore the geometric transform (crop / straighten / rotate):
   they are per-preset colour references, rendered once per image from the
@@ -123,7 +125,15 @@ alone took ~5 s), queued ahead of it. Now:
   the zoom: every landed render resets the view to fit anyway, and a
   full-resolution render at 100 % costs the seconds this change removed.
   The export is the full-resolution result; a lazy detail render at deep
-  zoom is left open.
+  zoom is left open. So that the soft picture is not taken for the
+  result (Sharpen or Denoise judged at 100 %), an explicit zoom that
+  crosses into magnifying the preview's own pixels (device pixels per
+  texture pixel > 1, `ggaze_viewer_get_texel_scale`, watched through the
+  viewer's `zoom-changed` signal) puts **"Preview at N % resolution — s
+  saves full size"** on the status line — once per crossing, not per
+  zoom step; not at fit (the source is built to cover it), and never for
+  a full-resolution picture zoomed past 100 %
+  (`/enhance_flow/deep_zoom_says_the_preview_is_scaled`).
 - **The export is unchanged**: `s` and the save gate's Save decode the file
   and run the chain at full resolution, pixel lengths unscaled —
   byte-identical to the export before this change
@@ -131,6 +141,14 @@ alone took ~5 s), queued ahead of it. Now:
   `/enhancer_preview/full_resolution_chain_is_the_plain_graph`).
 - **Copy** (`Ctrl+c`) of an active preview copies the texture on screen,
   i.e. the preview at its display resolution; `s` writes the full one.
+  The status line says so, with the size: *Copied edited preview
+  (1600×1200) — s saves full size* (under hold-`Space`, *Copied original
+  preview (…)*), never a bare *Copied image*.
+- **Hold-`Space`'s compare texture is made on the first press**, not with
+  the source: `enhancer_source_get_original` converts the scaled buffer on
+  demand (~2 ms for a 64 MP photo's 1600x1200 source, measured, against
+  ~0.9 s to build the source), so the compare stays instant and a session
+  that never holds Space never pays for the copy.
 - A rewrite of the file the texture cache's stamp cannot tell (same size,
   inode and nanosecond mtime) is now invisible to the preview as it is to
   the view — the render used to decode the file; `s` still reads it.

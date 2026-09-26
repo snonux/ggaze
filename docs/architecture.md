@@ -96,7 +96,9 @@ ggaze
   via GTK4 render nodes. Every geometry is in IMAGE pixels: a texture that
   stands for a larger image (`logical-size.h`: the enhance preview renders
   a scaled-down copy, 8l2) is laid out, zoomed and reported to the tool
-  overlay at the image's size and drawn stretched over it. Holds both the raw and GEGL-processed textures;
+  overlay at the image's size and drawn stretched over it; its
+  "zoom-changed" signal and texel scale let the window say when such a
+  preview is shown magnified. Holds both the raw and GEGL-processed textures;
   `Space` swaps to the raw (compare) while held. Emits "needs-next" when nearing
   the end of a preloaded set. **Plays an animated GIF/WebP** (yb2): the
   texture it is given is that file's first frame with the other frames
@@ -361,7 +363,8 @@ Ctrl+c → ggaze_window_get_copy_provider(win)
          marks?    clipboard_build_uri_provider(marked_files) [text/uri-list + text/plain]
          no marks? clipboard_build_texture_provider(viewer texture) [image/png]
        → gdk_clipboard_set_content (main thread)
-       → status: "Copied image" / "Copied N files"
+       → status: "Copied image" / "Copied N files" / for a scaled enhance
+                 preview "Copied edited preview (W×H) — s saves full size"
 ```
 
 Prefetch: when `navigator.current` changes, schedule `loader.load` for the
@@ -414,8 +417,9 @@ feels instant.
   path runs the same identity reset, since a file that sorts first in its
   folder never emits "changed"), on a rewrite's rescan, and in dispose.
   The preview itself is small since 8l2: the render and the preview source
-  it runs on (plus a 128 px copy for the cards and, for a scaled source,
-  the source as a texture for hold-`Space`) are about the view's size
+  it runs on (plus a 128 px copy for the cards and, for a scaled source
+  once `Space` is first held, the source as a texture for the compare)
+  are about the view's size
   (~1500x1100 x 4 bytes, ~6.6 MB each, on a 1280x800 window), whatever the
   photo's; building the source from the viewer's decode adds no second
   full-size decode. Building it for a colour-managed file does hold the
