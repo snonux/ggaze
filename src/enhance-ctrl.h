@@ -159,6 +159,14 @@ typedef struct {
     * from enhance_ctrl_dispose too, so the host must tolerate a call
     * during its own dispose. */
    void (*mode_changed)(gpointer p_host);
+   /* The large view's size in logical pixels and its device scale factor
+    * (each <= 0 while unknown): what the preview source is scaled for
+    * (8l2, preview-scale.h). */
+   void (*get_view)(gpointer p_host, gint *p_w, gint *p_h, gint *p_scale);
+   /* Show (TRUE) or hide the "Rendering…" indicator over the view: a
+    * preview render has been pending for a noticeable while (8l2). Called
+    * again with FALSE when it lands, fails or is superseded. */
+   void (*show_busy)(gpointer p_host, gboolean b_busy);
 } EnhanceUIHostOps;
 
 /* Continuation for enhance_ctrl_save_async: b_ok is TRUE on a real write. */
@@ -259,10 +267,51 @@ gboolean enhance_ctrl_get_base_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
  * original is known before it measures a horizon at 0 degrees. */
 gboolean enhance_ctrl_get_orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
 
-/* How many preview renders (full decode + chain) this controller has
- * launched so far. A test seam for the render coalescing: N rapid changes
- * must cost at most two launches (tests/test_enhance_flow.c). */
+/* How many preview renders this controller has launched so far -- each a
+ * chain on the preview source, after the source is built when none serves
+ * (8l2). A test seam for the render coalescing: N rapid changes must cost
+ * at most two launches (tests/test_enhance_flow.c). */
 guint enhance_ctrl_get_render_count(EnhanceCtrl *p_ctrl);
+
+/* --- the preview source and its seams (8l2, decision #53) ----------------
+ *
+ * The live preview renders from a SOURCE: the current image decoded once
+ * (or taken from the decode the viewer shows, when that is the loader's)
+ * and scaled down to about what the view shows (preview-scale.h), kept
+ * while the image stays the same. The render's texture is small but
+ * stands for the export's size (logical-size.h), so the viewer's zoom and
+ * the tools measure the image; `s` exports at full resolution as before.
+ * The card thumbnails are cut from the source too, and run only after the
+ * preview (a batch in flight is paused by a new preview). A render pending
+ * for 300 ms shows "Rendering…" (the host's show_busy and the panel's
+ * state line) until it lands. */
+
+/* How many source builds this controller has launched. */
+guint enhance_ctrl_get_source_count(EnhanceCtrl *p_ctrl);
+
+/* How many card-thumbnail batches really started (enhance_ctrl_get_
+ * preview_count counts the batches asked for; they start once the source
+ * is there and no preview is pending). */
+guint enhance_ctrl_get_thumb_launch_count(EnhanceCtrl *p_ctrl);
+
+/* TRUE while the "Rendering…" indicator is up. */
+gboolean enhance_ctrl_is_busy_shown(EnhanceCtrl *p_ctrl);
+
+/* TRUE iff no preview work is outstanding: no render pending, no source
+ * build in flight, and no card batch running or waiting to run in the
+ * open panel. A test seam: the cards now render AFTER the preview, so a
+ * test that measures the window at rest waits for this, not just for the
+ * preview to land. */
+gboolean enhance_ctrl_is_settled(EnhanceCtrl *p_ctrl);
+
+/* Test seam: cap the source's long side at i_max_side pixels (0: no cap
+ * beyond the view's own), so a fixture a few hundred pixels across gets a
+ * scaled preview too. Takes effect with the next source built. */
+void enhance_ctrl_set_preview_cap(EnhanceCtrl *p_ctrl, gint i_max_side);
+
+/* The landed source's scale (source pixels per image pixel, (0, 1]);
+ * FALSE with none. */
+gboolean enhance_ctrl_get_preview_scale(EnhanceCtrl *p_ctrl, gdouble *pd_scale);
 
 /* How many managed-original fetches (hold-Space on a colour-managed
  * render, enhancer_managed_original_async) this controller has launched so
@@ -318,7 +367,10 @@ void enhance_ctrl_texture_shown(EnhanceCtrl *p_ctrl, GdkTexture *p_tex);
 
 /* Hold-Space compare: TRUE shows the original as the viewer last showed it
  * (this controller's own reference -- an evicted or stale cache entry does
- * not matter); FALSE restores the cached modified texture. For a render
+ * not matter); FALSE restores the cached modified texture. A preview from
+ * a SCALED source (8l2) compares against that source itself, standing for
+ * the original's size: the same resolution and the same decode, so only
+ * the presets differ. At full size, for a render
  * whose decode was colour-managed the compare is against the MANAGED
  * original instead, fetched in a worker on the first press (not with every
  * render: a full-size texture outside the cache's cap) and swapped in when

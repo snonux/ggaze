@@ -17,6 +17,7 @@
  *:*/
 
 #include "enhancer.h"
+#include "preview-scale.h"
 #include "transform.h"
 
 #if GGAZE_HAVE_GEGL
@@ -119,7 +120,11 @@ GdkTexture *enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err);
 /* Async: load p_file, apply the enabled-preset chain (u_mask) and the
  * transform p_xf (nullable), and convert the result to a GdkTexture, all off
  * the calling thread (a GTask worker) so a caller with a main loop (e.g. the
- * window) is never blocked by GEGL's CPU-heavy processing (tu0). p_presets
+ * window) is never blocked by GEGL's CPU-heavy processing (tu0). This is
+ * the FULL-RESOLUTION render: the edit panel's live preview no longer
+ * uses it (8l2 renders from a scaled source, enhancer_source_render_async
+ * below); it stays the one-call form of the export's decode + chain, which
+ * the colour-management suite pins the managed verdict through. p_presets
  * and p_xf are snapshotted internally before the worker starts, so a
  * concurrent enhancer_set_presets() (Preferences apply) or a tool nudge
  * cannot race it. p_cancel may be NULL. Since GEGL processing itself cannot
@@ -169,17 +174,105 @@ void enhancer_managed_original_async(GFile *p_file, GCancellable *p_cancel,
 GdkTexture *enhancer_managed_original_finish(GAsyncResult *p_res,
                                              GError      **p_err);
 
-/* Generate the max-512px original followed by up to eight independent preset
- * previews. The returned array owns its GdkTexture entries; index 0 is the
- * original and index i + 1 corresponds to preset i. An unsupported individual
- * preset is represented by NULL. */
-void       enhancer_preview_thumbnails_async(GFile              *p_file,
-                                             const GPtrArray    *p_presets,
-                                             GCancellable       *p_cancel,
-                                             GAsyncReadyCallback p_cb,
-                                             gpointer            p_data);
+/* --- the live preview (8l2, decision #53) ---------------------------------
+ *
+ * The edit panel's preview does not run the chain on the full-resolution
+ * image (~10 s per key on a 64 MP photo): it renders from a SOURCE, the
+ * image decoded once and scaled down to what the screen shows
+ * (preview-scale.h), kept by the controller for as long as the image is
+ * the same, so a toggle or a strength step costs one chain on ~2 MP. The
+ * export alone runs at full resolution (enhancer_export_chain_async),
+ * exactly as before. */
+
+/* A decoded, scaled-down image the preview renders from. Owned by whoever
+ * finished its build; the workers that use it hold references to its
+ * buffers, not to it, so it may be deleted while a render is in flight. */
+typedef struct EnhancerSource EnhancerSource;
+
+/* Build p_file's source for the viewport p_view (copied), in a worker. The
+ * decode is enhancer_load's: the managed path when it applies (the whole
+ * image decoded through GEGL, then scaled), else ggaze's loader -- but a
+ * file the loader path decodes is NOT decoded again when p_decoded (may
+ * be NULL) is given: that is the loader's decode of p_file the viewer
+ * shows, and the source is scaled straight out of its pixels (~0.3 s for
+ * 64 MP where a decode takes ~0.7 s more). Cancellation skips what has not
+ * started (G_IO_ERROR_CANCELLED). */
+void enhancer_source_new_async(GFile *p_file, GdkTexture *p_decoded,
+                               const PreviewView *p_view,
+                               GCancellable *p_cancel, GAsyncReadyCallback p_cb,
+                               gpointer p_data);
+/* The source (caller deletes), or NULL with p_err set (the load's error). */
+EnhancerSource *enhancer_source_new_finish(GAsyncResult *p_res, GError **p_err);
+void            enhancer_source_delete(EnhancerSource *p_src);
+
+/* The file it was built from (borrowed). */
+GFile *enhancer_source_get_file(const EnhancerSource *p_src);
+/* The original's upright size. */
+void enhancer_source_get_orig_size(const EnhancerSource *p_src, gint *p_w,
+                                   gint *p_h);
+/* Source pixels per image pixel, (0, 1]: 1 is the image itself. */
+gdouble enhancer_source_get_scale(const EnhancerSource *p_src);
+/* Whether the decode was colour-managed (enhancer_apply_chain_finish's
+ * *pb_managed). */
+gboolean enhancer_source_is_managed(const EnhancerSource *p_src);
+/* A scaled source's own pixels as a texture standing for the original's
+ * size (logical-size.h) -- what hold-Space compares a preview against, so
+ * the compare is like with like: the same resolution, the same (managed or
+ * not) decode. NULL for a source at scale 1: the original on screen IS
+ * that then (and NULL if the conversion failed). Borrowed. Made on the
+ * FIRST call, on the calling thread (a few ms: the source is small), and
+ * kept with the source: a session that never holds Space never makes it.
+ * Not thread-safe: call it from the thread that owns the source. */
+GdkTexture *enhancer_source_get_original(EnhancerSource *p_src);
+/* Whether enhancer_source_get_original has made its texture yet (a test
+ * seam for the laziness). */
+gboolean enhancer_source_has_original(const EnhancerSource *p_src);
+/* TRUE iff p_src was built from p_file and is fine enough for p_view
+ * (preview_scale_covers): a view that would show it magnified at fit --
+ * a window grown past the oversample's head room, a finer device -- asks
+ * for a new one; a smaller or moderately larger one does not. */
+gboolean enhancer_source_serves(const EnhancerSource *p_src, GFile *p_file,
+                                const PreviewView *p_view);
+
+/* Render the chain (presets in u_mask -- resolved, enhancer_presets_resolve
+ * -- then p_xf, nullable, in the ORIGINAL's pixels) on p_src, in a worker:
+ * the transform is scaled onto the source (transform_scale) and every
+ * preset's pixel lengths with it (preview-scale.h), and the texture comes
+ * back standing for the size the export would have (transform_output_size
+ * of the original, logical-size.h). p_presets and p_xf are snapshotted.
+ * Cancellation skips a render that has not started. */
+void enhancer_source_render_async(const EnhancerSource *p_src,
+                                  const GPtrArray *p_presets, guint32 u_mask,
+                                  const Transform *p_xf, GCancellable *p_cancel,
+                                  GAsyncReadyCallback p_cb, gpointer p_data);
+/* The rendered texture (caller unrefs), or NULL with p_err set. */
+GdkTexture *enhancer_source_render_finish(GAsyncResult *p_res, GError **p_err);
+
+/* The card thumbnails, from p_src's own thumbnail-sized copy
+ * (PREVIEW_SCALE_THUMB_SIDE, made with the source -- no decode): the
+ * original followed by one independent preview per preset (pixel lengths
+ * scaled like the preview's). The returned array owns its GdkTexture
+ * entries; index 0 is the original and index i + 1 preset i; a preset that
+ * cannot be applied is NULL. The worker checks p_cancel between presets
+ * (a newer preview render cancels a batch in flight). */
+void       enhancer_preview_thumbnails_async(const EnhancerSource *p_src,
+                                             const GPtrArray      *p_presets,
+                                             GCancellable         *p_cancel,
+                                             GAsyncReadyCallback   p_cb,
+                                             gpointer              p_data);
 GPtrArray *enhancer_preview_thumbnails_finish(GAsyncResult *p_res,
                                               GError      **p_err);
+
+/* Test seam: every source render sleeps u_ms first (0: none), so a test
+ * can hold a preview pending past the controller's indicator delay. Not
+ * thread-safe: set it only while no render is in flight. */
+void enhancer_test_set_render_delay(guint u_ms);
+
+/* Test seam: while b_fail is set every source render fails (with
+ * G_IO_ERROR_FAILED) instead of running -- the one way left to make a
+ * preview render fail on purpose, now that it no longer reads the file.
+ * Same threading rule as the delay. */
+void enhancer_test_set_render_fail(gboolean b_fail);
 
 /* Test seam: treat the GEGL op c_op (e.g. "gegl:png-load") as not
  * installed, so a unit test reaches the fallbacks a GEGL without it takes;

@@ -17,6 +17,9 @@ ggaze
 ├── opener.{c,h}         # configurable external programs; launch current image (GSubprocess)
 ├── runner.{c,h}          # configurable shell scripts; async run via /bin/sh -c, rescan on done
 ├── enhancer.{c,h}        # (optional) GEGL quick-enhance presets; non-destructive apply + export copy
+├── enhancer-preview.c    # (optional) the live preview's scaled-down source, its render, the card thumbnails (enhancer-gegl.h; enhancer-private.h shares enhancer.c's load/chain)
+├── preview-scale.{c,h}   # how far the live preview is scaled down + which GEGL properties are pixel lengths, plain C
+├── logical-size.{c,h}    # the image size a (scaled-down) texture stands for, as qdata on the texture
 ├── clipboard.{c,h}       # image/png (displayed texture) or file-URI content providers (no state)
 ├── viewload.{c,h}        # large-view load pipeline: texture LRU, one active load, prefetch, last-write-wins
 ├── info-overlay.{c,h}    # EXIF card + histogram + status line over the stack (async gather, auto-hide)
@@ -90,7 +93,12 @@ ggaze
   `GtkDropTarget` accepting dropped files/folders (open them).
 - **viewer** — the *large* view. Pure display widget. Takes a `GdkTexture`
   (or `GtkSnapshot` paintable). Owns zoom level, pan offset, fit mode. Draws
-  via GTK4 render nodes. Holds both the raw and GEGL-processed textures;
+  via GTK4 render nodes. Every geometry is in IMAGE pixels: a texture that
+  stands for a larger image (`logical-size.h`: the enhance preview renders
+  a scaled-down copy, 8l2) is laid out, zoomed and reported to the tool
+  overlay at the image's size and drawn stretched over it; its
+  "zoom-changed" signal and texel scale let the window say when such a
+  preview is shown magnified. Holds both the raw and GEGL-processed textures;
   `Space` swaps to the raw (compare) while held. Emits "needs-next" when nearing
   the end of a preloaded set. **Plays an animated GIF/WebP** (yb2): the
   texture it is given is that file's first frame with the other frames
@@ -200,7 +208,14 @@ ggaze
   loader's gate and `loader/intact.c` vouch for it (anything else takes the
   loader path, as before), the chain runs in the image's space, the preview
   and the hold-`Space` original are converted to sRGB, and the PNG/JPEG
-  savers keep the profile. Owns no GTK state.
+  savers keep the profile. Owns no GTK state. The live preview (8l2,
+  decision #53) does not run on the full image: `enhancer-preview.c`
+  builds a per-image SOURCE (the decode scaled to ~1.5x the view's fit
+  size; the viewer's own decode is reused when the loader path applies)
+  and renders the chain on it with the transform and the presets' pixel
+  lengths scaled to it (`transform_scale`, `preview-scale.h`), returning a
+  texture tagged with the export's size (`logical-size.h`); the export
+  alone decodes and runs at full resolution.
 - **icc** — plain C: the embedded ICC profile of a PNG (iCCP) or JPEG (APP2
   ICC_PROFILE) and its `desc` name, for the info card's colour-space line in
   every build (no GEGL, no babl). **streamread** holds the bounded stream
@@ -321,13 +336,17 @@ on done → navigator_rescan() (scripts may add/remove files)
 ```
 key 'a' → enhance side panel appended beside the large view (in-window)
         → enhancer_get_presets() → [ {"Auto-fix", "stretch-contrast|color-enhance"}, … ]
-        → one card per preset, hotkeys 1..8 by list order; thumbnail batch
+        → one card per preset, hotkeys 1..8 by list order; a thumbnail batch
+          asked for (it runs on the preview source, after any pending
+          preview)
         → panel stays across navigation (re-previewed), hidden with the grid
-key '1' → import decoded image → GeglBuffer
-        → enhancer_apply(buf, presets[0], &err)   [GTask thread]
-        → GeglBuffer out → render to GdkTexture → viewer (non-destructive)
+key '1' → the image's preview SOURCE, built once per image  [GTask thread]
+          (the decode on screen, or the managed decode, scaled to the view)
+        → the chain on the source, transform + pixel lengths scaled
+          [GTask thread] → GdkTexture standing for the export's size
+          → viewer (non-destructive); pending > 300 ms: "Rendering…"
         → toggle off on second press; Esc closes the panel, then discards
-key 's' → enhancer_export(buf, presets[0], out_file, &err)  [GTask thread]
+key 's' → decode the file, the chain at full resolution, save [GTask thread]
         → on success the preview is SAVED: still shown, no longer dirty
         → writes IMG_0001-enhanced.<ext> via GEGL saver; original untouched
         → does NOT clear the dirty flag (press again → another numbered copy)
@@ -344,7 +363,8 @@ Ctrl+c → ggaze_window_get_copy_provider(win)
          marks?    clipboard_build_uri_provider(marked_files) [text/uri-list + text/plain]
          no marks? clipboard_build_texture_provider(viewer texture) [image/png]
        → gdk_clipboard_set_content (main thread)
-       → status: "Copied image" / "Copied N files"
+       → status: "Copied image" / "Copied N files" / for a scaled enhance
+                 preview "Copied edited preview (W×H) — s saves full size"
 ```
 
 Prefetch: when `navigator.current` changes, schedule `loader.load` for the
@@ -396,6 +416,14 @@ feels instant.
   on navigation (an open or a drop of another file included: the open
   path runs the same identity reset, since a file that sorts first in its
   folder never emits "changed"), on a rewrite's rescan, and in dispose.
+  The preview itself is small since 8l2: the render and the preview source
+  it runs on (plus a 128 px copy for the cards and, for a scaled source
+  once `Space` is first held, the source as a texture for the compare)
+  are about the view's size
+  (~1500x1100 x 4 bytes, ~6.6 MB each, on a 1280x800 window), whatever the
+  photo's; building the source from the viewer's decode adds no second
+  full-size decode. Building it for a colour-managed file does hold the
+  full managed decode (`w × h × 4`) in the worker until it is scaled.
   With GEGL a THIRD one may join them for a colour-managed file (decision
   #45): the managed original hold-`Space` compares against, a full-size
   RGBA8 texture (`w × h × 4` bytes: ~100 MB at 24 MP, ~200 MB at 50 MP).

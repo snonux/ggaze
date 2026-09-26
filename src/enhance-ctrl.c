@@ -20,12 +20,20 @@
 #include "enhance-ui.h"
 #include "enhancer-gegl.h"
 #include "preset-strength.h"
+#include "preview-scale.h"
 #include "transform.h"
 
 /* The snapshot keeps one strength per mask bit, and the mask is a
  * guint32 here, in the snapshot and in the enhancer's chain alike. */
 G_STATIC_ASSERT(GGAZE_ENHANCE_MAX_PRESETS == EDIT_SNAPSHOT_PRESETS);
 G_STATIC_ASSERT(GGAZE_ENHANCE_MAX_PRESETS <= 32);
+
+/* How long a preview render may be pending before the "Rendering…"
+ * indicator shows (8l2): a render of the scaled-down source usually lands
+ * well within it, so the indicator only appears when there is something to
+ * wait for -- the first source of a colour-managed 64 MP file, a Denoise --
+ * and a quick render never flickers it. */
+#define _BUSY_DELAY_MS 300
 
 /* The run keys of strength steps (edit_history_push_run): h / l presses on
  * preset i coalesce under i, one drag of its slider under i plus this, so
@@ -63,6 +71,16 @@ static gboolean _orig_size(EnhanceCtrl *p_ctrl, gint *p_w, gint *p_h);
 static void     _drop_managed(EnhanceCtrl *p_ctrl);
 static void     _drop_managed_orig(EnhanceCtrl *p_ctrl);
 static void     _fetch_managed_original(EnhanceCtrl *p_ctrl);
+static void     _drop_source(EnhanceCtrl *p_ctrl);
+static void     _reset_source(EnhanceCtrl *p_ctrl);
+static void     _build_source(EnhanceCtrl *p_ctrl, GFile *p_file);
+static void     _maybe_start_thumbs(EnhanceCtrl *p_ctrl);
+static void     _cancel_thumbs(EnhanceCtrl *p_ctrl);
+static void     _sync_busy(EnhanceCtrl *p_ctrl);
+
+/* One preview render's request (_launch): see its definition below. */
+typedef struct ApplyReq _Req;
+static void             _req_free(_Req *p_req);
 
 /* --- struct --------------------------------------------------------------- */
 
@@ -240,6 +258,30 @@ struct EnhanceCtrl {
                                     * just wrote next to the original) so a save
                                     * doesn't silently discard its own
                                     * still-active preview */
+
+   /* The live preview's SOURCE (8l2, decision #53): the current image
+    * decoded once and scaled down to what the view shows
+    * (enhancer_source_new_async), which every render and the card
+    * thumbnails run on; the export alone decodes at full resolution. */
+   EnhancerSource *p_source;     /* the landed one (owned; NULL = none) */
+   GCancellable   *p_src_cancel; /* the build in flight (NULL = none) ... */
+   GFile          *p_build_file; /* ... of this file (owned) */
+   guint           u_source_gen; /* bumped by _drop_source: a build that
+                                  * lands under an older value is stale */
+   guint u_source_count;         /* builds launched (a test seam) */
+   gint  i_max_side;             /* test seam: a cap on the source's long
+                                  * side (0: none), so a small fixture
+                                  * gets a scaled preview too */
+   _Req *p_wait_req;             /* a render launched while no source
+                                  * served it: it starts when the build
+                                  * lands (it counts as pending) */
+   gboolean b_thumbs_wanted;     /* a card batch waits for the source and
+                                  * for the preview, which goes first */
+   gboolean b_thumbs_running;    /* a card batch is in flight */
+   guint    u_thumb_launches;    /* card batches really started (a test
+                                  * seam: they wait for the preview) */
+   guint    u_busy_id;           /* the _BUSY_DELAY_MS timer (0: none) */
+   gboolean b_busy;              /* the "Rendering…" indicator is up */
 };
 
 /* --- host-op wrappers ---------------------------------------------------- */
@@ -426,6 +468,11 @@ enhance_ctrl_delete(EnhanceCtrl *p_ctrl) {
    g_clear_object(&p_ctrl->p_managed_orig);
    g_clear_object(&p_ctrl->p_orig_cancel);
    g_clear_object(&p_ctrl->p_enhance_file);
+   g_clear_object(&p_ctrl->p_src_cancel);
+   g_clear_object(&p_ctrl->p_build_file);
+   g_clear_pointer(&p_ctrl->p_source, enhancer_source_delete);
+   g_clear_pointer(&p_ctrl->p_wait_req, _req_free);
+   g_clear_handle_id(&p_ctrl->u_busy_id, g_source_remove);
    g_clear_pointer(&p_ctrl->p_enhancer, enhancer_delete);
    g_clear_pointer(&p_ctrl->p_history, edit_history_delete);
    g_free(p_ctrl->c_saved_name);
@@ -444,6 +491,9 @@ enhance_ctrl_dispose(EnhanceCtrl *p_ctrl) {
    g_cancellable_cancel(p_ctrl->p_save_cancel);
    g_clear_object(&p_ctrl->p_save_cancel);
    _drop_managed(p_ctrl); /* cancels a managed-original fetch too */
+   _drop_source(p_ctrl);  /* and a source build */
+   g_clear_pointer(&p_ctrl->p_wait_req, _req_free);
+   g_clear_handle_id(&p_ctrl->u_busy_id, g_source_remove);
    g_clear_object(&p_ctrl->p_enhance_tex);
    g_clear_object(&p_ctrl->p_orig_tex);
    g_clear_object(&p_ctrl->p_enhance_file);
@@ -615,17 +665,41 @@ enhance_ctrl_is_open(EnhanceCtrl *p_ctrl) {
    return (p_ctrl->p_panel != NULL);
 }
 
-/* Under hold-Space the managed original, once fetched, stands for the
- * original: it is what the screen shows then, so the window's texture
- * choke point keeps it up and the info card (window.c _info_texture_for)
- * plots it as the current file's -- without this the histogram went blank
- * whenever Space showed a managed original. */
+/* What hold-Space compares a SCALED preview against (8l2): the preview's
+ * own source shown as it is -- the same resolution and the same decode
+ * (colour-managed or not) as the render on screen, so only the presets
+ * differ and no sharpness step appears between the two. NULL when the
+ * source is at full size (the original on screen, or the managed
+ * original, is the like-with-like compare then) or belongs to another
+ * file. The texture is made on the first ask -- a Space press -- not with
+ * the source: ~2 ms for a 64 MP photo's source, and a session that never
+ * compares never pays for it (8l2 review). */
+static GdkTexture *
+_compare_original(EnhanceCtrl *p_ctrl) {
+   if (p_ctrl->p_source == NULL || p_ctrl->p_enhance_file == NULL ||
+       !g_file_equal(enhancer_source_get_file(p_ctrl->p_source),
+                     p_ctrl->p_enhance_file)) {
+      return (NULL);
+   }
+   return (enhancer_source_get_original(p_ctrl->p_source));
+}
+
+/* Under hold-Space the compare original (_compare_original, else the
+ * managed original once fetched) stands for the original: it is what the
+ * screen shows then, so the window's texture choke point keeps it up and
+ * the info card (window.c _info_texture_for) plots it as the current
+ * file's -- without this the histogram went blank whenever Space showed a
+ * managed original. */
 GdkTexture *
 enhance_ctrl_override_texture(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
    if (p_ctrl == NULL || !_has_work(p_ctrl) || p_ctrl->p_enhance_tex == NULL) {
       return (p_tex);
    }
    if (p_ctrl->b_hold_original) {
+      GdkTexture *p_cmp = _compare_original(p_ctrl);
+      if (p_cmp != NULL) {
+         return (p_cmp);
+      }
       return (p_ctrl->p_managed_orig != NULL ? p_ctrl->p_managed_orig : p_tex);
    }
    return (p_ctrl->p_enhance_tex);
@@ -644,6 +718,19 @@ _note_orig_size(EnhanceCtrl *p_ctrl, gint i_w, gint i_h) {
    return (TRUE);
 }
 
+/* The panel's card batch waits for a source that nobody is building:
+ * _start_previews builds none while the file's decode is still on its way
+ * to the viewer (it would decode the file a second time next to it), so
+ * the decode's arrival starts it -- from that decode. */
+static void
+_build_for_waiting_cards(EnhanceCtrl *p_ctrl) {
+   GFile *p_cur = _current_file(p_ctrl);
+   if (p_ctrl->b_thumbs_wanted && p_ctrl->p_source == NULL &&
+       p_ctrl->p_src_cancel == NULL && p_cur != NULL) {
+      _build_source(p_ctrl, p_cur);
+   }
+}
+
 /* Remember p_tex as the original's identity, with its size, and tell the
  * tool: a rectangle laid out on the previous object (or on none yet) lays
  * out again on this one, whether or not the size moved -- the overlay is
@@ -653,7 +740,9 @@ _note_orig_size(EnhanceCtrl *p_ctrl, gint i_w, gint i_h) {
  * decode the viewer has not shown), so none can forget to tell it. */
 static void
 _learn_original(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
-   if (p_ctrl->p_orig_tex != NULL && p_ctrl->p_orig_tex != p_tex) {
+   gboolean b_replaced =
+      p_ctrl->p_orig_tex != NULL && p_ctrl->p_orig_tex != p_tex;
+   if (b_replaced) {
       /* A NEW decode of the file replaces a known one: the file may have
        * been rewritten since the managed original was fetched from it, so
        * that one (or its fetch in flight) goes too. b_managed stays: it is
@@ -663,9 +752,16 @@ _learn_original(EnhanceCtrl *p_ctrl, GdkTexture *p_tex) {
       _drop_managed_orig(p_ctrl);
    }
    g_set_object(&p_ctrl->p_orig_tex, p_tex);
+   if (b_replaced) {
+      /* The preview source was built from the previous decode: build it
+       * again -- from this one -- when a render waits for it, else when
+       * one next needs it (8l2). */
+      _reset_source(p_ctrl);
+   }
    _note_orig_size(p_ctrl, gdk_texture_get_width(p_tex),
                    gdk_texture_get_height(p_tex));
    p_ctrl->p_ops->original_changed(p_ctrl->p_host);
+   _build_for_waiting_cards(p_ctrl);
 }
 
 /* Where the original's identity (and, with it, its size) is learned in
@@ -707,7 +803,9 @@ enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold) {
    }
    p_ctrl->b_hold_original = b_hold;
    if (b_hold) {
-      /* A colour-managed file compares against its managed original (the
+      /* A scaled preview compares against its own source
+       * (_compare_original: same resolution, same decode). At full size, a
+       * colour-managed file compares against its managed original (the
        * render's own decode, p_managed_orig), so only the presets differ.
        * Otherwise -- and, on the FIRST press on a managed render, until
        * the lazily fetched managed original lands (_managed_orig_done
@@ -721,13 +819,19 @@ enhance_ctrl_set_hold_original(EnhanceCtrl *p_ctrl, gboolean b_hold) {
        * not landed yet (a rewrite's rescan forgot it, the reload is in
        * flight): a silent no-op then rather than a synchronous re-decode
        * on the main thread. */
+      GdkTexture *p_cmp  = _compare_original(p_ctrl);
       GdkTexture *p_orig = p_ctrl->p_managed_orig != NULL
                               ? p_ctrl->p_managed_orig
                               : p_ctrl->p_orig_tex;
+      if (p_cmp != NULL) {
+         p_orig = p_cmp; /* a scaled preview: its own source (8l2) */
+      }
       if (p_orig != NULL) {
          _show_texture(p_ctrl, p_orig);
       }
-      _fetch_managed_original(p_ctrl);
+      if (p_cmp == NULL) {
+         _fetch_managed_original(p_ctrl);
+      }
    } else if (p_ctrl->p_enhance_tex != NULL) {
       _show_texture(p_ctrl, p_ctrl->p_enhance_tex);
    }
@@ -935,7 +1039,7 @@ _sync_panel(EnhanceCtrl *p_ctrl) {
    if (p_ctrl->p_state != NULL) {
       enhance_ui_set_save_state(p_ctrl->p_state, p_ctrl->p_save_btn,
                                 _has_work(p_ctrl), p_ctrl->b_saved,
-                                p_ctrl->c_saved_name);
+                                p_ctrl->c_saved_name, p_ctrl->b_busy);
    }
    _sync_history(p_ctrl);
 }
@@ -1056,16 +1160,19 @@ _fetch_managed_original(EnhanceCtrl *p_ctrl) {
  * even across a dispose), the generation the request was launched at (for
  * the last-write-wins check in _apply_done_cb), and whether the completion
  * should tell the user how to compare/save (the panel was closed when the
- * preset was applied, and this file has not had the hint yet); the
- * completion parks whether the decode was colour-managed here until
- * _apply_landed takes it. */
-typedef struct {
+ * preset was applied, and this file has not had the hint yet). What the
+ * source says about the original -- its size, whether its decode was
+ * colour-managed -- is parked here when the render starts
+ * (_launch_render) until _apply_landed takes it. */
+struct ApplyReq {
    gpointer     p_host; /* ref'd window */
    EnhanceCtrl *p_ctrl; /* borrowed, valid while p_host is alive */
    guint        u_gen;
    gboolean     b_hint;
-   gboolean     b_managed; /* from the finish */
-} _Req;
+   gboolean     b_managed; /* the source's decode was colour-managed */
+   gint         i_orig_w;  /* the original's upright size (the source's) */
+   gint         i_orig_h;
+};
 
 static void
 _req_free(_Req *p_req) {
@@ -1076,10 +1183,10 @@ _req_free(_Req *p_req) {
    g_free(p_req);
 }
 
-/* A render landed and is still wanted: show it. The worker decoded the
- * original, so its size is known here even before the viewer has shown a
- * decode of it -- after a rewrite in place the render may land BEFORE the
- * reload's decode, and a crop tool laid out on the old size used to draw
+/* A render landed and is still wanted: show it. The source it ran on knows
+ * the original's size, so it is known here even before the viewer has
+ * shown a decode of it -- after a rewrite in place the render may land BEFORE
+ * the reload's decode, and a crop tool laid out on the old size used to draw
  * its rectangle over the new render until that decode taught the
  * controller (the overlay's own base guard, tool-ctrl.c _rect_on_base,
  * would hide it now, but only a relayout puts the rectangle where it
@@ -1120,10 +1227,7 @@ _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    _Req        *p_req  = (_Req *)p_data;
    EnhanceCtrl *p_ctrl = p_req->p_ctrl;
    GError      *p_err  = NULL;
-   gint         i_w    = 0;
-   gint         i_h    = 0;
-   GdkTexture  *p_tex =
-      enhancer_apply_chain_finish(p_res, &i_w, &i_h, &p_req->b_managed, &p_err);
+   GdkTexture  *p_tex  = enhancer_source_render_finish(p_res, &p_err);
    if (_disposed(p_ctrl) || p_req->u_gen != p_ctrl->u_enhance_gen) {
       g_clear_object(&p_tex);
       g_clear_error(&p_err);
@@ -1139,13 +1243,15 @@ _apply_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       _throw_away(p_ctrl); /* back to the original; also bumps the gen and
                             * drops a queued relaunch (it would fail too) */
    } else {
-      _apply_landed(p_ctrl, p_req, p_tex, i_w, i_h);
+      _apply_landed(p_ctrl, p_req, p_tex, p_req->i_orig_w, p_req->i_orig_h);
       g_object_unref(p_tex);
    }
    if (p_ctrl->b_relaunch) {
       p_ctrl->b_relaunch = FALSE;
       _render(p_ctrl); /* the state moved on meanwhile: once more, latest */
    }
+   _sync_busy(p_ctrl);          /* still pending after a relaunch: kept up */
+   _maybe_start_thumbs(p_ctrl); /* the cards come after the preview */
    _req_free(p_req);
 }
 
@@ -1158,15 +1264,68 @@ _drop_inflight(EnhanceCtrl *p_ctrl) {
    p_ctrl->u_enhance_gen++;
    p_ctrl->b_apply_pending = FALSE;
    p_ctrl->b_relaunch      = FALSE;
+   g_clear_pointer(&p_ctrl->p_wait_req, _req_free); /* the build goes on */
    g_cancellable_cancel(p_ctrl->p_enhance_cancel);
    g_clear_object(&p_ctrl->p_enhance_cancel);
    p_ctrl->p_enhance_cancel = g_cancellable_new();
+   _sync_busy(p_ctrl);
+}
+
+/* The viewport the preview is for (the host's large view) with the test
+ * seam's cap. */
+static void
+_view(EnhanceCtrl *p_ctrl, PreviewView *p_out) {
+   memset(p_out, 0, sizeof(*p_out));
+   p_ctrl->p_ops->get_view(p_ctrl->p_host, &p_out->i_w, &p_out->i_h,
+                           &p_out->i_device_scale);
+   p_out->i_max_side = p_ctrl->i_max_side;
+}
+
+/* TRUE iff the landed source is p_file's and fine enough for the view. */
+static gboolean
+_source_ready(EnhanceCtrl *p_ctrl, GFile *p_file) {
+   PreviewView t_view;
+   _view(p_ctrl, &t_view);
+   return (p_ctrl->p_source != NULL &&
+           enhancer_source_serves(p_ctrl->p_source, p_file, &t_view));
+}
+
+/* Start the render of p_req on the landed source with the state as of
+ * NOW: the strengths resolved into the graphs (a nudge after this is the
+ * next render's, the coalescing slot) and the RENDER transform (a tool's
+ * override, else the committed one). The worker snapshots the list, so it
+ * is released right away. */
+static void
+_launch_render(EnhanceCtrl *p_ctrl, _Req *p_req) {
+   p_req->b_managed = enhancer_source_is_managed(p_ctrl->p_source);
+   enhancer_source_get_orig_size(p_ctrl->p_source, &p_req->i_orig_w,
+                                 &p_req->i_orig_h);
+   GPtrArray *p_presets = enhancer_presets_resolve(
+      enhancer_get_presets(p_ctrl->p_enhancer), p_ctrl->d_strength);
+   enhancer_source_render_async(
+      p_ctrl->p_source, p_presets, p_ctrl->u_enhance_mask,
+      _render_transform(p_ctrl), p_ctrl->p_enhance_cancel, _apply_done_cb,
+      p_req);
+   g_ptr_array_unref(p_presets);
+}
+
+/* A card batch in flight yields to the preview (8l2): it is cancelled --
+ * the worker stops between presets -- and started again once the preview
+ * has landed (_maybe_start_thumbs). */
+static void
+_pause_thumbs(EnhanceCtrl *p_ctrl) {
+   if (p_ctrl->b_thumbs_running) {
+      _cancel_thumbs(p_ctrl);
+      p_ctrl->b_thumbs_wanted = TRUE;
+   }
 }
 
 /* Launch the async apply for the has-render-work case: record which file
  * the preview applies to (see nav_changed's comment for why this is set
- * here, not only in nav_changed) and hand off to enhancer_apply_chain_async
- * with the RENDER transform (a tool's override, else the committed one). */
+ * here, not only in nav_changed) and render it on the preview source --
+ * at once when the landed source serves the view, else as soon as the
+ * source being built for it lands (p_wait_req; it counts as pending, so
+ * the state changes meanwhile coalesce exactly as during a render). */
 static void
 _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
    if (p_ctrl->p_enhance_file == NULL ||
@@ -1174,23 +1333,174 @@ _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
       _drop_managed(p_ctrl); /* another file's */
    }
    g_set_object(&p_ctrl->p_enhance_file, p_file);
-   _Req *p_req          = g_new0(_Req, 1);
-   p_req->p_host        = g_object_ref(p_ctrl->p_host);
-   p_req->p_ctrl        = p_ctrl;
-   p_req->u_gen         = p_ctrl->u_enhance_gen;
-   p_req->b_hint        = p_ctrl->p_panel == NULL && !p_ctrl->b_hint_shown;
-   p_ctrl->b_hint_shown = p_ctrl->b_hint_shown || p_req->b_hint;
-   /* The strengths as of NOW, resolved into the graphs: a nudge after
-    * this launch is the next render's (the coalescing slot). The worker
-    * snapshots the list, so it is released right away. */
-   GPtrArray *p_presets = enhancer_presets_resolve(
-      enhancer_get_presets(p_ctrl->p_enhancer), p_ctrl->d_strength);
+   _Req *p_req             = g_new0(_Req, 1);
+   p_req->p_host           = g_object_ref(p_ctrl->p_host);
+   p_req->p_ctrl           = p_ctrl;
+   p_req->u_gen            = p_ctrl->u_enhance_gen;
+   p_req->b_hint           = p_ctrl->p_panel == NULL && !p_ctrl->b_hint_shown;
+   p_ctrl->b_hint_shown    = p_ctrl->b_hint_shown || p_req->b_hint;
    p_ctrl->b_apply_pending = TRUE;
    p_ctrl->u_render_count++;
-   enhancer_apply_chain_async(p_file, p_presets, p_ctrl->u_enhance_mask,
-                              _render_transform(p_ctrl),
-                              p_ctrl->p_enhance_cancel, _apply_done_cb, p_req);
-   g_ptr_array_unref(p_presets);
+   _pause_thumbs(p_ctrl);
+   if (_source_ready(p_ctrl, p_file)) {
+      _launch_render(p_ctrl, p_req);
+   } else {
+      p_ctrl->p_wait_req = p_req;
+      _build_source(p_ctrl, p_file);
+   }
+   _sync_busy(p_ctrl);
+}
+
+/* --- the preview source (8l2) --------------------------------------------- */
+
+/* A build's context: the host ref keeps the borrowed controller alive (as
+ * _Req does), u_gen says whether it is still wanted. */
+typedef struct {
+   gpointer     p_host; /* ref'd window */
+   EnhanceCtrl *p_ctrl; /* borrowed, valid while p_host is alive */
+   guint        u_gen;
+} _SrcReq;
+
+/* Forget the source and cancel a build in flight (its landing is stale by
+ * u_source_gen). A render waiting for it keeps waiting: _reset_source is
+ * the caller-facing form that builds again for it. */
+static void
+_drop_source(EnhanceCtrl *p_ctrl) {
+   p_ctrl->u_source_gen++;
+   if (p_ctrl->p_src_cancel != NULL) {
+      g_cancellable_cancel(p_ctrl->p_src_cancel);
+      g_clear_object(&p_ctrl->p_src_cancel);
+   }
+   g_clear_object(&p_ctrl->p_build_file);
+   g_clear_pointer(&p_ctrl->p_source, enhancer_source_delete);
+}
+
+/* The source is stale (another decode of the file, another file): drop it,
+ * and build the current file's again at once when a render waits for one
+ * -- it would wait for ever otherwise. */
+static void
+_reset_source(EnhanceCtrl *p_ctrl) {
+   _drop_source(p_ctrl);
+   GFile *p_cur = _current_file(p_ctrl);
+   if (p_ctrl->p_wait_req != NULL && p_cur != NULL) {
+      _build_source(p_ctrl, p_cur);
+   }
+}
+
+/* A render waited for a source that could not be built (the file cannot
+ * be decoded any more): the same as a failed render -- back to the
+ * original, which says what the loader thinks of the file. Without a
+ * waiting render only the cards stay empty. */
+static void
+_source_failed(EnhanceCtrl *p_ctrl, const GError *p_err) {
+   _Req *p_wait = g_steal_pointer(&p_ctrl->p_wait_req);
+   if (p_wait == NULL) {
+      p_ctrl->b_thumbs_wanted = FALSE;
+      return;
+   }
+   _req_free(p_wait);
+   p_ctrl->b_apply_pending = FALSE;
+   g_warning("ggaze: enhance failed: %s",
+             p_err != NULL ? p_err->message : "(no detail)");
+   _show_status(p_ctrl, "Enhance failed");
+   _throw_away(p_ctrl);
+   _sync_busy(p_ctrl);
+}
+
+/* The source landed: keep it, and start what waited for it -- the preview
+ * first (with the state as of now, which supersedes a queued relaunch),
+ * the cards after it (_maybe_start_thumbs runs when it lands). */
+static void
+_source_landed(EnhanceCtrl *p_ctrl, EnhancerSource *p_src) {
+   g_clear_pointer(&p_ctrl->p_source, enhancer_source_delete);
+   p_ctrl->p_source = p_src;
+   _Req *p_wait     = g_steal_pointer(&p_ctrl->p_wait_req);
+   if (p_wait != NULL) {
+      p_ctrl->b_relaunch = FALSE;
+      _launch_render(p_ctrl, p_wait);
+   } else {
+      _maybe_start_thumbs(p_ctrl);
+   }
+}
+
+static void
+_source_done_cb(GObject *p_obj, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_obj;
+   _SrcReq        *p_req  = p_data;
+   EnhanceCtrl    *p_ctrl = p_req->p_ctrl;
+   GError         *p_err  = NULL;
+   EnhancerSource *p_src  = enhancer_source_new_finish(p_res, &p_err);
+   if (_disposed(p_ctrl) || p_req->u_gen != p_ctrl->u_source_gen) {
+      enhancer_source_delete(p_src);
+   } else {
+      g_clear_object(&p_ctrl->p_src_cancel);
+      g_clear_object(&p_ctrl->p_build_file);
+      if (p_src == NULL) {
+         _source_failed(p_ctrl, p_err);
+      } else {
+         _source_landed(p_ctrl, p_src);
+      }
+   }
+   g_clear_error(&p_err);
+   g_object_unref(p_req->p_host);
+   g_free(p_req);
+}
+
+/* Build p_file's source unless one is on its way for it: from the decode
+ * the viewer shows when there is one (p_orig_tex, the current file's --
+ * no second decode), else from the file. */
+static void
+_build_source(EnhanceCtrl *p_ctrl, GFile *p_file) {
+   if (p_ctrl->p_src_cancel != NULL && p_ctrl->p_build_file != NULL &&
+       g_file_equal(p_ctrl->p_build_file, p_file)) {
+      return;
+   }
+   _drop_source(p_ctrl);
+   PreviewView t_view;
+   _view(p_ctrl, &t_view);
+   _SrcReq *p_req       = g_new(_SrcReq, 1);
+   p_req->p_host        = g_object_ref(p_ctrl->p_host);
+   p_req->p_ctrl        = p_ctrl;
+   p_req->u_gen         = p_ctrl->u_source_gen;
+   p_ctrl->p_src_cancel = g_cancellable_new();
+   p_ctrl->p_build_file = g_object_ref(p_file);
+   p_ctrl->u_source_count++;
+   enhancer_source_new_async(p_file, p_ctrl->p_orig_tex, &t_view,
+                             p_ctrl->p_src_cancel, _source_done_cb, p_req);
+}
+
+/* --- the pending indicator (8l2) ------------------------------------------ */
+
+static gboolean
+_busy_timeout(gpointer p_data) {
+   EnhanceCtrl *p_ctrl = p_data;
+   p_ctrl->u_busy_id   = 0;
+   p_ctrl->b_busy      = TRUE;
+   p_ctrl->p_ops->show_busy(p_ctrl->p_host, TRUE);
+   _sync_panel(p_ctrl);
+   return (G_SOURCE_REMOVE);
+}
+
+/* Bring the indicator in line with b_apply_pending: a render pending for
+ * _BUSY_DELAY_MS shows it (the host's overlay on the view, and the panel's
+ * state line); the render landing, failing or being dropped takes it
+ * down. A relaunch keeps it up (still pending), so a burst of slow renders
+ * does not blink it. The timer borrows p_ctrl: dispose removes it. */
+static void
+_sync_busy(EnhanceCtrl *p_ctrl) {
+   if (p_ctrl->b_apply_pending && !_disposed(p_ctrl)) {
+      if (!p_ctrl->b_busy && p_ctrl->u_busy_id == 0) {
+         p_ctrl->u_busy_id =
+            g_timeout_add(_BUSY_DELAY_MS, _busy_timeout, p_ctrl);
+      }
+      return;
+   }
+   g_clear_handle_id(&p_ctrl->u_busy_id, g_source_remove);
+   if (p_ctrl->b_busy) {
+      p_ctrl->b_busy = FALSE;
+      p_ctrl->p_ops->show_busy(p_ctrl->p_host, FALSE);
+      _sync_panel(p_ctrl);
+   }
 }
 
 /* Canonical "nothing to render" site -- every path that clears the state
@@ -1202,7 +1512,15 @@ _launch(EnhanceCtrl *p_ctrl, GFile *p_file) {
  * set_hold_original no-ops once nothing is active, so a Space RELEASE
  * arriving after the mask was cleared out from under a still-held key would
  * otherwise leave the flag stuck TRUE and swallow the next press (tu0 review
- * round 2, issue 4). */
+ * round 2, issue 4).
+ *
+ * Nothing is pending afterwards, so the card batch goes ahead here: it
+ * waits for the preview (_maybe_start_thumbs), and a preview dropped
+ * before it landed -- x, an undo back to no edit, the gate's Discard, all
+ * under a slow render -- never lands to start it, so the cards stayed
+ * empty (and a batch paused under that preview lost its pictures). Not in
+ * _drop_inflight itself: the _launch that follows it there would pause
+ * the batch again at once. */
 static void
 _restore_original(EnhanceCtrl *p_ctrl) {
    _drop_inflight(p_ctrl);
@@ -1211,6 +1529,7 @@ _restore_original(EnhanceCtrl *p_ctrl) {
    g_clear_object(&p_ctrl->p_enhance_tex);
    _load_current(p_ctrl);
    _update_header(p_ctrl);
+   _maybe_start_thumbs(p_ctrl);
 }
 
 /* Bring the screen in line with the state, off the GTK main thread
@@ -1357,11 +1676,14 @@ enhance_ctrl_set_preview_transform(EnhanceCtrl *p_ctrl, const Transform *p_xf) {
 
 /* Forget what is known about the original (another file, or this one
  * rewritten in place): the reload that follows shows the file's fresh
- * decode, and enhance_ctrl_texture_shown learns it again from that. */
+ * decode, and enhance_ctrl_texture_shown learns it again from that. The
+ * preview source goes with it (a render waiting for one gets a new build:
+ * _reset_source). */
 static void
 _forget_original(EnhanceCtrl *p_ctrl) {
    g_clear_object(&p_ctrl->p_orig_tex);
    _drop_managed(p_ctrl);
+   _reset_source(p_ctrl); /* built from what is forgotten */
    p_ctrl->i_orig_w = 0;
    p_ctrl->i_orig_h = 0;
 }
@@ -1448,6 +1770,50 @@ guint
 enhance_ctrl_get_preview_count(EnhanceCtrl *p_ctrl) {
    g_return_val_if_fail(p_ctrl != NULL, 0);
    return (p_ctrl->u_preview_count);
+}
+
+guint
+enhance_ctrl_get_source_count(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, 0);
+   return (p_ctrl->u_source_count);
+}
+
+guint
+enhance_ctrl_get_thumb_launch_count(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, 0);
+   return (p_ctrl->u_thumb_launches);
+}
+
+gboolean
+enhance_ctrl_is_busy_shown(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, FALSE);
+   return (p_ctrl->b_busy);
+}
+
+gboolean
+enhance_ctrl_is_settled(EnhanceCtrl *p_ctrl) {
+   g_return_val_if_fail(p_ctrl != NULL, TRUE);
+   gboolean b_cards = p_ctrl->b_thumbs_running ||
+                      (p_ctrl->b_thumbs_wanted && p_ctrl->p_panel != NULL &&
+                       p_ctrl->b_thumbnails);
+   return (!p_ctrl->b_apply_pending && p_ctrl->p_src_cancel == NULL &&
+           !b_cards);
+}
+
+void
+enhance_ctrl_set_preview_cap(EnhanceCtrl *p_ctrl, gint i_max_side) {
+   g_return_if_fail(p_ctrl != NULL);
+   p_ctrl->i_max_side = MAX(0, i_max_side);
+}
+
+gboolean
+enhance_ctrl_get_preview_scale(EnhanceCtrl *p_ctrl, gdouble *pd_scale) {
+   g_return_val_if_fail(p_ctrl != NULL && pd_scale != NULL, FALSE);
+   if (p_ctrl->p_source == NULL) {
+      return (FALSE);
+   }
+   *pd_scale = enhancer_source_get_scale(p_ctrl->p_source);
+   return (TRUE);
 }
 
 gboolean
@@ -1670,9 +2036,8 @@ _scroll_to_selected(EnhanceCtrl *p_ctrl) {
  * back is a step of its own, so undo can stop at the value it closed on. */
 static void
 _destroy(EnhanceCtrl *p_ctrl) {
-   p_ctrl->u_preview_gen++;
-   g_cancellable_cancel(p_ctrl->p_preview_cancel);
-   g_clear_object(&p_ctrl->p_preview_cancel);
+   _cancel_thumbs(p_ctrl);
+   p_ctrl->b_thumbs_wanted = FALSE;
    if (p_ctrl->p_panel == NULL) {
       return;
    }
@@ -1719,6 +2084,9 @@ _preview_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    GError      *p_err  = NULL;
    GPtrArray   *p_tex  = enhancer_preview_thumbnails_finish(p_res, &p_err);
    EnhanceCtrl *p_ctrl = p_ctx->p_ctrl;
+   if (!_disposed(p_ctrl) && p_ctx->u_gen == p_ctrl->u_preview_gen) {
+      p_ctrl->b_thumbs_running = FALSE;
+   }
    if (!_disposed(p_ctrl) && p_ctx->u_gen == p_ctrl->u_preview_gen &&
        p_ctrl->p_panel != NULL && p_tex != NULL && p_tex->len > 0) {
       GdkTexture *p_original = g_ptr_array_index(p_tex, 0);
@@ -1741,10 +2109,52 @@ _preview_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    g_free(p_ctx);
 }
 
-/* Start (or restart) the one cancellable thumbnail batch for the current
- * file. A no-op for label-only cards or when there is no current file.
- * Counted (u_preview_count) only when a batch really starts, so the seam
- * measures work launched, not calls made. */
+/* Stop the card batch in flight, if any: its landing is stale by
+ * u_preview_gen. */
+static void
+_cancel_thumbs(EnhanceCtrl *p_ctrl) {
+   p_ctrl->u_preview_gen++;
+   p_ctrl->b_thumbs_running = FALSE;
+   g_cancellable_cancel(p_ctrl->p_preview_cancel);
+   g_clear_object(&p_ctrl->p_preview_cancel);
+}
+
+/* Start the wanted card batch once it may run: the panel is up with
+ * picture cards, the current file's source has landed, and no preview is
+ * pending -- the preview renders first (8l2), and a batch started under
+ * it would compete for the same cores. Counted in u_thumb_launches. */
+static void
+_maybe_start_thumbs(EnhanceCtrl *p_ctrl) {
+   GFile *p_file = _current_file(p_ctrl);
+   if (!p_ctrl->b_thumbs_wanted || p_ctrl->p_panel == NULL ||
+       !p_ctrl->b_thumbnails || p_ctrl->b_apply_pending ||
+       p_ctrl->p_source == NULL || p_file == NULL ||
+       !g_file_equal(enhancer_source_get_file(p_ctrl->p_source), p_file)) {
+      return;
+   }
+   p_ctrl->b_thumbs_wanted = FALSE;
+   _cancel_thumbs(p_ctrl);
+   p_ctrl->p_preview_cancel = g_cancellable_new();
+   _PreviewCtx *p_ctx       = g_new(_PreviewCtx, 1);
+   p_ctx->p_host            = g_object_ref(p_ctrl->p_host);
+   p_ctx->p_ctrl            = p_ctrl;
+   p_ctx->u_gen             = p_ctrl->u_preview_gen;
+   p_ctrl->b_thumbs_running = TRUE;
+   p_ctrl->u_thumb_launches++;
+   enhancer_preview_thumbnails_async(
+      p_ctrl->p_source, enhancer_get_presets(p_ctrl->p_enhancer),
+      p_ctrl->p_preview_cancel, _preview_done_cb, p_ctx);
+}
+
+/* Ask for the card batch of the current file (the panel opened, was
+ * pointed at another file or rebuilt). A no-op for label-only cards or
+ * when there is no current file. Counted (u_preview_count) per request,
+ * so the seam measures batches asked for, whenever they then run: a batch
+ * runs on the file's preview source, after a pending preview
+ * (_maybe_start_thumbs). With no source, one is built -- from the decode
+ * the viewer shows; while that decode is still on its way the build waits
+ * for it (_learn_original starts it), rather than decoding the file a
+ * second time next to the viewer. */
 static void
 _start_previews(EnhanceCtrl *p_ctrl) {
    if (!p_ctrl->b_thumbnails) {
@@ -1755,17 +2165,15 @@ _start_previews(EnhanceCtrl *p_ctrl) {
       return;
    }
    p_ctrl->u_preview_count++;
-   p_ctrl->u_preview_gen++;
-   g_cancellable_cancel(p_ctrl->p_preview_cancel);
-   g_clear_object(&p_ctrl->p_preview_cancel);
-   p_ctrl->p_preview_cancel = g_cancellable_new();
-   _PreviewCtx *p_ctx       = g_new(_PreviewCtx, 1);
-   p_ctx->p_host            = g_object_ref(p_ctrl->p_host);
-   p_ctx->p_ctrl            = p_ctrl;
-   p_ctx->u_gen             = p_ctrl->u_preview_gen;
-   enhancer_preview_thumbnails_async(
-      p_file, enhancer_get_presets(p_ctrl->p_enhancer),
-      p_ctrl->p_preview_cancel, _preview_done_cb, p_ctx);
+   _cancel_thumbs(p_ctrl);
+   p_ctrl->b_thumbs_wanted = TRUE;
+   gboolean b_have =
+      p_ctrl->p_source != NULL &&
+      g_file_equal(enhancer_source_get_file(p_ctrl->p_source), p_file);
+   if (!b_have && p_ctrl->p_orig_tex != NULL) {
+      _build_source(p_ctrl, p_file);
+   }
+   _maybe_start_thumbs(p_ctrl);
 }
 
 /* A slider's handlers: value-changed sets the strength (_scale_changed),
@@ -2195,6 +2603,11 @@ enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl) {
       _reset_strengths(p_ctrl); /* per image, like the mask */
       transform_init(&p_ctrl->t_xf);
       p_ctrl->b_preview = FALSE; /* a tool's override goes with it */
+      _drop_inflight(p_ctrl);    /* first: a render waiting for the old
+                                  * file's source must not have the new
+                                  * file's built for it (_reset_source) --
+                                  * the cards build theirs from the decode
+                                  * the viewer is about to show */
       _forget_original(p_ctrl);  /* another image, another size */
       p_ctrl->b_saved      = FALSE;
       p_ctrl->b_have_saved = FALSE; /* the saved pair was this file's */
@@ -2203,7 +2616,6 @@ enhance_ctrl_nav_changed(EnhanceCtrl *p_ctrl) {
       p_ctrl->b_hold_original = FALSE; /* mask cleared without going through
                                         * _render, so reset the hold flag
                                         * here too (issue 4) */
-      _drop_inflight(p_ctrl);
       g_clear_object(&p_ctrl->p_enhance_tex);
       if (p_ctrl->p_panel != NULL && p_cur == NULL) {
          _destroy(p_ctrl); /* nothing left to enhance */

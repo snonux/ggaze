@@ -315,6 +315,16 @@ pans); elsewhere it is ignored, so `Shift+Enter` applies a crop and
   was set (a panorama zoomed out to 1.83 % stays there, rather than jumping
   to 2 %, after the window widens; zooming back in, or a two-finger pan's
   wobble, moves it only as far as asked).
+- Zoom is in **image** pixels, whatever the texture's resolution: an
+  enhance preview is rendered from a copy scaled to the view (8l2,
+  [gegl.md](gegl.md) "The live preview renders at display resolution")
+  yet stands for the image, so fit, `0`'s 100 % and the crop / straighten
+  overlays are the image's. Zoomed past about 1.5x fit, the preview is
+  shown **magnified** (soft at a 64 MP photo's 100 %); the saved copy is
+  the full-resolution result. The status line says so when a zoom
+  crosses into that — *Preview at 17 % resolution — s saves full size* —
+  once per crossing (again after a trip back to fit), never at fit and
+  never for a full-resolution picture.
 
 ## Info overlay (`i`)
 
@@ -426,7 +436,11 @@ image's histogram.
 - **`Ctrl+c`** (or menu *Copy*) puts the current picture on the clipboard so
   you can paste it into other apps (Katogram, GIMP, chat clients) — like gthumb.
 - **No marks** → copies the **displayed** image **pixels** as PNG (modified
-  if a preview is active, else original) via `GdkClipboard` +
+  if a preview is active — at the preview's display resolution, since the
+  live preview renders a scaled copy (8l2), and the status line says so
+  with the size, *Copied edited preview (1600×1200) — s saves full size*;
+  `s` saves the full-resolution edit — else original, *Copied image*) via
+  `GdkClipboard` +
   `GdkContentProvider` for `image/png`; pastes as an image. Decoding runs in a
   `GTask` thread so the UI doesn't block.
 - **Marks present** → copies the marked **files** as `text/uri-list` (plus a
@@ -503,8 +517,14 @@ image's histogram.
     different mark from the on state, and under it — for a tunable preset
     — its **strength slider** (the preset's own range, a tick at the
     default; one slider at a time, so all eight rows still fit).
-    Preferences can turn the thumbnails off for label-only rows;
-    the rows and the Original always show the **untransformed** image —
+    Preferences can turn the thumbnails off for label-only rows. The
+    thumbnails render **after** the large preview (8l2): opening the panel
+    and pressing a preset at once shows the preview first, the cards a
+    moment later — they are cut from the preview's scaled source, so they
+    cost no decode of their own; a preview dropped before it lands (`x`,
+    `u` back to no edit, the save prompt's Discard) lets them start at
+    once. The rows and the Original always show the
+    **untransformed** image —
     they are references for the colour presets alone and ignore a crop,
     straighten or turn. More presets than fit the window **scroll** — only
     the preset list: the title, Original, Transform and the actions below
@@ -514,7 +534,11 @@ image's histogram.
     tooltips: crop `c`, straighten `r`, rotate left `[`, rotate right `]`
     (the same actions as the keys).
   - **Save state and actions** — one line saying *No edits yet*, *Unsaved
-    edits · original kept* or *Saved as …*, then **Save copy** `s` (naming
+    edits · original kept* or *Saved as …* — followed by *· rendering…*
+    while a preview render has been pending for more than 300 ms (8l2;
+    a *Rendering…* pill with a spinner also shows over the top of the
+    view, with or without the panel, and both go when the render lands,
+    fails or is superseded) — then **Save copy** `s` (naming
     the file it will write, `as IMG_0001-enhanced.jpg`) beside **Revert**
     `x`, and under them **Undo** `u` and **Redo** `Shift+u`, each
     insensitive while there is nothing to undo / redo.
@@ -621,6 +645,15 @@ image's histogram.
   menu's *Undo edit* / *Redo edit* only say where they work.
 - **Hold `Space`** shows the original; release shows the current edit — with
   or without the panel.
+- **The preview renders at display resolution** (8l2, decision #53): the
+  edit is rendered from the image scaled to about 1.5x the view's fit
+  size (decoded once per image, or taken from the picture already on
+  screen), so a key press updates a 64 MP photo in ~0.1 s instead of
+  ~10 s; `s` and the save prompt's Save export at full resolution,
+  unchanged. Blur and sharpen radii are scaled with the preview, so
+  Sharpen looks as it will in the saved copy; Denoise's iteration count
+  is not (it looks a little stronger on the preview). Details:
+  [gegl.md](gegl.md) "The live preview renders at display resolution".
 - Presets are GEGL op graph strings, the built-ins included (Brightness =
   `gegl:exposure exposure={s:0.5:-2..2:0.1}`; the full table is in
   [gegl.md](gegl.md) "Built-in presets"). User presets are configured in
@@ -837,6 +870,10 @@ While a tool is up the key-hint bar under the image lists its keys.
   straighten / rotate) is active; otherwise original == modified, no-op.
 - Large view only. Works with or without the edit panel open; the panel's
   key-hint bar names it. GUI: menu *Show original* (toggle) for mouse users.
+- A preview rendered from a scaled copy (8l2) is compared with that copy
+  itself — the same resolution and the same (colour-managed or not)
+  decode — so the before/after differs only by the edit, not by
+  sharpness.
 - On an animated GIF/WebP the modified image is a still of the first frame;
   holding `Space` shows the original animation (from its first frame).
 

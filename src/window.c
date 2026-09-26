@@ -28,6 +28,7 @@
 #include "delete-confirm.h"
 #include "fileops.h"
 #include "info-overlay.h"
+#include "logical-size.h"
 #include "mover.h"
 #include "navigator.h"
 #include "opener.h"
@@ -93,6 +94,9 @@ struct _GgazeWindow {
    GtkWidget *p_side_slot; /* GtkBox beside the overlay that the enhance
                             * side panel is appended to while open; shown
                             * only in the large view (_set_view) */
+   GtkWidget *p_busy;      /* the "Rendering…" pill over the view (GEGL
+                            * builds, _init_busy_indicator; NULL without):
+                            * a preview render taking a while (8l2) */
    InfoOverlay *p_info;    /* info card + status line over the stack */
    guint        u_slideshow; /* slideshow timeout id (0=off) */
    gint64       i_esc_at;    /* monotonic us of the last grid Esc (two-step
@@ -100,7 +104,11 @@ struct _GgazeWindow {
    GtkWidget *p_status_page; /* AdwStatusPage: the "empty" stack child */
    GtkWidget *p_menu_btn;    /* header-bar main menu (F10) */
    gboolean   b_disposed;    /* set in dispose; async callbacks check it */
-   guint      u_load_count;  /* _load_current runs with a navigator so
+   gboolean   b_soft_noted;  /* the viewer shows a scaled-down preview
+                              * magnified and the status line has said so
+                              * (_on_viewer_zoom_changed): said once per
+                              * crossing into magnification, not per step */
+   guint u_load_count;       /* _load_current runs with a navigator so
                               * far (a test seam: an open is one load) */
    DeleteConfirm *p_delete_confirm; /* bulk-delete confirm flow
                                      * (captured targets + outstanding
@@ -1086,6 +1094,48 @@ _action_mark_range(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    _update_header(p_win);
 }
 
+/* The resolution of a scaled-down texture on screen, in percent of the
+ * image it stands for (logical-size.h), or 0 for a full-resolution one. */
+static gint
+_preview_percent(GdkTexture *p_tex) {
+   gint i_lw = 0;
+   if (p_tex == NULL) {
+      return (0);
+   }
+   logical_size_get(p_tex, &i_lw, NULL);
+   gint i_pw = gdk_texture_get_width(p_tex);
+   if (i_pw >= i_lw || i_lw <= 0) {
+      return (0);
+   }
+   return (CLAMP((gint)(100.0 * i_pw / i_lw + 0.5), 1, 99));
+}
+
+/* What win.copy says it copied from the view (no marks): the texture on
+ * screen as it is. The live enhance preview is scaled down (8l2), so its
+ * pixels -- or, under hold-Space, the original at the preview's size --
+ * are what lands on the clipboard; the status line says so, with the size,
+ * so a user expecting the full-resolution edit is never misled silently. */
+static char *
+_copied_text(GgazeWindow *p_win, GdkTexture *p_tex) {
+   if (_preview_percent(p_tex) == 0) {
+      return (g_strdup("Copied image"));
+   }
+   gint     i_w    = gdk_texture_get_width(p_tex);
+   gint     i_h    = gdk_texture_get_height(p_tex);
+   gboolean b_hold = FALSE;
+#if GGAZE_HAVE_GEGL
+   b_hold = enhance_ctrl_is_hold_original(p_win->p_enhance_ctrl);
+#else
+   (void)p_win;
+#endif
+   if (b_hold) {
+      return (
+         g_strdup_printf("Copied original preview (%d\u00d7%d)", i_w, i_h));
+   }
+   return (g_strdup_printf(
+      "Copied edited preview (%d\u00d7%d) \u2014 s saves full size", i_w, i_h));
+}
+
 /* win.copy (Ctrl+c): put the current picture on the clipboard. With marks,
  * copy the marked files as text/uri-list (+ text/plain) so file managers and
  * file-aware apps can paste them. With no marks, copy the DISPLAYED image
@@ -1093,11 +1143,14 @@ _action_mark_range(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * preview when an enhance preset is active, else the original (docs/ui-and-
  * interactions.md "Copy to clipboard"). The texture is already decoded, so the
  * PNG encode (gdk_texture_save_to_png_bytes) runs synchronously and is fast
- * enough not to block the UI on a re-decode. The viewer only ever holds the
- * texture for navigator.current (last-write-wins invariant), so copying it is
- * tied to the current load by construction. The decision is factored into
- * ggaze_window_get_copy_provider so it can be tested without driving the
- * (display-backend-dependent) system clipboard. */
+ * enough not to block the UI on a re-decode. The preview is the scaled-down
+ * one the view shows (8l2), and the status line says so with its size
+ * (_copied_text); `s` is what writes the edit at full size. The viewer only
+ * ever holds the texture for navigator.current (last-write-wins
+ * invariant), so copying it is tied to the current load by construction.
+ * The decision is factored into ggaze_window_get_copy_provider so it can
+ * be tested without driving the (display-backend-dependent) system
+ * clipboard. */
 static void
 _action_copy(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -1119,7 +1172,10 @@ _action_copy(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       _show_status(p_win, c_msg);
       g_free(c_msg);
    } else {
-      _show_status(p_win, "Copied image");
+      char *c_msg = _copied_text(
+         p_win, ggaze_viewer_get_texture(GGAZE_VIEWER(p_win->p_viewer)));
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
    }
 }
 
@@ -1436,6 +1492,27 @@ _ec_mode_changed(gpointer p_host) {
    _sync_edit_mode(GGAZE_WINDOW(p_host));
 }
 
+/* The large view's size and device scale: what the preview source is
+ * scaled for (8l2). 0 x 0 while the viewer has no allocation yet (the
+ * controller assumes a default view then). */
+static void
+_ec_get_view(gpointer p_host, gint *p_w, gint *p_h, gint *p_scale) {
+   GtkWidget *p_viewer = GGAZE_WINDOW(p_host)->p_viewer;
+   *p_w                = gtk_widget_get_width(p_viewer);
+   *p_h                = gtk_widget_get_height(p_viewer);
+   *p_scale            = gtk_widget_get_scale_factor(p_viewer);
+}
+
+/* A preview render has been pending for a while: the pill over the view
+ * says so (and goes when it lands, fails or is superseded). */
+static void
+_ec_show_busy(gpointer p_host, gboolean b_busy) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_host);
+   if (p_win->p_busy != NULL) {
+      gtk_widget_set_visible(p_win->p_busy, b_busy);
+   }
+}
+
 static const EnhanceUIHostOps _ENHANCE_OPS = {
    .show_texture       = _ec_show_texture,
    .update_header      = _ec_update_header,
@@ -1449,6 +1526,8 @@ static const EnhanceUIHostOps _ENHANCE_OPS = {
    .abandon_tool       = _ec_abandon_tool,
    .original_changed   = _ec_original_changed,
    .mode_changed       = _ec_mode_changed,
+   .get_view           = _ec_get_view,
+   .show_busy          = _ec_show_busy,
 };
 
 /* win.enhance (key 'a', the panel's close button, the menu): open the side
@@ -1798,6 +1877,45 @@ ggaze_window_enhance_has_managed_original(GgazeWindow *p_win) {
    return (enhance_ctrl_has_managed_original(p_win->p_enhance_ctrl));
 }
 
+guint
+ggaze_window_enhance_source_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (enhance_ctrl_get_source_count(p_win->p_enhance_ctrl));
+}
+
+guint
+ggaze_window_enhance_thumb_launch_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (enhance_ctrl_get_thumb_launch_count(p_win->p_enhance_ctrl));
+}
+
+gboolean
+ggaze_window_enhance_is_settled(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), TRUE);
+   return (enhance_ctrl_is_settled(p_win->p_enhance_ctrl));
+}
+
+gboolean
+ggaze_window_enhance_busy_shown(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   gboolean b_ctrl = enhance_ctrl_is_busy_shown(p_win->p_enhance_ctrl);
+   gboolean b_pill =
+      p_win->p_busy != NULL && gtk_widget_get_visible(p_win->p_busy);
+   return (b_ctrl && b_pill);
+}
+
+void
+ggaze_window_enhance_set_preview_cap(GgazeWindow *p_win, gint i_max_side) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   enhance_ctrl_set_preview_cap(p_win->p_enhance_ctrl, i_max_side);
+}
+
+gboolean
+ggaze_window_enhance_preview_scale(GgazeWindow *p_win, gdouble *pd_scale) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (enhance_ctrl_get_preview_scale(p_win->p_enhance_ctrl, pd_scale));
+}
+
 gboolean
 ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
                             gint *p_base_w, gint *p_base_h) {
@@ -1993,6 +2111,43 @@ ggaze_window_enhance_managed_fetch_count(GgazeWindow *p_win) {
 gboolean
 ggaze_window_enhance_has_managed_original(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (FALSE);
+}
+
+guint
+ggaze_window_enhance_source_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (0); /* no GEGL, no preview */
+}
+
+guint
+ggaze_window_enhance_thumb_launch_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (0);
+}
+
+gboolean
+ggaze_window_enhance_is_settled(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), TRUE);
+   return (TRUE);
+}
+
+gboolean
+ggaze_window_enhance_busy_shown(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (FALSE);
+}
+
+void
+ggaze_window_enhance_set_preview_cap(GgazeWindow *p_win, gint i_max_side) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   (void)i_max_side;
+}
+
+gboolean
+ggaze_window_enhance_preview_scale(GgazeWindow *p_win, gdouble *pd_scale) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   (void)pd_scale;
    return (FALSE);
 }
 
@@ -2314,6 +2469,33 @@ static void
 _on_viewer_toggle_info(GgazeViewer *p_v, gpointer p_data) {
    (void)p_v;
    g_action_group_activate_action(G_ACTION_GROUP(p_data), "info", NULL);
+}
+
+/* The zoom changed (8l2 review). The live enhance preview is rendered at
+ * about the view's resolution (decision #53), so zoomed in past that it is
+ * shown magnified -- soft where the export will be sharp, which a user
+ * judging Sharpen or Denoise at 100 % would take for the result. Say so
+ * on the status line when the view crosses into that, once per crossing
+ * (not on every further zoom step): "Preview at N % resolution". Only for
+ * an explicit zoom -- at fit the source is built to cover the view -- and
+ * only for a scaled texture, so an ordinary picture zoomed past 100 %
+ * never gets it. */
+static void
+_on_viewer_zoom_changed(GgazeViewer *p_v, gpointer p_data) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->b_disposed) {
+      return;
+   }
+   gint     i_pct  = _preview_percent(ggaze_viewer_get_texture(p_v));
+   gboolean b_soft = i_pct > 0 && !ggaze_viewer_is_fit(p_v) &&
+                     ggaze_viewer_get_texel_scale(p_v) > 1.0 + 1e-6;
+   if (b_soft && !p_win->b_soft_noted) {
+      char *c_msg = g_strdup_printf(
+         "Preview at %d %% resolution \u2014 s saves full size", i_pct);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
+   }
+   p_win->b_soft_noted = b_soft;
 }
 
 static void
@@ -3366,6 +3548,27 @@ _init_enhance_state(GgazeWindow *p_win) {
  * must be claimed before the global shortcut table sees them. The router's
  * key-hint bar goes under the large view, in the column _init_info_overlay
  * built around the overlay. */
+/* The "Rendering…" pill: a spinner and a label at the top of the view,
+ * over the picture, hidden until a preview render has been pending for a
+ * while (_ec_show_busy, 8l2). It takes no clicks, so it never steals a
+ * drag from the crop tool under it. */
+static void
+_init_busy_indicator(GgazeWindow *p_win) {
+   GtkWidget *p_box  = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+   GtkWidget *p_spin = gtk_spinner_new();
+   gtk_spinner_start(GTK_SPINNER(p_spin));
+   gtk_box_append(GTK_BOX(p_box), p_spin);
+   gtk_box_append(GTK_BOX(p_box), gtk_label_new("Rendering…"));
+   gtk_widget_add_css_class(p_box, "ggaze-info");
+   gtk_widget_set_halign(p_box, GTK_ALIGN_CENTER);
+   gtk_widget_set_valign(p_box, GTK_ALIGN_START);
+   gtk_widget_set_margin_top(p_box, 12);
+   gtk_widget_set_can_target(p_box, FALSE);
+   gtk_widget_set_visible(p_box, FALSE);
+   gtk_overlay_add_overlay(GTK_OVERLAY(p_win->p_overlay), p_box);
+   p_win->p_busy = p_box;
+}
+
 static void
 _init_tool_state(GgazeWindow *p_win) {
    p_win->p_tool_ctrl = tool_ctrl_new(p_win->p_enhance_ctrl, &_TOOL_OPS, p_win);
@@ -3374,6 +3577,7 @@ _init_tool_state(GgazeWindow *p_win) {
    GtkWidget *p_column = gtk_widget_get_parent(p_win->p_overlay);
    gtk_box_append(GTK_BOX(p_column),
                   edit_mode_get_hint_bar(p_win->p_edit_mode));
+   _init_busy_indicator(p_win);
    GtkEventController *p_kc = gtk_event_controller_key_new();
    gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
    g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_edit_key_cb), p_win);
@@ -3715,6 +3919,8 @@ _init_stack_and_viewer(GgazeWindow *p_win) {
                     G_CALLBACK(_on_viewer_navigate), p_win);
    g_signal_connect(p_win->p_viewer, "toggle-info",
                     G_CALLBACK(_on_viewer_toggle_info), p_win);
+   g_signal_connect(p_win->p_viewer, "zoom-changed",
+                    G_CALLBACK(_on_viewer_zoom_changed), p_win);
    _apply_viewer_prefs(p_win);
 
    _set_view(p_win, GGAZE_VIEW_EMPTY);

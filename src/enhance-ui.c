@@ -450,7 +450,7 @@ enhance_ui_build_panel(const GPtrArray *p_presets, guint32 u_mask,
 void
 enhance_ui_set_save_state(GtkWidget *p_state, GtkWidget *p_save_btn,
                           gboolean b_active, gboolean b_saved,
-                          const char *c_saved) {
+                          const char *c_saved, gboolean b_rendering) {
    g_return_if_fail(GTK_IS_LABEL(p_state));
    char *c_text = NULL;
    if (!b_active) {
@@ -460,6 +460,11 @@ enhance_ui_set_save_state(GtkWidget *p_state, GtkWidget *p_save_btn,
                                : g_strdup("Saved");
    } else {
       c_text = g_strdup("Unsaved edits · original kept");
+   }
+   if (b_rendering) {
+      char *c_busy = g_strconcat(c_text, " · rendering…", NULL);
+      g_free(c_text);
+      c_text = c_busy;
    }
    gtk_label_set_text(GTK_LABEL(p_state), c_text);
    gtk_widget_set_tooltip_text(p_state, c_text); /* when it is ellipsized */

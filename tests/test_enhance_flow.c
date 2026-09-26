@@ -80,6 +80,7 @@
 #include "histogram-view.h"
 #include "histogram.h"
 #include "icc.h"
+#include "logical-size.h"
 #include "settings.h"
 #include "temp_dir.h"
 #include "transform.h"
@@ -255,15 +256,33 @@ revert_edits(GgazeWindow *p_win) {
    fire(p_win, "win.edit-revert");
 }
 
+/* Pump until no preview work is outstanding (ggaze_window_enhance_is_
+ * settled, 5 s at most) and ASSERT that it is: since 8l2 the card
+ * thumbnails render AFTER the preview, so a preview landing no longer
+ * means the panel's batch is done -- and a batch holds a window ref, which
+ * the refcount checks (assert_ref_settled) would read as a leak. The
+ * assertion is the point: a wait that ran out silently once hid cards
+ * that never started at all (a dropped preview never restarted them). */
+static void
+wait_for_settled(GgazeWindow *p_win) {
+   for (guint u = 0; u < 5000 && !ggaze_window_enhance_is_settled(p_win); u++) {
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(ggaze_window_enhance_is_settled(p_win));
+}
+
 /* Poll until the viewer's texture pointer differs from p_before (a fresh
  * async enhance apply always builds a brand-new GdkTexture) or a generous
- * timeout elapses. */
+ * timeout elapses, then until the preview work has settled (the card batch
+ * that follows a preview, wait_for_settled). */
 static void
 wait_for_texture_change(GgazeWindow *p_win, GdkTexture *p_before) {
    for (guint u = 0; u < 5000 && viewer_texture(p_win) == p_before; u++) {
       g_main_context_iteration(g_main_context_default(), FALSE);
       g_usleep(1000);
    }
+   wait_for_settled(p_win);
    ggtest_drain_main(50);
 }
 
@@ -3897,9 +3916,13 @@ test_straighten_drag_end_without_begin_is_ignored(void) {
 }
 
 /* Renders are coalesced: twenty nudges without a main-loop turn in between
- * launch ONE render for the first and ONE more (for the latest state) when
- * it lands -- not twenty full decodes -- and what ends up on screen is the
- * last state (10 degrees), never an intermediate one. */
+ * launch ONE render for the first and at most ONE more (for the latest
+ * state) when it lands -- not twenty -- and what ends up on screen is the
+ * last state (10 degrees), never an intermediate one. Since 8l2 the first
+ * render of an image waits for its preview source, and a render starts
+ * with the state as of when it STARTS: the nudges that arrived while the
+ * source was built are all in it, and the queued relaunch is dropped --
+ * so this may well cost a single render. */
 static void
 test_rapid_nudges_coalesce_into_two_renders(void) {
    ToolFx fx;
@@ -3919,7 +3942,7 @@ test_rapid_nudges_coalesce_into_two_renders(void) {
    wait_for_texture_size(fx.p_win, (gint)d_w, (gint)d_h);
    ggtest_drain_main(300); /* nothing else may land after the last state */
    assert_texture_size(fx.p_win, (gint)d_w, (gint)d_h);
-   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win) - u_before, ==,
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win) - u_before, <=,
                     2);
    g_assert_nonnull(
       g_strstr_len(window_title(fx.p_win), -1, "straighten 10.0° CW"));
@@ -5416,28 +5439,26 @@ test_slideshow_discard_ends_the_tool(void) {
    tool_fx_close(&fx);
 }
 
-/* A render that fails -- the file made unreadable under the tool -- discards
- * the preview from _apply_done_cb, and that discard ends the tool too:
- * after "Enhance failed" no straighten session is left to re-apply its
- * angle. The folder monitor ignores an attribute change, so nothing else
- * moves. Skipped as root, which reads a mode-000 file regardless. */
+/* A render that fails discards the preview from _apply_done_cb, and that
+ * discard ends the tool too: after "Enhance failed" no straighten session
+ * is left to re-apply its angle. The failure is the enhancer's test seam:
+ * since 8l2 the render runs on the preview source built from the decode
+ * on screen, so making the file unreadable under the tool -- this test's
+ * trigger before -- no longer fails it (the file is read again only for a
+ * new source; a source that cannot be built fails the render the same
+ * way, /enhance_flow/failed_source_discards_the_preview). */
 static void
 test_failed_render_ends_the_tool(void) {
-   if (geteuid() == 0) {
-      g_test_skip("an unreadable file is readable as root");
-      return;
-   }
    ToolFx fx;
    tool_fx_open(&fx, FALSE);
    fire(fx.p_win, "win.straighten");
    tool_key_and_wait(fx.p_win, GDK_KEY_l);
-   g_assert_cmpint(g_chmod(fx.c_path, 0), ==, 0);
-   tool_key(fx.p_win, GDK_KEY_l); /* this render decodes the file: fails */
-   /* The mode is restored BEFORE the first assertion: a failing assertion
-    * aborts the process, and the mode-000 file used to outlive it in the
-    * temp folder (the poll asserts nothing). */
+   enhancer_test_set_render_fail(TRUE);
+   tool_key(fx.p_win, GDK_KEY_l); /* this render fails */
+   /* The seam is off again BEFORE the first assertion: a failing assertion
+    * aborts the process (the poll asserts nothing). */
    const char *c_status = poll_for_status_prefix(fx.p_win, "Enhance failed");
-   g_assert_cmpint(g_chmod(fx.c_path, 0644), ==, 0);
+   enhancer_test_set_render_fail(FALSE);
    g_assert_true(g_str_has_prefix(c_status, "Enhance failed"));
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_NONE);
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
@@ -5982,13 +6003,19 @@ wait_for_status_dismissed(GgazeWindow *p_win) {
    ggtest_drain_main(50);
 }
 
-/* The crop tool is open on the 400x300 base when a render decodes the file
- * at another size before any reload has (rewrite_as_200x150_same_stamp:
- * the reload is a cache hit of the old decode, the preset's render reads
- * the 200x150 file). The render's original size is told to the tool as a
- * new original is, so the rectangle is laid out again on 200x150 and
- * reported full on it; before the fix the seam reported the 400x300 layout
- * as drawn over the 200x150 render. Then the keys crop on the true base. */
+/* The crop tool is open on the 400x300 base when the file is rewritten as
+ * 200x150 in a way its stamp cannot tell (rewrite_as_200x150_same_stamp:
+ * the reload is a cache hit of the old decode). Before 8l2 the preset's
+ * render decoded the file and landed at 200x150, and the rectangle had to
+ * follow a base the viewer never showed; since then the preview renders
+ * from the decode ON SCREEN (the preview source is built from it, no
+ * second decode), so the render is the 400x300 picture the tool is laid
+ * out on, the rectangle stays full on that base and the keys crop it --
+ * the view, the preview and the tool agree. (The export still reads the
+ * file: a rewrite no stamp can tell reaches `s` alone, as it reaches the
+ * next reload that misses the cache.) The render of a rewritten file that
+ * lands before its reload -- a real rewrite, whose source is decoded from
+ * the file -- still teaches the tool its size (_apply_landed). */
 static void
 test_crop_tool_follows_a_render_of_another_size(void) {
    ToolFx fx;
@@ -6005,18 +6032,13 @@ test_crop_tool_follows_a_render_of_another_size(void) {
                                          * fresh, the reload a hit */
    g_assert_true(viewer_texture(fx.p_win) == fx.p_orig);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
-   fire_and_wait(fx.p_win, "win.enhance-1"); /* the render reads 200x150 */
-   assert_texture_size(fx.p_win, 200, 150);
+   fire_and_wait(fx.p_win, "win.enhance-1"); /* renders the decode shown */
+   assert_texture_size(fx.p_win, TOOL_W, TOOL_H);
    g_assert_cmpint(ggaze_window_get_tool(fx.p_win), ==, GGAZE_TOOL_CROP);
    g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
-   g_assert_cmpint(i_bw, ==, 200);
-   g_assert_cmpint(i_bh, ==, 150);
-   g_assert_true(croprect_is_full(&t_rect, 200.0, 150.0));
-   for (guint u = 0; u < 10; u++) {
-      crop_shrink_right(fx.p_win);
-   }
-   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
-   assert_texture_size(fx.p_win, 190, 150);
+   g_assert_cmpint(i_bw, ==, TOOL_W);
+   g_assert_cmpint(i_bh, ==, TOOL_H);
+   g_assert_true(croprect_is_full(&t_rect, TOOL_W, TOOL_H));
    tool_fx_close(&fx);
 }
 
@@ -7975,6 +7997,597 @@ add_user_preset_tests(void) {
                    test_preferences_change_during_a_save);
 }
 
+/* --- 8l2: the preview renders at display resolution -----------------------
+ *
+ * The live preview renders from a scaled-down SOURCE of the image (the
+ * decode on screen, scaled to the view) and only the export runs at full
+ * resolution (decision #53). The subtests cap the source's long side at
+ * 100 px (ggaze_window_enhance_set_preview_cap), so a 400x300 picture --
+ * textured: a dark left half, a light right half, a ramp down the rows --
+ * previews from a 100x75 source: the texture on screen is small, yet the
+ * viewer, the tools and the title keep measuring the 400x300 image, the
+ * export is the full-resolution one pixel for pixel, the card thumbnails
+ * wait for the preview, and a slow render says so. */
+
+#define SCALED_CAP 100
+
+typedef struct {
+   char        *c_dir;
+   char        *c_path;
+   GgazeWindow *p_win;
+   GdkTexture  *p_orig; /* owned ref on the full-resolution decode */
+} ScaledFx;
+
+/* edge.png, TOOL_W x TOOL_H, in a fresh folder; returns the folder. */
+static char *
+make_edge_dir(char **c_path_out) {
+   GError *p_err = NULL;
+   char   *c_dir = g_dir_make_tmp("ggaze-scaled-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   GdkPixbuf *p_pb =
+      gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, TOOL_W, TOOL_H);
+   guint8 *p_px = gdk_pixbuf_get_pixels(p_pb);
+   gint    i_rs = gdk_pixbuf_get_rowstride(p_pb);
+   for (gint y = 0; y < TOOL_H; y++) {
+      for (gint x = 0; x < TOOL_W; x++) {
+         guint8 *p = p_px + y * i_rs + x * 3;
+         p[0]      = x < TOOL_W / 2 ? 20 : 235;
+         p[1]      = (guint8)(y * 255 / (TOOL_H - 1));
+         p[2]      = (guint8)(x * 255 / (TOOL_W - 1));
+      }
+   }
+   char *c_path = g_build_filename(c_dir, "edge.png", NULL);
+   g_assert_true(gdk_pixbuf_save(p_pb, c_path, "png", &p_err, NULL));
+   g_assert_no_error(p_err);
+   g_object_unref(p_pb);
+   *c_path_out = c_path;
+   return (c_dir);
+}
+
+/* A window on edge.png whose preview sources are capped at SCALED_CAP,
+ * presented at 900x700 when b_present (the drags map widget pixels). */
+static void
+scaled_fx_open(ScaledFx *p_fx, gboolean b_present) {
+   memset(p_fx, 0, sizeof(*p_fx));
+   p_fx->c_dir   = make_edge_dir(&p_fx->c_path);
+   p_fx->p_win   = new_window();
+   GFile *p_file = g_file_new_for_path(p_fx->c_path);
+   ggaze_window_enhance_set_preview_cap(p_fx->p_win, SCALED_CAP);
+   if (b_present) {
+      gtk_window_set_default_size(GTK_WINDOW(p_fx->p_win), 900, 700);
+      gtk_window_present(GTK_WINDOW(p_fx->p_win));
+   }
+   ggaze_window_open(p_fx->p_win, p_file);
+   g_object_unref(p_file);
+   if (b_present) {
+      wait_for_view(p_fx->p_win, TOOL_W, TOOL_H);
+   } else {
+      wait_for_load(p_fx->p_win, TOOL_W, TOOL_H);
+   }
+   p_fx->p_orig = ref_viewer_texture(p_fx->p_win);
+}
+
+static void
+scaled_fx_close(ScaledFx *p_fx) {
+   gtk_window_destroy(GTK_WINDOW(p_fx->p_win));
+   ggtest_drain_main(300);
+   g_clear_object(&p_fx->p_orig);
+   g_free(p_fx->c_path);
+   ggtest_cleanup_temp_dir(p_fx->c_dir);
+}
+
+/* Channel i_c of pixel (i_x, i_y) of p_tex. */
+static guint8
+tex_px(GdkTexture *p_tex, gint i_x, gint i_y, gint i_c) {
+   GdkTextureDownloader *p_dl = gdk_texture_downloader_new(p_tex);
+   gdk_texture_downloader_set_format(p_dl, GDK_MEMORY_R8G8B8A8);
+   gsize         u_stride = 0;
+   GBytes       *p_b = gdk_texture_downloader_download_bytes(p_dl, &u_stride);
+   const guint8 *p_d = g_bytes_get_data(p_b, NULL);
+   guint8        u_v = p_d[(gsize)i_y * u_stride + (gsize)i_x * 4 + i_c];
+   g_bytes_unref(p_b);
+   gdk_texture_downloader_free(p_dl);
+   return (u_v);
+}
+
+/* The texture on screen holds i_w x i_h pixels and stands for an
+ * i_lw x i_lh image. */
+static void
+assert_scaled_texture(GgazeWindow *p_win, gint i_w, gint i_h, gint i_lw,
+                      gint i_lh) {
+   GdkTexture *p_tex = viewer_texture(p_win);
+   g_assert_nonnull(p_tex);
+   g_assert_cmpint(gdk_texture_get_width(p_tex), ==, i_w);
+   g_assert_cmpint(gdk_texture_get_height(p_tex), ==, i_h);
+   gint i_gw, i_gh;
+   logical_size_get(p_tex, &i_gw, &i_gh);
+   g_assert_cmpint(i_gw, ==, i_lw);
+   g_assert_cmpint(i_gh, ==, i_lh);
+}
+
+/* The preview is the source's size, the geometry the image's: the same fit
+ * and on-screen rectangle as the full decode, the image's size for the
+ * tools; a second preset reuses the source (no second build). */
+static void
+test_scaled_preview_measures_the_image(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, TRUE);
+   GgazeViewer    *p_v = large_viewer(fx.p_win);
+   GgazeViewerGeom t_full, t_prev;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &t_full));
+   fire_and_wait(fx.p_win, "win.enhance-2");
+   assert_scaled_texture(fx.p_win, 100, 75, TOOL_W, TOOL_H);
+   gdouble d_scale = 0.0;
+   g_assert_true(ggaze_window_enhance_preview_scale(fx.p_win, &d_scale));
+   g_assert_cmpfloat(ABS(d_scale - 0.25), <, 1e-9);
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &t_prev));
+   g_assert_cmpint(t_prev.i_img_w, ==, TOOL_W);
+   g_assert_cmpint(t_prev.i_img_h, ==, TOOL_H);
+   g_assert_cmpfloat(ABS(t_prev.d_scale - t_full.d_scale), <, 1e-9);
+   g_assert_cmpfloat(ABS(t_prev.d_x - t_full.d_x), <, 1e-9);
+   g_assert_cmpuint(ggaze_window_enhance_source_count(fx.p_win), ==, 1);
+   guint u_renders = ggaze_window_enhance_render_count(fx.p_win);
+   fire_and_wait(fx.p_win, "win.enhance-3");
+   assert_scaled_texture(fx.p_win, 100, 75, TOOL_W, TOOL_H);
+   g_assert_cmpuint(ggaze_window_enhance_source_count(fx.p_win), ==, 1);
+   g_assert_cmpuint(ggaze_window_enhance_render_count(fx.p_win), ==,
+                    u_renders + 1);
+   scaled_fx_close(&fx);
+}
+
+/* Zoom past the preview's resolution (the design: the preview is shown
+ * magnified -- no second render at the zoom): 100 % is one IMAGE pixel
+ * per widget pixel, the geometry stays the image's, the texture the
+ * source's. Hold-Space compares like with like: the source itself,
+ * standing for the image, not brightened -- and no managed fetch. */
+static void
+test_scaled_preview_zoom_and_compare(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, TRUE);
+   GgazeViewer *p_v = large_viewer(fx.p_win);
+   fire_and_wait(fx.p_win, "win.enhance-2");
+   GdkTexture *p_prev = ref_viewer_texture(fx.p_win);
+   ggaze_viewer_toggle_fit_100(p_v);
+   g_assert_cmpfloat(ABS(ggaze_viewer_get_scale(p_v) - 1.0), <, 1e-9);
+   GgazeViewerGeom t_g;
+   g_assert_true(ggaze_viewer_get_geometry(p_v, &t_g));
+   g_assert_cmpint(t_g.i_img_w, ==, TOOL_W);
+   assert_scaled_texture(fx.p_win, 100, 75, TOOL_W, TOOL_H);
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   GdkTexture *p_held = viewer_texture(fx.p_win);
+   g_assert_true(p_held != fx.p_orig && p_held != p_prev);
+   assert_scaled_texture(fx.p_win, 100, 75, TOOL_W, TOOL_H);
+   /* Brightness lifts the dark half; the compare shows it as it is. */
+   g_assert_cmpint(tex_px(p_held, 10, 40, 0), <, tex_px(p_prev, 10, 40, 0));
+   g_assert_cmpint(ABS((gint)tex_px(p_held, 10, 40, 0) -
+                       (gint)tex_px(fx.p_orig, 40, 160, 0)),
+                   <=, 3);
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   g_assert_true(viewer_texture(fx.p_win) == p_prev);
+   g_assert_cmpuint(ggaze_window_enhance_managed_fetch_count(fx.p_win), ==, 0);
+   g_object_unref(p_prev);
+   scaled_fx_close(&fx);
+}
+
+/* The crop tool over a scaled preview lays out and drags in image pixels:
+ * the same drags as /enhance_flow/crop_drag_resizes_and_moves give the
+ * same rectangle on the 400x300 base, and the crop's preview stands for
+ * the 300x200 the export will be. */
+static void
+test_crop_on_a_scaled_preview(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, TRUE);
+   fire_and_wait(fx.p_win, "win.enhance-2");
+   fire(fx.p_win, "win.crop");
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(large_viewer(fx.p_win), &g));
+   g_assert_cmpint(g.i_img_w, ==, TOOL_W);
+   gdouble d_s = g.d_scale;
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN,
+                          g.d_x + TOOL_W * d_s, g.d_y + TOOL_H * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 300 * d_s,
+                          g.d_y + 200 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN, g.d_x + 150 * d_s,
+                          g.d_y + 100 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 200 * d_s,
+                          g.d_y + 140 * d_s);
+   CropRect t_rect;
+   gint     i_bw, i_bh;
+   g_assert_true(ggaze_window_tool_crop_rect(fx.p_win, &t_rect, &i_bw, &i_bh));
+   g_assert_cmpint(i_bw, ==, TOOL_W);
+   g_assert_cmpint(i_bh, ==, TOOL_H);
+   g_assert_true(croprect_equal(&t_rect, &(CropRect){50, 40, 300, 200}));
+   tool_key_and_wait(fx.p_win, GDK_KEY_Return);
+   assert_scaled_texture(fx.p_win, 75, 50, 300, 200);
+   g_assert_nonnull(g_strstr_len(window_title(fx.p_win), -1, "crop"));
+   scaled_fx_close(&fx);
+}
+
+/* The straighten tool measures a horizon on a scaled preview in image
+ * pixels: the drag of /enhance_flow/straighten_horizon_drag_levels levels
+ * by the same 10 degrees, and the render stands for the straightened
+ * base. */
+static void
+test_straighten_on_a_scaled_preview(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, TRUE);
+   fire_and_wait(fx.p_win, "win.enhance-2");
+   fire(fx.p_win, "win.straighten");
+   GgazeViewerGeom g;
+   g_assert_true(ggaze_viewer_get_geometry(large_viewer(fx.p_win), &g));
+   g_assert_cmpint(g.i_img_w, ==, TOOL_W);
+   gdouble     d_s      = g.d_scale;
+   GdkTexture *p_before = ref_viewer_texture(fx.p_win);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_BEGIN, g.d_x + 50 * d_s,
+                          g.d_y + 100 * d_s);
+   ggaze_window_tool_drag(fx.p_win, GGAZE_VIEWER_DRAG_END, g.d_x + 150 * d_s,
+                          g.d_y + 117.63 * d_s);
+   wait_for_texture_change(fx.p_win, p_before);
+   g_object_unref(p_before);
+   g_assert_nonnull(
+      g_strstr_len(window_title(fx.p_win), -1, "straighten 10.0° CCW"));
+   Transform t;
+   transform_init(&t);
+   t.d_degrees = -10.0;
+   gdouble d_w, d_h;
+   transform_base_size(&t, TOOL_W, TOOL_H, &d_w, &d_h);
+   gint i_lw, i_lh;
+   logical_size_get(viewer_texture(fx.p_win), &i_lw, &i_lh);
+   g_assert_cmpint(i_lw, ==, (gint)d_w);
+   g_assert_cmpint(i_lh, ==, (gint)d_h);
+   g_assert_cmpint(gdk_texture_get_width(viewer_texture(fx.p_win)), <, 100);
+   tool_key(fx.p_win, GDK_KEY_Return);
+   scaled_fx_close(&fx);
+}
+
+/* The decoded pixels of the image file at c_path (a new texture). */
+static GdkTexture *
+decode_file(const char *c_path) {
+   GError     *p_err = NULL;
+   GdkTexture *p_tex = gdk_texture_new_from_filename(c_path, &p_err);
+   g_assert_no_error(p_err);
+   return (p_tex);
+}
+
+/* `s` exports at full resolution while the preview is scaled, and exactly
+ * what the full-resolution chain -- the export path as it was before the
+ * preview was scaled -- writes: a quarter turn and Sharpen (a pixel-length
+ * preset, scaled on the preview) come out pixel for pixel the same. */
+static void
+test_export_is_full_resolution_and_unchanged(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.rotate-cw");
+   fire_and_wait(fx.p_win, "win.enhance-7");
+   assert_scaled_texture(fx.p_win, 75, 100, TOOL_H, TOOL_W);
+   char *c_out = g_build_filename(fx.c_dir, "edge-enhanced.png", NULL);
+   fire(fx.p_win, "win.enhance-save");
+   wait_for_file(c_out);
+   wait_for_status_prefix(fx.p_win, "Saved");
+   char       *c_ref = g_build_filename(fx.c_dir, "reference.png", NULL);
+   GFile      *p_src = g_file_new_for_path(fx.c_path);
+   GFile      *p_ref = g_file_new_for_path(c_ref);
+   Enhancer   *p_e   = enhancer_new();
+   GPtrArray  *p_pr = enhancer_presets_resolve(enhancer_get_presets(p_e), NULL);
+   GError     *p_err = NULL;
+   GeglBuffer *p_in  = enhancer_load(p_src, &p_err);
+   g_assert_no_error(p_err);
+   Transform t;
+   transform_init(&t);
+   t.i_quarter = 1;
+   g_assert_true(enhancer_export_chain(p_in, p_pr, GGAZE_ENHANCE_BIT(6), &t,
+                                       p_ref, &p_err));
+   g_assert_no_error(p_err);
+   GdkTexture *p_got = decode_file(c_out);
+   g_assert_cmpint(gdk_texture_get_width(p_got), ==, TOOL_H);
+   g_assert_cmpint(gdk_texture_get_height(p_got), ==, TOOL_W);
+   gsize   u_len = 0, u_len2 = 0;
+   char   *c_a  = load_bytes(c_out, &u_len);
+   char   *c_b  = load_bytes(c_ref, &u_len2);
+   GBytes *p_ga = g_bytes_new_take(c_a, u_len);
+   GBytes *p_gb = g_bytes_new_take(c_b, u_len2);
+   g_assert_true(g_bytes_equal(p_ga, p_gb)); /* the very same file */
+   g_bytes_unref(p_ga);
+   g_bytes_unref(p_gb);
+   g_object_unref(p_got);
+   g_object_unref(p_in);
+   g_ptr_array_unref(p_pr);
+   enhancer_delete(p_e);
+   g_object_unref(p_ref);
+   g_object_unref(p_src);
+   g_remove(c_ref);
+   g_free(c_ref);
+   g_free(c_out);
+   scaled_fx_close(&fx);
+}
+
+/* The card thumbnails wait for the preview: the panel asks for its batch,
+ * a preset is pressed at once, and while that render is held pending (the
+ * enhancer's delay seam) no batch starts; it starts when the preview has
+ * landed, and every card gets its picture. The same when the source is
+ * there already: the panel opened again under a pending render asks for
+ * a batch that starts only once that render has landed. */
+static void
+test_thumbnails_wait_for_the_preview(void) {
+   char        *c_dir  = NULL;
+   char        *c_path = NULL;
+   GgazeWindow *p_win =
+      open_presented(TRUE, "ggaze-cards-after-XXXXXX", &c_dir, &c_path);
+   GdkTexture *p_orig = ref_viewer_texture(p_win);
+   enhancer_test_set_render_delay(600);
+   fire(p_win, "win.enhance");   /* the panel asks for its cards */
+   fire(p_win, "win.enhance-2"); /* the preview goes first */
+   g_assert_cmpuint(ggaze_window_enhance_preview_count(p_win), ==, 1);
+   ggtest_drain_main(300); /* the source lands; the render is held */
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   g_assert_cmpuint(ggaze_window_enhance_thumb_launch_count(p_win), ==, 0);
+   g_assert_false(ggaze_window_enhance_is_settled(p_win));
+   wait_for_texture_change(p_win, p_orig); /* ... and the cards after it */
+   enhancer_test_set_render_delay(0);
+   g_assert_cmpuint(ggaze_window_enhance_thumb_launch_count(p_win), ==, 1);
+   GPtrArray *p_pics = g_ptr_array_new();
+   collect_pictures(find_panel(p_win), p_pics);
+   wait_for_pictures_painted(p_pics);
+   g_ptr_array_unref(p_pics);
+   fire(p_win, "win.enhance"); /* closed */
+   GdkTexture *p_prev = ref_viewer_texture(p_win);
+   enhancer_test_set_render_delay(600);
+   fire(p_win, "win.enhance-3"); /* pending, on the source there is */
+   fire(p_win, "win.enhance");   /* open again: a batch is asked for */
+   g_assert_cmpuint(ggaze_window_enhance_preview_count(p_win), ==, 2);
+   ggtest_drain_main(300);
+   g_assert_cmpuint(ggaze_window_enhance_thumb_launch_count(p_win), ==, 1);
+   wait_for_texture_change(p_win, p_prev);
+   enhancer_test_set_render_delay(0);
+   g_assert_cmpuint(ggaze_window_enhance_thumb_launch_count(p_win), ==, 2);
+   g_object_unref(p_prev);
+   g_object_unref(p_orig);
+   close_presented(p_win, c_dir, c_path);
+}
+
+/* Pump until the "Rendering…" indicator is up, 2 s at most. */
+static void
+wait_for_busy(GgazeWindow *p_win) {
+   for (guint u = 0; u < 2000 && !ggaze_window_enhance_busy_shown(p_win); u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   g_assert_true(ggaze_window_enhance_busy_shown(p_win));
+}
+
+/* A render held pending (the delay seam) shows "Rendering…" -- not at
+ * once, after the indicator's delay -- over the view and on the panel's
+ * state line, and takes it down when it lands; a render superseded by x
+ * takes it down at once. */
+static void
+test_slow_render_shows_the_pending_indicator(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.enhance");
+   wait_for_settled(fx.p_win);
+   enhancer_test_set_render_delay(1000);
+   GdkTexture *p_before = ref_viewer_texture(fx.p_win);
+   fire(fx.p_win, "win.enhance-2");
+   g_assert_false(ggaze_window_enhance_busy_shown(fx.p_win));
+   ggtest_drain_main(100);
+   g_assert_false(ggaze_window_enhance_busy_shown(fx.p_win));
+   wait_for_busy(fx.p_win);
+   GtkWidget *p_state = find_label_prefix(find_panel(fx.p_win), "Unsaved");
+   g_assert_nonnull(p_state);
+   g_assert_true(
+      g_str_has_suffix(gtk_label_get_text(GTK_LABEL(p_state)), "rendering…"));
+   wait_for_texture_change(fx.p_win, p_before);
+   g_object_unref(p_before);
+   g_assert_false(ggaze_window_enhance_busy_shown(fx.p_win));
+   g_assert_false(
+      g_str_has_suffix(gtk_label_get_text(GTK_LABEL(p_state)), "rendering…"));
+   fire(fx.p_win, "win.enhance-3");
+   wait_for_busy(fx.p_win);
+   fire(fx.p_win, "win.edit-revert"); /* x: nothing left to render */
+   g_assert_false(ggaze_window_enhance_busy_shown(fx.p_win));
+   enhancer_test_set_render_delay(0);
+   wait_for_settled(fx.p_win);
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   scaled_fx_close(&fx);
+}
+
+/* A render that waits for a source which cannot be built -- the file
+ * rewritten into bytes no decoder takes, under a live preview, so the
+ * rescan forgets the decode and the re-render builds from the file --
+ * fails like a render: the preview is thrown away, nothing is left
+ * pending and no indicator stays up. */
+static void
+test_failed_source_discards_the_preview(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, FALSE);
+   fire_and_wait(fx.p_win, "win.enhance-2");
+   g_assert_true(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(
+      g_file_set_contents(fx.c_path, "not an image at all", -1, NULL));
+   for (guint u = 0; u < 5000 && (ggaze_window_enhance_is_dirty(fx.p_win) ||
+                                  !ggaze_window_enhance_is_settled(fx.p_win));
+        u++) {
+      g_main_context_iteration(NULL, FALSE);
+      g_usleep(1000);
+   }
+   g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
+   g_assert_true(ggaze_window_enhance_is_settled(fx.p_win));
+   g_assert_false(ggaze_window_enhance_busy_shown(fx.p_win));
+   g_assert_cmpuint(ggaze_window_enhance_source_count(fx.p_win), ==, 2);
+   g_assert_null(g_strstr_len(window_title(fx.p_win), -1, "Brightness"));
+   scaled_fx_close(&fx);
+}
+
+/* Put a marker on the status line, so a later check can tell that
+ * nothing overwrote it. */
+static void
+mark_status(GgazeWindow *p_win) {
+   gtk_label_set_text(GTK_LABEL(ggaze_window_get_info_label(p_win)), "marker");
+}
+
+#define SOFT_NOTE "Preview at 25 % resolution \u2014 s saves full size"
+
+/* Zoomed past the preview's resolution the status line says the preview
+ * is scaled (a quarter here), once per crossing into it: not at fit, not
+ * again on a further zoom step, again after a trip back to fit -- and
+ * never for the full-resolution original zoomed past 100 %. */
+static void
+test_deep_zoom_says_the_preview_is_scaled(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, TRUE);
+   GgazeViewer *p_v = large_viewer(fx.p_win);
+   mark_status(fx.p_win);
+   ggaze_viewer_toggle_fit_100(p_v); /* the original at 100 %, then more */
+   ggaze_viewer_zoom_in(p_v);
+   g_assert_cmpfloat(ggaze_viewer_get_texel_scale(p_v), >, 1.0);
+   g_assert_cmpstr(status_text(fx.p_win), ==, "marker");
+   fire_and_wait(fx.p_win, "win.enhance-2"); /* lands at fit */
+   g_assert_true(ggaze_viewer_is_fit(p_v));
+   /* The 100 px source is magnified even at fit here (the test cap; a real
+    * source covers the view), but fit says nothing: an explicit zoom does
+    * -- even one out, the preview being magnified still. */
+   mark_status(fx.p_win);
+   ggaze_viewer_zoom_out(p_v);
+   g_assert_cmpstr(status_text(fx.p_win), ==, SOFT_NOTE);
+   mark_status(fx.p_win);
+   ggaze_viewer_zoom_in(p_v);
+   g_assert_cmpstr(status_text(fx.p_win), ==, "marker"); /* once */
+   ggaze_viewer_toggle_fit_100(p_v); /* back to fit: re-armed */
+   g_assert_true(ggaze_viewer_is_fit(p_v));
+   g_assert_cmpstr(status_text(fx.p_win), ==, "marker");
+   ggaze_viewer_toggle_fit_100(p_v); /* 100 %: a new crossing */
+   g_assert_cmpstr(status_text(fx.p_win), ==, SOFT_NOTE);
+   scaled_fx_close(&fx);
+}
+
+/* Ctrl+c of a scaled preview copies what is on screen, and the status line
+ * says it is the preview, with its size: the edit's, or under hold-Space
+ * the original's. The original itself is copied as ever. */
+static void
+test_copy_of_a_scaled_preview_says_so(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.copy");
+   g_assert_cmpstr(status_text(fx.p_win), ==, "Copied image");
+   fire_and_wait(fx.p_win, "win.enhance-2");
+   fire(fx.p_win, "win.copy");
+   g_assert_cmpstr(status_text(fx.p_win), ==,
+                   "Copied edited preview (100\u00d775) \u2014 s saves "
+                   "full size");
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   fire(fx.p_win, "win.copy");
+   g_assert_cmpstr(status_text(fx.p_win), ==,
+                   "Copied original preview (100\u00d775)");
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   revert_edits(fx.p_win);
+   wait_for_settled(fx.p_win);
+   fire(fx.p_win, "win.copy");
+   g_assert_cmpstr(status_text(fx.p_win), ==, "Copied image");
+   scaled_fx_close(&fx);
+}
+
+/* How a pending preview is dropped before it lands. */
+typedef enum {
+   DROP_REVERT,  /* x */
+   DROP_UNDO,    /* u back to no edit */
+   DROP_DISCARD, /* the navigate-away gate's Discard */
+} DropHow;
+
+static void
+drop_pending_preview(GgazeWindow *p_win, DropHow e_how) {
+   switch (e_how) {
+   case DROP_REVERT:
+      fire(p_win, "win.edit-revert");
+      break;
+   case DROP_UNDO:
+      fire(p_win, "win.edit-undo");
+      break;
+   case DROP_DISCARD:
+      fire(p_win, "win.next"); /* the only file: the gate, then no move */
+      ggtest_drain_main(150);
+      GGTEST_ASSERT_DIALOG_UP(GTK_WINDOW(p_win), "Discard");
+      g_assert_true(ggtest_click_dialog_button(GTK_WINDOW(p_win), "Discard"));
+      break;
+   }
+}
+
+/* The panel's cards wait for the preview; a preview dropped before it
+ * lands (x, an undo back to no edit, the gate's Discard) never lands to
+ * start them, so dropping it starts them: the batch runs, every card gets
+ * its picture and the window settles. Nothing pending is left behind. */
+static void
+cards_after_a_dropped_preview(DropHow e_how) {
+   char        *c_dir  = NULL;
+   char        *c_path = NULL;
+   GgazeWindow *p_win =
+      open_presented(TRUE, "ggaze-cards-drop-XXXXXX", &c_dir, &c_path);
+   GdkTexture *p_orig = ref_viewer_texture(p_win);
+   enhancer_test_set_render_delay(600);
+   fire(p_win, "win.enhance-2"); /* pending ... */
+   fire(p_win, "win.enhance");   /* ... so the cards wait for it */
+   ggtest_drain_main(200);
+   g_assert_cmpuint(ggaze_window_enhance_thumb_launch_count(p_win), ==, 0);
+   drop_pending_preview(p_win, e_how);
+   wait_for_settled(p_win);
+   g_assert_cmpuint(ggaze_window_enhance_thumb_launch_count(p_win), ==, 1);
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   GPtrArray *p_pics = g_ptr_array_new();
+   collect_pictures(find_panel(p_win), p_pics);
+   wait_for_pictures_painted(p_pics);
+   g_ptr_array_unref(p_pics);
+   enhancer_test_set_render_delay(0);
+   ggtest_drain_main(700); /* the dropped render lands, stale */
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   g_object_unref(p_orig);
+   close_presented(p_win, c_dir, c_path);
+}
+
+static void
+test_cards_after_a_reverted_preview(void) {
+   cards_after_a_dropped_preview(DROP_REVERT);
+}
+
+static void
+test_cards_after_an_undone_preview(void) {
+   cards_after_a_dropped_preview(DROP_UNDO);
+}
+
+static void
+test_cards_after_a_discarded_preview(void) {
+   cards_after_a_dropped_preview(DROP_DISCARD);
+}
+
+static void
+add_scaled_preview_tests(void) {
+   g_test_add_func("/enhance_flow/deep_zoom_says_the_preview_is_scaled",
+                   test_deep_zoom_says_the_preview_is_scaled);
+   g_test_add_func("/enhance_flow/copy_of_a_scaled_preview_says_so",
+                   test_copy_of_a_scaled_preview_says_so);
+   g_test_add_func("/enhance_flow/cards_after_a_reverted_preview",
+                   test_cards_after_a_reverted_preview);
+   g_test_add_func("/enhance_flow/cards_after_an_undone_preview",
+                   test_cards_after_an_undone_preview);
+   g_test_add_func("/enhance_flow/cards_after_a_discarded_preview",
+                   test_cards_after_a_discarded_preview);
+   g_test_add_func("/enhance_flow/scaled_preview_measures_the_image",
+                   test_scaled_preview_measures_the_image);
+   g_test_add_func("/enhance_flow/scaled_preview_zoom_and_compare",
+                   test_scaled_preview_zoom_and_compare);
+   g_test_add_func("/enhance_flow/crop_on_a_scaled_preview",
+                   test_crop_on_a_scaled_preview);
+   g_test_add_func("/enhance_flow/straighten_on_a_scaled_preview",
+                   test_straighten_on_a_scaled_preview);
+   g_test_add_func("/enhance_flow/export_is_full_resolution_and_unchanged",
+                   test_export_is_full_resolution_and_unchanged);
+   g_test_add_func("/enhance_flow/thumbnails_wait_for_the_preview",
+                   test_thumbnails_wait_for_the_preview);
+   g_test_add_func("/enhance_flow/slow_render_shows_the_pending_indicator",
+                   test_slow_render_shows_the_pending_indicator);
+   g_test_add_func("/enhance_flow/failed_source_discards_the_preview",
+                   test_failed_source_discards_the_preview);
+}
+
 int
 main(int i_argc, char **c_argv) {
    /* Production always calls gegl_init() at GApplication startup (app.c)
@@ -8018,5 +8631,6 @@ main(int i_argc, char **c_argv) {
    add_tool_review7_tests();
    add_open_many_tests();
    add_icc_tests();
+   add_scaled_preview_tests();
    return (g_test_run());
 }

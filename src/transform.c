@@ -268,6 +268,38 @@ transform_output_size(const Transform *p_t, gdouble d_w, gdouble d_h,
    }
 }
 
+/* Only the crop is in pixels: the turn and the angle are the same on any
+ * resolution, and the straighten's auto-crop is derived from the size it
+ * is applied to (transform_straighten_size). The crop lives on the BASE
+ * (after turn and straighten), so it is scaled by how the two bases
+ * compare, per axis -- which is also right after a quarter turn swapped
+ * the sides. The TRANSFORM_AUTOCROP_INSET stays one pixel of whichever
+ * image the chain runs on: on a scaled source that trims a hair more of
+ * the picture than the export does (one source pixel, 1 / scale image
+ * pixels), invisible at the size the preview is shown. */
+void
+transform_scale(const Transform *p_t, gdouble d_w, gdouble d_h, gdouble d_sw,
+                gdouble d_sh, Transform *p_out) {
+   g_return_if_fail(p_t != NULL && p_out != NULL);
+   *p_out = *p_t;
+   if (!p_t->b_crop) {
+      return;
+   }
+   gdouble d_bw, d_bh, d_sbw, d_sbh;
+   transform_base_size(p_t, d_w, d_h, &d_bw, &d_bh);
+   transform_base_size(p_t, d_sw, d_sh, &d_sbw, &d_sbh);
+   if (d_bw <= 0.0 || d_bh <= 0.0) {
+      p_out->b_crop = FALSE; /* nowhere to put it (transform_rotate_quarter) */
+      return;
+   }
+   gdouble d_kx = d_sbw / d_bw;
+   gdouble d_ky = d_sbh / d_bh;
+   p_out->t_crop.d_x *= d_kx;
+   p_out->t_crop.d_w *= d_kx;
+   p_out->t_crop.d_y *= d_ky;
+   p_out->t_crop.d_h *= d_ky;
+}
+
 /* --- description ---------------------------------------------------------- */
 
 static void

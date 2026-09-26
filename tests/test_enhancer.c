@@ -950,6 +950,34 @@ typedef struct {
    GError    *p_err;
 } PreviewResult;
 
+typedef struct {
+   GMainLoop      *p_loop;
+   EnhancerSource *p_src;
+   GError         *p_err;
+} SourceResult;
+
+static void
+source_done_cb(GObject *p_obj, GAsyncResult *p_res, gpointer p_data) {
+   (void)p_obj;
+   SourceResult *p_r = p_data;
+   p_r->p_src        = enhancer_source_new_finish(p_res, &p_r->p_err);
+   g_main_loop_quit(p_r->p_loop);
+}
+
+/* p_file's preview source (8l2) for the default view: the card
+ * thumbnails are cut from it. */
+static EnhancerSource *
+build_source(GFile *p_file) {
+   PreviewView  t_view = {0, 0, 0, 0};
+   SourceResult r      = {.p_loop = g_main_loop_new(NULL, FALSE)};
+   enhancer_source_new_async(p_file, NULL, &t_view, NULL, source_done_cb, &r);
+   g_main_loop_run(r.p_loop);
+   g_main_loop_unref(r.p_loop);
+   g_assert_no_error(r.p_err);
+   g_assert_nonnull(r.p_src);
+   return (r.p_src);
+}
+
 static void
 preview_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
@@ -961,14 +989,16 @@ preview_done_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
 
 static void
 test_preview_thumbnails(void) {
-   const gchar  *c_fx   = g_getenv("GGAZE_FIXTURES_DIR");
-   char         *c_path = g_build_filename(c_fx, "plain.jpg", NULL);
-   GFile        *p_file = g_file_new_for_path(c_path);
-   Enhancer     *p_e    = enhancer_new();
-   PreviewResult result = {.p_loop = g_main_loop_new(NULL, FALSE)};
-   enhancer_preview_thumbnails_async(p_file, enhancer_get_presets(p_e), NULL,
+   const gchar    *c_fx   = g_getenv("GGAZE_FIXTURES_DIR");
+   char           *c_path = g_build_filename(c_fx, "plain.jpg", NULL);
+   GFile          *p_file = g_file_new_for_path(c_path);
+   Enhancer       *p_e    = enhancer_new();
+   PreviewResult   result = {.p_loop = g_main_loop_new(NULL, FALSE)};
+   EnhancerSource *p_src  = build_source(p_file);
+   enhancer_preview_thumbnails_async(p_src, enhancer_get_presets(p_e), NULL,
                                      preview_done_cb, &result);
    g_main_loop_run(result.p_loop);
+   enhancer_source_delete(p_src); /* the batch holds what it needs */
    g_assert_no_error(result.p_err);
    g_assert_nonnull(result.p_result);
    g_assert_cmpuint(result.p_result->len, ==, 9);
@@ -980,8 +1010,10 @@ test_preview_thumbnails(void) {
          u_rendered++;
          g_assert_cmpint(gdk_texture_get_width(p_tex), >, 0);
          g_assert_cmpint(gdk_texture_get_height(p_tex), >, 0);
-         g_assert_cmpint(gdk_texture_get_width(p_tex), <=, 512);
-         g_assert_cmpint(gdk_texture_get_height(p_tex), <=, 512);
+         g_assert_cmpint(gdk_texture_get_width(p_tex), <=,
+                         PREVIEW_SCALE_THUMB_SIDE);
+         g_assert_cmpint(gdk_texture_get_height(p_tex), <=,
+                         PREVIEW_SCALE_THUMB_SIDE);
       }
    }
    g_assert_cmpuint(u_rendered, >, 0);
@@ -992,22 +1024,24 @@ test_preview_thumbnails(void) {
    g_free(c_path);
 }
 
-/* /enhancer/preview_orientation: the A-menu per-preset preview thumbnails
- * must be upright too. rot6.jpg is stored 8x4 (landscape) with Orientation 6
- * (upright portrait 4x8). The fixture is tiny so the max-512px downscale is
- * a no-op, and the original (index 0) and every rendered preset preview must
- * come back 4x8 (portrait) -- without orientation they would be 8x4
- * (landscape). */
+/* /enhancer/preview_orientation: the edit panel's per-preset preview
+ * thumbnails must be upright too. rot6.jpg is stored 8x4 (landscape) with
+ * Orientation 6 (upright portrait 4x8). The fixture is tiny so the source's
+ * and the thumbnails' downscale are no-ops, and the original (index 0) and
+ * every rendered preset preview must come back 4x8 (portrait) -- without
+ * orientation they would be 8x4 (landscape). */
 static void
 test_preview_orientation(void) {
-   const gchar  *c_fx   = g_getenv("GGAZE_FIXTURES_DIR");
-   char         *c_path = g_build_filename(c_fx, "rot6.jpg", NULL);
-   GFile        *p_file = g_file_new_for_path(c_path);
-   Enhancer     *p_e    = enhancer_new();
-   PreviewResult result = {.p_loop = g_main_loop_new(NULL, FALSE)};
-   enhancer_preview_thumbnails_async(p_file, enhancer_get_presets(p_e), NULL,
+   const gchar    *c_fx   = g_getenv("GGAZE_FIXTURES_DIR");
+   char           *c_path = g_build_filename(c_fx, "rot6.jpg", NULL);
+   GFile          *p_file = g_file_new_for_path(c_path);
+   Enhancer       *p_e    = enhancer_new();
+   PreviewResult   result = {.p_loop = g_main_loop_new(NULL, FALSE)};
+   EnhancerSource *p_src  = build_source(p_file);
+   enhancer_preview_thumbnails_async(p_src, enhancer_get_presets(p_e), NULL,
                                      preview_done_cb, &result);
    g_main_loop_run(result.p_loop);
+   enhancer_source_delete(p_src); /* the batch holds what it needs */
    g_assert_no_error(result.p_err);
    g_assert_nonnull(result.p_result);
    /* The original (index 0) must be the upright portrait (4x8), not the

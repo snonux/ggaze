@@ -73,6 +73,7 @@
 
 #include "gesture-math.h"
 #include "loader/animation.h"
+#include "logical-size.h"
 #include "settings.h"
 
 /* One wheel notch / key press. The limits (GGAZE_ZOOM_MIN/MAX) live in
@@ -156,8 +157,15 @@ struct _GgazeViewer {
 
 G_DEFINE_TYPE(GgazeViewer, ggaze_viewer, GTK_TYPE_WIDGET)
 
-static guint u_navigate_sig    = 0;
-static guint u_toggle_info_sig = 0;
+static guint u_navigate_sig     = 0;
+static guint u_toggle_info_sig  = 0;
+static guint u_zoom_changed_sig = 0;
+
+/* The zoom state may have changed (viewer.h, "zoom-changed"). */
+static void
+_zoom_changed(GgazeViewer *p_v) {
+   g_signal_emit(p_v, u_zoom_changed_sig, 0);
+}
 
 /* --- animation playback -------------------------------------------------- */
 
@@ -271,14 +279,28 @@ _drawn_texture(GgazeViewer *p_v) {
 /* --- geometry --------------------------------------------------------------
  */
 
+/* The IMAGE's size, which every piece of geometry here is in: the size
+ * the texture stands for (logical-size.h), not its pixel count. The two
+ * differ for the scaled-down enhance preview (8l2): a 9248x6936 photo's
+ * preview texture holds ~1500x1100 pixels, and fit, 100 % zoom, the pan
+ * clamp and the tool overlay's geometry must all still be the photo's --
+ * the snapshot simply draws the texture stretched over that rectangle. */
 static int
 _tex_w(GgazeViewer *p_v) {
-   return (p_v->p_texture != NULL) ? gdk_texture_get_width(p_v->p_texture) : 0;
+   gint i_w = 0;
+   if (p_v->p_texture != NULL) {
+      logical_size_get(p_v->p_texture, &i_w, NULL);
+   }
+   return (i_w);
 }
 
 static int
 _tex_h(GgazeViewer *p_v) {
-   return (p_v->p_texture != NULL) ? gdk_texture_get_height(p_v->p_texture) : 0;
+   gint i_h = 0;
+   if (p_v->p_texture != NULL) {
+      logical_size_get(p_v->p_texture, NULL, &i_h);
+   }
+   return (i_h);
 }
 
 /* The fit-to-window ratio for the given allocation: the largest scale that
@@ -391,6 +413,7 @@ _zoom_at(GgazeViewer *p_v, gdouble d_cx, gdouble d_cy, gdouble d_new_zoom) {
    p_v->d_pan_x = d_pan_x;
    p_v->d_pan_y = d_pan_y;
    gtk_widget_queue_draw(GTK_WIDGET(p_v));
+   _zoom_changed(p_v);
 }
 
 /* Remember the view as it is now: what a two-finger tap puts back (zb2).
@@ -412,6 +435,7 @@ _view_restore(GgazeViewer *p_v, const ViewState *p_in) {
    p_v->d_pan_x = p_in->d_pan_x;
    p_v->d_pan_y = p_in->d_pan_y;
    gtk_widget_queue_draw(GTK_WIDGET(p_v));
+   _zoom_changed(p_v);
 }
 
 static void
@@ -574,6 +598,10 @@ ggaze_viewer_class_init(GgazeViewerClass *p_klass) {
     * viewer does not know the window's action names. */
    u_toggle_info_sig =
       g_signal_new("toggle-info", G_OBJECT_CLASS_TYPE(p_oc), G_SIGNAL_RUN_LAST,
+                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+   /* "zoom-changed": the zoom state may have changed (viewer.h). */
+   u_zoom_changed_sig =
+      g_signal_new("zoom-changed", G_OBJECT_CLASS_TYPE(p_oc), G_SIGNAL_RUN_LAST,
                    0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
@@ -954,6 +982,7 @@ ggaze_viewer_set_texture(GgazeViewer *p_viewer, GdkTexture *p_texture) {
    _gestures_reset(p_viewer);
    _anim_start(p_viewer);
    gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
+   _zoom_changed(p_viewer); /* back to fit */
 }
 
 GdkTexture *
@@ -1041,6 +1070,27 @@ ggaze_viewer_toggle_fit_100(GgazeViewer *p_viewer) {
       p_viewer->b_fit = TRUE;
    }
    gtk_widget_queue_draw(GTK_WIDGET(p_viewer));
+   _zoom_changed(p_viewer);
+}
+
+gboolean
+ggaze_viewer_is_fit(GgazeViewer *p_viewer) {
+   g_return_val_if_fail(GGAZE_IS_VIEWER(p_viewer), TRUE);
+   return (p_viewer->b_fit);
+}
+
+gdouble
+ggaze_viewer_get_texel_scale(GgazeViewer *p_viewer) {
+   g_return_val_if_fail(GGAZE_IS_VIEWER(p_viewer), 0.0);
+   gint i_px = p_viewer->p_texture != NULL
+                  ? gdk_texture_get_width(p_viewer->p_texture)
+                  : 0;
+   if (i_px <= 0) {
+      return (0.0);
+   }
+   return (_current_scale(p_viewer) *
+           gtk_widget_get_scale_factor(GTK_WIDGET(p_viewer)) *
+           _tex_w(p_viewer) / i_px);
 }
 
 void
@@ -1205,6 +1255,7 @@ _pinch_hold_fit(GgazeViewer *p_v) {
                     NULL, NULL);
    }
    gtk_widget_queue_draw(GTK_WIDGET(p_v));
+   _zoom_changed(p_v);
 }
 
 void

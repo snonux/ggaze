@@ -230,6 +230,22 @@ guint ggaze_window_enhance_preview_count(GgazeWindow *p_win);
 guint    ggaze_window_enhance_managed_fetch_count(GgazeWindow *p_win);
 gboolean ggaze_window_enhance_has_managed_original(GgazeWindow *p_win);
 
+/* The scaled-down live preview (8l2), as test seams; 0 / FALSE / a no-op
+ * without GEGL (enhance-ctrl.h "the preview source"): how many preview
+ * sources were built, whether no preview work is outstanding
+ * (enhance_ctrl_is_settled; TRUE without GEGL), how many card-thumbnail batches
+ * really started (they wait for the preview), whether the "Rendering…"
+ * indicator is up (the controller's flag AND the pill over the view), a cap on
+ * the source's long side so a small fixture gets a scaled preview, and the
+ * landed source's scale. */
+guint    ggaze_window_enhance_source_count(GgazeWindow *p_win);
+gboolean ggaze_window_enhance_is_settled(GgazeWindow *p_win);
+guint    ggaze_window_enhance_thumb_launch_count(GgazeWindow *p_win);
+gboolean ggaze_window_enhance_busy_shown(GgazeWindow *p_win);
+void ggaze_window_enhance_set_preview_cap(GgazeWindow *p_win, gint i_max_side);
+gboolean ggaze_window_enhance_preview_scale(GgazeWindow *p_win,
+                                            gdouble     *pd_scale);
+
 /* The crop rectangle as the overlay draws it right now (tool_ctrl_get_crop_
  * rect): TRUE with the rectangle and the size of the base it is laid out on
  * iff the crop tool is up and its overlay is visible over the texture on
