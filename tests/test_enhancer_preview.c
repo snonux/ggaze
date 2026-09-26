@@ -229,6 +229,58 @@ test_full_size_source_renders_the_export_pixels(void) {
    fx_close(&fx);
 }
 
+/* The buffer's pixels as R'G'B'A u8 (caller unrefs). */
+static GBytes *
+buffer_bytes(GeglBuffer *p_buf) {
+   const GeglRectangle *p_r   = gegl_buffer_get_extent(p_buf);
+   gsize                u_len = (gsize)p_r->width * (gsize)p_r->height * 4;
+   guint8              *p_px  = g_malloc(u_len);
+   gegl_buffer_get(p_buf, p_r, 1.0, babl_format("R'G'B'A u8"), p_px,
+                   p_r->width * 4, GEGL_ABYSS_NONE);
+   return (g_bytes_new_take(p_px, u_len));
+}
+
+/* The full-resolution chain -- what the export runs -- is the plain GEGL
+ * graph: Sharpen at full size is gegl:unsharp-mask with the op's own 3 px
+ * std-dev, not a radius scaled for some preview (a reference built here,
+ * outside the enhancer, so a scale leaking into the export's chain cannot
+ * hide behind a reference that shares it). */
+static void
+test_full_resolution_chain_is_the_plain_graph(void) {
+   Fx fx;
+   fx_open(&fx);
+   Enhancer   *p_e  = enhancer_new();
+   GPtrArray  *p_pr = enhancer_presets_resolve(enhancer_get_presets(p_e), NULL);
+   GError     *p_err = NULL;
+   GeglBuffer *p_in  = enhancer_load(fx.p_file, &p_err);
+   g_assert_no_error(p_err);
+   GeglBuffer *p_got =
+      enhancer_apply_chain(p_in, p_pr, GGAZE_ENHANCE_BIT(6), NULL, &p_err);
+   g_assert_no_error(p_err);
+   GeglBuffer *p_want  = NULL;
+   GeglNode   *p_graph = gegl_node_new();
+   GeglNode   *p_src   = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-source", "buffer", p_in, NULL);
+   GeglNode *p_op = gegl_node_new_child(
+      p_graph, "operation", "gegl:unsharp-mask", "scale", 0.5, NULL);
+   GeglNode *p_sink = gegl_node_new_child(
+      p_graph, "operation", "gegl:buffer-sink", "buffer", &p_want, NULL);
+   gegl_node_link_many(p_src, p_op, p_sink, NULL);
+   gegl_node_process(p_sink);
+   g_object_unref(p_graph);
+   GBytes *p_a = buffer_bytes(p_got);
+   GBytes *p_b = buffer_bytes(p_want);
+   g_assert_true(g_bytes_equal(p_a, p_b));
+   g_bytes_unref(p_a);
+   g_bytes_unref(p_b);
+   g_object_unref(p_want);
+   g_object_unref(p_got);
+   g_object_unref(p_in);
+   g_ptr_array_unref(p_pr);
+   enhancer_delete(p_e);
+   fx_close(&fx);
+}
+
 /* Capped at 100 px the source is the image at a quarter; its render of a
  * crop is the crop at a quarter yet stands for the export's 200x150; the
  * source's own texture stands for the 400x300 original. */
@@ -446,6 +498,8 @@ main(int argc, char **argv) {
    g_test_init(&argc, &argv, NULL);
    g_test_add_func("/enhancer_preview/full_size_source_renders_export_pixels",
                    test_full_size_source_renders_the_export_pixels);
+   g_test_add_func("/enhancer_preview/full_resolution_chain_is_the_plain_graph",
+                   test_full_resolution_chain_is_the_plain_graph);
    g_test_add_func("/enhancer_preview/capped_source_stands_for_the_image",
                    test_capped_source_is_scaled_and_stands_for_the_image);
    g_test_add_func("/enhancer_preview/source_from_the_decode_does_not_decode",

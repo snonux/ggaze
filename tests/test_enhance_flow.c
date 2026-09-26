@@ -8301,7 +8301,9 @@ test_export_is_full_resolution_and_unchanged(void) {
 /* The card thumbnails wait for the preview: the panel asks for its batch,
  * a preset is pressed at once, and while that render is held pending (the
  * enhancer's delay seam) no batch starts; it starts when the preview has
- * landed, and every card gets its picture. */
+ * landed, and every card gets its picture. The same when the source is
+ * there already: the panel opened again under a pending render asks for
+ * a batch that starts only once that render has landed. */
 static void
 test_thumbnails_wait_for_the_preview(void) {
    char        *c_dir  = NULL;
@@ -8324,6 +8326,18 @@ test_thumbnails_wait_for_the_preview(void) {
    collect_pictures(find_panel(p_win), p_pics);
    wait_for_pictures_painted(p_pics);
    g_ptr_array_unref(p_pics);
+   fire(p_win, "win.enhance"); /* closed */
+   GdkTexture *p_prev = ref_viewer_texture(p_win);
+   enhancer_test_set_render_delay(600);
+   fire(p_win, "win.enhance-3"); /* pending, on the source there is */
+   fire(p_win, "win.enhance");   /* open again: a batch is asked for */
+   g_assert_cmpuint(ggaze_window_enhance_preview_count(p_win), ==, 2);
+   ggtest_drain_main(300);
+   g_assert_cmpuint(ggaze_window_enhance_thumb_launch_count(p_win), ==, 1);
+   wait_for_texture_change(p_win, p_prev);
+   enhancer_test_set_render_delay(0);
+   g_assert_cmpuint(ggaze_window_enhance_thumb_launch_count(p_win), ==, 2);
+   g_object_unref(p_prev);
    g_object_unref(p_orig);
    close_presented(p_win, c_dir, c_path);
 }
