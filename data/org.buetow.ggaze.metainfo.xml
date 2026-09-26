@@ -35,6 +35,11 @@
   </recommends>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.2.0" date="2026-09-26">
+      <description>
+        <p>A single edit panel with adjustable preset strength, crop, straighten, rotate and undo/redo, a fast screen-resolution edit preview, ICC colour management for enhanced copies, animated GIF/WebP playback and touch gestures.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-07-12">
       <description><p>Initial development release.</p></description>
     </release>

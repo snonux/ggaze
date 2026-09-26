@@ -1,5 +1,5 @@
 Name:    ggaze
-Version: 0.1.0
+Version: 0.2.0
 Release: 1%{?dist}
 Summary: Fast native image viewer for culling camera shoots
 
@@ -49,5 +49,13 @@ on. No library, no database, no sidecars.
 %license LICENSE
 
 %changelog
+* Sat Sep 26 2026 ggaze contributors <paul@buetow.org> - 0.2.0-1
+- Edit panel: presets with adjustable strength, crop, straighten, rotate,
+  undo/redo, key-hint bar; user presets in the panel
+- Fast display-resolution edit preview; full-resolution export
+- ICC colour management on the GEGL enhance/export path
+- Animated GIF/WebP playback, touch gestures (pinch, swipe, two-finger tap)
+- CI builds on fedora:40; make install / make update
+
 * Sat Jul 12 2026 ggaze contributors <paul@buetow.org> - 0.1.0-1
 - Initial RPM package
