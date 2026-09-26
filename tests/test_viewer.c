@@ -272,6 +272,57 @@ test_scaled_texture_keeps_the_image_geometry(void) {
    fx_close(&fx);
 }
 
+static void
+count_emission(GgazeViewer *p_v, gpointer p_data) {
+   (void)p_v;
+   (*(guint *)p_data)++;
+}
+
+/* 8l2 review: how magnified the texture's own pixels are drawn -- device
+ * pixels per texture pixel -- and the "zoom-changed" signal the window
+ * watches it by. A quarter-resolution texture standing for the image is
+ * magnified 4x sooner than the full one; every zoom-state change emits
+ * (a new texture, the 100 % toggle, a zoom), a pan does not; no texture
+ * reads 0. */
+static void
+test_texel_scale_follows_the_zoom(void) {
+   ViewerFx fx;
+   fx_open(&fx);
+   guint u_emits = 0;
+   g_signal_connect(fx.p_viewer, "zoom-changed", G_CALLBACK(count_emission),
+                    &u_emits);
+   gdouble d_sf  = gtk_widget_get_scale_factor(GTK_WIDGET(fx.p_viewer));
+   gdouble d_fit = ggaze_viewer_get_scale(fx.p_viewer);
+   g_assert_true(ggaze_viewer_is_fit(fx.p_viewer));
+   g_assert_cmpfloat_with_epsilon(ggaze_viewer_get_texel_scale(fx.p_viewer),
+                                  d_fit * d_sf, 1e-9);
+   gsize       u_len = 300 * 200 * 4;
+   GBytes     *p_b   = g_bytes_new_take(g_malloc0(u_len), u_len);
+   GdkTexture *p_tex =
+      gdk_memory_texture_new(300, 200, GDK_MEMORY_R8G8B8A8, p_b, 300 * 4);
+   g_bytes_unref(p_b);
+   logical_size_set(p_tex, FIXTURE_W, FIXTURE_H);
+   ggaze_viewer_set_texture(fx.p_viewer, p_tex);
+   g_assert_cmpuint(u_emits, ==, 1);
+   g_assert_cmpfloat_with_epsilon(ggaze_viewer_get_texel_scale(fx.p_viewer),
+                                  d_fit * d_sf * 4.0, 1e-9);
+   ggaze_viewer_toggle_fit_100(fx.p_viewer);
+   g_assert_cmpuint(u_emits, ==, 2);
+   g_assert_false(ggaze_viewer_is_fit(fx.p_viewer));
+   g_assert_cmpfloat_with_epsilon(ggaze_viewer_get_texel_scale(fx.p_viewer),
+                                  d_sf * 4.0, 1e-9);
+   ggaze_viewer_zoom_in(fx.p_viewer);
+   g_assert_cmpuint(u_emits, ==, 3);
+   g_assert_cmpfloat_with_epsilon(ggaze_viewer_get_texel_scale(fx.p_viewer),
+                                  d_sf * 4.0 * 1.25, 1e-9);
+   ggaze_viewer_pan(fx.p_viewer, 5.0, 5.0);
+   g_assert_cmpuint(u_emits, ==, 3); /* a pan is not a zoom */
+   ggaze_viewer_set_texture(fx.p_viewer, NULL);
+   g_assert_cmpfloat(ggaze_viewer_get_texel_scale(fx.p_viewer), ==, 0.0);
+   g_object_unref(p_tex);
+   fx_close(&fx);
+}
+
 /* THE hx0 REGRESSION. A non-finite pan delta -- what the wheel path produced
  * once gdk_event_get_position()'s NAN reached the pan fields -- must be
  * rejected outright. Before the guard this poisoned d_pan_x/d_pan_y forever:
@@ -944,6 +995,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/viewer/toggle_fit_100", test_toggle_fit_100);
    g_test_add_func("/viewer/scaled_texture_keeps_the_image_geometry",
                    test_scaled_texture_keeps_the_image_geometry);
+   g_test_add_func("/viewer/texel_scale_follows_the_zoom",
+                   test_texel_scale_follows_the_zoom);
    g_test_add_func("/viewer/non_finite_pan_is_rejected",
                    test_non_finite_pan_is_rejected);
    g_test_add_func("/viewer/finite_pan_still_applies",

@@ -28,6 +28,7 @@
 #include "delete-confirm.h"
 #include "fileops.h"
 #include "info-overlay.h"
+#include "logical-size.h"
 #include "mover.h"
 #include "navigator.h"
 #include "opener.h"
@@ -103,7 +104,11 @@ struct _GgazeWindow {
    GtkWidget *p_status_page; /* AdwStatusPage: the "empty" stack child */
    GtkWidget *p_menu_btn;    /* header-bar main menu (F10) */
    gboolean   b_disposed;    /* set in dispose; async callbacks check it */
-   guint      u_load_count;  /* _load_current runs with a navigator so
+   gboolean   b_soft_noted;  /* the viewer shows a scaled-down preview
+                              * magnified and the status line has said so
+                              * (_on_viewer_zoom_changed): said once per
+                              * crossing into magnification, not per step */
+   guint u_load_count;       /* _load_current runs with a navigator so
                               * far (a test seam: an open is one load) */
    DeleteConfirm *p_delete_confirm; /* bulk-delete confirm flow
                                      * (captured targets + outstanding
@@ -1089,6 +1094,48 @@ _action_mark_range(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    _update_header(p_win);
 }
 
+/* The resolution of a scaled-down texture on screen, in percent of the
+ * image it stands for (logical-size.h), or 0 for a full-resolution one. */
+static gint
+_preview_percent(GdkTexture *p_tex) {
+   gint i_lw = 0;
+   if (p_tex == NULL) {
+      return (0);
+   }
+   logical_size_get(p_tex, &i_lw, NULL);
+   gint i_pw = gdk_texture_get_width(p_tex);
+   if (i_pw >= i_lw || i_lw <= 0) {
+      return (0);
+   }
+   return (CLAMP((gint)(100.0 * i_pw / i_lw + 0.5), 1, 99));
+}
+
+/* What win.copy says it copied from the view (no marks): the texture on
+ * screen as it is. The live enhance preview is scaled down (8l2), so its
+ * pixels -- or, under hold-Space, the original at the preview's size --
+ * are what lands on the clipboard; the status line says so, with the size,
+ * so a user expecting the full-resolution edit is never misled silently. */
+static char *
+_copied_text(GgazeWindow *p_win, GdkTexture *p_tex) {
+   if (_preview_percent(p_tex) == 0) {
+      return (g_strdup("Copied image"));
+   }
+   gint     i_w    = gdk_texture_get_width(p_tex);
+   gint     i_h    = gdk_texture_get_height(p_tex);
+   gboolean b_hold = FALSE;
+#if GGAZE_HAVE_GEGL
+   b_hold = enhance_ctrl_is_hold_original(p_win->p_enhance_ctrl);
+#else
+   (void)p_win;
+#endif
+   if (b_hold) {
+      return (
+         g_strdup_printf("Copied original preview (%d\u00d7%d)", i_w, i_h));
+   }
+   return (g_strdup_printf(
+      "Copied edited preview (%d\u00d7%d) \u2014 s saves full size", i_w, i_h));
+}
+
 /* win.copy (Ctrl+c): put the current picture on the clipboard. With marks,
  * copy the marked files as text/uri-list (+ text/plain) so file managers and
  * file-aware apps can paste them. With no marks, copy the DISPLAYED image
@@ -1096,11 +1143,14 @@ _action_mark_range(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
  * preview when an enhance preset is active, else the original (docs/ui-and-
  * interactions.md "Copy to clipboard"). The texture is already decoded, so the
  * PNG encode (gdk_texture_save_to_png_bytes) runs synchronously and is fast
- * enough not to block the UI on a re-decode. The viewer only ever holds the
- * texture for navigator.current (last-write-wins invariant), so copying it is
- * tied to the current load by construction. The decision is factored into
- * ggaze_window_get_copy_provider so it can be tested without driving the
- * (display-backend-dependent) system clipboard. */
+ * enough not to block the UI on a re-decode. The preview is the scaled-down
+ * one the view shows (8l2), and the status line says so with its size
+ * (_copied_text); `s` is what writes the edit at full size. The viewer only
+ * ever holds the texture for navigator.current (last-write-wins
+ * invariant), so copying it is tied to the current load by construction.
+ * The decision is factored into ggaze_window_get_copy_provider so it can
+ * be tested without driving the (display-backend-dependent) system
+ * clipboard. */
 static void
 _action_copy(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -1122,7 +1172,10 @@ _action_copy(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
       _show_status(p_win, c_msg);
       g_free(c_msg);
    } else {
-      _show_status(p_win, "Copied image");
+      char *c_msg = _copied_text(
+         p_win, ggaze_viewer_get_texture(GGAZE_VIEWER(p_win->p_viewer)));
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
    }
 }
 
@@ -2416,6 +2469,33 @@ static void
 _on_viewer_toggle_info(GgazeViewer *p_v, gpointer p_data) {
    (void)p_v;
    g_action_group_activate_action(G_ACTION_GROUP(p_data), "info", NULL);
+}
+
+/* The zoom changed (8l2 review). The live enhance preview is rendered at
+ * about the view's resolution (decision #53), so zoomed in past that it is
+ * shown magnified -- soft where the export will be sharp, which a user
+ * judging Sharpen or Denoise at 100 % would take for the result. Say so
+ * on the status line when the view crosses into that, once per crossing
+ * (not on every further zoom step): "Preview at N % resolution". Only for
+ * an explicit zoom -- at fit the source is built to cover the view -- and
+ * only for a scaled texture, so an ordinary picture zoomed past 100 %
+ * never gets it. */
+static void
+_on_viewer_zoom_changed(GgazeViewer *p_v, gpointer p_data) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->b_disposed) {
+      return;
+   }
+   gint     i_pct  = _preview_percent(ggaze_viewer_get_texture(p_v));
+   gboolean b_soft = i_pct > 0 && !ggaze_viewer_is_fit(p_v) &&
+                     ggaze_viewer_get_texel_scale(p_v) > 1.0 + 1e-6;
+   if (b_soft && !p_win->b_soft_noted) {
+      char *c_msg = g_strdup_printf(
+         "Preview at %d %% resolution \u2014 s saves full size", i_pct);
+      _show_status(p_win, c_msg);
+      g_free(c_msg);
+   }
+   p_win->b_soft_noted = b_soft;
 }
 
 static void
@@ -3839,6 +3919,8 @@ _init_stack_and_viewer(GgazeWindow *p_win) {
                     G_CALLBACK(_on_viewer_navigate), p_win);
    g_signal_connect(p_win->p_viewer, "toggle-info",
                     G_CALLBACK(_on_viewer_toggle_info), p_win);
+   g_signal_connect(p_win->p_viewer, "zoom-changed",
+                    G_CALLBACK(_on_viewer_zoom_changed), p_win);
    _apply_viewer_prefs(p_win);
 
    _set_view(p_win, GGAZE_VIEW_EMPTY);

@@ -8418,6 +8418,74 @@ test_failed_source_discards_the_preview(void) {
    scaled_fx_close(&fx);
 }
 
+/* Put a marker on the status line, so a later check can tell that
+ * nothing overwrote it. */
+static void
+mark_status(GgazeWindow *p_win) {
+   gtk_label_set_text(GTK_LABEL(ggaze_window_get_info_label(p_win)), "marker");
+}
+
+#define SOFT_NOTE "Preview at 25 % resolution \u2014 s saves full size"
+
+/* Zoomed past the preview's resolution the status line says the preview
+ * is scaled (a quarter here), once per crossing into it: not at fit, not
+ * again on a further zoom step, again after a trip back to fit -- and
+ * never for the full-resolution original zoomed past 100 %. */
+static void
+test_deep_zoom_says_the_preview_is_scaled(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, TRUE);
+   GgazeViewer *p_v = large_viewer(fx.p_win);
+   mark_status(fx.p_win);
+   ggaze_viewer_toggle_fit_100(p_v); /* the original at 100 %, then more */
+   ggaze_viewer_zoom_in(p_v);
+   g_assert_cmpfloat(ggaze_viewer_get_texel_scale(p_v), >, 1.0);
+   g_assert_cmpstr(status_text(fx.p_win), ==, "marker");
+   fire_and_wait(fx.p_win, "win.enhance-2"); /* lands at fit */
+   g_assert_true(ggaze_viewer_is_fit(p_v));
+   /* The 100 px source is magnified even at fit here (the test cap; a real
+    * source covers the view), but fit says nothing: an explicit zoom does
+    * -- even one out, the preview being magnified still. */
+   mark_status(fx.p_win);
+   ggaze_viewer_zoom_out(p_v);
+   g_assert_cmpstr(status_text(fx.p_win), ==, SOFT_NOTE);
+   mark_status(fx.p_win);
+   ggaze_viewer_zoom_in(p_v);
+   g_assert_cmpstr(status_text(fx.p_win), ==, "marker"); /* once */
+   ggaze_viewer_toggle_fit_100(p_v); /* back to fit: re-armed */
+   g_assert_true(ggaze_viewer_is_fit(p_v));
+   g_assert_cmpstr(status_text(fx.p_win), ==, "marker");
+   ggaze_viewer_toggle_fit_100(p_v); /* 100 %: a new crossing */
+   g_assert_cmpstr(status_text(fx.p_win), ==, SOFT_NOTE);
+   scaled_fx_close(&fx);
+}
+
+/* Ctrl+c of a scaled preview copies what is on screen, and the status line
+ * says it is the preview, with its size: the edit's, or under hold-Space
+ * the original's. The original itself is copied as ever. */
+static void
+test_copy_of_a_scaled_preview_says_so(void) {
+   ScaledFx fx;
+   scaled_fx_open(&fx, FALSE);
+   fire(fx.p_win, "win.copy");
+   g_assert_cmpstr(status_text(fx.p_win), ==, "Copied image");
+   fire_and_wait(fx.p_win, "win.enhance-2");
+   fire(fx.p_win, "win.copy");
+   g_assert_cmpstr(status_text(fx.p_win), ==,
+                   "Copied edited preview (100\u00d775) \u2014 s saves "
+                   "full size");
+   ggaze_window_set_hold_original(fx.p_win, TRUE);
+   fire(fx.p_win, "win.copy");
+   g_assert_cmpstr(status_text(fx.p_win), ==,
+                   "Copied original preview (100\u00d775)");
+   ggaze_window_set_hold_original(fx.p_win, FALSE);
+   revert_edits(fx.p_win);
+   wait_for_settled(fx.p_win);
+   fire(fx.p_win, "win.copy");
+   g_assert_cmpstr(status_text(fx.p_win), ==, "Copied image");
+   scaled_fx_close(&fx);
+}
+
 /* How a pending preview is dropped before it lands. */
 typedef enum {
    DROP_REVERT,  /* x */
@@ -8492,6 +8560,10 @@ test_cards_after_a_discarded_preview(void) {
 
 static void
 add_scaled_preview_tests(void) {
+   g_test_add_func("/enhance_flow/deep_zoom_says_the_preview_is_scaled",
+                   test_deep_zoom_says_the_preview_is_scaled);
+   g_test_add_func("/enhance_flow/copy_of_a_scaled_preview_says_so",
+                   test_copy_of_a_scaled_preview_says_so);
    g_test_add_func("/enhance_flow/cards_after_a_reverted_preview",
                    test_cards_after_a_reverted_preview);
    g_test_add_func("/enhance_flow/cards_after_an_undone_preview",

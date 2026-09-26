@@ -36,6 +36,13 @@
  * info card ("toggle-info"). The viewer only reports intent; the window gates
  * the navigation and owns the info action. See "touch gestures" below.
  *
+ * "zoom-changed" (no arguments) is emitted whenever the zoom STATE may
+ * have changed -- a zoom about a point (wheel, keys, pinch), the fit / 100 %
+ * toggle, a view put back, a new texture (which resets to fit) -- so the
+ * window can tell when a scaled-down preview is shown magnified (8l2
+ * review, ggaze_viewer_get_texel_scale). A resize that changes the fit
+ * ratio does not emit it.
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -112,7 +119,18 @@ gdouble ggaze_viewer_get_scale(GgazeViewer *p_viewer);
  * this too when checking that the image is still displayable. */
 void ggaze_viewer_get_pan(GgazeViewer *p_viewer, gdouble *p_x, gdouble *p_y);
 void ggaze_viewer_toggle_fit_100(GgazeViewer *p_viewer);
-void ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy);
+
+/* TRUE while the picture is fitted to the widget (FALSE: an explicit zoom). */
+gboolean ggaze_viewer_is_fit(GgazeViewer *p_viewer);
+
+/* How many DEVICE pixels one of the texture's own pixels covers as drawn:
+ * the drawn scale times the widget's scale factor times the texture's
+ * image-to-pixel ratio (logical-size.h). Above 1 the texture is magnified
+ * -- for a full-resolution texture that is simply a zoom past 100 %, for
+ * the scaled-down enhance preview it happens much sooner (8l2 review).
+ * 0.0 with no texture. */
+gdouble ggaze_viewer_get_texel_scale(GgazeViewer *p_viewer);
+void    ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy);
 
 /* --- tool overlay hosting --------------------------------------------------
  */
