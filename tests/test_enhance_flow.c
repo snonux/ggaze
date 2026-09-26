@@ -257,16 +257,19 @@ revert_edits(GgazeWindow *p_win) {
 }
 
 /* Pump until no preview work is outstanding (ggaze_window_enhance_is_
- * settled, 5 s at most, not asserted): since 8l2 the card thumbnails
- * render AFTER the preview, so a preview landing no longer means the
- * panel's batch is done -- and a batch holds a window ref, which the
- * refcount checks (assert_ref_settled) would read as a leak. */
+ * settled, 5 s at most) and ASSERT that it is: since 8l2 the card
+ * thumbnails render AFTER the preview, so a preview landing no longer
+ * means the panel's batch is done -- and a batch holds a window ref, which
+ * the refcount checks (assert_ref_settled) would read as a leak. The
+ * assertion is the point: a wait that ran out silently once hid cards
+ * that never started at all (a dropped preview never restarted them). */
 static void
 wait_for_settled(GgazeWindow *p_win) {
    for (guint u = 0; u < 5000 && !ggaze_window_enhance_is_settled(p_win); u++) {
       g_main_context_iteration(g_main_context_default(), FALSE);
       g_usleep(1000);
    }
+   g_assert_true(ggaze_window_enhance_is_settled(p_win));
 }
 
 /* Poll until the viewer's texture pointer differs from p_before (a fresh
@@ -8415,8 +8418,86 @@ test_failed_source_discards_the_preview(void) {
    scaled_fx_close(&fx);
 }
 
+/* How a pending preview is dropped before it lands. */
+typedef enum {
+   DROP_REVERT,  /* x */
+   DROP_UNDO,    /* u back to no edit */
+   DROP_DISCARD, /* the navigate-away gate's Discard */
+} DropHow;
+
+static void
+drop_pending_preview(GgazeWindow *p_win, DropHow e_how) {
+   switch (e_how) {
+   case DROP_REVERT:
+      fire(p_win, "win.edit-revert");
+      break;
+   case DROP_UNDO:
+      fire(p_win, "win.edit-undo");
+      break;
+   case DROP_DISCARD:
+      fire(p_win, "win.next"); /* the only file: the gate, then no move */
+      ggtest_drain_main(150);
+      GGTEST_ASSERT_DIALOG_UP(GTK_WINDOW(p_win), "Discard");
+      g_assert_true(ggtest_click_dialog_button(GTK_WINDOW(p_win), "Discard"));
+      break;
+   }
+}
+
+/* The panel's cards wait for the preview; a preview dropped before it
+ * lands (x, an undo back to no edit, the gate's Discard) never lands to
+ * start them, so dropping it starts them: the batch runs, every card gets
+ * its picture and the window settles. Nothing pending is left behind. */
+static void
+cards_after_a_dropped_preview(DropHow e_how) {
+   char        *c_dir  = NULL;
+   char        *c_path = NULL;
+   GgazeWindow *p_win =
+      open_presented(TRUE, "ggaze-cards-drop-XXXXXX", &c_dir, &c_path);
+   GdkTexture *p_orig = ref_viewer_texture(p_win);
+   enhancer_test_set_render_delay(600);
+   fire(p_win, "win.enhance-2"); /* pending ... */
+   fire(p_win, "win.enhance");   /* ... so the cards wait for it */
+   ggtest_drain_main(200);
+   g_assert_cmpuint(ggaze_window_enhance_thumb_launch_count(p_win), ==, 0);
+   drop_pending_preview(p_win, e_how);
+   wait_for_settled(p_win);
+   g_assert_cmpuint(ggaze_window_enhance_thumb_launch_count(p_win), ==, 1);
+   g_assert_false(ggaze_window_enhance_is_dirty(p_win));
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   GPtrArray *p_pics = g_ptr_array_new();
+   collect_pictures(find_panel(p_win), p_pics);
+   wait_for_pictures_painted(p_pics);
+   g_ptr_array_unref(p_pics);
+   enhancer_test_set_render_delay(0);
+   ggtest_drain_main(700); /* the dropped render lands, stale */
+   g_assert_true(viewer_texture(p_win) == p_orig);
+   g_object_unref(p_orig);
+   close_presented(p_win, c_dir, c_path);
+}
+
+static void
+test_cards_after_a_reverted_preview(void) {
+   cards_after_a_dropped_preview(DROP_REVERT);
+}
+
+static void
+test_cards_after_an_undone_preview(void) {
+   cards_after_a_dropped_preview(DROP_UNDO);
+}
+
+static void
+test_cards_after_a_discarded_preview(void) {
+   cards_after_a_dropped_preview(DROP_DISCARD);
+}
+
 static void
 add_scaled_preview_tests(void) {
+   g_test_add_func("/enhance_flow/cards_after_a_reverted_preview",
+                   test_cards_after_a_reverted_preview);
+   g_test_add_func("/enhance_flow/cards_after_an_undone_preview",
+                   test_cards_after_an_undone_preview);
+   g_test_add_func("/enhance_flow/cards_after_a_discarded_preview",
+                   test_cards_after_a_discarded_preview);
    g_test_add_func("/enhance_flow/scaled_preview_measures_the_image",
                    test_scaled_preview_measures_the_image);
    g_test_add_func("/enhance_flow/scaled_preview_zoom_and_compare",

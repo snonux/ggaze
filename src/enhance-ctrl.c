@@ -1510,7 +1510,15 @@ _sync_busy(EnhanceCtrl *p_ctrl) {
  * set_hold_original no-ops once nothing is active, so a Space RELEASE
  * arriving after the mask was cleared out from under a still-held key would
  * otherwise leave the flag stuck TRUE and swallow the next press (tu0 review
- * round 2, issue 4). */
+ * round 2, issue 4).
+ *
+ * Nothing is pending afterwards, so the card batch goes ahead here: it
+ * waits for the preview (_maybe_start_thumbs), and a preview dropped
+ * before it landed -- x, an undo back to no edit, the gate's Discard, all
+ * under a slow render -- never lands to start it, so the cards stayed
+ * empty (and a batch paused under that preview lost its pictures). Not in
+ * _drop_inflight itself: the _launch that follows it there would pause
+ * the batch again at once. */
 static void
 _restore_original(EnhanceCtrl *p_ctrl) {
    _drop_inflight(p_ctrl);
@@ -1519,6 +1527,7 @@ _restore_original(EnhanceCtrl *p_ctrl) {
    g_clear_object(&p_ctrl->p_enhance_tex);
    _load_current(p_ctrl);
    _update_header(p_ctrl);
+   _maybe_start_thumbs(p_ctrl);
 }
 
 /* Bring the screen in line with the state, off the GTK main thread
