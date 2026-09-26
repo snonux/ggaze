@@ -143,7 +143,7 @@ alone took ~5 s), queued ahead of it. Now:
   i.e. the preview at its display resolution; `s` writes the full one.
   The status line says so, with the size: *Copied edited preview
   (1600×1200) — s saves full size* (under hold-`Space`, *Copied original
-  preview (…)*), never a bare *Copied image*.
+  preview (…)*), never a bare *Copied image* for a scaled preview (a photo small enough to preview at full size copies as *Copied image*).
 - **Hold-`Space`'s compare texture is made on the first press**, not with
   the source: `enhancer_source_get_original` converts the scaled buffer on
   demand (~2 ms for a 64 MP photo's 1600x1200 source, measured, against
