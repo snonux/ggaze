@@ -502,6 +502,18 @@ if gegl_dep.found()
    test('enhancer', test_enhancer, suite : 'unit', env : enhancer_env,
       protocol : 'tap')
 
+   # enhancer_preview (8l2): the live preview's scaled-down source and its
+   # render -- export pixels at full size, the logical size, no second
+   # decode, pixel lengths scaled, managed sources, the cards, the seams.
+   test_enhancer_preview = executable(
+      'test_enhancer_preview', ['test_enhancer_preview.c', ggaze_conf_h],
+      include_directories : [inc, src_inc],
+      dependencies : [glib_dep, gegl_dep, gtk4_dep, gdkpixbuf_dep],
+      link_with : ggaze_lib, install : false,
+   )
+   test('enhancer_preview', test_enhancer_preview, suite : 'unit',
+      env : enhancer_env, protocol : 'tap')
+
    # enhancer_icc (xb2): colour management on the enhance path (decision
    # #45) -- managed decodes, the loader's verdict for every broken file,
    # the profile-keeping export, the missing-op fallbacks (the enhancer's

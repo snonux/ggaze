@@ -93,6 +93,9 @@ struct _GgazeWindow {
    GtkWidget *p_side_slot; /* GtkBox beside the overlay that the enhance
                             * side panel is appended to while open; shown
                             * only in the large view (_set_view) */
+   GtkWidget *p_busy;      /* the "Rendering…" pill over the view (GEGL
+                            * builds, _init_busy_indicator; NULL without):
+                            * a preview render taking a while (8l2) */
    InfoOverlay *p_info;    /* info card + status line over the stack */
    guint        u_slideshow; /* slideshow timeout id (0=off) */
    gint64       i_esc_at;    /* monotonic us of the last grid Esc (two-step
@@ -1436,6 +1439,27 @@ _ec_mode_changed(gpointer p_host) {
    _sync_edit_mode(GGAZE_WINDOW(p_host));
 }
 
+/* The large view's size and device scale: what the preview source is
+ * scaled for (8l2). 0 x 0 while the viewer has no allocation yet (the
+ * controller assumes a default view then). */
+static void
+_ec_get_view(gpointer p_host, gint *p_w, gint *p_h, gint *p_scale) {
+   GtkWidget *p_viewer = GGAZE_WINDOW(p_host)->p_viewer;
+   *p_w                = gtk_widget_get_width(p_viewer);
+   *p_h                = gtk_widget_get_height(p_viewer);
+   *p_scale            = gtk_widget_get_scale_factor(p_viewer);
+}
+
+/* A preview render has been pending for a while: the pill over the view
+ * says so (and goes when it lands, fails or is superseded). */
+static void
+_ec_show_busy(gpointer p_host, gboolean b_busy) {
+   GgazeWindow *p_win = GGAZE_WINDOW(p_host);
+   if (p_win->p_busy != NULL) {
+      gtk_widget_set_visible(p_win->p_busy, b_busy);
+   }
+}
+
 static const EnhanceUIHostOps _ENHANCE_OPS = {
    .show_texture       = _ec_show_texture,
    .update_header      = _ec_update_header,
@@ -1449,6 +1473,8 @@ static const EnhanceUIHostOps _ENHANCE_OPS = {
    .abandon_tool       = _ec_abandon_tool,
    .original_changed   = _ec_original_changed,
    .mode_changed       = _ec_mode_changed,
+   .get_view           = _ec_get_view,
+   .show_busy          = _ec_show_busy,
 };
 
 /* win.enhance (key 'a', the panel's close button, the menu): open the side
@@ -1798,6 +1824,45 @@ ggaze_window_enhance_has_managed_original(GgazeWindow *p_win) {
    return (enhance_ctrl_has_managed_original(p_win->p_enhance_ctrl));
 }
 
+guint
+ggaze_window_enhance_source_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (enhance_ctrl_get_source_count(p_win->p_enhance_ctrl));
+}
+
+guint
+ggaze_window_enhance_thumb_launch_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (enhance_ctrl_get_thumb_launch_count(p_win->p_enhance_ctrl));
+}
+
+gboolean
+ggaze_window_enhance_is_settled(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), TRUE);
+   return (enhance_ctrl_is_settled(p_win->p_enhance_ctrl));
+}
+
+gboolean
+ggaze_window_enhance_busy_shown(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   gboolean b_ctrl = enhance_ctrl_is_busy_shown(p_win->p_enhance_ctrl);
+   gboolean b_pill =
+      p_win->p_busy != NULL && gtk_widget_get_visible(p_win->p_busy);
+   return (b_ctrl && b_pill);
+}
+
+void
+ggaze_window_enhance_set_preview_cap(GgazeWindow *p_win, gint i_max_side) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   enhance_ctrl_set_preview_cap(p_win->p_enhance_ctrl, i_max_side);
+}
+
+gboolean
+ggaze_window_enhance_preview_scale(GgazeWindow *p_win, gdouble *pd_scale) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (enhance_ctrl_get_preview_scale(p_win->p_enhance_ctrl, pd_scale));
+}
+
 gboolean
 ggaze_window_tool_crop_rect(GgazeWindow *p_win, CropRect *p_rect,
                             gint *p_base_w, gint *p_base_h) {
@@ -1993,6 +2058,43 @@ ggaze_window_enhance_managed_fetch_count(GgazeWindow *p_win) {
 gboolean
 ggaze_window_enhance_has_managed_original(GgazeWindow *p_win) {
    g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (FALSE);
+}
+
+guint
+ggaze_window_enhance_source_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (0); /* no GEGL, no preview */
+}
+
+guint
+ggaze_window_enhance_thumb_launch_count(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), 0);
+   return (0);
+}
+
+gboolean
+ggaze_window_enhance_is_settled(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), TRUE);
+   return (TRUE);
+}
+
+gboolean
+ggaze_window_enhance_busy_shown(GgazeWindow *p_win) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   return (FALSE);
+}
+
+void
+ggaze_window_enhance_set_preview_cap(GgazeWindow *p_win, gint i_max_side) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   (void)i_max_side;
+}
+
+gboolean
+ggaze_window_enhance_preview_scale(GgazeWindow *p_win, gdouble *pd_scale) {
+   g_return_val_if_fail(GGAZE_IS_WINDOW(p_win), FALSE);
+   (void)pd_scale;
    return (FALSE);
 }
 
@@ -3366,6 +3468,27 @@ _init_enhance_state(GgazeWindow *p_win) {
  * must be claimed before the global shortcut table sees them. The router's
  * key-hint bar goes under the large view, in the column _init_info_overlay
  * built around the overlay. */
+/* The "Rendering…" pill: a spinner and a label at the top of the view,
+ * over the picture, hidden until a preview render has been pending for a
+ * while (_ec_show_busy, 8l2). It takes no clicks, so it never steals a
+ * drag from the crop tool under it. */
+static void
+_init_busy_indicator(GgazeWindow *p_win) {
+   GtkWidget *p_box  = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+   GtkWidget *p_spin = gtk_spinner_new();
+   gtk_spinner_start(GTK_SPINNER(p_spin));
+   gtk_box_append(GTK_BOX(p_box), p_spin);
+   gtk_box_append(GTK_BOX(p_box), gtk_label_new("Rendering…"));
+   gtk_widget_add_css_class(p_box, "ggaze-info");
+   gtk_widget_set_halign(p_box, GTK_ALIGN_CENTER);
+   gtk_widget_set_valign(p_box, GTK_ALIGN_START);
+   gtk_widget_set_margin_top(p_box, 12);
+   gtk_widget_set_can_target(p_box, FALSE);
+   gtk_widget_set_visible(p_box, FALSE);
+   gtk_overlay_add_overlay(GTK_OVERLAY(p_win->p_overlay), p_box);
+   p_win->p_busy = p_box;
+}
+
 static void
 _init_tool_state(GgazeWindow *p_win) {
    p_win->p_tool_ctrl = tool_ctrl_new(p_win->p_enhance_ctrl, &_TOOL_OPS, p_win);
@@ -3374,6 +3497,7 @@ _init_tool_state(GgazeWindow *p_win) {
    GtkWidget *p_column = gtk_widget_get_parent(p_win->p_overlay);
    gtk_box_append(GTK_BOX(p_column),
                   edit_mode_get_hint_bar(p_win->p_edit_mode));
+   _init_busy_indicator(p_win);
    GtkEventController *p_kc = gtk_event_controller_key_new();
    gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
    g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_edit_key_cb), p_win);

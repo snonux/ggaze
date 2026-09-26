@@ -163,10 +163,12 @@ GtkWidget *enhance_ui_build_panel(const GPtrArray *p_presets, guint32 u_mask,
  * p_save_btn to match: nothing edited -> "No edits yet" (button
  * insensitive); edits on screen but unsaved -> says so, and that the
  * original is kept; saved -> "Saved as <c_saved>" (c_saved nullable, then
- * a generic "Saved"). Pure widget update. */
+ * a generic "Saved"). b_rendering (8l2: a preview has been pending for a
+ * while) appends " · rendering…" -- after the state, so the line still
+ * starts with what it always said. Pure widget update. */
 void enhance_ui_set_save_state(GtkWidget *p_state, GtkWidget *p_save_btn,
                                gboolean b_active, gboolean b_saved,
-                               const char *c_saved);
+                               const char *c_saved, gboolean b_rendering);
 
 /* Show d_value on a tunable card: the label's text (p_value) and the
  * slider's position (p_scale) -- both nullable, both the preset p_s's.

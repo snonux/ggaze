@@ -29,6 +29,7 @@
 #include <lcms2.h>
 
 #include "enhancer-gegl.h"
+#include "enhancer-private.h"
 #include "ggaze-config.h"
 #include "icc.h"                /* is there a profile to manage at all? */
 #include "info.h"               /* EXIF Orientation for the GEGL decode */
@@ -37,6 +38,7 @@
 #include "loader/loader.h"      /* orientation-aware load -> upright texture */
 #include "loader/pixbuf-util.h" /* the orientation permutation */
 #include "pathutil.h"
+#include "preview-scale.h" /* which properties are pixel lengths */
 #include "transform.h"
 
 /* Test seam (enhancer-gegl.h): an op name to treat as not installed. */
@@ -141,8 +143,8 @@ _preset_new(const char *c_name, const char *c_graph, int i_builtin) {
  * empty array). Shared by enhancer_set_presets and the async paths (which
  * snapshot the preset list before handing it to a worker thread, so a
  * concurrent enhancer_set_presets() cannot race it). */
-static GPtrArray *
-_presets_copy(const GPtrArray *p_src) {
+GPtrArray *
+enhancer_priv_presets_copy(const GPtrArray *p_src) {
    GPtrArray *p_out = g_ptr_array_new_with_free_func(_preset_free);
    for (guint u = 0;
         p_src != NULL && u < p_src->len && u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
@@ -181,7 +183,7 @@ enhancer_delete(Enhancer *p_e) {
 void
 enhancer_set_presets(Enhancer *p_e, const GPtrArray *p_presets) {
    g_return_if_fail(p_e != NULL);
-   GPtrArray *p_copy = _presets_copy(p_presets);
+   GPtrArray *p_copy = enhancer_priv_presets_copy(p_presets);
    g_ptr_array_unref(p_e->p_presets);
    p_e->p_presets = p_copy;
 }
@@ -264,7 +266,7 @@ enhancer_default_strengths(const GPtrArray *p_presets, gdouble *pd_out) {
 GPtrArray *
 enhancer_presets_resolve(const GPtrArray *p_presets,
                          const gdouble   *pd_strength) {
-   GPtrArray *p_out = _presets_copy(p_presets);
+   GPtrArray *p_out = enhancer_priv_presets_copy(p_presets);
    for (guint u = 0;
         pd_strength != NULL && u < p_out->len && u < GGAZE_ENHANCE_MAX_PRESETS;
         u++) {
@@ -497,15 +499,65 @@ _set_prop(GeglNode *p_node, const char *c_pair, GError **p_err) {
    return (b_ok);
 }
 
+/* p_spec's value on p_node as a length on an image scaled by d_scale
+ * (preview-scale.h), within the property's own range: an int is rounded
+ * -- a 1 px box blur on a fifth-size source is no blur, which is what the
+ * export's 1 px blur looks like at that size. */
+static void
+_scale_length(GeglNode *p_node, GParamSpec *p_spec, gdouble d_scale) {
+   GValue t_val = G_VALUE_INIT;
+   g_value_init(&t_val, p_spec->value_type);
+   gegl_node_get_property(p_node, p_spec->name, &t_val);
+   if (G_IS_PARAM_SPEC_DOUBLE(p_spec)) {
+      const GParamSpecDouble *p_d = G_PARAM_SPEC_DOUBLE(p_spec);
+      gdouble d_v = preview_scale_length(g_value_get_double(&t_val), d_scale,
+                                         p_d->minimum);
+      g_value_set_double(&t_val, MIN(d_v, p_d->maximum));
+   } else if (G_IS_PARAM_SPEC_INT(p_spec)) {
+      const GParamSpecInt *p_i = G_PARAM_SPEC_INT(p_spec);
+      gdouble              d_v =
+         preview_scale_length(g_value_get_int(&t_val), d_scale, p_i->minimum);
+      g_value_set_int(&t_val,
+                      CLAMP((gint)lround(d_v), p_i->minimum, p_i->maximum));
+   } else {
+      g_value_unset(&t_val);
+      return;
+   }
+   gegl_node_set_property(p_node, p_spec->name, &t_val);
+   g_value_unset(&t_val);
+}
+
+/* Scale every pixel length of p_node's op (its value as the preset set it,
+ * or the op's default) by d_scale: the preset then looks on a scaled-down
+ * preview source as it will on the full-resolution export (8l2). 1 leaves
+ * the node untouched -- the export's chain is built exactly as before. */
+static void
+_scale_lengths(GeglNode *p_node, gdouble d_scale) {
+   if (p_node == NULL || d_scale == 1.0) {
+      return;
+   }
+   const char  *c_op = gegl_node_get_operation(p_node);
+   guint        u_n  = 0;
+   GParamSpec **pp_spec =
+      c_op != NULL ? gegl_operation_list_properties(c_op, &u_n) : NULL;
+   for (guint u = 0; u < u_n; u++) {
+      if (preview_scale_is_length(c_op, pp_spec[u]->name)) {
+         _scale_length(p_node, pp_spec[u], d_scale);
+      }
+   }
+   g_free(pp_spec);
+}
+
 /* Parse a graph string ("gegl:op prop=v gegl:op2 ...") into nodes chained
  * after p_prev. A tunable number still in it (a preset list that was not
  * resolved, enhancer_presets_resolve) runs at its default; a malformed
  * placeholder fails with its message rather than reaching the property
- * parser, which would read "{s:..." as 0. Returns the last node, or NULL
- * with p_err. */
+ * parser, which would read "{s:..." as 0. Each node's pixel lengths are
+ * scaled by d_px_scale once its properties are set (_scale_lengths; 1 for
+ * a full-resolution chain). Returns the last node, or NULL with p_err. */
 static GeglNode *
 _make_user_chain(GeglNode *p_graph, GeglNode *p_prev, const char *c_graph,
-                 GError **p_err) {
+                 gdouble d_px_scale, GError **p_err) {
    char *c_plain = preset_strength_substitute(c_graph, NAN, p_err);
    if (c_plain == NULL) {
       return (NULL);
@@ -530,11 +582,15 @@ _make_user_chain(GeglNode *p_graph, GeglNode *p_prev, const char *c_graph,
          b_ok = FALSE;
          break;
       }
+      _scale_lengths(p_node, d_px_scale); /* the previous op is complete */
       p_node = gegl_node_new_child(p_graph, "operation", c_tok, NULL);
       gegl_node_link(p_last, p_node);
       p_last = p_node;
    }
    g_strfreev(pp_tok);
+   if (b_ok) {
+      _scale_lengths(p_node, d_px_scale);
+   }
    if (b_ok && p_last == p_prev) {
       g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
                   "enhancer: empty graph");
@@ -548,8 +604,10 @@ _make_user_chain(GeglNode *p_graph, GeglNode *p_prev, const char *c_graph,
  * (BUILTINS[] above). */
 static GeglNode *
 _append_preset(GeglNode *p_graph, GeglNode *p_prev,
-               const EnhancerPreset *p_preset, GError **p_err) {
-   return (_make_user_chain(p_graph, p_prev, p_preset->c_graph, p_err));
+               const EnhancerPreset *p_preset, gdouble d_px_scale,
+               GError **p_err) {
+   return (
+      _make_user_chain(p_graph, p_prev, p_preset->c_graph, d_px_scale, p_err));
 }
 
 /* --- geometric transform nodes (decision #35) ---------------------------
@@ -654,17 +712,20 @@ _append_transform(GeglNode *p_graph, GeglNode *p_prev, const Transform *p_xf) {
    return (p_prev);
 }
 
-/* Append the presets enabled in u_mask after p_prev; returns the new tail,
- * or NULL with p_err. *p_any is set when at least one was appended. */
+/* Append the presets enabled in u_mask after p_prev, their pixel lengths
+ * scaled by d_px_scale; returns the new tail, or NULL with p_err. *p_any is
+ * set when at least one was appended. */
 static GeglNode *
 _append_presets(GeglNode *p_graph, GeglNode *p_prev, const GPtrArray *p_presets,
-                guint32 u_mask, gboolean *p_any, GError **p_err) {
+                guint32 u_mask, gdouble d_px_scale, gboolean *p_any,
+                GError **p_err) {
    for (guint u = 0; u < p_presets->len && u < GGAZE_ENHANCE_MAX_PRESETS; u++) {
       if ((u_mask & GGAZE_ENHANCE_BIT(u)) == 0) {
          continue;
       }
-      p_prev = _append_preset(
-         p_graph, p_prev, g_ptr_array_index((GPtrArray *)p_presets, u), p_err);
+      p_prev = _append_preset(p_graph, p_prev,
+                              g_ptr_array_index((GPtrArray *)p_presets, u),
+                              d_px_scale, p_err);
       if (p_prev == NULL) {
          return (NULL);
       }
@@ -676,15 +737,21 @@ _append_presets(GeglNode *p_graph, GeglNode *p_prev, const GPtrArray *p_presets,
 /* Run p_in through the presets enabled in u_mask (bit i: row i, in row
  * order) and then the transform p_xf (nullable), and return the sink buffer.
  * gegl:buffer-sink allocates the output itself: handing it a pre-created
- * buffer leaked one GeglBuffer per apply (the sink replaced the pointer). */
-static GeglBuffer *
-_run_chain(GeglBuffer *p_in, const GPtrArray *p_presets, guint32 u_mask,
-           const Transform *p_xf, GError **p_err) {
+ * buffer leaked one GeglBuffer per apply (the sink replaced the pointer).
+ * d_px_scale is how p_in compares with the full-resolution image: the
+ * presets' pixel lengths are scaled by it (1: the image itself -- the
+ * export, and every chain before 8l2). p_xf must already be in p_in's
+ * pixels (transform_scale). */
+GeglBuffer *
+enhancer_priv_run_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
+                        guint32 u_mask, const Transform *p_xf,
+                        gdouble d_px_scale, GError **p_err) {
    GeglNode *p_graph = gegl_node_new();
    GeglNode *p_prev  = gegl_node_new_child(
       p_graph, "operation", "gegl:buffer-source", "buffer", p_in, NULL);
    gboolean b_any = FALSE;
-   p_prev = _append_presets(p_graph, p_prev, p_presets, u_mask, &b_any, p_err);
+   p_prev = _append_presets(p_graph, p_prev, p_presets, u_mask, d_px_scale,
+                            &b_any, p_err);
    if (p_prev == NULL) {
       g_object_unref(p_graph);
       return (NULL);
@@ -717,7 +784,7 @@ enhancer_apply_chain(GeglBuffer *p_in, const GPtrArray *p_presets,
                      guint32 u_mask, const Transform *p_xf, GError **p_err) {
    g_return_val_if_fail(p_in != NULL, NULL);
    g_return_val_if_fail(p_presets != NULL, NULL);
-   return (_run_chain(p_in, p_presets, u_mask, p_xf, p_err));
+   return (enhancer_priv_run_chain(p_in, p_presets, u_mask, p_xf, 1.0, p_err));
 }
 
 GeglBuffer *
@@ -728,7 +795,8 @@ enhancer_apply(GeglBuffer *p_in, const EnhancerPreset *p_preset,
    /* A chain of one: the preset is index 0 of a one-entry list. */
    GPtrArray *p_one = g_ptr_array_new();
    g_ptr_array_add(p_one, (gpointer)p_preset);
-   GeglBuffer *p_out = _run_chain(p_in, p_one, 1, NULL, p_err);
+   GeglBuffer *p_out =
+      enhancer_priv_run_chain(p_in, p_one, 1, NULL, 1.0, p_err);
    g_ptr_array_unref(p_one);
    return (p_out);
 }
@@ -923,8 +991,8 @@ _export_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
 }
 
 /* Copy p_xf into *p_dst, the identity when p_xf is NULL. */
-static void
-_snapshot_transform(Transform *p_dst, const Transform *p_xf) {
+void
+enhancer_priv_snapshot_transform(Transform *p_dst, const Transform *p_xf) {
    if (p_xf != NULL) {
       *p_dst = *p_xf;
    } else {
@@ -942,9 +1010,9 @@ enhancer_export_chain_async(GFile *p_src, const GPtrArray *p_presets,
    _ExportReq *p_req = g_new0(_ExportReq, 1);
    p_req->p_src      = (GFile *)g_object_ref(p_src);
    p_req->p_out      = (GFile *)g_object_ref(p_out);
-   p_req->p_presets  = _presets_copy(p_presets);
+   p_req->p_presets  = enhancer_priv_presets_copy(p_presets);
    p_req->u_mask     = u_mask;
-   _snapshot_transform(&p_req->t_xf, p_xf);
+   enhancer_priv_snapshot_transform(&p_req->t_xf, p_xf);
    GTask *p_task = g_task_new(p_src, p_cancel, p_cb, p_data);
    g_task_set_task_data(p_task, p_req, (GDestroyNotify)_export_req_free);
    g_task_run_in_thread(p_task, _export_thread);
@@ -983,9 +1051,9 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
  * LOADER path -- ggaze's own loader, the same decode and the same errors
  * every file got before xb2, its pixels copied as sRGB. (Copied RIGHT
  * since xb2: before it the copy swapped red and blue and kept premultiplied
- * alpha -- see _load_via_loader -- so the enhance preview of every file,
- * untagged ones included, changed visibly with xb2: it is now what the
- * file holds.) It declines
+ * alpha -- see enhancer_priv_load_via_loader -- so the enhance preview of
+ * every file, untagged ones included, changed visibly with xb2: it is now
+ * what the file holds.) It declines
  *   - a file with no profile, one babl cannot use (a LUT-only RGB profile:
  *     GEGL's loader would tag it sRGB anyway) or one babl identifies as
  *     sRGB -- nothing to manage, and the loader path is faster;
@@ -1048,27 +1116,77 @@ enhancer_export_chain_finish(GAsyncResult *p_res, GError **p_err) {
  * an "R'G'B'A u8" buffer swapped red and blue (found by xb2's WebP round
  * trip). The downloader is also why there is no gegl:load fallback for a
  * texture that is not RGBA8 any more: every texture converts. */
-static GeglBuffer *
-_load_via_loader(GFile *p_file, GCancellable *p_cancel, GError **p_err) {
+GeglBuffer *
+enhancer_priv_load_via_loader(GFile *p_file, GCancellable *p_cancel,
+                              GError **p_err) {
    g_atomic_int_inc(&i_loader_decodes);
    GdkTexture *p_tex = loader_load(p_file, p_cancel, p_err);
    if (p_tex == NULL) {
       return (NULL);
    }
+   GeglBuffer *p_buf = enhancer_priv_buffer_from_texture(p_tex, 1.0);
+   g_object_unref(p_tex);
+   return (p_buf);
+}
+
+/* p_tex's pixels as an sRGB "R'G'B'A u8" buffer at d_scale (section
+ * comment above: an explicit R8G8B8A8 download). At 1 they are copied
+ * into a tiled buffer, as the loader path always did. Below 1 the
+ * download -- the texture's own bytes when it already is R8G8B8A8, which
+ * every loader backend produces -- is wrapped as a linear buffer, no
+ * copy, and only the scaled result is kept (enhancer_priv_downscale):
+ * a 64 MP decode is scaled in ~0.26 s instead of copied (~0.1 s) and then
+ * scaled (~0.37 s). */
+GeglBuffer *
+enhancer_priv_buffer_from_texture(GdkTexture *p_tex, gdouble d_scale) {
    const Babl           *p_fmt = babl_format("R'G'B'A u8");
    GeglRectangle         rect  = {0, 0, gdk_texture_get_width(p_tex),
                                   gdk_texture_get_height(p_tex)};
    GdkTextureDownloader *p_dl  = gdk_texture_downloader_new(p_tex);
    gdk_texture_downloader_set_format(p_dl, GDK_MEMORY_R8G8B8A8);
-   gsize       u_stride = 0;
-   GBytes     *p_bytes = gdk_texture_downloader_download_bytes(p_dl, &u_stride);
-   GeglBuffer *p_buf   = gegl_buffer_new(&rect, p_fmt);
-   gegl_buffer_set(p_buf, &rect, 0, p_fmt, g_bytes_get_data(p_bytes, NULL),
-                   (gint)u_stride);
-   g_bytes_unref(p_bytes);
+   gsize   u_stride = 0;
+   GBytes *p_bytes  = gdk_texture_downloader_download_bytes(p_dl, &u_stride);
    gdk_texture_downloader_free(p_dl);
-   g_object_unref(p_tex);
+   GeglBuffer *p_buf = NULL;
+   if (d_scale >= 1.0) {
+      p_buf = gegl_buffer_new(&rect, p_fmt);
+      gegl_buffer_set(p_buf, &rect, 0, p_fmt, g_bytes_get_data(p_bytes, NULL),
+                      (gint)u_stride);
+      g_bytes_unref(p_bytes);
+      return (p_buf);
+   }
+   /* No destroy notify: the wrap is dropped right after the one read, and
+    * the bytes outlive it here (GEGL calls a buffer's destroy_fn with two
+    * arguments through a one-argument type, which no cast makes clean). */
+   GeglBuffer *p_wrap = gegl_buffer_linear_new_from_data(
+      (gpointer)g_bytes_get_data(p_bytes, NULL), p_fmt, &rect, (gint)u_stride,
+      NULL, NULL);
+   p_buf = enhancer_priv_downscale(p_wrap, d_scale);
+   g_object_unref(p_wrap);
+   g_bytes_unref(p_bytes);
    return (p_buf);
+}
+
+/* p_in scaled by d_scale (< 1) into a new tiled buffer of the same format
+ * (its colour space included): gegl_buffer_get's scaled read, which boxes
+ * down through GEGL's mipmap levels. The 5 s gegl:scale-size took on a
+ * 64 MP photo (the old card thumbnails' downscale) is what this replaces. */
+GeglBuffer *
+enhancer_priv_downscale(GeglBuffer *p_in, gdouble d_scale) {
+   const Babl          *p_fmt = gegl_buffer_get_format(p_in);
+   const GeglRectangle *p_ext = gegl_buffer_get_extent(p_in);
+   gint                 i_w, i_h;
+   preview_scale_size(p_ext->width, p_ext->height, d_scale, &i_w, &i_h);
+   gint          i_bpp    = babl_format_get_bytes_per_pixel(p_fmt);
+   gint          i_stride = i_w * i_bpp;
+   guint8       *p_px     = g_malloc((gsize)i_stride * (gsize)i_h);
+   GeglRectangle t_out    = {0, 0, i_w, i_h};
+   gegl_buffer_get(p_in, &t_out, d_scale, p_fmt, p_px, i_stride,
+                   GEGL_ABYSS_CLAMP);
+   GeglBuffer *p_out = gegl_buffer_new(&t_out, p_fmt);
+   gegl_buffer_set(p_out, &t_out, 0, p_fmt, p_px, i_stride);
+   g_free(p_px);
+   return (p_out);
 }
 
 /* GEGL's ICC-aware loader for p_file, or NULL (with *pe_fmt) when the
@@ -1822,9 +1940,10 @@ _load_managed(GFile *p_file, const char *c_path, GCancellable *p_cancel) {
    return (p_out);
 }
 
-/* _load_managed() for p_file when it is local, else NULL. */
-static GeglBuffer *
-_load_managed_file(GFile *p_file, GCancellable *p_cancel) {
+/* _load_managed() for p_file when it is local, else NULL: the managed
+ * decode, shared with the preview source (enhancer-private.h). */
+GeglBuffer *
+enhancer_priv_load_managed(GFile *p_file, GCancellable *p_cancel) {
    char       *c_path = g_file_get_path(p_file);
    GeglBuffer *p_buf =
       c_path != NULL ? _load_managed(p_file, c_path, p_cancel) : NULL;
@@ -1844,14 +1963,14 @@ _load_managed_file(GFile *p_file, GCancellable *p_cancel) {
 static GeglBuffer *
 _load(GFile *p_file, GCancellable *p_cancel, gboolean *pb_managed,
       GError **p_err) {
-   GeglBuffer *p_buf = _load_managed_file(p_file, p_cancel);
+   GeglBuffer *p_buf = enhancer_priv_load_managed(p_file, p_cancel);
    if (pb_managed != NULL) {
       *pb_managed = p_buf != NULL;
    }
    if (p_buf != NULL || g_cancellable_set_error_if_cancelled(p_cancel, p_err)) {
       return (p_buf);
    }
-   return (_load_via_loader(p_file, p_cancel, p_err));
+   return (enhancer_priv_load_via_loader(p_file, p_cancel, p_err));
 }
 
 /* The managed path's own gates, header-deep: _load_managed's choices up to
@@ -2006,9 +2125,9 @@ enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
    g_return_if_fail(p_file != NULL);
    _AsyncApplyReq *p_req = g_new0(_AsyncApplyReq, 1);
    p_req->p_file         = (GFile *)g_object_ref(p_file);
-   p_req->p_presets      = _presets_copy(p_presets);
+   p_req->p_presets      = enhancer_priv_presets_copy(p_presets);
    p_req->u_mask         = u_mask;
-   _snapshot_transform(&p_req->t_xf, p_xf);
+   enhancer_priv_snapshot_transform(&p_req->t_xf, p_xf);
    GTask *p_task = g_task_new(p_file, p_cancel, p_cb, p_data);
    g_task_set_task_data(p_task, p_req, (GDestroyNotify)_async_apply_req_free);
    g_task_run_in_thread(p_task, _apply_chain_thread);
@@ -2059,7 +2178,7 @@ _managed_original_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
     * past the profile cap) is "no managed original", never a plain decode
     * -- the caller already shows that one. */
    GError     *p_err = NULL;
-   GeglBuffer *p_buf = _load_managed_file(G_FILE(p_src), p_cancel);
+   GeglBuffer *p_buf = enhancer_priv_load_managed(G_FILE(p_src), p_cancel);
    GdkTexture *p_tex = NULL;
    if (p_buf != NULL) {
       p_tex = enhancer_buffer_to_texture(p_buf, &p_err);
@@ -2087,145 +2206,6 @@ GdkTexture *
 enhancer_managed_original_finish(GAsyncResult *p_res, GError **p_err) {
    g_return_val_if_fail(G_IS_TASK(p_res), NULL);
    return (g_task_propagate_pointer(G_TASK(p_res), p_err));
-}
-
-typedef struct {
-   GFile     *p_file;
-   GPtrArray *p_presets;
-} _PreviewReq;
-
-static void
-_preview_req_free(_PreviewReq *p_req) {
-   g_clear_object(&p_req->p_file);
-   g_ptr_array_unref(p_req->p_presets);
-   g_free(p_req);
-}
-
-static void
-_texture_free(gpointer p_data) {
-   if (p_data != NULL) {
-      g_object_unref(p_data);
-   }
-}
-
-static GeglBuffer *
-_preview_downscale(GeglBuffer *p_in, GError **p_err) {
-   gint i_w = gegl_buffer_get_width(p_in);
-   gint i_h = gegl_buffer_get_height(p_in);
-   if (i_w <= 0 || i_h <= 0) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                  "enhancer: empty preview source");
-      return (NULL);
-   }
-   gdouble   d_scale = MIN(1.0, 512.0 / (gdouble)MAX(i_w, i_h));
-   gint      i_out_w = MAX(1, (gint)(i_w * d_scale));
-   gint      i_out_h = MAX(1, (gint)(i_h * d_scale));
-   GeglNode *p_graph = gegl_node_new();
-   GeglNode *p_src   = gegl_node_new_child(
-      p_graph, "operation", "gegl:buffer-source", "buffer", p_in, NULL);
-   GeglNode *p_scale =
-      gegl_node_new_child(p_graph, "operation", "gegl:scale-size", "x",
-                          (gdouble)i_out_w, "y", (gdouble)i_out_h, NULL);
-   GeglBuffer *p_out  = NULL;
-   GeglNode   *p_sink = gegl_node_new_child(
-      p_graph, "operation", "gegl:buffer-sink", "buffer", &p_out, NULL);
-   gegl_node_link_many(p_src, p_scale, p_sink, NULL);
-   gegl_node_process(p_sink);
-   g_object_unref(p_graph);
-   if (p_out == NULL) {
-      g_set_error(p_err, G_IO_ERROR, G_IO_ERROR_FAILED,
-                  "enhancer: preview downscale failed");
-   }
-   return (p_out);
-}
-
-/* Complete p_task as cancelled, releasing p_small/p_out. Returns TRUE iff it
- * did (the caller then returns). */
-static gboolean
-_preview_bail_if_cancelled(GTask *p_task, GCancellable *p_cancel,
-                           GeglBuffer *p_small, GPtrArray *p_out) {
-   if (!g_cancellable_is_cancelled(p_cancel)) {
-      return (FALSE);
-   }
-   g_clear_object(&p_small);
-   g_clear_pointer(&p_out, g_ptr_array_unref);
-   g_task_return_new_error(p_task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
-                           "enhancer preview cancelled");
-   return (TRUE);
-}
-
-/* One preset's preview texture from the downscaled original, or NULL when
- * that preset cannot be applied (the card then stays empty). */
-static GdkTexture *
-_preview_one(GeglBuffer *p_small, const EnhancerPreset *p_preset) {
-   GError     *p_err    = NULL;
-   GeglBuffer *p_effect = enhancer_apply(p_small, p_preset, &p_err);
-   GdkTexture *p_tex =
-      p_effect != NULL ? enhancer_buffer_to_texture(p_effect, &p_err) : NULL;
-   g_clear_object(&p_effect);
-   g_clear_error(&p_err);
-   return (p_tex);
-}
-
-static void
-_preview_thread(GTask *p_task, gpointer p_src, gpointer p_task_data,
-                GCancellable *p_cancel) {
-   (void)p_src;
-   _PreviewReq *p_req = (_PreviewReq *)p_task_data;
-   if (g_task_return_error_if_cancelled(p_task)) {
-      return;
-   }
-   GError     *p_err  = NULL;
-   GeglBuffer *p_full = enhancer_load(p_req->p_file, &p_err);
-   if (p_full != NULL &&
-       _preview_bail_if_cancelled(p_task, p_cancel, p_full, NULL)) {
-      return;
-   }
-   GeglBuffer *p_small =
-      p_full != NULL ? _preview_downscale(p_full, &p_err) : NULL;
-   g_clear_object(&p_full);
-   if (p_small == NULL) {
-      g_task_return_error(p_task, p_err);
-      return;
-   }
-   GPtrArray  *p_out      = g_ptr_array_new_with_free_func(_texture_free);
-   GdkTexture *p_original = enhancer_buffer_to_texture(p_small, &p_err);
-   if (p_original == NULL) {
-      g_object_unref(p_small);
-      g_ptr_array_unref(p_out);
-      g_task_return_error(p_task, p_err);
-      return;
-   }
-   g_ptr_array_add(p_out, p_original);
-   for (guint u = 0; u < p_req->p_presets->len; u++) {
-      if (_preview_bail_if_cancelled(p_task, p_cancel, p_small, p_out)) {
-         return;
-      }
-      g_ptr_array_add(
-         p_out, _preview_one(p_small, g_ptr_array_index(p_req->p_presets, u)));
-   }
-   g_object_unref(p_small);
-   g_task_return_pointer(p_task, p_out, (GDestroyNotify)g_ptr_array_unref);
-}
-
-void
-enhancer_preview_thumbnails_async(GFile *p_file, const GPtrArray *p_presets,
-                                  GCancellable       *p_cancel,
-                                  GAsyncReadyCallback p_cb, gpointer p_data) {
-   g_return_if_fail(G_IS_FILE(p_file));
-   _PreviewReq *p_req = g_new0(_PreviewReq, 1);
-   p_req->p_file      = (GFile *)g_object_ref(p_file);
-   p_req->p_presets   = _presets_copy(p_presets); /* the rows a mask reaches */
-   GTask *p_task      = g_task_new(p_file, p_cancel, p_cb, p_data);
-   g_task_set_task_data(p_task, p_req, (GDestroyNotify)_preview_req_free);
-   g_task_run_in_thread(p_task, _preview_thread);
-   g_object_unref(p_task);
-}
-
-GPtrArray *
-enhancer_preview_thumbnails_finish(GAsyncResult *p_res, GError **p_err) {
-   g_return_val_if_fail(G_IS_TASK(p_res), NULL);
-   return ((GPtrArray *)g_task_propagate_pointer(G_TASK(p_res), p_err));
 }
 
 #endif /* GGAZE_HAVE_GEGL */
