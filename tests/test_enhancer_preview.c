@@ -209,6 +209,7 @@ test_full_size_source_renders_the_export_pixels(void) {
    EnhancerSource *p_src = source_for(fx.p_file, NULL, 0);
    g_assert_cmpfloat(enhancer_source_get_scale(p_src), ==, 1.0);
    g_assert_null(enhancer_source_get_original(p_src));
+   g_assert_false(enhancer_source_has_original(p_src)); /* none to make */
    gint i_w, i_h;
    enhancer_source_get_orig_size(p_src, &i_w, &i_h);
    g_assert_cmpint(i_w, ==, IMG_W);
@@ -283,15 +284,20 @@ test_full_resolution_chain_is_the_plain_graph(void) {
 
 /* Capped at 100 px the source is the image at a quarter; its render of a
  * crop is the crop at a quarter yet stands for the export's 200x150; the
- * source's own texture stands for the 400x300 original. */
+ * source's own texture stands for the 400x300 original -- made on the
+ * first ask only (a session that never holds Space never makes it), and
+ * the same object on every later one. */
 static void
 test_capped_source_is_scaled_and_stands_for_the_image(void) {
    Fx fx;
    fx_open(&fx);
    EnhancerSource *p_src = source_for(fx.p_file, NULL, 100);
    g_assert_cmpfloat_with_epsilon(enhancer_source_get_scale(p_src), 0.25, 1e-9);
+   g_assert_false(enhancer_source_has_original(p_src)); /* not yet */
    GdkTexture *p_orig = enhancer_source_get_original(p_src);
    g_assert_nonnull(p_orig);
+   g_assert_true(enhancer_source_has_original(p_src));
+   g_assert_true(enhancer_source_get_original(p_src) == p_orig);
    g_assert_cmpint(gdk_texture_get_width(p_orig), ==, 100);
    gint i_w, i_h;
    logical_size_get(p_orig, &i_w, &i_h);

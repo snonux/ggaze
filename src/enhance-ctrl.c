@@ -671,7 +671,9 @@ enhance_ctrl_is_open(EnhanceCtrl *p_ctrl) {
  * differ and no sharpness step appears between the two. NULL when the
  * source is at full size (the original on screen, or the managed
  * original, is the like-with-like compare then) or belongs to another
- * file. */
+ * file. The texture is made on the first ask -- a Space press -- not with
+ * the source: ~2 ms for a 64 MP photo's source, and a session that never
+ * compares never pays for it (8l2 review). */
 static GdkTexture *
 _compare_original(EnhanceCtrl *p_ctrl) {
    if (p_ctrl->p_source == NULL || p_ctrl->p_enhance_file == NULL ||

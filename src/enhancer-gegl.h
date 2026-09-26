@@ -219,8 +219,14 @@ gboolean enhancer_source_is_managed(const EnhancerSource *p_src);
  * size (logical-size.h) -- what hold-Space compares a preview against, so
  * the compare is like with like: the same resolution, the same (managed or
  * not) decode. NULL for a source at scale 1: the original on screen IS
- * that then. Borrowed. */
-GdkTexture *enhancer_source_get_original(const EnhancerSource *p_src);
+ * that then (and NULL if the conversion failed). Borrowed. Made on the
+ * FIRST call, on the calling thread (a few ms: the source is small), and
+ * kept with the source: a session that never holds Space never makes it.
+ * Not thread-safe: call it from the thread that owns the source. */
+GdkTexture *enhancer_source_get_original(EnhancerSource *p_src);
+/* Whether enhancer_source_get_original has made its texture yet (a test
+ * seam for the laziness). */
+gboolean enhancer_source_has_original(const EnhancerSource *p_src);
 /* TRUE iff p_src was built from p_file and is fine enough for p_view
  * (preview_scale_covers): a view that would show it magnified at fit --
  * a window grown past the oversample's head room, a finer device -- asks
