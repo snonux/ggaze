@@ -351,11 +351,12 @@ static void
 test_pixel_lengths_scale_with_the_source(void) {
    Fx fx;
    fx_open(&fx);
-   EnhancerSource *p_src = source_for(fx.p_file, NULL, 100);
-   EnhancerPreset  t_pr  = {.c_name  = "Blur",
-                            .c_graph = "gegl:gaussian-blur std-dev-x=8 "
-                                       "std-dev-y=8"};
-   GPtrArray      *p_one = g_ptr_array_new();
+   static char     c_graph[] = "gegl:gaussian-blur std-dev-x=8 std-dev-y=8";
+   static char     c_name[]  = "Blur";
+   EnhancerSource *p_src     = source_for(fx.p_file, NULL, 100);
+
+   EnhancerPreset t_pr  = {.c_name = c_name, .c_graph = c_graph};
+   GPtrArray     *p_one = g_ptr_array_new();
    g_ptr_array_add(p_one, &t_pr);
    Wait w = {.p_loop = g_main_loop_new(NULL, FALSE)};
    enhancer_source_render_async(p_src, p_one, 1, NULL, NULL, render_cb, &w);
