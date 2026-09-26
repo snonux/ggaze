@@ -73,14 +73,18 @@ test_scale_is_bounded(void) {
    g_assert_cmpint(i_h, ==, 1); /* never 0 */
 }
 
-/* A source serves a view that wants no finer, or when it is the whole
- * image; a coarser one does not. */
+/* A source serves a view that wants no finer, one that wants up to the
+ * oversample more (it is still screen-sharp at fit: the head room), and
+ * any view when it is the whole image; a view that would magnify it at
+ * fit does not. */
 static void
 test_covers(void) {
    g_assert_true(preview_scale_covers(0.2, 0.2));
    g_assert_true(preview_scale_covers(0.2, 0.19));
-   g_assert_true(preview_scale_covers(0.2, 0.20000001));
-   g_assert_false(preview_scale_covers(0.2, 0.25));
+   g_assert_true(preview_scale_covers(0.2, 0.25));
+   g_assert_true(preview_scale_covers(0.2, 0.2 * PREVIEW_SCALE_OVERSAMPLE));
+   g_assert_false(
+      preview_scale_covers(0.2, 0.2 * PREVIEW_SCALE_OVERSAMPLE + 0.01));
    g_assert_true(preview_scale_covers(1.0, 3.0));
 }
 

@@ -218,8 +218,9 @@ gboolean enhancer_source_is_managed(const EnhancerSource *p_src);
  * that then. Borrowed. */
 GdkTexture *enhancer_source_get_original(const EnhancerSource *p_src);
 /* TRUE iff p_src was built from p_file and is fine enough for p_view
- * (preview_scale_covers): a larger window or a finer device asks for a new
- * one, a smaller one does not. */
+ * (preview_scale_covers): a view that would show it magnified at fit --
+ * a window grown past the oversample's head room, a finer device -- asks
+ * for a new one; a smaller or moderately larger one does not. */
 gboolean enhancer_source_serves(const EnhancerSource *p_src, GFile *p_file,
                                 const PreviewView *p_view);
 

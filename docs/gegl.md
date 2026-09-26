@@ -90,7 +90,9 @@ alone took ~5 s), queued ahead of it. Now:
   view: fit-to-window x device scale x **1.5** (`preview-scale.h`:
   headroom for a zoom step or a larger window), never upscaled, 512 to
   4096 px on the long side. The controller keeps it while the image and
-  its decode stay; a window grown past it builds a new one. A 64 MP decode
+  its decode stay; a view that would show it magnified at fit (a window
+  grown by more than the 1.5x head room, a finer device scale) builds a
+  new one — the panel closing or opening does not. A 64 MP decode
   is scaled to ~1500x1100 in ~0.26 s; a Brightness render on that takes
   ~15 ms (the process's first chain pays ~0.25 s of babl setup once).
 - **The render on it** scales the geometric transform onto the source

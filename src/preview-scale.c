@@ -79,7 +79,8 @@ preview_scale_size(gint i_img_w, gint i_img_h, gdouble d_scale, gint *p_w,
 
 gboolean
 preview_scale_covers(gdouble d_have, gdouble d_want) {
-   return (d_have >= 1.0 - _SCALE_EPS || d_have >= d_want - _SCALE_EPS);
+   return (d_have >= 1.0 - _SCALE_EPS ||
+           d_have * PREVIEW_SCALE_OVERSAMPLE >= d_want - _SCALE_EPS);
 }
 
 gdouble

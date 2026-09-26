@@ -18,7 +18,8 @@
  *     never upscaled), its long side never below PREVIEW_SCALE_MIN_SIDE
  *     (the card thumbnails are cut from it) and never above a cap;
  *   - whether a source made at one scale still serves a viewport that
- *     wants another (a smaller window keeps it; a larger one rebuilds);
+ *     wants another (a smaller window keeps it, and so does one larger by
+ *     up to the oversample; past that it is rebuilt);
  *   - the thumbnail scale of the cards (PREVIEW_SCALE_THUMB_SIDE);
  *   - which GEGL op properties are LENGTHS in pixels, so a preset run on a
  *     source scaled by s gets them scaled by s too and looks on the
@@ -37,8 +38,8 @@ G_BEGIN_DECLS
  * zoom step (1.25x) and a moderately larger window sharp without a
  * rebuild, and keeps the chain's cost -- which grows with the pixel count
  * (a 4-iteration noise reduction: ~0.9 ms per 1000 px) -- near the
- * screen's. Measured on a 1280x800 window: a 64 MP photo's source is then
- * ~1400x1050. */
+ * screen's. On a 1280x800 window a 64 MP photo's source is then about
+ * 1500x1100. */
 #define PREVIEW_SCALE_OVERSAMPLE 1.5
 
 /* A source's long side is at least this (or the whole image when that is
@@ -79,10 +80,14 @@ gdouble preview_scale_for_view(gint i_img_w, gint i_img_h,
 void preview_scale_size(gint i_img_w, gint i_img_h, gdouble d_scale, gint *p_w,
                         gint *p_h);
 
-/* TRUE iff a source made at d_have serves a view that wants d_want: it is
- * the whole image (1), or at least as fine (to a rounding's worth). A
- * source finer than wanted is kept -- rebuilding it smaller would only
- * cost a decode. */
+/* TRUE iff a source made at d_have serves a view that wants d_want (both
+ * from preview_scale_for_view): it is the whole image (1), or it is still
+ * no coarser than the screen at fit -- d_have x PREVIEW_SCALE_OVERSAMPLE
+ * reaches d_want, to a rounding's worth. That is what the oversample's
+ * head room is for: the panel closing, or a window grown by up to 1.5x,
+ * keeps the source (it is simply no longer oversampled); only a view that
+ * would show it magnified at fit builds a new one. A source finer than
+ * wanted is kept -- rebuilding it smaller would only cost a decode. */
 gboolean preview_scale_covers(gdouble d_have, gdouble d_want);
 
 /* The scale (0, 1] that brings an i_w x i_h source down to a card
