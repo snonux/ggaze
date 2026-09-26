@@ -97,6 +97,8 @@ ggaze_src = files(
       'src/croprect.c',
       'src/gesture-math.c',
       'src/transform.c',
+      'src/preview-scale.c',
+      'src/logical-size.c',
       'src/edit-history.c',
       'src/preset-strength.c',
       'src/runner.c',

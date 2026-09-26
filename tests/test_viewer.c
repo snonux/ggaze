@@ -57,6 +57,7 @@
 #include "gtk_helpers.h"
 #include "loader/animation.h"
 #include "loader/loader.h"
+#include "logical-size.h"
 #include "pixbuf_modules.h"
 #include "viewer.h"
 
@@ -228,6 +229,46 @@ test_toggle_fit_100(void) {
    g_assert_cmpfloat(ABS(ggaze_viewer_get_scale(fx.p_viewer) - d_fit), <,
                      0.0001);
 
+   fx_close(&fx);
+}
+
+/* 8l2: a scaled-down texture that stands for a larger image
+ * (logical-size.h, the enhance preview's) is laid out as that image. Put
+ * over the 1200x800 fixture at a quarter of its pixels, the viewer keeps
+ * the same fit scale and the same on-screen rectangle, reports the IMAGE's
+ * size in its geometry (what the crop / straighten tools measure in), and
+ * its 100 % is one image pixel per widget pixel -- the preview magnified,
+ * not a 300x200 picture at 1:1. */
+static void
+test_scaled_texture_keeps_the_image_geometry(void) {
+   ViewerFx fx;
+   fx_open(&fx);
+   GgazeViewerGeom t_full, t_small;
+   g_assert_true(ggaze_viewer_get_geometry(fx.p_viewer, &t_full));
+   gdouble d_fit = ggaze_viewer_get_scale(fx.p_viewer);
+
+   gsize   u_len = 300 * 200 * 4;
+   GBytes *p_b   = g_bytes_new_take(g_malloc0(u_len), u_len);
+
+   GdkTexture *p_tex =
+      gdk_memory_texture_new(300, 200, GDK_MEMORY_R8G8B8A8, p_b, 300 * 4);
+   g_bytes_unref(p_b);
+   logical_size_set(p_tex, FIXTURE_W, FIXTURE_H);
+   ggaze_viewer_set_texture(fx.p_viewer, p_tex);
+   g_assert_true(ggaze_viewer_get_geometry(fx.p_viewer, &t_small));
+   g_assert_cmpint(t_small.i_img_w, ==, FIXTURE_W);
+   g_assert_cmpint(t_small.i_img_h, ==, FIXTURE_H);
+   g_assert_cmpfloat(ABS(t_small.d_scale - t_full.d_scale), <, 1e-9);
+   g_assert_cmpfloat(ABS(t_small.d_x - t_full.d_x), <, 1e-9);
+   g_assert_cmpfloat(ABS(t_small.d_y - t_full.d_y), <, 1e-9);
+   g_assert_cmpfloat(ABS(ggaze_viewer_get_scale(fx.p_viewer) - d_fit), <, 1e-9);
+   ggaze_viewer_toggle_fit_100(fx.p_viewer);
+   g_assert_true(ggaze_viewer_get_geometry(fx.p_viewer, &t_small));
+   g_assert_cmpfloat(ABS(t_small.d_scale - 1.0), <, 1e-9);
+   g_assert_cmpint(t_small.i_img_w, ==, FIXTURE_W); /* still the image */
+   g_assert_cmpint(gdk_texture_get_width(ggaze_viewer_get_texture(fx.p_viewer)),
+                   ==, 300);
+   g_object_unref(p_tex);
    fx_close(&fx);
 }
 
@@ -901,6 +942,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/viewer/zoom_in_then_out_round_trips",
                    test_zoom_in_then_out_round_trips);
    g_test_add_func("/viewer/toggle_fit_100", test_toggle_fit_100);
+   g_test_add_func("/viewer/scaled_texture_keeps_the_image_geometry",
+                   test_scaled_texture_keeps_the_image_geometry);
    g_test_add_func("/viewer/non_finite_pan_is_rejected",
                    test_non_finite_pan_is_rejected);
    g_test_add_func("/viewer/finite_pan_still_applies",

@@ -328,6 +328,31 @@ test_transform = executable(
 )
 test('transform', test_transform, suite : 'unit', env : fixtures_env)
 
+# 8l2: the scaled-down live preview's arithmetic (source scale from the
+# view, thumbnail scale, which GEGL properties are pixel lengths) is plain
+# C (no GTK, no GEGL), so it runs in every lane, the minimal one included.
+test_preview_scale = executable(
+   'test_preview_scale',
+   ['test_preview_scale.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [glib_dep, m_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('preview_scale', test_preview_scale, suite : 'unit', env : fixtures_env)
+
+# 8l2: the image size a scaled-down preview texture stands for, over
+# GdkMemoryTextures (no display), in every lane: the viewer reads it.
+test_logical_size = executable(
+   'test_logical_size',
+   ['test_logical_size.c', ggaze_conf_h],
+   include_directories : [inc, src_inc],
+   dependencies : [gtk4_dep, glib_dep],
+   link_with : ggaze_lib,
+   install : false,
+)
+test('logical_size', test_logical_size, suite : 'unit', env : fixtures_env)
+
 # 7i2: the edit panel's undo / redo history is plain C over the edit
 # snapshot (no GTK, no GEGL), so it runs in every lane, the minimal one
 # included.

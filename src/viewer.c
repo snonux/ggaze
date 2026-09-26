@@ -73,6 +73,7 @@
 
 #include "gesture-math.h"
 #include "loader/animation.h"
+#include "logical-size.h"
 #include "settings.h"
 
 /* One wheel notch / key press. The limits (GGAZE_ZOOM_MIN/MAX) live in
@@ -271,14 +272,28 @@ _drawn_texture(GgazeViewer *p_v) {
 /* --- geometry --------------------------------------------------------------
  */
 
+/* The IMAGE's size, which every piece of geometry here is in: the size
+ * the texture stands for (logical-size.h), not its pixel count. The two
+ * differ for the scaled-down enhance preview (8l2): a 9248x6936 photo's
+ * preview texture holds ~1500x1100 pixels, and fit, 100 % zoom, the pan
+ * clamp and the tool overlay's geometry must all still be the photo's --
+ * the snapshot simply draws the texture stretched over that rectangle. */
 static int
 _tex_w(GgazeViewer *p_v) {
-   return (p_v->p_texture != NULL) ? gdk_texture_get_width(p_v->p_texture) : 0;
+   gint i_w = 0;
+   if (p_v->p_texture != NULL) {
+      logical_size_get(p_v->p_texture, &i_w, NULL);
+   }
+   return (i_w);
 }
 
 static int
 _tex_h(GgazeViewer *p_v) {
-   return (p_v->p_texture != NULL) ? gdk_texture_get_height(p_v->p_texture) : 0;
+   gint i_h = 0;
+   if (p_v->p_texture != NULL) {
+      logical_size_get(p_v->p_texture, NULL, &i_h);
+   }
+   return (i_h);
 }
 
 /* The fit-to-window ratio for the given allocation: the largest scale that

@@ -169,6 +169,18 @@ gboolean transform_rebase_crop(Transform *p_t, const Transform *p_old,
 gboolean transform_crop_is_outside(const Transform *p_t, gdouble d_orig_w,
                                    gdouble d_orig_h);
 
+/* p_t as it applies to the same picture at another resolution: the
+ * original is d_w x d_h, the image the chain runs on d_sw x d_sh (the
+ * live preview's scaled-down source, 8l2). The turn, the angle and the
+ * auto-crop flag are copied; the crop rectangle is scaled from the base of
+ * the one to the base of the other (transform_base_size), so it covers the
+ * same part of the picture. A crop on an empty base is dropped, as
+ * transform_rotate_quarter drops it. The output of the scaled transform on
+ * the scaled image is then transform_output_size of the original scaled
+ * (to the whole-pixel rounding of either). p_out may not alias p_t. */
+void transform_scale(const Transform *p_t, gdouble d_w, gdouble d_h,
+                     gdouble d_sw, gdouble d_sh, Transform *p_out);
+
 /* A short human summary for the window title, e.g. "90° CW",
  * "180°", "straighten 1.5° CCW", "crop", joined by ", "; a crop of which
  * nothing is inside the base of a d_orig_w x d_orig_h original reads

@@ -119,8 +119,12 @@ void ggaze_viewer_pan(GgazeViewer *p_viewer, gdouble d_dx, gdouble d_dy);
 
 /* Where the image is on screen: its top-left corner in widget pixels and the
  * scale that turns image pixels into widget pixels (image * d_scale + d_x).
- * i_img_w/i_img_h are the texture's size, so a caller can tell whether the
- * texture on screen is the one its overlay was laid out on. */
+ * i_img_w/i_img_h are the IMAGE's size -- the size the texture stands for
+ * (logical-size.h), which is the texture's own except for the scaled-down
+ * enhance preview (8l2) -- so an overlay measures in image pixels whatever
+ * resolution the texture on screen has. Zoom works on the same terms:
+ * 100 % is one IMAGE pixel per widget pixel, so a scaled-down preview is
+ * drawn magnified there. */
 typedef struct {
    gdouble d_x;
    gdouble d_y;

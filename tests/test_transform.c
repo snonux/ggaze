@@ -505,6 +505,66 @@ test_straighten_inset_needs_three_px_per_side(void) {
    g_assert_cmpfloat(w, >, aw - 2.0 * TRANSFORM_AUTOCROP_INSET);
 }
 
+/* transform_scale (8l2): the preview renders a scaled-down source, so its
+ * crop must cover the same part of the picture there. Without a crop the
+ * transform is copied as it is; with one, the rectangle scales from the
+ * original's base to the source's, per axis -- also after a quarter turn
+ * swapped the sides -- and the scaled output is the original's output
+ * scaled; a crop on an empty base is dropped. */
+static void
+test_scale_carries_the_crop_to_a_smaller_source(void) {
+   Transform t_xf, t_out;
+   transform_init(&t_xf);
+   t_xf.d_degrees = 2.5;
+   transform_scale(&t_xf, 4000, 3000, 1000, 750, &t_out);
+   g_assert_true(transform_equal(&t_out, &t_xf)); /* nothing in pixels */
+
+   transform_init(&t_xf);
+   t_xf.b_crop = TRUE;
+   t_xf.t_crop = (CropRect){400, 300, 2000, 1500};
+   transform_scale(&t_xf, 4000, 3000, 1000, 750, &t_out);
+   g_assert_true(t_out.b_crop);
+   g_assert_cmpfloat_with_epsilon(t_out.t_crop.d_x, 100, 1e-9);
+   g_assert_cmpfloat_with_epsilon(t_out.t_crop.d_y, 75, 1e-9);
+   g_assert_cmpfloat_with_epsilon(t_out.t_crop.d_w, 500, 1e-9);
+   g_assert_cmpfloat_with_epsilon(t_out.t_crop.d_h, 375, 1e-9);
+   gdouble d_w, d_h, d_sw, d_sh;
+   transform_output_size(&t_xf, 4000, 3000, &d_w, &d_h);
+   transform_output_size(&t_out, 1000, 750, &d_sw, &d_sh);
+   g_assert_cmpfloat(d_sw, ==, d_w / 4.0);
+   g_assert_cmpfloat(d_sh, ==, d_h / 4.0);
+
+   /* A quarter turn: the base is 3000 wide, the source's 750. */
+   t_xf.i_quarter = 1;
+   t_xf.t_crop    = (CropRect){0, 1000, 3000, 2000};
+   transform_scale(&t_xf, 4000, 3000, 1000, 750, &t_out);
+   g_assert_cmpfloat_with_epsilon(t_out.t_crop.d_y, 250, 1e-9);
+   g_assert_cmpfloat_with_epsilon(t_out.t_crop.d_w, 750, 1e-9);
+   g_assert_cmpfloat_with_epsilon(t_out.t_crop.d_h, 500, 1e-9);
+
+   /* An empty original: nowhere to put the crop. */
+   transform_scale(&t_xf, 0, 0, 10, 10, &t_out);
+   g_assert_false(t_out.b_crop);
+}
+
+/* Straightened and cropped, the scaled output matches the original's to
+ * the whole-pixel rounding of the smaller image (the auto-crop and the
+ * crop snap to whole source pixels). */
+static void
+test_scale_straightened_crop_matches_to_a_pixel(void) {
+   Transform t_xf, t_out;
+   transform_init(&t_xf);
+   t_xf.d_degrees = -4.0;
+   t_xf.b_crop    = TRUE;
+   t_xf.t_crop    = (CropRect){500, 400, 2400, 1600};
+   transform_scale(&t_xf, 4000, 3000, 1333, 1000, &t_out);
+   gdouble d_w, d_h, d_sw, d_sh;
+   transform_output_size(&t_xf, 4000, 3000, &d_w, &d_h);
+   transform_output_size(&t_out, 1333, 1000, &d_sw, &d_sh);
+   g_assert_cmpfloat(fabs(d_sw - d_w * 1333.0 / 4000.0), <=, 1.5);
+   g_assert_cmpfloat(fabs(d_sh - d_h * 1000.0 / 3000.0), <=, 1.5);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -540,5 +600,9 @@ main(int i_argc, char **c_argv) {
                    test_rebase_crop_composes_with_a_quarter_turn);
    g_test_add_func("/transform/straighten_inset_needs_three_px_per_side",
                    test_straighten_inset_needs_three_px_per_side);
+   g_test_add_func("/transform/scale_carries_the_crop_to_a_smaller_source",
+                   test_scale_carries_the_crop_to_a_smaller_source);
+   g_test_add_func("/transform/scale_straightened_crop_matches_to_a_pixel",
+                   test_scale_straightened_crop_matches_to_a_pixel);
    return (g_test_run());
 }
