@@ -463,9 +463,10 @@ gboolean         enhancer_export_chain(GeglBuffer *p_in,
                                        const Transform *p_xf, GFile *p_out,
                                        GError **p_err);
 
-/* Async: load + apply_chain + buffer_to_texture in a GTask worker; finish
- * also reports the original's upright size (the crop tool's base) and
- * whether the decode was colour-managed. */
+/* Async: load + apply_chain + buffer_to_texture in a GTask worker, at full
+ * resolution; finish also reports the original's upright size and whether
+ * the decode was colour-managed. (The live preview renders from a scaled
+ * source since 8l2: enhancer_source_render_async, below.) */
 void       enhancer_apply_chain_async(GFile *p_file, const GPtrArray *p_presets,
                                       guint32 u_mask, const Transform *p_xf,
                                       GCancellable *p_cancel,

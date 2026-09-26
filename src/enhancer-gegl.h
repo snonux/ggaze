@@ -120,7 +120,11 @@ GdkTexture *enhancer_buffer_to_texture(GeglBuffer *p_buf, GError **p_err);
 /* Async: load p_file, apply the enabled-preset chain (u_mask) and the
  * transform p_xf (nullable), and convert the result to a GdkTexture, all off
  * the calling thread (a GTask worker) so a caller with a main loop (e.g. the
- * window) is never blocked by GEGL's CPU-heavy processing (tu0). p_presets
+ * window) is never blocked by GEGL's CPU-heavy processing (tu0). This is
+ * the FULL-RESOLUTION render: the edit panel's live preview no longer
+ * uses it (8l2 renders from a scaled source, enhancer_source_render_async
+ * below); it stays the one-call form of the export's decode + chain, which
+ * the colour-management suite pins the managed verdict through. p_presets
  * and p_xf are snapshotted internally before the worker starts, so a
  * concurrent enhancer_set_presets() (Preferences apply) or a tool nudge
  * cannot race it. p_cancel may be NULL. Since GEGL processing itself cannot
