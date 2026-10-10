@@ -3026,14 +3026,35 @@ _edit_state_nav_changed(GgazeWindow *p_win) {
 }
 #endif
 
+/* TRUE iff a "changed" emission says the picture of navigator.current may
+ * be another one now: current moved (or an explicit relist could not vouch
+ * for it -- both CURSOR), or the current file itself was rewritten. A
+ * listing change around an untouched current file is not: the folder
+ * monitor reports one for every file a batch job adds next to it, and
+ * re-showing the picture each time reset the zoom, restarted an animation
+ * and dismissed the info card for as long as the job ran. */
+static gboolean
+_nav_change_hits_current(GgazeWindow *p_win, guint u_flags) {
+   if ((u_flags & GGAZE_NAV_CURSOR) != 0) {
+      return (TRUE);
+   }
+   return ((u_flags & GGAZE_NAV_CONTENT) != 0 &&
+           navigator_was_modified(p_win->p_nav,
+                                  navigator_get_current(p_win->p_nav)));
+}
+
 static void
 _nav_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
    (void)p_nav;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if ((u_flags & (GGAZE_NAV_CURSOR | GGAZE_NAV_LISTING)) == 0) {
-      /* Marks or the removed set changed: only the title (mark count,
-       * remaining count) is affected. */
+   if (!_nav_change_hits_current(p_win, u_flags)) {
+      /* Marks, the removed set, the listing around the current file or
+       * other files' contents changed: only the title (mark count,
+       * position, remaining count) and the empty state are affected. */
       _update_header(p_win);
+      if ((u_flags & GGAZE_NAV_LISTING) != 0) {
+         _update_empty_state(p_win);
+      }
       return;
    }
 #if GGAZE_HAVE_GEGL

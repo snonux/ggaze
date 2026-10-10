@@ -54,7 +54,9 @@ void ggaze_grid_set_thumbnail_size(GgazeGrid *p_grid, int i_size);
 int  ggaze_grid_get_thumbnail_size(GgazeGrid *p_grid);
 void ggaze_grid_set_hide_trashed(GgazeGrid *p_grid, gboolean b_hide);
 
-/* Rebuild the cells from the navigator (call after structural changes). */
+/* Bring the cells in line with the navigator's listing in place (call after
+ * structural changes): cells of files still listed are kept, thumbnail
+ * included. */
 void ggaze_grid_refresh(GgazeGrid *p_grid);
 
 /* Update each cell's mark badge in place from the navigator (no rebuild). */

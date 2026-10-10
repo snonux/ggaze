@@ -20,6 +20,8 @@ typedef struct {
    GFile   *p_file;     /* owned ref */
    GFile   *p_expected; /* the file this thumbnail request is for (owned) */
    gboolean b_done;     /* thumbnail painted for the current size bucket */
+   gboolean b_stale;    /* the file was rewritten while a request was in
+                         * flight: ask again when that one lands */
 } CellData;
 
 static const char *CELL_DATA_KEY = "ggaze-cell-data";
@@ -154,6 +156,8 @@ _grid_select(GgazeGrid *p_grid, GFile *p_file) {
 
 /* --- thumbnail request --------------------------------------------------- */
 
+static void _request_thumbnail(GtkWidget *p_pic);
+
 static void
 _thumb_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
@@ -163,7 +167,7 @@ _thumb_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       g_object_unref(p_pic);
       return;
    }
-   /* If the grid was detached/disposed (or the cell rebuilt) after this
+   /* If the grid was detached/disposed after this
     * request was issued, drop the result without touching the (possibly
     * orphaned) picture. g_task_propagate_pointer also yields NULL for a
     * cancelled task, but checking the cancellable explicitly keeps the
@@ -188,6 +192,13 @@ _thumb_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       g_clear_error(&p_err);
    }
    g_clear_object(&p_d->p_expected);
+   if (p_d->b_stale) {
+      /* The file was rewritten while this request read it: what it painted
+       * (if anything) stays up until the fresh thumbnail replaces it. */
+      p_d->b_stale = FALSE;
+      p_d->b_done  = FALSE;
+      _request_thumbnail(p_pic);
+   }
    g_object_unref(p_pic);
 }
 
@@ -435,21 +446,11 @@ _on_flow_middle_pressed(GtkGesture *p_g, gint i_n_press, gdouble d_x,
    ggaze_grid_mark_at_pos(GGAZE_GRID(p_data), (gint)d_x, (gint)d_y);
 }
 
-/* --- refresh / rebuild --------------------------------------------------- */
-
-static void
-_clear_flow(GgazeGrid *p_grid) {
-   GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
-   while (p_child != NULL) {
-      GtkWidget *p_next = gtk_widget_get_next_sibling(p_child);
-      gtk_flow_box_remove(GTK_FLOW_BOX(p_grid->p_flow), p_child);
-      p_child = p_next;
-   }
-}
+/* --- refresh ------------------------------------------------------------- */
 
 /* Highlight the current file's cell and, ONLY while the grid is on screen,
  * move keyboard focus onto it. Grabbing focus into an unmapped cell (the
- * grid rebuilds behind the large view whenever the folder listing changes
+ * grid refreshes behind the large view whenever the folder listing changes
  * -- a `d` creates .Trash, a script writes a file) parked the toplevel's
  * focus on a widget that can never receive a key, and every key after that
  * was dropped. _on_map re-grabs once the grid is shown again. */
@@ -616,33 +617,118 @@ ggaze_grid_update_mark_badge(GgazeGrid *p_grid, GFile *p_file) {
    }
 }
 
+/* Put p_file's cell at u_pos: the kept one from p_cells (GFile -> its
+ * flow-box child), its mark/removed look brought up to date, or a new one. */
+static void
+_place_cell(GgazeGrid *p_grid, GHashTable *p_cells, GFile *p_file,
+            guint u_pos) {
+   GtkWidget *p_child = (GtkWidget *)g_hash_table_lookup(p_cells, p_file);
+   if (p_child == NULL) {
+      p_child = _make_cell(p_grid, p_file);
+      gtk_flow_box_insert(GTK_FLOW_BOX(p_grid->p_flow), p_child, (int)u_pos);
+      return;
+   }
+   GtkWidget *p_box = _cell_box(p_child);
+   _set_marked(p_box, navigator_is_marked(p_grid->p_nav, p_file));
+   _set_removed(p_box, navigator_is_removed(p_grid->p_nav, p_file));
+   if (gtk_flow_box_child_get_index(GTK_FLOW_BOX_CHILD(p_child)) !=
+       (int)u_pos) {
+      /* Moved (a re-sort, a file inserted before it): the same widget, its
+       * painted thumbnail included, goes to the new position. */
+      g_object_ref(p_child);
+      gtk_flow_box_remove(GTK_FLOW_BOX(p_grid->p_flow), p_child);
+      gtk_flow_box_insert(GTK_FLOW_BOX(p_grid->p_flow), p_child, (int)u_pos);
+      g_object_unref(p_child);
+   }
+}
+
+/* The files that get a cell, in listing order (borrowed from the
+ * navigator): everything listed, minus the removed ones while those are
+ * hidden. */
+static GPtrArray *
+_wanted_files(GgazeGrid *p_grid) {
+   GPtrArray *p_wanted = g_ptr_array_new();
+   guint      u_n      = navigator_get_count(p_grid->p_nav);
+   for (guint u_i = 0; u_i < u_n; u_i++) {
+      GFile *p_file = navigator_get_file(p_grid->p_nav, u_i);
+      if (p_file != NULL && !(p_grid->b_hide_trashed &&
+                              navigator_is_removed(p_grid->p_nav, p_file))) {
+         g_ptr_array_add(p_wanted, p_file);
+      }
+   }
+   return (p_wanted);
+}
+
+/* The two tables of one reconcile: the files wanted (a set) and the kept
+ * cells by file. Keys and values are borrowed. */
+typedef struct {
+   GHashTable *p_wanted;
+   GHashTable *p_cells;
+} Reconcile;
+
+/* Drop a cell whose file is not wanted any more, index the others. Gone
+ * cells leave BEFORE the kept ones are placed, so a kept cell's index only
+ * differs from its new position when it really moved. */
+static void
+_sort_out_cell_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
+   Reconcile *p_rc = (Reconcile *)p_data;
+   GFile     *p_f  = _cell_file(p_child);
+   if (p_f != NULL && g_hash_table_contains(p_rc->p_wanted, p_f)) {
+      g_hash_table_insert(p_rc->p_cells, p_f, p_child);
+   } else {
+      gtk_flow_box_remove(GTK_FLOW_BOX(p_grid->p_flow), p_child);
+   }
+}
+
+/* Bring the cells in line with the navigator's listing IN PLACE: a file
+ * that is still listed keeps its cell (and the thumbnail painted on it),
+ * only new files get a new cell and only gone ones lose theirs. This used
+ * to throw every cell away and build the grid anew, which blanked it until
+ * each thumbnail had been requested and decoded again -- once per rescan,
+ * so a folder being written to made the whole grid blink. In-flight
+ * thumbnail requests stay valid for the same reason; one for a cell that
+ * left paints into an orphaned picture, which is harmless. */
 void
 ggaze_grid_refresh(GgazeGrid *p_grid) {
    g_return_if_fail(GGAZE_IS_GRID(p_grid));
-   /* A rebuild discards every cell; cancel any in-flight thumbnail requests
-    * for the old pictures so their finish callbacks don't paint into orphaned
-    * widgets, then start a fresh cancellable for the new cells. */
-   if (p_grid->p_cancel != NULL) {
-      g_cancellable_cancel(p_grid->p_cancel);
-      g_clear_object(&p_grid->p_cancel);
+   if (p_grid->p_cancel == NULL) {
+      p_grid->p_cancel = g_cancellable_new();
    }
-   p_grid->p_cancel = g_cancellable_new();
-   _clear_flow(p_grid);
-
-   guint u_n = navigator_get_count(p_grid->p_nav);
-   for (guint u_i = 0; u_i < u_n; u_i++) {
-      GFile *p_file = navigator_get_file(p_grid->p_nav, u_i);
-      if (p_file == NULL) {
-         continue;
-      }
-      if (p_grid->b_hide_trashed &&
-          navigator_is_removed(p_grid->p_nav, p_file)) {
-         continue;
-      }
-      GtkWidget *p_child = _make_cell(p_grid, p_file);
-      gtk_flow_box_append(GTK_FLOW_BOX(p_grid->p_flow), p_child);
+   GPtrArray *p_wanted = _wanted_files(p_grid);
+   Reconcile  st_rc;
+   st_rc.p_wanted =
+      g_hash_table_new((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal);
+   st_rc.p_cells =
+      g_hash_table_new((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal);
+   for (guint u_i = 0; u_i < p_wanted->len; u_i++) {
+      g_hash_table_add(st_rc.p_wanted, g_ptr_array_index(p_wanted, u_i));
    }
+   _foreach_cell(p_grid, _sort_out_cell_step, &st_rc);
+   for (guint u_i = 0; u_i < p_wanted->len; u_i++) {
+      _place_cell(p_grid, st_rc.p_cells,
+                  (GFile *)g_ptr_array_index(p_wanted, u_i), u_i);
+   }
+   g_hash_table_unref(st_rc.p_cells);
+   g_hash_table_unref(st_rc.p_wanted);
+   g_ptr_array_unref(p_wanted);
    _select_current(p_grid);
+}
+
+/* A file the navigator reports as rewritten gets its thumbnail requested
+ * again. The picture keeps the old one until the new one lands, so the cell
+ * never goes blank. */
+static void
+_refresh_modified_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
+   (void)p_data;
+   GtkWidget *p_box = _cell_box(p_child);
+   GtkWidget *p_pic =
+      (p_box != NULL) ? gtk_widget_get_first_child(p_box) : NULL;
+   CellData *p_d = (p_pic != NULL) ? _cell_data(p_pic) : NULL;
+   if (p_d == NULL || !navigator_was_modified(p_grid->p_nav, p_d->p_file)) {
+      return;
+   }
+   p_d->b_done  = FALSE;
+   p_d->b_stale = (p_d->p_expected != NULL);
 }
 
 /* Update every cell's "ggaze-marked" badge from the navigator's mark set
@@ -697,26 +783,29 @@ _on_nav_changed(Navigator *p_nav, guint u_flags, gpointer p_data) {
    if (p_grid->p_nav == NULL) {
       return;
    }
-   /* A rebuilt listing always needs a full rebuild (cells may be new, gone
-    * or renamed -- a same-count replace included). So does a removed-set
-    * change while trashed items are hidden, because those cells must
-    * physically leave the flowbox. Anything else is an in-place refresh:
-    * rebuilding on every navigation keypress would recreate every
-    * GtkPicture and blank the grid while each cell re-requested its
-    * thumbnail. */
+   /* A changed listing is reconciled cell by cell (new, gone, moved or
+    * renamed -- a same-count replace included). So is a removed-set change
+    * while trashed items are hidden, because those cells must physically
+    * leave the flowbox. Either also re-syncs every kept cell's mark and
+    * removed look and the selection, so the in-place refreshes below are
+    * only for the emissions without it. */
    if ((u_flags & GGAZE_NAV_LISTING) != 0 ||
        (p_grid->b_hide_trashed && (u_flags & GGAZE_NAV_REMOVED) != 0)) {
       ggaze_grid_refresh(p_grid);
-      return;
+   } else {
+      if ((u_flags & GGAZE_NAV_MARKS) != 0) {
+         ggaze_grid_refresh_mark_badges(p_grid);
+      }
+      if ((u_flags & GGAZE_NAV_REMOVED) != 0) {
+         _refresh_removed_state(p_grid);
+      }
+      if ((u_flags & GGAZE_NAV_CURSOR) != 0) {
+         _select_current(p_grid);
+      }
    }
-   if ((u_flags & GGAZE_NAV_MARKS) != 0) {
-      ggaze_grid_refresh_mark_badges(p_grid);
-   }
-   if ((u_flags & GGAZE_NAV_REMOVED) != 0) {
-      _refresh_removed_state(p_grid);
-   }
-   if ((u_flags & GGAZE_NAV_CURSOR) != 0) {
-      _select_current(p_grid);
+   if ((u_flags & GGAZE_NAV_CONTENT) != 0) {
+      _foreach_cell(p_grid, _refresh_modified_step, NULL);
+      _queue_visible_thumbnails(p_grid);
    }
 }
 

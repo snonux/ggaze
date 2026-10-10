@@ -49,7 +49,11 @@ struct _Navigator {
    GFileMonitor *p_monitor;
    guint         u_debounce_ms;
    guint         u_debounce_id; /* 0 = none pending */
-   char         *c_error;       /* last enumerate failure, NULL if readable */
+   GHashTable   *p_touched;     /* GFile* (owned refs): written since the last
+                                 * monitor rescan, reported by the next one */
+   GHashTable *p_modified;      /* GFile* (owned refs): what the CONTENT
+                                 * emission in progress is about, else empty */
+   char *c_error;               /* last enumerate failure, NULL if readable */
 };
 
 G_DEFINE_TYPE(Navigator, navigator, G_TYPE_OBJECT)
@@ -359,12 +363,116 @@ _emit_changed(Navigator *p_nav, guint u_flags) {
 
 /* --- monitor / debounce -------------------------------------------------- */
 
+/* What a monitor rescan needs to remember of the listing it replaces, to
+ * say afterwards what actually changed. */
+typedef struct {
+   GPtrArray *p_files;   /* GFile* (owned refs), the old order */
+   GFile     *p_current; /* owned ref, NULL if nothing was current */
+   guint      u_removed;
+   gboolean   b_readable;
+} ListingSnapshot;
+
+static void
+_snapshot_take(Navigator *p_nav, ListingSnapshot *p_snap) {
+   p_snap->p_files =
+      g_ptr_array_new_with_free_func((GDestroyNotify)g_object_unref);
+   for (guint u_i = 0; u_i < p_nav->p_files->len; u_i++) {
+      g_ptr_array_add(p_snap->p_files,
+                      g_object_ref(g_ptr_array_index(p_nav->p_files, u_i)));
+   }
+   GFile *p_cur       = navigator_get_current(p_nav);
+   p_snap->p_current  = (p_cur != NULL) ? g_object_ref(p_cur) : NULL;
+   p_snap->u_removed  = g_hash_table_size(p_nav->p_removed);
+   p_snap->b_readable = (p_nav->c_error == NULL);
+}
+
+static void
+_snapshot_clear(ListingSnapshot *p_snap) {
+   g_clear_pointer(&p_snap->p_files, g_ptr_array_unref);
+   g_clear_object(&p_snap->p_current);
+}
+
+/* TRUE iff the listing differs from the snapshot in a way a view has to
+ * follow: another file set or order, a changed removed set (a trashed file
+ * reappeared and was un-removed), or the folder became (un)readable. */
+static gboolean
+_listing_differs(Navigator *p_nav, const ListingSnapshot *p_snap) {
+   if (p_snap->p_files->len != p_nav->p_files->len ||
+       p_snap->u_removed != g_hash_table_size(p_nav->p_removed) ||
+       p_snap->b_readable != (p_nav->c_error == NULL)) {
+      return (TRUE);
+   }
+   for (guint u_i = 0; u_i < p_nav->p_files->len; u_i++) {
+      if (!g_file_equal(g_ptr_array_index(p_snap->p_files, u_i),
+                        g_ptr_array_index(p_nav->p_files, u_i))) {
+         return (TRUE);
+      }
+   }
+   return (FALSE);
+}
+
+/* TRUE iff navigator.current names another file than in the snapshot. */
+static gboolean
+_current_differs(Navigator *p_nav, const ListingSnapshot *p_snap) {
+   GFile *p_cur = navigator_get_current(p_nav);
+   if (p_cur == NULL || p_snap->p_current == NULL) {
+      return (p_cur != p_snap->p_current);
+   }
+   return (!g_file_equal(p_cur, p_snap->p_current));
+}
+
+/* Move the touched files that are (still) listed into p_modified -- the set
+ * navigator_was_modified() answers from during the emission -- and forget
+ * the rest. Returns TRUE iff any was listed. */
+static gboolean
+_collect_modified(Navigator *p_nav) {
+   GHashTableIter iter;
+   gpointer       p_key;
+   g_hash_table_remove_all(p_nav->p_modified);
+   g_hash_table_iter_init(&iter, p_nav->p_touched);
+   while (g_hash_table_iter_next(&iter, &p_key, NULL)) {
+      if (_find_index_by_file(p_nav, (GFile *)p_key) >= 0) {
+         g_hash_table_add(p_nav->p_modified, g_object_ref(p_key));
+      }
+   }
+   g_hash_table_remove_all(p_nav->p_touched);
+   return (g_hash_table_size(p_nav->p_modified) > 0);
+}
+
+/* The monitor's rescan. Unlike an explicit navigator_rescan() it says only
+ * what really changed, and nothing at all when nothing a view shows did (a
+ * non-image file was written, a dotfile appeared). A busy folder -- a batch
+ * job rewriting its pictures -- fires this several times a second, and a
+ * blanket "the listing was rebuilt" made the grid recreate every cell and
+ * the large view re-show its picture each time: the window blinked for as
+ * long as the job ran. */
 static gboolean
 _debounce_fire(gpointer p_data) {
    Navigator *p_nav     = (Navigator *)p_data;
    p_nav->u_debounce_id = 0;
+   ListingSnapshot st_snap;
+   _snapshot_take(p_nav, &st_snap);
    _relist(p_nav);
-   _emit_changed(p_nav, GGAZE_NAV_LISTING);
+   guint u_flags = 0;
+   if (_listing_differs(p_nav, &st_snap)) {
+      u_flags |= GGAZE_NAV_LISTING;
+   }
+   if (_current_differs(p_nav, &st_snap)) {
+      u_flags |= GGAZE_NAV_CURSOR;
+   }
+   if (_collect_modified(p_nav)) {
+      u_flags |= GGAZE_NAV_CONTENT;
+   }
+   _snapshot_clear(&st_snap);
+   if (u_flags != 0) {
+      /* A handler may drop the last outside reference. */
+      g_object_ref(p_nav);
+      _emit_changed(p_nav, u_flags);
+      if (p_nav->p_modified != NULL) {
+         g_hash_table_remove_all(p_nav->p_modified);
+      }
+      g_object_unref(p_nav);
+   }
    return (G_SOURCE_REMOVE);
 }
 
@@ -377,25 +485,47 @@ _schedule_debounce(Navigator *p_nav) {
       g_timeout_add(p_nav->u_debounce_ms, _debounce_fire, p_nav);
 }
 
+/* Remember p_file as written, for the next rescan to report (CONTENT). */
 static void
-_monitor_changed_cb(GFileMonitor *p_mon, GFile *p_other, GFile *p_src,
+_touch(Navigator *p_nav, GFile *p_file) {
+   if (p_file != NULL) {
+      g_hash_table_add(p_nav->p_touched, g_object_ref(p_file));
+   }
+}
+
+static void
+_monitor_changed_cb(GFileMonitor *p_mon, GFile *p_src, GFile *p_other,
                     GFileMonitorEvent e_ev, gpointer p_data) {
    (void)p_mon;
-   (void)p_other;
-   (void)p_src;
+   Navigator *p_nav = (Navigator *)p_data;
    switch (e_ev) {
-   case G_FILE_MONITOR_EVENT_CREATED:
-   case G_FILE_MONITOR_EVENT_DELETED:
-   case G_FILE_MONITOR_EVENT_MOVED_IN:
-   case G_FILE_MONITOR_EVENT_MOVED_OUT:
-   case G_FILE_MONITOR_EVENT_RENAMED:
    /* A file rewritten in place (external editor, `!` script) must reach the
-    * window too: the rescan re-emits "changed", the large view reloads and
-    * the texture cache's mtime check drops the stale decode. The debounce
-    * folds the burst of CHANGED events a save produces into one rescan. */
-   case G_FILE_MONITOR_EVENT_CHANGED:
+    * window: the rescan reports it (CONTENT), the large view reloads it and
+    * the texture cache's stamp check drops the stale decode. Only once the
+    * writer is done, though: CHANGES_DONE_HINT follows the close (GLib
+    * synthesises it after two quiet seconds where the backend has none),
+    * while CHANGED arrives over and over DURING a long write, and acting on
+    * it decoded a half-written file -- an error or a torn picture, replaced
+    * moments later -- for every burst. So CHANGED is deliberately not
+    * handled. */
    case G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT:
-      _schedule_debounce((Navigator *)p_data);
+   /* A file that appears may replace one that just left under the same
+    * name (delete + create inside one debounce): the listing reads the
+    * same, the content is new. */
+   case G_FILE_MONITOR_EVENT_CREATED:
+   case G_FILE_MONITOR_EVENT_MOVED_IN:
+      _touch(p_nav, p_src);
+      _schedule_debounce(p_nav);
+      break;
+   /* An atomic save (temp file renamed over the original) rewrites the
+    * destination. */
+   case G_FILE_MONITOR_EVENT_RENAMED:
+      _touch(p_nav, p_other);
+      _schedule_debounce(p_nav);
+      break;
+   case G_FILE_MONITOR_EVENT_DELETED:
+   case G_FILE_MONITOR_EVENT_MOVED_OUT:
+      _schedule_debounce(p_nav);
       break;
    default:
       break;
@@ -417,6 +547,8 @@ navigator_dispose(GObject *p_obj) {
    }
    g_clear_pointer(&p_nav->p_marks, g_hash_table_unref);
    g_clear_pointer(&p_nav->p_removed, g_hash_table_unref);
+   g_clear_pointer(&p_nav->p_touched, g_hash_table_unref);
+   g_clear_pointer(&p_nav->p_modified, g_hash_table_unref);
    g_clear_pointer(&p_nav->p_files, g_ptr_array_unref);
    g_clear_object(&p_nav->p_dir);
    g_clear_object(&p_nav->p_last_mark);
@@ -441,6 +573,12 @@ navigator_init(Navigator *p_nav) {
       g_hash_table_new_full((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal,
                             (GDestroyNotify)g_object_unref, NULL);
    p_nav->p_removed =
+      g_hash_table_new_full((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal,
+                            (GDestroyNotify)g_object_unref, NULL);
+   p_nav->p_touched =
+      g_hash_table_new_full((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal,
+                            (GDestroyNotify)g_object_unref, NULL);
+   p_nav->p_modified =
       g_hash_table_new_full((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal,
                             (GDestroyNotify)g_object_unref, NULL);
    p_nav->i_current     = -1;
@@ -733,7 +871,7 @@ navigator_set_sort(Navigator *p_nav, GgazeSort e_sort) {
    }
    p_nav->e_sort = e_sort;
    _relist(p_nav);
-   _emit_changed(p_nav, GGAZE_NAV_LISTING);
+   _emit_changed(p_nav, GGAZE_NAV_LISTING | GGAZE_NAV_CURSOR);
 }
 
 gboolean
@@ -762,7 +900,7 @@ navigator_set_hide_raw(Navigator *p_nav, gboolean b_hide_raw) {
    }
    p_nav->b_hide_raw = b_hide_raw;
    _relist(p_nav);
-   _emit_changed(p_nav, GGAZE_NAV_LISTING);
+   _emit_changed(p_nav, GGAZE_NAV_LISTING | GGAZE_NAV_CURSOR);
 }
 
 /* --- marks --------------------------------------------------------------- */
@@ -869,7 +1007,7 @@ void
 navigator_rescan(Navigator *p_nav) {
    g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
    _relist(p_nav);
-   _emit_changed(p_nav, GGAZE_NAV_LISTING);
+   _emit_changed(p_nav, GGAZE_NAV_LISTING | GGAZE_NAV_CURSOR);
 }
 
 gboolean
@@ -897,6 +1035,13 @@ navigator_remove(Navigator *p_nav, GFile *p_file) {
    }
    _emit_changed(p_nav, GGAZE_NAV_LISTING | GGAZE_NAV_CURSOR);
    return (TRUE);
+}
+
+gboolean
+navigator_was_modified(Navigator *p_nav, GFile *p_file) {
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), FALSE);
+   return (p_file != NULL && p_nav->p_modified != NULL &&
+           g_hash_table_contains(p_nav->p_modified, p_file));
 }
 
 void

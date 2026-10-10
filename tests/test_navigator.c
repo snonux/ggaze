@@ -502,6 +502,74 @@ test_monitor_add(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* What the monitor subtests record of the "changed" emissions they see. */
+typedef struct {
+   guint    u_count;
+   guint    u_flags;    /* every emission's flags, OR-ed */
+   GFile   *p_watch;    /* borrowed: the file asked about */
+   gboolean b_modified; /* p_watch was reported rewritten in some emission */
+} ChangeLog;
+
+static void
+log_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
+   ChangeLog *p_log = (ChangeLog *)p_data;
+   p_log->u_count++;
+   p_log->u_flags |= u_flags;
+   if (p_log->p_watch != NULL &&
+       navigator_was_modified(p_nav, p_log->p_watch)) {
+      p_log->b_modified = TRUE;
+   }
+}
+
+static gboolean
+_log_has_emission(gpointer p_data) {
+   return (((ChangeLog *)p_data)->u_count > 0);
+}
+
+/* The monitor's rescans say exactly what changed, since a folder being
+ * written to fires them several times a second and the views blinked on
+ * every blanket "listing rebuilt": nothing for a file no view shows, LISTING
+ * without CURSOR for a new picture next to the current one, and CONTENT (no
+ * LISTING) naming the file for a rewrite in place -- after which the set
+ * navigator_was_modified() answers from is empty again. */
+static void
+test_monitor_reports_exact_changes(void) {
+   char *c_dir = make_temp_dir();
+   write_file(c_dir, "a.jpg", "x", 1);
+   write_file(c_dir, "b.jpg", "x", 1);
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   GFile     *p_a    = file_ref(c_dir, "a.jpg");
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, TRUE, TRUE);
+   navigator_set_debounce_ms(p_nav, 5);
+   ChangeLog st_log = {0, 0, p_a, FALSE};
+   g_signal_connect(p_nav, "changed", G_CALLBACK(log_changed_cb), &st_log);
+
+   write_file(c_dir, "notes.txt", "x", 1); /* not listed: no emission */
+   g_assert_false(pump_until(_log_has_emission, &st_log, 300));
+
+   write_file(c_dir, "c.jpg", "x", 1);
+   g_assert_true(pump_until(_log_has_emission, &st_log, 2000));
+   pump_until(NULL, NULL, 100); /* the write's later events, if any */
+   g_assert_cmpuint(st_log.u_flags & GGAZE_NAV_LISTING, !=, 0);
+   g_assert_cmpuint(st_log.u_flags & GGAZE_NAV_CURSOR, ==, 0);
+   g_assert_false(st_log.b_modified);
+   g_assert_cmpint(navigator_get_count(p_nav), ==, 3);
+
+   st_log.u_count = 0;
+   st_log.u_flags = 0;
+   write_file(c_dir, "a.jpg", "yy", 2); /* the current file, rewritten */
+   g_assert_true(pump_until(_log_has_emission, &st_log, 2000));
+   pump_until(NULL, NULL, 100);
+   g_assert_cmpuint(st_log.u_flags, ==, GGAZE_NAV_CONTENT);
+   g_assert_true(st_log.b_modified);
+   g_assert_false(navigator_was_modified(p_nav, p_a)); /* emission over */
+
+   navigator_delete(p_nav);
+   g_object_unref(p_a);
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
 static void
 on_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
    (void)p_nav;
@@ -854,6 +922,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/navigator/remove_before_cursor",
                    test_remove_before_cursor);
    g_test_add_func("/navigator/monitor_add", test_monitor_add);
+   g_test_add_func("/navigator/monitor_reports_exact_changes",
+                   test_monitor_reports_exact_changes);
    g_test_add_func("/navigator/changed_signal", test_changed_signal);
    g_test_add_func("/navigator/empty_dir", test_empty_dir);
    g_test_add_func("/navigator/nav_skips_removed", test_nav_skips_removed);

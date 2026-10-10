@@ -544,6 +544,61 @@ test_hidden_grid_rebuild_keeps_focus_off_it(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* A listing change keeps the cells of the files that stay: the grid used to
+ * throw every cell away and rebuild, so a folder being written to (one
+ * rescan per burst of file events) blanked every thumbnail several times a
+ * second. A file added in front (it sorts first) moves the kept cells along
+ * as the same widgets; a file removed takes only its own cell. */
+static void
+test_refresh_keeps_cells_of_kept_files(void) {
+   char      *c_dir = make_folder();
+   GtkWindow *p_win;
+   Navigator *p_nav;
+   Thumbnail *p_thumb;
+   GgazeGrid *p_grid;
+   build_grid(c_dir, &p_win, &p_nav, &p_thumb, &p_grid);
+   GtkFlowBox *p_flow = ggtest_find_flow_box(GTK_WIDGET(p_grid));
+   GtkWidget  *p_old[3];
+   for (int i = 0; i < 3; i++) {
+      p_old[i] = GTK_WIDGET(gtk_flow_box_get_child_at_index(p_flow, i));
+   }
+
+   char  *c_src = g_build_filename(c_dir, "small.png", NULL);
+   char  *c_new = g_build_filename(c_dir, "aaa.png", NULL);
+   GFile *p_src = g_file_new_for_path(c_src);
+   GFile *p_dst = g_file_new_for_path(c_new);
+   g_assert_true(
+      g_file_copy(p_src, p_dst, G_FILE_COPY_NONE, NULL, NULL, NULL, NULL));
+   navigator_rescan(p_nav);
+   ggtest_drain_main(50);
+   g_assert_cmpuint(ggaze_grid_get_count(p_grid), ==, 4);
+   for (int i = 0; i < 3; i++) {
+      g_assert_true(GTK_WIDGET(gtk_flow_box_get_child_at_index(
+                       p_flow, i + 1)) == p_old[i]);
+   }
+
+   g_assert_true(g_file_delete(p_dst, NULL, NULL));
+   g_assert_true(g_file_delete(p_src, NULL, NULL)); /* small.png: last */
+   navigator_rescan(p_nav);
+   ggtest_drain_main(50);
+   g_assert_cmpuint(ggaze_grid_get_count(p_grid), ==, 2);
+   for (int i = 0; i < 2; i++) {
+      g_assert_true(GTK_WIDGET(gtk_flow_box_get_child_at_index(p_flow, i)) ==
+                    p_old[i]);
+   }
+
+   g_object_unref(p_src);
+   g_object_unref(p_dst);
+   g_free(c_src);
+   g_free(c_new);
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   ggtest_drain_main(100);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -575,5 +630,7 @@ main(int i_argc, char **c_argv) {
                    test_click_selection_syncs_current);
    g_test_add_func("/grid_select_gate/hidden_grid_rebuild_keeps_focus_off_it",
                    test_hidden_grid_rebuild_keeps_focus_off_it);
+   g_test_add_func("/grid_select_gate/refresh_keeps_cells_of_kept_files",
+                   test_refresh_keeps_cells_of_kept_files);
    return (g_test_run());
 }

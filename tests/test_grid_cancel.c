@@ -269,7 +269,7 @@ test_grid_refresh_with_inflight(void) {
    g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
 
    /* Trash the current file (structural nav change → grid refresh, which
-    * cancels the in-flight requests for the old cells and rebuilds). */
+    * reconciles the cells in place while their requests are in flight). */
    gtk_widget_activate_action(GTK_WIDGET(p_win), "win.trash", NULL);
    drain_main(200);
    /* Undo restores the file (another structural change → refresh). */

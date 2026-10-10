@@ -7,10 +7,11 @@
  * Navigator is a GObject (no GtkWidget) that owns the current directory
  * listing: it filters to image MIME types, sorts (name/time/size), keeps a
  * cursor and a path-based mark set, watches the directory with GFileMonitor
- * (debounced) and emits "changed" on structural changes so the views stay in
- * sync. If the current file disappears (external delete, or trash/move) it
- * falls back to the nearest. Owns no GTK state; unit-testable without a
- * display. See docs/architecture.md "Responsibilities / navigator".
+ * (debounced) and emits "changed" on structural changes and on files
+ * rewritten in place (once their writer is done) so the views stay in sync. If
+ * the current file disappears (external delete, or trash/move) it falls back to
+ * the nearest. Owns no GTK state; unit-testable without a display. See
+ * docs/architecture.md "Responsibilities / navigator".
  *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -29,14 +30,26 @@ G_DECLARE_FINAL_TYPE(Navigator, navigator, GGAZE, NAVIGATOR, GObject)
 
 /* What a "changed" emission is about (bit flags, several may be set). The
  * signal used to carry nothing, so every consumer reconstructed the meaning
- * from counters -- and got it wrong for a same-count listing change. */
+ * from counters -- and got it wrong for a same-count listing change.
+ *
+ * CURSOR is the "show navigator.current again" bit: set when current names
+ * another file, and by every explicit relist (rescan, sort, hide-raw), which
+ * cannot vouch that the file it kept is the picture it was. The folder
+ * monitor's own rescans are exact instead -- LISTING only when the file set
+ * or order really changed, CURSOR only when current names another file,
+ * CONTENT for the files rewritten meanwhile, and no emission when none of
+ * that happened -- because a folder being written to triggers them several
+ * times a second and each blanket "everything changed" made the views
+ * rebuild and blink. */
 typedef enum {
-   GGAZE_NAV_CURSOR  = 1 << 0, /* navigator.current moved */
+   GGAZE_NAV_CURSOR  = 1 << 0, /* navigator.current moved, or may have */
    GGAZE_NAV_MARKS   = 1 << 1, /* the mark set / range anchor changed */
-   GGAZE_NAV_LISTING = 1 << 2, /* the listing was rebuilt (rescan, sort,
+   GGAZE_NAV_LISTING = 1 << 2, /* the listing changed (rescan, sort,
                                 * filter, monitor); cells may be new */
    GGAZE_NAV_REMOVED = 1 << 3, /* the removed/dimmed set changed */
-   GGAZE_NAV_ALL     = 0xf,
+   GGAZE_NAV_CONTENT = 1 << 4, /* listed files were rewritten on disk;
+                                * navigator_was_modified() says which */
+   GGAZE_NAV_ALL = 0x1f,
 } GgazeNavChange;
 
 /* Construct a navigator over p_dir (file or folder; a file's parent is used by
@@ -114,6 +127,11 @@ guint navigator_get_live_position(Navigator *p_nav);
  */
 gboolean navigator_remove(Navigator *p_nav, GFile *p_file);
 
+/* TRUE iff p_file is one of the files the "changed" emission in progress
+ * reports as rewritten (GGAZE_NAV_CONTENT). Only meaningful inside a handler
+ * of such an emission: the set is empty at any other time. */
+gboolean navigator_was_modified(Navigator *p_nav, GFile *p_file);
+
 /* GFileMonitor debounce in ms (default 250; decision #28). Tests may lower it.
  */
 void navigator_set_debounce_ms(Navigator *p_nav, guint u_ms);
@@ -126,7 +144,8 @@ guint    navigator_get_removed_count(Navigator *p_nav);
 
 /* "changed" signal: void changed(Navigator *, guint u_flags, gpointer), where
  * u_flags is a GgazeNavChange mask saying what changed. Emitted on every
- * cursor move, mark change, listing rebuild and removed-set change. Test
+ * cursor move, mark change, listing change, removed-set change and
+ * rewritten file. Test
  * seam: emit it with GGAZE_NAV_ALL. */
 void navigator_emit_changed(Navigator *p_nav);
 

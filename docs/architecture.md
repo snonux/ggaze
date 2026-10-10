@@ -168,8 +168,16 @@ ggaze
   `navigator_get_marks` (returns a `GList` of `GFile*`). Emits a `changed`
   signal on sort/filter/trash/move so grid + large stay in sync. Watches the
   directory with `GFileMonitor` and emits `changed` on external
-  adds/deletes/moves (debounced); if the current file is removed, falls back
-  to the nearest. Owns no GTK state; testable standalone.
+  adds/deletes/moves and on files rewritten in place (debounced); if the
+  current file is removed, falls back to the nearest. A monitor rescan
+  reports **exactly** what changed — `LISTING` only for another file set or
+  order, `CURSOR` only when current names another file, `CONTENT` (+
+  `navigator_was_modified`) for rewritten files, and nothing when no listed
+  file is affected — and a rewrite is reported only once its writer is done
+  (`CHANGES_DONE_HINT`, not every `CHANGED`). The grid therefore reconciles
+  its cells in place and the window re-shows the picture only when the
+  current file itself is hit, so a folder a batch job is writing to does not
+  make either view blink. Owns no GTK state; testable standalone.
 - **trash** — moves a file to `<dir>/.Trash/` (creating it lazily), preserving
   relative path uniqueness (suffix `-1`, `-2`… on collision). `D` calls
   `g_file_delete` instead. Tracks the last trashed item for `u` undo/restore.
