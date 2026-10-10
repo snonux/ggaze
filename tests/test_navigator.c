@@ -571,6 +571,41 @@ test_monitor_reports_exact_changes(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* A Shift+cursor selection: everything between the anchor and the cursor is
+ * marked, and moving the cursor back towards (or past) the anchor gives
+ * back what only the old stretch covered. */
+static void
+test_extend_marks(void) {
+   char       *c_dir     = make_temp_dir();
+   const char *c_names[] = {"a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"};
+   GFile      *p_f[5];
+   for (gsize u = 0; u < 5; u++) {
+      touch_file(c_dir, c_names[u]);
+      p_f[u] = file_ref(c_dir, c_names[u]);
+   }
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, TRUE, TRUE);
+
+   navigator_extend_marks(p_nav, p_f[1], p_f[1], p_f[3]); /* b -> d */
+   g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 3);
+   g_assert_true(navigator_is_marked(p_nav, p_f[2]));
+   navigator_extend_marks(p_nav, p_f[1], p_f[3], p_f[2]); /* back to c */
+   g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 2);
+   g_assert_false(navigator_is_marked(p_nav, p_f[3]));
+   navigator_extend_marks(p_nav, p_f[1], p_f[2], p_f[0]); /* past the anchor */
+   g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 2);
+   g_assert_true(navigator_is_marked(p_nav, p_f[0]));
+   g_assert_true(navigator_is_marked(p_nav, p_f[1]));
+   g_assert_false(navigator_is_marked(p_nav, p_f[2]));
+
+   navigator_delete(p_nav);
+   for (gsize u = 0; u < 5; u++) {
+      g_object_unref(p_f[u]);
+   }
+   g_object_unref(p_dirf);
+   cleanup_temp_dir(c_dir);
+}
+
 /* Sub-folders are listed apart from the images, by name, without the
  * dot-folders; one appearing later is a LISTING change for the views. */
 static void
@@ -966,6 +1001,7 @@ main(int i_argc, char **c_argv) {
                    test_remove_before_cursor);
    g_test_add_func("/navigator/monitor_add", test_monitor_add);
    g_test_add_func("/navigator/subdirs", test_subdirs);
+   g_test_add_func("/navigator/extend_marks", test_extend_marks);
    g_test_add_func("/navigator/monitor_reports_exact_changes",
                    test_monitor_reports_exact_changes);
    g_test_add_func("/navigator/changed_signal", test_changed_signal);

@@ -49,7 +49,9 @@ Keyboard first: every action has a vi-style key and a traditional one
 
 | Key | Action |
 |-----|--------|
-| `h` / `l`, `←`/`→`, `PgUp`/`PgDn` | previous / next image |
+| `h` / `l`, `←`/`→` | previous / next image |
+| `PgUp` / `PgDn` | grid: cursor one page up / down; large view: previous / next image |
+| `Shift`+arrows | grid: multi-select (extends the marks; moving back unmarks); large view: pan |
 | `g` / `G`, `Home` / `End` | first / last image |
 | `Enter` / `Esc`    | grid → large / large → grid (`t` toggles; `Esc` twice in the grid quits) |
 | `j` / `k`, `↓`/`↑` | cursor row down / up (grid) · pan (large) |

@@ -229,9 +229,6 @@ static gboolean _space_released_cb(GtkEventControllerKey *p_c, guint u_keyval,
                                    guint u_kc, GdkModifierType e_state,
                                    gpointer p_data);
 static void     _init_enhance_state(GgazeWindow *p_win);
-static gboolean _edit_key_cb(GtkEventControllerKey *p_c, guint u_keyval,
-                             guint u_kc, GdkModifierType e_state,
-                             gpointer p_data);
 static void     _init_tool_state(GgazeWindow *p_win);
 #endif
 
@@ -650,22 +647,61 @@ _action_cursor_vertical(GgazeWindow *p_win, int i_direction) {
    }
 }
 
-/* Shift+H / Shift+L: horizontal pan in the large view (the grid has no
- * horizontal cursor; Left/Right are prev/next everywhere). */
+/* Shift + a cursor key. In the grid it extends the marks from where the
+ * run of such moves began (the multi-selection of a file manager); TRUE iff
+ * the grid took it. In the large view there is nothing to select and the
+ * caller pans (Shift+H / Shift+L / Shift+Left / Shift+Right horizontally).
+ */
+static gboolean
+_extend_marks(GgazeWindow *p_win, int i_dx, int i_dy) {
+   if (_get_view(p_win) != GGAZE_VIEW_GRID || p_win->p_grid == NULL) {
+      return (FALSE);
+   }
+   ggaze_grid_extend_selection(p_win->p_grid, i_dx, i_dy);
+   return (TRUE);
+}
+
 static void
 _action_pan_left(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   ggaze_viewer_pan(GGAZE_VIEWER(GGAZE_WINDOW(p_data)->p_viewer),
-                    -GGAZE_VIEWER_PAN_STEP, 0.0);
+   if (!_extend_marks(GGAZE_WINDOW(p_data), -1, 0)) {
+      ggaze_viewer_pan(GGAZE_VIEWER(GGAZE_WINDOW(p_data)->p_viewer),
+                       -GGAZE_VIEWER_PAN_STEP, 0.0);
+   }
 }
 
 static void
 _action_pan_right(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
-   ggaze_viewer_pan(GGAZE_VIEWER(GGAZE_WINDOW(p_data)->p_viewer),
-                    GGAZE_VIEWER_PAN_STEP, 0.0);
+   if (!_extend_marks(GGAZE_WINDOW(p_data), 1, 0)) {
+      ggaze_viewer_pan(GGAZE_VIEWER(GGAZE_WINDOW(p_data)->p_viewer),
+                       GGAZE_VIEWER_PAN_STEP, 0.0);
+   }
+}
+
+static void _action_cursor_vertical(GgazeWindow *p_win, int i_direction);
+
+/* Shift+Up / Shift+Down: extend the marks in the grid; in the large view
+ * the same as the unshifted key (a vertical pan), as before these rows
+ * existed. */
+static void
+_action_extend_up(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   if (!_extend_marks(GGAZE_WINDOW(p_data), 0, -1)) {
+      _action_cursor_vertical(GGAZE_WINDOW(p_data), -1);
+   }
+}
+
+static void
+_action_extend_down(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   if (!_extend_marks(GGAZE_WINDOW(p_data), 0, 1)) {
+      _action_cursor_vertical(GGAZE_WINDOW(p_data), 1);
+   }
 }
 
 static void
@@ -680,6 +716,32 @@ _action_cursor_up(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    _action_cursor_vertical(GGAZE_WINDOW(p_data), -1);
+}
+
+/* Page Up / Page Down: a page of rows in the grid; in the large view, where
+ * there are no rows, the previous / next image as before. */
+static void
+_action_page(GgazeWindow *p_win, int i_dir) {
+   if (_get_view(p_win) == GGAZE_VIEW_GRID && p_win->p_grid != NULL) {
+      ggaze_grid_move_page(p_win->p_grid, i_dir);
+      return;
+   }
+   gtk_widget_activate_action(GTK_WIDGET(p_win),
+                              (i_dir < 0) ? "win.prev" : "win.next", NULL);
+}
+
+static void
+_action_page_down(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _action_page(GGAZE_WINDOW(p_data), 1);
+}
+
+static void
+_action_page_up(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   _action_page(GGAZE_WINDOW(p_data), -1);
 }
 
 static void
@@ -2004,30 +2066,6 @@ ggaze_window_get_hint_text(GgazeWindow *p_win) {
               : NULL);
 }
 
-/* The edit keys' controller (window-level, capture phase, see
- * _init_tool_state): the active tool's keys, then the open panel's, are
- * answered here (edit-mode.c) and STOPPED, so the GLOBAL-scope shortcut
- * table (which runs later, in the bubble phase at the root) never turns
- * the crop tool's `h` into win.prev -- and, with neither on screen, a key
- * goes on to that table untouched (a digit then does nothing). A popover
- * with keyboard focus (the m / e / ! choosers) keeps answering its own
- * keys: the move popup's digits must pick a destination, not a preset. */
-static gboolean
-_edit_key_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
-             GdkModifierType e_state, gpointer p_data) {
-   (void)p_c;
-   (void)u_kc;
-   GgazeWindow *p_win   = GGAZE_WINDOW(p_data);
-   GtkWidget   *p_focus = gtk_root_get_focus(GTK_ROOT(p_win));
-   if (p_focus != NULL &&
-       gtk_widget_get_ancestor(p_focus, GTK_TYPE_POPOVER) != NULL) {
-      return (GDK_EVENT_PROPAGATE);
-   }
-   return (ggaze_window_edit_key(p_win, u_keyval, e_state)
-              ? GDK_EVENT_STOP
-              : GDK_EVENT_PROPAGATE);
-}
-
 /* Hold-Space compare (see window.h): TRUE shows the cached original; FALSE
  * restores the cached modified texture. Delegates to the controller. */
 void
@@ -2970,6 +3008,8 @@ static const GActionEntry ACTIONS[] = {
    {.name = "next", .activate = _action_next},
    {.name = "cursor-down", .activate = _action_cursor_down},
    {.name = "cursor-up", .activate = _action_cursor_up},
+   {.name = "page-down", .activate = _action_page_down},
+   {.name = "page-up", .activate = _action_page_up},
    {.name = "first", .activate = _action_first},
    {.name = "last", .activate = _action_last},
    {.name = "open", .activate = _action_open},
@@ -2992,6 +3032,8 @@ static const GActionEntry ACTIONS[] = {
    {.name = "zoom-reset", .activate = _action_zoom_reset},
    {.name = "pan-left", .activate = _action_pan_left},
    {.name = "pan-right", .activate = _action_pan_right},
+   {.name = "extend-up", .activate = _action_extend_up},
+   {.name = "extend-down", .activate = _action_extend_down},
    {.name = "enter-large", .activate = _action_enter_large},
    {.name = "menu", .activate = _action_menu},
    {.name = "empty-trash", .activate = _action_empty_trash},
@@ -3685,11 +3727,10 @@ _init_enhance_state(GgazeWindow *p_win) {
 
 /* Create the crop / straighten tool controller (it needs the viewer, so this
  * runs after _init_stack_and_viewer, unlike _init_enhance_state), the
- * edit-key router over it and the panel, and install the router's
- * capture-phase key controller -- see _edit_key_cb for why the modes' keys
- * must be claimed before the global shortcut table sees them. The router's
- * key-hint bar goes under the large view, in the column _init_info_overlay
- * built around the overlay. */
+ * edit-key router over it and the panel -- see _key_router_cb for why the
+ * modes' keys must be claimed before the global shortcut table sees them.
+ * The router's key-hint bar goes under the large view, in the column
+ * _init_info_overlay built around the overlay. */
 /* The "Rendering…" pill: a spinner and a label at the top of the view,
  * over the picture, hidden until a preview render has been pending for a
  * while (_ec_show_busy, 8l2). It takes no clicks, so it never steals a
@@ -3720,12 +3761,71 @@ _init_tool_state(GgazeWindow *p_win) {
    gtk_box_append(GTK_BOX(p_column),
                   edit_mode_get_hint_bar(p_win->p_edit_mode));
    _init_busy_indicator(p_win);
-   GtkEventController *p_kc = gtk_event_controller_key_new();
-   gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
-   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_edit_key_cb), p_win);
-   gtk_widget_add_controller(GTK_WIDGET(p_win), p_kc);
 }
 #endif
+
+/* --- key router ----------------------------------------------------------- */
+
+/* The cursor keys in the large view, looked up in the global shortcut table
+ * and run from here. They are in that table (Left / Right: previous / next
+ * image, Up / Down: pan, Shift: pan sideways), but its GLOBAL-scope
+ * controller never got to see them: GtkWindow binds the four arrows to
+ * keyboard focus movement and answers first, so in the large view only the
+ * vi keys and Page Up / Page Down changed the image. Not in the grid, whose
+ * flow box takes the arrows itself (gridview.c _on_flow_key). TRUE iff the
+ * key was one of them and ran its action. */
+static gboolean
+_large_view_arrow_key(GgazeWindow *p_win, guint u_keyval,
+                      GdkModifierType e_state) {
+   if (_get_view(p_win) != GGAZE_VIEW_LARGE ||
+       (u_keyval != GDK_KEY_Left && u_keyval != GDK_KEY_Right &&
+        u_keyval != GDK_KEY_Up && u_keyval != GDK_KEY_Down)) {
+      return (FALSE);
+   }
+   const char *c_action = shortcuts_global_action(u_keyval, e_state);
+   if (c_action == NULL) {
+      return (FALSE);
+   }
+   gtk_widget_activate_action(GTK_WIDGET(p_win), c_action, NULL);
+   return (TRUE);
+}
+
+/* The window's key router (capture phase, so it runs before anything
+ * below the window and before the GLOBAL-scope shortcut table, which is
+ * consulted in the bubble phase at the root). First the edit keys: the
+ * active tool's, then the open panel's, are answered (edit-mode.c) and
+ * STOPPED, so the table never turns the crop tool's `h` into win.prev --
+ * and, with neither on screen, a key goes on to that table untouched (a
+ * digit then does nothing). Then the large view's cursor keys
+ * (_large_view_arrow_key). A popover with keyboard focus (the m / e / !
+ * choosers, the menu) keeps answering its own keys: the move popup's
+ * digits must pick a destination, not a preset, and its arrows move its
+ * own selection. */
+static gboolean
+_key_router_cb(GtkEventControllerKey *p_c, guint u_keyval, guint u_kc,
+               GdkModifierType e_state, gpointer p_data) {
+   (void)p_c;
+   (void)u_kc;
+   GgazeWindow *p_win   = GGAZE_WINDOW(p_data);
+   GtkWidget   *p_focus = gtk_root_get_focus(GTK_ROOT(p_win));
+   if (p_focus != NULL &&
+       gtk_widget_get_ancestor(p_focus, GTK_TYPE_POPOVER) != NULL) {
+      return (GDK_EVENT_PROPAGATE);
+   }
+   if (ggaze_window_edit_key(p_win, u_keyval, e_state) ||
+       _large_view_arrow_key(p_win, u_keyval, e_state)) {
+      return (GDK_EVENT_STOP);
+   }
+   return (GDK_EVENT_PROPAGATE);
+}
+
+static void
+_init_key_router(GgazeWindow *p_win) {
+   GtkEventController *p_kc = gtk_event_controller_key_new();
+   gtk_event_controller_set_propagation_phase(p_kc, GTK_PHASE_CAPTURE);
+   g_signal_connect(p_kc, "key-pressed", G_CALLBACK(_key_router_cb), p_win);
+   gtk_widget_add_controller(GTK_WIDGET(p_win), p_kc);
+}
 
 /* --- FileOps report op ---------------------------------------------------- */
 
@@ -4105,6 +4205,7 @@ ggaze_window_init(GgazeWindow *p_win) {
 #if GGAZE_HAVE_GEGL
    _init_tool_state(p_win); /* after the viewer it draws on exists */
 #endif
+   _init_key_router(p_win);
 
    /* Actions + keybindings (decision #10/#12). */
    g_action_map_add_action_entries(G_ACTION_MAP(p_win), ACTIONS,

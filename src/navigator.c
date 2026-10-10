@@ -1003,6 +1003,35 @@ navigator_mark_range(Navigator *p_nav, GFile *p_from, GFile *p_to) {
 }
 
 void
+navigator_extend_marks(Navigator *p_nav, GFile *p_anchor, GFile *p_from,
+                       GFile *p_to) {
+   g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
+   gint i_a   = _find_index_by_file(p_nav, p_anchor);
+   gint i_old = _find_index_by_file(p_nav, p_from);
+   gint i_new = _find_index_by_file(p_nav, p_to);
+   if (i_a < 0 || i_old < 0 || i_new < 0) {
+      return;
+   }
+   gint i_lo = MIN(i_a, i_new);
+   gint i_hi = MAX(i_a, i_new);
+   /* What the old stretch covered and the new one does not: given back. */
+   for (gint i = MIN(i_a, i_old); i <= MAX(i_a, i_old); i++) {
+      if (i < i_lo || i > i_hi) {
+         g_hash_table_remove(p_nav->p_marks,
+                             g_ptr_array_index(p_nav->p_files, (guint)i));
+      }
+   }
+   for (gint i = i_lo; i <= i_hi; i++) {
+      _mark_index(p_nav, (guint)i);
+   }
+   if (p_nav->p_last_mark != NULL &&
+       !g_hash_table_contains(p_nav->p_marks, p_nav->p_last_mark)) {
+      g_clear_object(&p_nav->p_last_mark); /* the `V` anchor was given back */
+   }
+   _emit_changed(p_nav, GGAZE_NAV_MARKS);
+}
+
+void
 navigator_mark_all(Navigator *p_nav) {
    g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
    for (guint u_i = 0; u_i < p_nav->p_files->len; u_i++) {

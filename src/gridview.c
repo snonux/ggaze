@@ -35,12 +35,16 @@ typedef struct {
 static const char *CELL_DATA_KEY = "ggaze-cell-data";
 
 struct _GgazeGrid {
-   GtkWidget           parent_instance;
-   Navigator          *p_nav;
-   Thumbnail          *p_thumb;
-   GtkWidget          *p_flow;     /* GtkFlowBox */
-   GtkWidget          *p_scrolled; /* GtkScrolledWindow */
-   GFile              *p_parent;   /* the ".." cell's folder (owned) or NULL */
+   GtkWidget  parent_instance;
+   Navigator *p_nav;
+   Thumbnail *p_thumb;
+   GtkWidget *p_flow;       /* GtkFlowBox */
+   GtkWidget *p_scrolled;   /* GtkScrolledWindow */
+   GFile     *p_parent;     /* the ".." cell's folder (owned) or NULL */
+   GFile     *p_ext_anchor; /* where the running Shift+cursor
+                             * selection began (owned) or NULL */
+   GFile *p_ext_cursor;     /* the cell it last moved to (owned):
+                             * the run goes on only from there */
    int                 i_size;
    gboolean            b_hide_trashed;
    guint               u_nav_handler;
@@ -481,7 +485,8 @@ _on_child_activated(GtkFlowBox *p_flow, GtkFlowBoxChild *p_child,
    g_signal_emit(p_grid, u_activate_signal, 0);
 }
 
-/* Keys the grid answers itself. Arrow/vi rows move the cursor; Left/Right,
+/* Keys the grid answers itself. Arrow/vi rows and Page Up/Down move the
+ * cursor; Left/Right,
  * Ctrl+a and the middle-click mark are reported as signals for the owner to
  * act on (the grid does not know the window's action names). Ctrl+a must be
  * caught here: GtkFlowBox binds it to its own "select-all", which counts as
@@ -497,6 +502,16 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
    if (e_mods == GDK_CONTROL_MASK && u_kv == GDK_KEY_a) {
       g_signal_emit(p_grid, u_mark_all_signal, 0);
       return (TRUE);
+   }
+   if (e_mods == GDK_SHIFT_MASK) {
+      /* Shift + a cursor key extends the marks. Caught here, ahead of
+       * GtkFlowBox's own Shift+arrow bindings. */
+      int i_dx = (u_kv == GDK_KEY_Left) ? -1 : (u_kv == GDK_KEY_Right) ? 1 : 0;
+      int i_dy = (u_kv == GDK_KEY_Up) ? -1 : (u_kv == GDK_KEY_Down) ? 1 : 0;
+      if (i_dx != 0 || i_dy != 0) {
+         ggaze_grid_extend_selection(p_grid, i_dx, i_dy);
+         return (TRUE);
+      }
    }
    if (e_mods != 0) {
       return (FALSE); /* other chords belong to the window */
@@ -521,6 +536,12 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
    }
    if (u_kv == GDK_KEY_k || u_kv == GDK_KEY_Up) {
       ggaze_grid_move_cursor(p_grid, -1);
+      return (TRUE);
+   }
+   if (u_kv == GDK_KEY_Page_Down || u_kv == GDK_KEY_Page_Up) {
+      /* Caught here like j/k: GtkFlowBox has page bindings of its own,
+       * which move its cursor without the folder-cell rules above. */
+      ggaze_grid_move_page(p_grid, (u_kv == GDK_KEY_Page_Down) ? 1 : -1);
       return (TRUE);
    }
    if (u_kv == GDK_KEY_Left || u_kv == GDK_KEY_Right) {
@@ -720,36 +741,110 @@ _nearest_cell_in_row_direction(GgazeGrid *p_grid, GtkWidget *p_cur, int i_dy) {
    return (st.p_best);
 }
 
-/* Move the grid cursor one row down (i_dy = +1) or up (i_dy = -1), selecting
- * the cell in the adjacent row closest to the current column. Updates
- * navigator.current so the header and large-view preview track the move (the
- * "changed" emission re-selects via _on_nav_changed). */
-void
-ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy) {
-   g_return_if_fail(GGAZE_IS_GRID(p_grid));
-   if (p_grid->p_nav == NULL || p_grid->p_flow == NULL) {
+/* How many rows a page move covers: the rows that fit the viewport, less
+ * one so the row the cursor leaves stays in sight as context -- and always
+ * at least one. p_cur's laid-out height is the row height (the flow box is
+ * homogeneous). */
+static int
+_rows_per_page(GgazeGrid *p_grid, GtkWidget *p_cur) {
+   graphene_rect_t r;
+   if (!gtk_widget_compute_bounds(p_cur, p_grid->p_flow, &r) ||
+       r.size.height <= 0) {
+      return (1);
+   }
+   GtkAdjustment *p_vadj = gtk_scrolled_window_get_vadjustment(
+      GTK_SCROLLED_WINDOW(p_grid->p_scrolled));
+   int i_rows = (int)(gtk_adjustment_get_page_size(p_vadj) / r.size.height);
+   return (MAX(1, i_rows - 1));
+}
+
+/* Move the grid cursor i_rows rows down (i_dy = +1) or up (i_dy = -1),
+ * each step to the cell of the next row closest to the column it came
+ * from, stopping at the grid's edge. Updates navigator.current so the
+ * header and large-view preview track the move (the "changed" emission
+ * re-selects via _on_nav_changed). */
+static void
+_move_cursor_rows(GgazeGrid *p_grid, GtkWidget *p_cur, int i_dy, int i_rows) {
+   GtkWidget *p_best = p_cur;
+   for (int i = 0; i < i_rows; i++) {
+      GtkWidget *p_next = _nearest_cell_in_row_direction(p_grid, p_best, i_dy);
+      if (p_next == NULL) {
+         break;
+      }
+      p_best = p_next;
+   }
+   if (p_best == p_cur) {
       return;
    }
-   GList *p_sel =
-      gtk_flow_box_get_selected_children(GTK_FLOW_BOX(p_grid->p_flow));
-   if (p_sel == NULL) {
-      return;
-   }
-   GtkWidget *p_cur = GTK_WIDGET(p_sel->data);
-   g_list_free(p_sel);
-   GtkWidget *p_best = _nearest_cell_in_row_direction(p_grid, p_cur, i_dy);
-   if (p_best != NULL &&
-       (_cell_folder(p_best) != NULL || _cell_folder(p_cur) != NULL)) {
+   if (_cell_folder(p_best) != NULL || _cell_folder(p_cur) != NULL) {
       /* Onto or off a folder cell: the highlight moves by itself (a folder
        * is never navigator.current); landing on an image, the selection
        * handler brings current along through the gate. */
       _select_cell(p_grid, p_best);
       return;
    }
-   GFile *p_f = (p_best != NULL) ? _cell_file(p_best) : NULL;
+   GFile *p_f = _cell_file(p_best);
    if (p_f != NULL) {
       _grid_select(p_grid, p_f);
    }
+}
+
+/* One row down (i_dy = +1) or up (i_dy = -1). */
+void
+ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy) {
+   g_return_if_fail(GGAZE_IS_GRID(p_grid));
+   GtkWidget *p_cur = _selected_cell(p_grid);
+   if (p_grid->p_nav != NULL && p_cur != NULL) {
+      _move_cursor_rows(p_grid, p_cur, i_dy, 1);
+   }
+}
+
+/* One page of rows down or up (Page Down / Page Up). */
+void
+ggaze_grid_move_page(GgazeGrid *p_grid, int i_dy) {
+   g_return_if_fail(GGAZE_IS_GRID(p_grid));
+   GtkWidget *p_cur = _selected_cell(p_grid);
+   if (p_grid->p_nav != NULL && p_cur != NULL) {
+      _move_cursor_rows(p_grid, p_cur, i_dy, _rows_per_page(p_grid, p_cur));
+   }
+}
+
+/* Shift + a cursor key: move the highlight one cell (i_dx) or one row
+ * (i_dy) and mark everything from where the run of such moves began to the
+ * new cell -- the file-manager multi-selection, on ggaze's marks. Moving
+ * back towards the start unmarks again (navigator_extend_marks). A run
+ * goes on only from the cell the last such move reached: any other cursor
+ * move in between starts a new one where the highlight then is. Folder
+ * cells take no part (they cannot be marked): the move stops before one. */
+void
+ggaze_grid_extend_selection(GgazeGrid *p_grid, int i_dx, int i_dy) {
+   g_return_if_fail(GGAZE_IS_GRID(p_grid));
+   GtkWidget *p_cur  = _selected_cell(p_grid);
+   GFile     *p_from = (p_cur != NULL) ? _cell_file(p_cur) : NULL;
+   if (p_grid->p_nav == NULL || p_from == NULL) {
+      return;
+   }
+   GtkWidget *p_to = NULL;
+   if (i_dy != 0) {
+      p_to = _nearest_cell_in_row_direction(p_grid, p_cur, i_dy);
+   } else {
+      p_to = (i_dx < 0) ? gtk_widget_get_prev_sibling(p_cur)
+                        : gtk_widget_get_next_sibling(p_cur);
+   }
+   GFile *p_target = (p_to != NULL) ? _cell_file(p_to) : NULL;
+   if (p_target == NULL) {
+      return;
+   }
+   if (p_grid->p_ext_anchor == NULL || p_grid->p_ext_cursor == NULL ||
+       !g_file_equal(p_grid->p_ext_cursor, p_from)) {
+      g_set_object(&p_grid->p_ext_anchor, p_from); /* a new run starts here */
+   }
+   g_object_ref(p_target); /* the marks' "changed" must not take it away */
+   navigator_extend_marks(p_grid->p_nav, p_grid->p_ext_anchor, p_from,
+                          p_target);
+   g_set_object(&p_grid->p_ext_cursor, p_target);
+   _grid_select(p_grid, p_target);
+   g_object_unref(p_target);
 }
 
 /* Borrowed pointer to the selected cell's file (NULL if nothing selected). */
@@ -1011,6 +1106,8 @@ ggaze_grid_dispose(GObject *p_obj) {
       g_clear_object(&p_grid->p_cancel);
    }
    g_clear_object(&p_grid->p_parent);
+   g_clear_object(&p_grid->p_ext_anchor);
+   g_clear_object(&p_grid->p_ext_cursor);
    if (p_grid->p_nav != NULL && p_grid->u_nav_handler != 0) {
       g_signal_handler_disconnect(p_grid->p_nav, p_grid->u_nav_handler);
       p_grid->u_nav_handler = 0;

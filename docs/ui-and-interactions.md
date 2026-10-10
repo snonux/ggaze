@@ -130,8 +130,10 @@ drift from the live bindings.
 
 | Key            | Action |
 |----------------|--------|
-| `h` / `Left` / `PageUp`   | previous image |
-| `l` / `Right` / `PageDown` | next image |
+| `h` / `Left`   | previous image |
+| `l` / `Right` | next image |
+| `PageUp` / `PageDown` | grid: cursor one page of rows up / down; large view: previous / next image |
+| `Shift`+arrows | grid: extend the marks from where the run of such moves began to the new cell (moving back unmarks again); large view: pan |
 | `j` / `Down`   | cursor down one row (grid) / pan down (large) |
 | `k` / `Up`     | cursor up one row (grid) / pan up (large) |
 | `H` / `L`, `Shift+Left` / `Shift+Right` | pan left / right (large) |

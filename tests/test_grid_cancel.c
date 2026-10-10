@@ -408,6 +408,95 @@ test_browse_sub_folders(void) {
    g_free(c_sub);
 }
 
+/* The basename of navigator.current must be c_expected. */
+static void
+assert_current(Navigator *p_nav, const char *c_expected) {
+   char *c_name = g_file_get_basename(navigator_get_current(p_nav));
+   g_assert_cmpstr(c_name, ==, c_expected);
+   g_free(c_name);
+}
+
+/* Page Down / Page Up move the cursor by the rows that fit the viewport
+ * less one (here: a 2-column grid three rows high -> two rows, four cells),
+ * stopping at the last / first row; Shift + a cursor key marks from where
+ * the run began to the new cell, and gives marks back on the way home. */
+static void
+test_grid_page_and_shift_select(void) {
+   const guint u_count = 12;
+   char       *c_dir   = make_large_folder(u_count);
+   GFile      *p_dir   = g_file_new_for_path(c_dir);
+   Navigator  *p_nav   = navigator_new(p_dir, GGAZE_SORT_NAME, FALSE, FALSE);
+   Thumbnail  *p_thumb = thumbnail_new();
+   GgazeGrid  *p_grid  = GGAZE_GRID(ggaze_grid_new(p_nav, p_thumb, 128, FALSE));
+   GtkWindow  *p_win   = GTK_WINDOW(gtk_window_new());
+   gtk_window_set_child(p_win, GTK_WIDGET(p_grid));
+   gtk_window_set_default_size(p_win, 300, 480);
+   gtk_window_present(p_win);
+   g_assert_true(wait_for_paintable(grid_picture(p_grid, 0), 5000));
+   drain_main(200);
+
+   /* The geometry the expectations below are computed from. */
+   graphene_rect_t r0, r1;
+   GtkWidget      *p_c0 =
+      gtk_widget_get_parent(gtk_widget_get_parent(grid_picture(p_grid, 0)));
+   GtkWidget *p_c1 =
+      gtk_widget_get_parent(gtk_widget_get_parent(grid_picture(p_grid, 1)));
+   g_assert_true(gtk_widget_compute_bounds(p_c0, GTK_WIDGET(p_grid), &r0));
+   g_assert_true(gtk_widget_compute_bounds(p_c1, GTK_WIDGET(p_grid), &r1));
+   guint u_cols = 1;
+   while (u_cols < u_count) {
+      graphene_rect_t r;
+      GtkWidget      *p_c = gtk_widget_get_parent(
+         gtk_widget_get_parent(grid_picture(p_grid, u_cols)));
+      g_assert_true(gtk_widget_compute_bounds(p_c, GTK_WIDGET(p_grid), &r));
+      if (r.origin.y > r0.origin.y) {
+         break;
+      }
+      u_cols++;
+   }
+   guint u_rows =
+      (guint)(gtk_widget_get_height(GTK_WIDGET(p_grid)) / r0.size.height);
+   guint u_page = MAX(1u, u_rows > 0 ? u_rows - 1 : 1u) * u_cols;
+   g_assert_cmpuint(u_page, <, u_count);
+
+   ggaze_grid_move_page(p_grid, 1);
+   drain_main(100);
+   char *c_want = g_strdup_printf("image-%02u.jpg", u_page);
+   assert_current(p_nav, c_want);
+   g_free(c_want);
+   for (guint u = 0; u < u_count; u++) {
+      ggaze_grid_move_page(p_grid, 1); /* far past the end: the last row */
+   }
+   drain_main(100);
+   g_assert_cmpint(navigator_get_current_index(p_nav), >=,
+                   (gint)(u_count - u_cols));
+   for (guint u = 0; u < u_count; u++) {
+      ggaze_grid_move_page(p_grid, -1);
+   }
+   drain_main(100);
+   assert_current(p_nav, "image-00.jpg");
+
+   ggaze_grid_extend_selection(p_grid, 1, 0);
+   ggaze_grid_extend_selection(p_grid, 1, 0);
+   drain_main(50);
+   g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 3);
+   assert_current(p_nav, "image-02.jpg");
+   ggaze_grid_extend_selection(p_grid, -1, 0); /* back: one mark returned */
+   drain_main(50);
+   g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 2);
+   ggaze_grid_extend_selection(p_grid, 0, 1); /* a row down: up to there */
+   drain_main(50);
+   g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 2 + u_cols);
+
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+
 /* Write a u_side x u_side noise PNG (slow to decode and scale next to the
  * small fixture) as c_dir/c_name. */
 static void
@@ -499,5 +588,7 @@ main(int i_argc, char **c_argv) {
                    test_grid_loads_newly_visible_after_resize);
    g_test_add_func("/grid/fills_from_the_top", test_grid_fills_from_the_top);
    g_test_add_func("/grid/browse_sub_folders", test_browse_sub_folders);
+   g_test_add_func("/grid/page_and_shift_select",
+                   test_grid_page_and_shift_select);
    return (g_test_run());
 }

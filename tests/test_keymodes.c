@@ -94,7 +94,7 @@ test_panel_card_keys(void) {
    g_assert_cmpstr(shortcuts_global_action(GDK_KEY_Down, 0), ==,
                    "win.cursor-down");
    g_assert_cmpstr(shortcuts_global_action(GDK_KEY_Page_Down, 0), ==,
-                   "win.next");
+                   "win.page-down"); /* next image in the large view */
    /* The tools keep theirs: the crop tool's h still moves, Enter applies. */
    g_assert_cmpint(shortcuts_mode_op(GGAZE_KEY_MODE_CROP, GDK_KEY_h, 0), ==,
                    GGAZE_KEY_OP_CROP_MOVE_LEFT);

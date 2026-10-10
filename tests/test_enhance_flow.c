@@ -7424,7 +7424,9 @@ test_card_keys_wait_for_the_tool(void) {
 
 /* 8i2 review: the arrows are not the panel's. With it open, Left / Right
  * still change the image and Up / Down / Shift+arrows pan -- flicking
- * through a folder with the arrows never moves a strength. */
+ * through a folder with the arrows never moves a strength. Also the
+ * regression test for the arrows changing the image in the large view at
+ * all: they go through the key router, not the shortcut controller. */
 static void
 test_arrows_stay_global_with_the_panel_open(void) {
    ToolFx fx;
@@ -7439,8 +7441,10 @@ test_arrows_stay_global_with_the_panel_open(void) {
    }
    assert_selected(fx.p_win, 1);
    g_assert_false(ggaze_window_enhance_is_dirty(fx.p_win));
-   g_assert_false(emit_capture_key(fx.p_win, GDK_KEY_Left));
-   activate_shortcut(fx.p_win, GDK_KEY_Left); /* -> win.prev */
+   /* The window's key router runs a large-view arrow's global action
+    * itself (GtkWindow's own arrow bindings would answer before the
+    * shortcut table got to see it): stopped, and already win.prev. */
+   g_assert_true(emit_capture_key(fx.p_win, GDK_KEY_Left));
    wait_for_load(fx.p_win, PLAIN_JPG_W, PLAIN_JPG_H);
    assert_showing(fx.p_win, "a.jpg");
    g_assert_nonnull(find_panel(fx.p_win)); /* the panel stays open */

@@ -107,9 +107,16 @@ gboolean navigator_is_raw_name(const char *c_name);
 gboolean navigator_is_marked(Navigator *p_nav, GFile *p_file);
 void     navigator_toggle_mark(Navigator *p_nav, GFile *p_file);
 void     navigator_mark_range(Navigator *p_nav, GFile *p_from, GFile *p_to);
-void     navigator_mark_all(Navigator *p_nav);
-void     navigator_clear_marks(Navigator *p_nav);
-guint    navigator_get_mark_count(Navigator *p_nav);
+/* A Shift+cursor selection stretching from p_anchor that ended on p_from
+ * now ends on p_to: mark everything from p_anchor to p_to (inclusive) and
+ * unmark what only the old stretch covered, so moving back towards the
+ * anchor shrinks the selection. Emits "changed" (marks). No-op when one of
+ * the three is not listed. */
+void   navigator_extend_marks(Navigator *p_nav, GFile *p_anchor, GFile *p_from,
+                              GFile *p_to);
+void   navigator_mark_all(Navigator *p_nav);
+void   navigator_clear_marks(Navigator *p_nav);
+guint  navigator_get_mark_count(Navigator *p_nav);
 GList *navigator_get_marks(Navigator *p_nav); /* (transfer full) GFile* refs */
 
 /* Borrowed pointer to the last file marked via a `v` toggle-on - the anchor

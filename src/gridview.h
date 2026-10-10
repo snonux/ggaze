@@ -70,6 +70,15 @@ gboolean ggaze_grid_sync_current(GgazeGrid *p_grid);
  * navigator.current so the header / large-view preview track the move. */
 void ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy);
 
+/* Shift + a cursor key: move the highlight one cell (i_dx = -1 / +1) or one
+ * row (i_dy = -1 / +1) and mark everything between the cell the run of
+ * such moves started on and the new one; moving back unmarks again. */
+void ggaze_grid_extend_selection(GgazeGrid *p_grid, int i_dx, int i_dy);
+
+/* The same by one page: the rows that fit the viewport less one (at least
+ * one), stopping at the grid's first / last row. */
+void ggaze_grid_move_page(GgazeGrid *p_grid, int i_dy);
+
 /* Borrowed pointer to the currently-selected cell's file (NULL if none). The
  * pointer is owned by the cell; only valid while the cell lives. */
 GFile *ggaze_grid_get_selected_file(GgazeGrid *p_grid);
