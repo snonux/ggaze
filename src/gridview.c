@@ -168,15 +168,29 @@ _set_marked(GtkWidget *p_box, gboolean b_marked) {
    }
 }
 
-/* Apply the dimmed/"ggaze-removed" appearance to one cell's box. */
+/* Apply the "ggaze-removed" appearance to one cell's box: a grey box where
+ * the picture was, the caption dimmed (the CSS is the window's). The cell
+ * itself (the box's flow-box child, once it has one) goes insensitive with
+ * it, so a click cannot put the highlight on a placeholder: its file is
+ * gone, and navigator.current is never a removed one. */
 static void
 _set_removed(GtkWidget *p_box, gboolean b_removed) {
-   gtk_widget_set_opacity(p_box, b_removed ? 0.35 : 1.0);
    if (b_removed) {
       gtk_widget_add_css_class(p_box, "ggaze-removed");
    } else {
       gtk_widget_remove_css_class(p_box, "ggaze-removed");
    }
+   GtkWidget *p_child = gtk_widget_get_parent(p_box);
+   if (p_child != NULL) {
+      gtk_widget_set_sensitive(p_child, !b_removed);
+   }
+}
+
+/* TRUE iff p_child is the placeholder of a trashed / deleted image. */
+static gboolean
+_cell_is_removed(GgazeGrid *p_grid, GtkWidget *p_child) {
+   GFile *p_f = _cell_file(p_child);
+   return (p_f != NULL && navigator_is_removed(p_grid->p_nav, p_f));
 }
 
 static void
@@ -326,6 +340,13 @@ _request_thumbnail(GtkWidget *p_pic) {
                        p_grid->p_cancel, _thumb_finish_cb, g_object_ref(p_pic));
 }
 
+/* TRUE iff p_pic is on screen or on the page right below it. Thumbnails are
+ * made for the visible cells and one viewport height ahead, so paging or
+ * scrolling down lands on pictures that are already there instead of on a
+ * page of empty cells -- and no further, so a large folder is still not
+ * decoded wholesale. Only ahead, not behind: requests go out in flow order
+ * and the grid fills strictly from the top (_paint_ready), so a cell above
+ * the viewport that was still waiting would hold back the visible ones. */
 static gboolean
 _picture_is_visible(GgazeGrid *p_grid, GtkWidget *p_pic) {
    graphene_rect_t t_bounds;
@@ -339,7 +360,8 @@ _picture_is_visible(GgazeGrid *p_grid, GtkWidget *p_pic) {
    double d_left   = gtk_adjustment_get_value(p_hadjustment);
    double d_top    = gtk_adjustment_get_value(p_vadjustment);
    double d_right  = d_left + gtk_adjustment_get_page_size(p_hadjustment);
-   double d_bottom = d_top + gtk_adjustment_get_page_size(p_vadjustment);
+   double d_page   = gtk_adjustment_get_page_size(p_vadjustment);
+   double d_bottom = d_top + 2.0 * d_page; /* the viewport + one page ahead */
    return (t_bounds.origin.x < d_right && t_bounds.origin.y < d_bottom &&
            t_bounds.origin.x + t_bounds.size.width > d_left &&
            t_bounds.origin.y + t_bounds.size.height > d_top);
@@ -420,11 +442,12 @@ _make_cell(GgazeGrid *p_grid, GFile *p_file) {
    gtk_widget_add_css_class(p_label, "caption");
    gtk_box_append(GTK_BOX(p_box), p_label);
 
-   _set_marked(p_box, navigator_is_marked(p_grid->p_nav, p_file));
-   _set_removed(p_box, navigator_is_removed(p_grid->p_nav, p_file));
+   gtk_widget_add_css_class(p_box, "ggaze-cell");
 
    GtkWidget *p_child = gtk_flow_box_child_new();
    gtk_flow_box_child_set_child(GTK_FLOW_BOX_CHILD(p_child), p_box);
+   _set_marked(p_box, navigator_is_marked(p_grid->p_nav, p_file));
+   _set_removed(p_box, navigator_is_removed(p_grid->p_nav, p_file));
    g_object_set_data_full(G_OBJECT(p_child), "file", g_object_ref(p_file),
                           (GDestroyNotify)g_object_unref);
    return (p_child);
@@ -437,6 +460,7 @@ static GtkWidget *
 _make_folder_cell(GgazeGrid *p_grid, GFile *p_folder) {
    GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
    gtk_widget_set_size_request(p_box, p_grid->i_size + 4, p_grid->i_size + 18);
+   gtk_widget_add_css_class(p_box, "ggaze-cell");
    gboolean b_up =
       (p_grid->p_parent != NULL && g_file_equal(p_folder, p_grid->p_parent));
    GtkWidget *p_icon =
@@ -708,7 +732,9 @@ static void
 _nearest_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
    NearestSearch  *p_s = (NearestSearch *)p_data;
    graphene_rect_t r;
-   if (p_child == p_s->p_cur ||
+   /* A removed image's placeholder is no place for the cursor: a row of
+    * nothing else is stepped over. */
+   if (p_child == p_s->p_cur || _cell_is_removed(p_grid, p_child) ||
        !gtk_widget_compute_bounds(p_child, p_grid->p_flow, &r) ||
        r.size.width == 0) {
       return;
@@ -814,7 +840,7 @@ ggaze_grid_move_page(GgazeGrid *p_grid, int i_dy) {
  * new cell -- the file-manager multi-selection, on ggaze's marks. Moving
  * back towards the start unmarks again (navigator_extend_marks). A run
  * goes on only from the cell the last such move reached: any other cursor
- * move in between starts a new one where the highlight then is. Folder
+ * move ends it and unmarks what it marked (_end_shift_selection). Folder
  * cells take no part (they cannot be marked): the move stops before one. */
 void
 ggaze_grid_extend_selection(GgazeGrid *p_grid, int i_dx, int i_dy) {
@@ -828,8 +854,11 @@ ggaze_grid_extend_selection(GgazeGrid *p_grid, int i_dx, int i_dy) {
    if (i_dy != 0) {
       p_to = _nearest_cell_in_row_direction(p_grid, p_cur, i_dy);
    } else {
-      p_to = (i_dx < 0) ? gtk_widget_get_prev_sibling(p_cur)
-                        : gtk_widget_get_next_sibling(p_cur);
+      p_to = p_cur;
+      do { /* the next cell that is not a removed image's placeholder */
+         p_to = (i_dx < 0) ? gtk_widget_get_prev_sibling(p_to)
+                           : gtk_widget_get_next_sibling(p_to);
+      } while (p_to != NULL && _cell_is_removed(p_grid, p_to));
    }
    GFile *p_target = (p_to != NULL) ? _cell_file(p_to) : NULL;
    if (p_target == NULL) {
@@ -1059,12 +1088,37 @@ _refresh_removed_state(GgazeGrid *p_grid) {
    _foreach_cell(p_grid, _refresh_removed_step, NULL);
 }
 
+/* The cursor moved. If a Shift+cursor selection is up and this was not one
+ * of its own moves (those leave current on p_ext_cursor), it was a plain
+ * cursor key, a click or any other navigation: the selection is dropped,
+ * as in a file manager -- it stays while the keys are merely released, and
+ * goes with the next move made without Shift. Only the stretch that run
+ * marked is unmarked; marks set elsewhere with `v` stay. */
+static void
+_end_shift_selection(GgazeGrid *p_grid) {
+   if (p_grid->p_ext_anchor == NULL || p_grid->p_ext_cursor == NULL) {
+      return;
+   }
+   GFile *p_cur = navigator_get_current(p_grid->p_nav);
+   if (p_cur != NULL && g_file_equal(p_cur, p_grid->p_ext_cursor)) {
+      return; /* the run's own move */
+   }
+   GFile *p_anchor = g_steal_pointer(&p_grid->p_ext_anchor);
+   GFile *p_end    = g_steal_pointer(&p_grid->p_ext_cursor);
+   navigator_unmark_range(p_grid->p_nav, p_anchor, p_end); /* re-enters */
+   g_object_unref(p_anchor);
+   g_object_unref(p_end);
+}
+
 static void
 _on_nav_changed(Navigator *p_nav, guint u_flags, gpointer p_data) {
    (void)p_nav;
    GgazeGrid *p_grid = GGAZE_GRID(p_data);
    if (p_grid->p_nav == NULL) {
       return;
+   }
+   if ((u_flags & GGAZE_NAV_CURSOR) != 0) {
+      _end_shift_selection(p_grid);
    }
    /* A changed listing is reconciled cell by cell (new, gone, moved or
     * renamed -- a same-count replace included). So is a removed-set change

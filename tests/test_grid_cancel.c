@@ -408,6 +408,51 @@ test_browse_sub_folders(void) {
    g_free(c_sub);
 }
 
+/* Thumbnails are made one page ahead of the viewport: a cell on the page
+ * below the visible one is painted without any scrolling (paging down then
+ * lands on pictures, not on empty cells), while the folder's far end still
+ * is not decoded. */
+static void
+test_grid_loads_one_page_ahead(void) {
+   const guint u_count = 24;
+   char       *c_dir   = make_large_folder(u_count);
+   GFile      *p_dir   = g_file_new_for_path(c_dir);
+   Navigator  *p_nav   = navigator_new(p_dir, GGAZE_SORT_NAME, FALSE, FALSE);
+   Thumbnail  *p_thumb = thumbnail_new();
+   GgazeGrid  *p_grid  = GGAZE_GRID(ggaze_grid_new(p_nav, p_thumb, 128, FALSE));
+   GtkWindow  *p_win   = GTK_WINDOW(gtk_window_new());
+   gtk_window_set_child(p_win, GTK_WIDGET(p_grid));
+   gtk_window_set_default_size(p_win, 300, 320);
+   gtk_window_present(p_win);
+   g_assert_true(wait_for_paintable(grid_picture(p_grid, 0), 5000));
+
+   /* The first cell that starts below the viewport: on the page ahead. */
+   float      f_view  = (float)gtk_widget_get_height(GTK_WIDGET(p_grid));
+   GtkWidget *p_ahead = NULL;
+   for (guint u = 0; u < u_count && p_ahead == NULL; u++) {
+      graphene_rect_t r;
+      GtkWidget      *p_pic = grid_picture(p_grid, u);
+      g_assert_true(gtk_widget_compute_bounds(p_pic, GTK_WIDGET(p_grid), &r));
+      if (r.origin.y >= f_view) {
+         g_assert_cmpfloat(r.origin.y, <, 2.0f * f_view);
+         p_ahead = p_pic;
+      }
+   }
+   g_assert_nonnull(p_ahead);
+   g_assert_true(wait_for_paintable(p_ahead, 5000));
+   drain_main(1000);
+   g_assert_null(gtk_picture_get_paintable(
+      GTK_PICTURE(grid_picture(p_grid, u_count - 1))));
+
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+
 /* The basename of navigator.current must be c_expected. */
 static void
 assert_current(Navigator *p_nav, const char *c_expected) {
@@ -480,6 +525,15 @@ test_grid_page_and_shift_select(void) {
    ggaze_grid_extend_selection(p_grid, 1, 0);
    drain_main(50);
    g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 3);
+   /* Marking must not resize a cell: the grid is homogeneous, so a marked
+    * cell that grew (a border only marked cells had) grew every row and
+    * the whole view jumped when a selection was started. */
+   graphene_rect_t r0_marked;
+   drain_main(100);
+   g_assert_true(
+      gtk_widget_compute_bounds(p_c0, GTK_WIDGET(p_grid), &r0_marked));
+   g_assert_cmpfloat(r0_marked.size.width, ==, r0.size.width);
+   g_assert_cmpfloat(r0_marked.size.height, ==, r0.size.height);
    assert_current(p_nav, "image-02.jpg");
    ggaze_grid_extend_selection(p_grid, -1, 0); /* back: one mark returned */
    drain_main(50);
@@ -487,6 +541,21 @@ test_grid_page_and_shift_select(void) {
    ggaze_grid_extend_selection(p_grid, 0, 1); /* a row down: up to there */
    drain_main(50);
    g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 2 + u_cols);
+
+   /* Released, the selection stays; the next move without Shift drops it --
+    * but not a mark set outside the run. */
+   GFile *p_last = navigator_get_file(p_nav, u_count - 1);
+   navigator_toggle_mark(p_nav, p_last);
+   drain_main(100);
+   g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 3 + u_cols);
+   ggaze_grid_move_cursor(p_grid, 1);
+   drain_main(50);
+   g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 1);
+   g_assert_true(navigator_is_marked(p_nav, p_last));
+   /* A new run starts where the highlight now is. */
+   ggaze_grid_extend_selection(p_grid, -1, 0);
+   drain_main(50);
+   g_assert_cmpuint(navigator_get_mark_count(p_nav), ==, 3);
 
    ggaze_grid_detach(p_grid);
    gtk_window_destroy(p_win);
@@ -590,5 +659,7 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/grid/browse_sub_folders", test_browse_sub_folders);
    g_test_add_func("/grid/page_and_shift_select",
                    test_grid_page_and_shift_select);
+   g_test_add_func("/grid/loads_one_page_ahead",
+                   test_grid_loads_one_page_ahead);
    return (g_test_run());
 }

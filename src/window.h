@@ -73,6 +73,13 @@ void ggaze_window_clear_texture_cache(GgazeWindow *p_win);
  * included -- must cost exactly one (tests/test_open_and_show.c, gd2). */
 guint ggaze_window_load_count(GgazeWindow *p_win);
 
+/* Wait for the background trash / delete work started so far (`d`, `D`) and
+ * apply its results now -- dimmed cells, the cursor advance, the status
+ * line -- without giving the main loop a turn. A test seam: the removals
+ * run on a worker thread and are otherwise applied a few milliseconds
+ * later from the main loop. */
+void ggaze_window_flush_file_ops(GgazeWindow *p_win);
+
 /* The info-overlay label (`i`; also reused for transient status messages
  * like "Copied image"). Exposed so tests can assert its visibility/text
  * directly instead of reaching into private window state -- e.g. the gu0

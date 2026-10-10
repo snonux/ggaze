@@ -211,8 +211,10 @@ test_bulk_delete_lands_on_live(void) {
 
    /* Bulk-delete the adjacent block rgba + rot6 via the captured path (the
     * exact code the confirm-dialog callback runs). The cursor is on rgba
-    * (now removed); a single navigator_next must skip rot6 (also removed) and
-    * land on small.png (live). */
+    * (now removed) and must go to the NEAREST file that stays: plain.jpg,
+    * right before it -- not rot6 (being removed too), and not small.png
+    * behind the whole block, where it used to be carried (and the view
+    * scrolled after it). */
    GFile            *p_dir    = g_file_new_for_path(c_dir);
    const char *const c_del[]  = {"rgba.png", "rot6.jpg"};
    const char *const c_live[] = {"plain.jpg", "small.png"};
@@ -245,9 +247,9 @@ test_bulk_delete_lands_on_live(void) {
    char *c_nowpath = g_build_filename(c_dir, c_now, NULL);
    g_assert_true(path_exists(c_nowpath));
    g_free(c_nowpath);
-   /* Specifically small.png (the live skip target after the removed block),
-    * never the removed rot6.jpg. */
-   g_assert_cmpstr(c_now, ==, "small.png");
+   /* Specifically plain.jpg (the nearest live neighbour of where the cursor
+    * was), never the removed rot6.jpg. */
+   g_assert_cmpstr(c_now, ==, "plain.jpg");
    g_free(c_now);
    g_assert_nonnull(viewer_texture(p_win));
 

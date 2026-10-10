@@ -121,6 +121,76 @@ nav_file(Fx *p_fx, guint u_idx) {
 
 /* --- tests --------------------------------------------------------------- */
 
+/* The window's `d` / `D`: the disk work runs on a worker and is applied
+ * from the main loop -- here by the flush -- file by file, with the same
+ * outcome as the synchronous calls: dimmed, advanced past, reported. A
+ * file already queued is not queued twice, `u` waits for a trash still in
+ * flight, and a removed entry keeps its place in the listing across a
+ * rescan until a refresh forgets it. */
+static void
+test_async_trash_and_delete(void) {
+   Fx fx = {0};
+   fx_setup(&fx);
+   GFile *p_a = g_object_ref(nav_file(&fx, 0));
+   GFile *p_b = g_object_ref(nav_file(&fx, 1));
+   GList  t_a = {p_a, NULL, NULL};
+   GList  t_b = {p_b, NULL, NULL};
+   fileops_trash_async(fx.p_fo, &t_a);
+   fileops_trash_async(fx.p_fo, &t_a); /* key repeat: ignored */
+   fileops_flush(fx.p_fo);
+   g_assert_false(exists(fx.c_dir, "a.jpg"));
+   g_assert_true(navigator_is_removed(fx.p_nav, p_a));
+   g_assert_cmpint(navigator_get_current_index(fx.p_nav), ==, 1);
+   g_assert_cmpstr(fx.c_last, ==, "Trashed a.jpg — u to undo");
+
+   /* The placeholder stays first across a rescan (it used to move to the
+    * end of the listing). */
+   navigator_rescan(fx.p_nav);
+   g_assert_cmpuint(navigator_get_count(fx.p_nav), ==, 3);
+   g_assert_true(g_file_equal(nav_file(&fx, 0), p_a));
+   g_assert_cmpint(navigator_get_current_index(fx.p_nav), ==, 1);
+
+   fileops_trash_async(fx.p_fo, &t_b);
+   fileops_undo(fx.p_fo); /* flushes, then restores b.jpg */
+   g_assert_true(exists(fx.c_dir, "b.jpg"));
+   g_assert_cmpstr(fx.c_last, ==, "Restored from Trash");
+   g_assert_false(navigator_is_removed(fx.p_nav, p_b));
+
+   /* A multi-selection goes to the bin as one batch: every file dimmed,
+    * and one `u` brings all of them back. */
+   GList *p_both = g_list_prepend(NULL, g_object_ref(nav_file(&fx, 2)));
+   p_both        = g_list_prepend(p_both, g_object_ref(p_b));
+   fileops_trash_async(fx.p_fo, p_both);
+   g_list_free_full(p_both, g_object_unref);
+   fileops_flush(fx.p_fo);
+   g_assert_cmpstr(fx.c_last, ==, "Trashed 2 files — u to undo");
+   g_assert_false(exists(fx.c_dir, "b.jpg"));
+   g_assert_false(exists(fx.c_dir, "c.jpg"));
+   g_assert_cmpuint(navigator_get_remaining(fx.p_nav), ==, 0);
+   fileops_undo(fx.p_fo);
+   g_assert_true(exists(fx.c_dir, "b.jpg"));
+   g_assert_true(exists(fx.c_dir, "c.jpg"));
+   g_assert_cmpuint(navigator_get_remaining(fx.p_nav), ==, 2);
+
+   GList *p_files = g_list_prepend(NULL, g_object_ref(p_b));
+   p_files        = g_list_prepend(p_files, g_object_ref(nav_file(&fx, 2)));
+   fileops_delete_files_async(fx.p_fo, p_files);
+   g_list_free_full(p_files, g_object_unref);
+   fileops_flush(fx.p_fo);
+   g_assert_false(exists(fx.c_dir, "b.jpg"));
+   g_assert_false(exists(fx.c_dir, "c.jpg"));
+   g_assert_cmpstr(fx.c_last, ==, "Deleted 2 files permanently (no undo)");
+   g_assert_cmpuint(navigator_get_count(fx.p_nav), ==, 3); /* placeholders */
+   g_assert_cmpuint(navigator_get_remaining(fx.p_nav), ==, 0);
+   g_assert_cmpint(navigator_get_current_index(fx.p_nav), ==, -1);
+
+   navigator_refresh(fx.p_nav); /* Ctrl+r: the placeholders go */
+   g_assert_cmpuint(navigator_get_count(fx.p_nav), ==, 0);
+   g_object_unref(p_a);
+   g_object_unref(p_b);
+   fx_teardown(&fx);
+}
+
 static void
 test_capture_targets(void) {
    Fx fx = {0};
@@ -226,6 +296,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/fileops/trash_advances_and_reports",
                    test_trash_advances_and_reports);
    g_test_add_func("/fileops/delete_reports", test_delete_reports);
+   g_test_add_func("/fileops/async_trash_and_delete",
+                   test_async_trash_and_delete);
    g_test_add_func("/fileops/move_and_undo", test_move_and_undo);
    g_test_add_func("/fileops/no_folder_is_noop", test_no_folder_is_noop);
    return (g_test_run());

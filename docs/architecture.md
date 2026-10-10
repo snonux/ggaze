@@ -183,6 +183,15 @@ ggaze
   open path as a *browse* move that keeps its browse root (the folder
   opened from outside), which is where the grid's `..` stops. Owns no GTK
   state; testable standalone.
+- **fileops** — the d / D / m / u policy over the engines. The window's
+  `d` and `D` go through `fileops_trash_async` / `fileops_delete_files_async`:
+  one worker thread does the rename / unlink in key-press order and hands
+  each file back to the main loop, which dims it, advances and reports.
+  The Trash engine is not thread-safe, so `fileops_flush` (undo, folder
+  change, Empty Trash) waits for the worker before the main thread uses it.
+  Removed entries keep their **position** in the navigator's listing across
+  rescans (`_reconcile_removed`) until `navigator_refresh` (`Ctrl+r`)
+  forgets them.
 - **trash** — moves a file to `<dir>/.Trash/` (creating it lazily), preserving
   relative path uniqueness (suffix `-1`, `-2`… on collision). `D` calls
   `g_file_delete` instead. Tracks the last trashed item for `u` undo/restore.

@@ -173,6 +173,7 @@ static void _action_enter_large(GSimpleAction *p_a, GVariant *p_v,
 static void _action_menu(GSimpleAction *p_a, GVariant *p_v, gpointer p_data);
 static void _action_parent_folder(GSimpleAction *p_a, GVariant *p_v,
                                   gpointer p_data);
+static void _action_refresh(GSimpleAction *p_a, GVariant *p_v, gpointer p_data);
 static void _action_empty_trash(GSimpleAction *p_a, GVariant *p_v,
                                 gpointer p_data);
 static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
@@ -939,27 +940,25 @@ _action_open_folder(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 
 /* --- M7: trash / delete / undo / view toggle / resize ------------------- */
 
-/* Bin p_target (the file `d` was pressed on, captured then -- NOT a fresh read
- * of navigator.current, see _FileCtx). The policy (still-in-folder guard,
- * advance only if it was current, undo record, wording) is fileops'. */
-static void
-_do_trash_now(GgazeWindow *p_win, GFile *p_target) {
-   fileops_trash(p_win->p_fileops, p_target);
-}
-
 static gboolean
 _proceed_trash(gpointer p_data) {
-   _FileCtx *p_ctx = (_FileCtx *)p_data;
-   _do_trash_now(p_ctx->p_win, p_ctx->p_file);
+   _FilesCtx *p_ctx = (_FilesCtx *)p_data;
+   /* The policy (still-in-folder guard, advance only past a file that was
+    * current, one undo batch, wording) is fileops'; the disk work runs on
+    * its worker. */
+   fileops_trash_async(p_ctx->p_win->p_fileops, p_ctx->p_files);
    return (G_SOURCE_REMOVE);
 }
 
-/* `d`: move the current file to ./Trash, then advance. If an unsaved (GEGL)
- * enhance preview is active on the current file, prompts Save/Discard/Cancel
- * first; trashing proceeds only after that resolves (immediately if nothing
- * is dirty). The victim is captured HERE, at key-press time, so answering the
- * prompt can never bin whatever happens to be current by then (round 3,
- * finding h). */
+/* `d`: move the marked set (else the current file) to ./Trash, then advance
+ * -- the same targets as `D` and `m`, so a multi-selection goes to the bin
+ * as a whole and every one of its cells turns into a grey box (it used to
+ * bin only the file under the cursor, whatever was marked). If an unsaved
+ * (GEGL) enhance preview is active, prompts Save/Discard/Cancel first;
+ * trashing proceeds only after that resolves (immediately if nothing is
+ * dirty). The targets are captured HERE, at key-press time, so answering
+ * the prompt can never bin whatever happens to be current or marked by then
+ * (round 3, finding h; see _capture_targets). */
 static void
 _action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
@@ -968,13 +967,15 @@ _action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (!_require_folder(p_win)) {
       return;
    }
-   if (_folder_cell_selected(p_win)) {
-      _show_status(p_win, "Select an image to trash");
+   GList *p_targets = _capture_targets(p_win);
+   if (p_targets == NULL) {
+      if (_folder_cell_selected(p_win)) {
+         _show_status(p_win, "Select an image to trash");
+      }
       return;
    }
-   GFile *p_cur = navigator_get_current(p_win->p_nav);
    save_gate_maybe_save_then(p_win->p_save_gate, _proceed_trash,
-                             _file_ctx_new(p_win, p_cur), _file_ctx_free);
+                             _files_ctx_new(p_win, p_targets), _files_ctx_free);
 }
 
 /* TRUE iff p_win still navigates p_dir (the folder the captured delete targets
@@ -995,7 +996,7 @@ ggaze_window_delete_targets_still_current(GgazeWindow *p_win, GFile *p_dir) {
  * outcome is reported -- fileops owns that policy. */
 static void
 _do_delete_files(GgazeWindow *p_win, GList *p_files) {
-   fileops_delete_files(p_win->p_fileops, p_files);
+   fileops_delete_files_async(p_win->p_fileops, p_files);
 }
 
 /* Process a confirmed bulk-delete against the captured targets p_files
@@ -3037,6 +3038,7 @@ static const GActionEntry ACTIONS[] = {
    {.name = "enter-large", .activate = _action_enter_large},
    {.name = "menu", .activate = _action_menu},
    {.name = "empty-trash", .activate = _action_empty_trash},
+   {.name = "refresh", .activate = _action_refresh},
    {.name = "fullscreen", .activate = _action_fullscreen},
    {.name = "slideshow", .activate = _action_slideshow},
    {.name = "info", .activate = _action_info},
@@ -3293,6 +3295,7 @@ _empty_trash_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(p_src), p_res, &p_err);
    g_clear_error(&p_err);
    if (i_btn == 1 && !p_win->b_disposed && p_win->p_trash != NULL) {
+      fileops_flush(p_win->p_fileops); /* the worker borrows the Trash */
       guint u_done = 0;
       if (trash_empty(p_win->p_trash, &u_done, &p_err)) {
          char *c_msg = g_strdup_printf("Emptied Trash (%u file%s)", u_done,
@@ -3312,6 +3315,25 @@ _empty_trash_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    g_object_unref(p_win);
 }
 
+/* Ctrl+r: re-read the folder and forget the removed entries, so the grid's
+ * grey placeholders for trashed / deleted images go and the cells close up.
+ * Deliberately a key of its own: a trash or delete leaves every other cell
+ * where it was, so the eye (and the cursor) keep their place while culling;
+ * the grid is only re-packed when the user asks for it. `u` still restores
+ * the last trashed file afterwards. */
+static void
+_action_refresh(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (!_require_folder(p_win)) {
+      return;
+   }
+   fileops_flush(p_win->p_fileops); /* what is being removed is removed */
+   navigator_refresh(p_win->p_nav); /* "changed" -> grid + reload */
+   _show_status(p_win, "Folder refreshed");
+}
+
 /* `E` / main menu "Empty Trash": permanently delete the folder's .Trash
  * contents after a confirm (no undo past this point). */
 static void
@@ -3322,6 +3344,7 @@ _action_empty_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (!_require_folder(p_win) || p_win->p_trash == NULL) {
       return;
    }
+   fileops_flush(p_win->p_fileops); /* a `d` still on its way counts */
    guint u_n = trash_count(p_win->p_trash);
    if (u_n == 0) {
       _show_status(p_win, "Trash is already empty");
@@ -3623,6 +3646,27 @@ ggaze_window_finalize(GObject *p_obj) {
  * the edit panel's preset rows and key badges, and the key-hint bar. */
 static const char _GGAZE_CSS[] =
    "/* marked-thumbnail badge (multi-selection). */\n"
+   /* A trashed / deleted image's cell: a grey box where the picture was,
+    * holding its place in the grid until a refresh (Ctrl+r). */
+   ".ggaze-removed {\n"
+   "  background-color: alpha(currentColor, 0.14);\n"
+   "  border-radius: 6px;\n"
+   "}\n"
+   ".ggaze-removed picture {\n"
+   "  opacity: 0;\n"
+   "}\n"
+   ".ggaze-removed label {\n"
+   "  opacity: 0.45;\n"
+   "}\n"
+   /* Every grid cell carries the border a mark colours, transparent until
+    * then. The border used to exist on marked cells only, which made a
+    * marked cell 4px larger -- and, the grid being homogeneous, EVERY cell:
+    * the first mark of a selection grew all rows and shifted the whole
+    * view, and deleting the selection shrank it back. */
+   ".ggaze-cell {\n"
+   "  border: 2px solid transparent;\n"
+   "  border-radius: 4px;\n"
+   "}\n"
    ".ggaze-marked {\n"
    "  border: 2px solid #3584e4;\n"
    "  border-radius: 4px;\n"
@@ -4703,6 +4747,14 @@ void
 ggaze_window_clear_texture_cache(GgazeWindow *p_win) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));
    viewload_clear_cache(p_win->p_viewload);
+}
+
+void
+ggaze_window_flush_file_ops(GgazeWindow *p_win) {
+   g_return_if_fail(GGAZE_IS_WINDOW(p_win));
+   if (p_win->p_fileops != NULL) {
+      fileops_flush(p_win->p_fileops);
+   }
 }
 
 guint

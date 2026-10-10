@@ -337,8 +337,10 @@ test_marks_persist_across_view_switch(void) {
    cleanup_temp_dir(c_dir);
 }
 
-/* Trashing the current image clears its mark (decision Q / du0): mark all 3,
- * trash the current, the mark count drops to 2 and the grid badges drop one. */
+/* `d` bins the marked set, like `D` and `m` (it used to bin only the file
+ * under the cursor, whatever was marked): mark two of three, trash -- both
+ * go, their marks with them (decision Q / du0), each cell stays as a
+ * placeholder, and the unmarked third is untouched. */
 static void
 test_marks_clear_on_trash(void) {
    GFile *p_plain = NULL;
@@ -348,14 +350,19 @@ test_marks_clear_on_trash(void) {
    ggaze_window_open(p_win, p_plain);
    wait_for_load(p_win);
 
-   fire(p_win, "win.mark-all");
-   assert_marks(p_win, 3);
+   fire(p_win, "win.mark"); /* the current one ... */
+   fire(p_win, "win.next");
+   drain_main(100);
+   fire(p_win, "win.mark"); /* ... and the next */
+   assert_marks(p_win, 2);
 
    fire(p_win, "win.trash");
    drain_main(300);
-   /* The trashed file's mark is cleared; 2 marks remain. */
-   g_assert_cmpint(title_mark_count(p_win), ==, 2);
-   g_assert_cmpint(grid_marked_count(window_grid(p_win)), ==, 2);
+   g_assert_cmpint(title_mark_count(p_win), ==, 0);
+   g_assert_cmpint(grid_marked_count(window_grid(p_win)), ==, 0);
+   g_assert_cmpuint(ggaze_grid_get_count(window_grid(p_win)), ==, 3);
+   g_assert_nonnull(
+      g_strstr_len(gtk_window_get_title(GTK_WINDOW(p_win)), -1, "1/1"));
 
    /* .Trash was created with the binned file. */
    char  *c_trashpath = g_build_filename(c_dir, ".Trash", NULL);

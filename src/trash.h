@@ -26,14 +26,21 @@ Trash *trash_new(GFile *p_shoot_dir);
 void   trash_delete(Trash *p_t); /* g_object_unref-style destructor */
 
 /* Move p_file into .Trash (lazy create, collision suffix -1/-2). Records the
- * move so trash_restore_last() can undo it. Returns TRUE on success. */
+ * move -- as a new undo batch of one -- so trash_restore_last() can undo
+ * it. Returns TRUE on success. */
 gboolean trash_bin(Trash *p_t, GFile *p_file, GError **p_err);
+
+/* The same, as one more file of the batch the last trash_bin started: the
+ * undo then restores all of them (a multi-selection binned with one `d`). */
+gboolean trash_bin_more(Trash *p_t, GFile *p_file, GError **p_err);
 
 /* Permanently delete p_file (unlink). Not undoable; stateless (no Trash). */
 gboolean trash_permanently_delete(GFile *p_file, GError **p_err);
 
-/* Move the last binned file back to its original path. Returns FALSE if there
- * is nothing to undo. */
+/* Move the last binned batch (one file, or everything trash_bin_more added
+ * to it) back to its original paths. Returns FALSE if there is nothing to
+ * undo, or when a file would not go back (p_err set; it and the ones not
+ * tried yet stay restorable). */
 gboolean trash_restore_last(Trash *p_t, GError **p_err);
 
 gboolean trash_can_undo(Trash *p_t);

@@ -44,6 +44,16 @@ The **KISS** part — things gthumb has that ggaze deliberately drops:
   current image and cannot be marked, and `d`/`D`/`m` do nothing while the
   highlight rests on one (unless files are marked). A folder with
   sub-folders but no images shows these cells, not the "No images" page.
+- **Trash / delete keep the grid in place**: a trashed (`d`) or deleted
+  (`D`) image's cell turns into a grey box and stays exactly where it was —
+  also across the folder rescans that follow — so no other cell moves while
+  culling. `Ctrl+r` refreshes the folder and removes the boxes. The disk
+  work runs on a worker thread, in key-press order; the UI never waits for
+  it, and each file is greyed as it actually leaves the disk. `u` (and a
+  folder change, Empty Trash) first wait for removals still in flight.
+- **Thumbnails one page ahead**: the grid makes thumbnails for the visible
+  cells and for one viewport height below them, so `PageDown` / scrolling
+  down lands on pictures that are already there.
 - **Thumbnails fill from the top**: a decoded thumbnail is not painted while
   a cell before it still waits for its first one, so the grid fills in
   order and nothing above the fill front changes again. Cells are kept
@@ -133,7 +143,7 @@ drift from the live bindings.
 | `h` / `Left`   | previous image |
 | `l` / `Right` | next image |
 | `PageUp` / `PageDown` | grid: cursor one page of rows up / down; large view: previous / next image |
-| `Shift`+arrows | grid: extend the marks from where the run of such moves began to the new cell (moving back unmarks again); large view: pan |
+| `Shift`+arrows | grid: extend the marks from where the run of such moves began to the new cell (moving back unmarks again); it stays when the keys are released and is dropped by the next cursor move without `Shift` (marks set with `v` elsewhere stay); large view: pan |
 | `j` / `Down`   | cursor down one row (grid) / pan down (large) |
 | `k` / `Up`     | cursor up one row (grid) / pan up (large) |
 | `H` / `L`, `Shift+Left` / `Shift+Right` | pan left / right (large) |
@@ -154,9 +164,10 @@ drift from the live bindings.
 | `s`            | save an edited copy (GEGL); no auto-save |
 | `S` / `F5`     | start / stop slideshow (large view; any navigation key, a swipe and a navigate-mode wheel notch stop it) |
 | `i`            | toggle info overlay |
-| `d` / `Delete` | move to `.Trash` (status line offers `u`), then next; undoable |
+| `d` / `Delete` | move the marked images (else the current one) to `.Trash` (status line offers `u`), then next; `u` restores the whole batch |
 | `D` / `Shift+Delete` | delete permanently (no trash), then next; no undo |
 | `E`            | empty this folder's `.Trash` (confirm dialog; no undo) |
+| `Ctrl+r`       | refresh the folder: re-read it and drop the grey placeholders of trashed / deleted images, so the grid closes up |
 | `m`            | move marks (or current) → destination popup |
 | `e`            | open current image in an external program → popup |
 | `!`            | run a shell script → popup (e.g. `usbimport`) |

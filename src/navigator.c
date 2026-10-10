@@ -292,35 +292,49 @@ _drop_raw_sidecars(GPtrArray *p_entries, GHashTable *p_jpeg_stems) {
    }
 }
 
-/* Replace the listing with the sorted entries, keeping the cursor on the
- * same file by path, else on the nearest position, else parked. */
+/* Replace the listing with the sorted entries. The cursor is put back by
+ * _restore_cursor once the removed entries are in place too. */
 static void
 _commit_entries(Navigator *p_nav, GPtrArray *p_entries) {
-   GFile *p_keep = NULL;
-   if (p_nav->i_current >= 0 && (guint)p_nav->i_current < p_nav->p_files->len) {
-      p_keep = g_object_ref(
-         g_ptr_array_index(p_nav->p_files, (guint)p_nav->i_current));
-   }
-   gint i_old = p_nav->i_current;
    g_ptr_array_set_size(p_nav->p_files, 0);
    for (gsize u_i = 0; u_i < p_entries->len; u_i++) {
       Entry *p_e = (Entry *)g_ptr_array_index(p_entries, u_i);
       g_ptr_array_add(p_nav->p_files, g_object_ref(p_e->p_file));
    }
-   if (p_keep != NULL) {
-      gint i_found = _find_index_by_file(p_nav, p_keep);
-      if (i_found >= 0) {
-         p_nav->i_current = i_found;
-      } else if (p_nav->p_files->len == 0) {
-         p_nav->i_current = -1;
-      } else {
-         p_nav->i_current = CLAMP(i_old, 0, (gint)p_nav->p_files->len - 1);
+}
+
+/* The live (not removed) entry nearest to position i_from, looking forward
+ * first, or -1 when nothing is live. */
+static gint
+_nearest_live_index(Navigator *p_nav, gint i_from) {
+   gint i_n = (gint)p_nav->p_files->len;
+   i_from   = CLAMP(i_from, 0, MAX(i_n - 1, 0));
+   for (gint i = i_from; i < i_n; i++) {
+      if (_is_live_index(p_nav, (guint)i)) {
+         return (i);
       }
-      g_object_unref(p_keep);
-   } else if (p_nav->p_files->len == 0) {
-      p_nav->i_current = -1;
-   } else if (p_nav->i_current < 0) {
-      p_nav->i_current = 0;
+   }
+   for (gint i = i_from - 1; i >= 0; i--) {
+      if (_is_live_index(p_nav, (guint)i)) {
+         return (i);
+      }
+   }
+   return (-1);
+}
+
+/* Keep the cursor on the same file by path (p_keep, the file that was
+ * current, or NULL), else on the live entry nearest to its old position
+ * (i_old), else parked. A parked cursor (nothing was current) goes to the
+ * first live entry: never onto a removed one, which stays listed only as a
+ * placeholder. */
+static void
+_restore_cursor(Navigator *p_nav, GFile *p_keep, gint i_old) {
+   gint i_found = _find_index_by_file(p_nav, p_keep);
+   if (i_found >= 0) {
+      p_nav->i_current = i_found;
+   } else {
+      p_nav->i_current =
+         _nearest_live_index(p_nav, (p_keep != NULL) ? i_old : 0);
    }
 }
 
@@ -342,21 +356,105 @@ _prune_marks(Navigator *p_nav) {
    }
 }
 
-/* Keep removed (dimmed) items listed even though they left the disk
- * (trashed/deleted this session); un-remove any that reappeared. */
+/* Un-remove the removed files that are listed again (restored by `u`,
+ * re-created). */
 static void
-_reconcile_removed(Navigator *p_nav) {
+_unremove_reappeared(Navigator *p_nav, GHashTable *p_listed) {
    GHashTableIter iter;
    gpointer       p_key;
    g_hash_table_iter_init(&iter, p_nav->p_removed);
    while (g_hash_table_iter_next(&iter, &p_key, NULL)) {
-      GFile *p_rf = (GFile *)p_key;
-      if (_find_index_by_file(p_nav, p_rf) < 0) {
-         g_ptr_array_add(p_nav->p_files, g_object_ref(p_rf));
-      } else {
+      if (g_hash_table_contains(p_listed, p_key)) {
          g_hash_table_iter_remove(&iter);
       }
    }
+}
+
+/* For every removed file of the old listing p_old that is gone from the
+ * new one: note it under the nearest old entry before it that IS listed
+ * (key NULL: before the first), in old order. Returns GFile* (borrowed, or
+ * NULL) -> GPtrArray of GFile* (borrowed). */
+static GHashTable *
+_removed_by_predecessor(Navigator *p_nav, GPtrArray *p_old,
+                        GHashTable *p_listed) {
+   GHashTable *p_after =
+      g_hash_table_new_full((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal,
+                            NULL, (GDestroyNotify)g_ptr_array_unref);
+   GPtrArray *p_head = g_ptr_array_new(); /* kept under the listing's own
+                                           * dir: never a listed file */
+   g_hash_table_insert(p_after, p_nav->p_dir, p_head);
+   GPtrArray *p_run = p_head;
+   for (guint u_i = 0; u_i < p_old->len; u_i++) {
+      GFile *p_o = (GFile *)g_ptr_array_index(p_old, u_i);
+      if (g_hash_table_contains(p_listed, p_o)) {
+         p_run = g_ptr_array_new();
+         g_hash_table_insert(p_after, p_o, p_run);
+      } else if (g_hash_table_contains(p_nav->p_removed, p_o)) {
+         g_ptr_array_add(p_run, p_o);
+      }
+   }
+   return (p_after);
+}
+
+/* Append the removed files noted under p_key to p_out, taking each out of
+ * p_left (the removed files not placed yet). */
+static void
+_emit_removed_after(GHashTable *p_after, GFile *p_key, GPtrArray *p_out,
+                    GHashTable *p_left) {
+   GPtrArray *p_run = (GPtrArray *)g_hash_table_lookup(p_after, p_key);
+   for (guint u_i = 0; p_run != NULL && u_i < p_run->len; u_i++) {
+      GFile *p_r = (GFile *)g_ptr_array_index(p_run, u_i);
+      if (g_hash_table_remove(p_left, p_r)) {
+         g_ptr_array_add(p_out, g_object_ref(p_r));
+      }
+   }
+}
+
+/* Keep removed (dimmed) items listed even though they left the disk
+ * (trashed/deleted this session), each WHERE IT WAS: right after the old
+ * neighbour before it that is still listed. They used to be appended to
+ * the end of the listing, so the first rescan after a `d` (the folder
+ * monitor's, moments later) moved the dimmed cell to the bottom of the grid
+ * and shifted every cell behind it up by one. Removed files that are
+ * listed again are un-removed. p_old is the listing being replaced. */
+static void
+_reconcile_removed(Navigator *p_nav, GPtrArray *p_old) {
+   if (g_hash_table_size(p_nav->p_removed) == 0) {
+      return;
+   }
+   GHashTable *p_listed =
+      g_hash_table_new((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal);
+   for (guint u_i = 0; u_i < p_nav->p_files->len; u_i++) {
+      g_hash_table_add(p_listed, g_ptr_array_index(p_nav->p_files, u_i));
+   }
+   _unremove_reappeared(p_nav, p_listed);
+   GHashTable *p_after = _removed_by_predecessor(p_nav, p_old, p_listed);
+   GHashTable *p_left =
+      g_hash_table_new((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal);
+   GHashTableIter iter;
+   gpointer       p_key;
+   g_hash_table_iter_init(&iter, p_nav->p_removed);
+   while (g_hash_table_iter_next(&iter, &p_key, NULL)) {
+      g_hash_table_add(p_left, p_key);
+   }
+   GPtrArray *p_out =
+      g_ptr_array_new_with_free_func((GDestroyNotify)g_object_unref);
+   _emit_removed_after(p_after, p_nav->p_dir, p_out, p_left);
+   for (guint u_i = 0; u_i < p_nav->p_files->len; u_i++) {
+      GFile *p_f = (GFile *)g_ptr_array_index(p_nav->p_files, u_i);
+      g_ptr_array_add(p_out, g_object_ref(p_f));
+      _emit_removed_after(p_after, p_f, p_out, p_left);
+   }
+   /* Removed without ever having been listed here: at the end. */
+   g_hash_table_iter_init(&iter, p_left);
+   while (g_hash_table_iter_next(&iter, &p_key, NULL)) {
+      g_ptr_array_add(p_out, g_object_ref(p_key));
+   }
+   g_hash_table_unref(p_left);
+   g_hash_table_unref(p_after);
+   g_hash_table_unref(p_listed);
+   g_ptr_array_unref(p_nav->p_files);
+   p_nav->p_files = p_out;
 }
 
 /* Re-read the directory, filter, hide-raw, sort, and commit; keep the current
@@ -376,9 +474,22 @@ _relist(Navigator *p_nav) {
    g_hash_table_unref(p_jpeg_stems);
    g_ptr_array_sort_with_data(p_entries, _compare_entries,
                               GINT_TO_POINTER((gint)p_nav->e_sort));
+   /* The listing being replaced: where the removed entries were, and which
+    * file the cursor was on. */
+   GPtrArray *p_old  = p_nav->p_files;
+   gint       i_old  = p_nav->i_current;
+   GFile     *p_keep = navigator_get_current(p_nav);
+   if (p_keep != NULL) {
+      g_object_ref(p_keep);
+   }
+   p_nav->p_files =
+      g_ptr_array_new_with_free_func((GDestroyNotify)g_object_unref);
    _commit_entries(p_nav, p_entries);
    _prune_marks(p_nav);
-   _reconcile_removed(p_nav);
+   _reconcile_removed(p_nav, p_old);
+   _restore_cursor(p_nav, p_keep, i_old);
+   g_clear_object(&p_keep);
+   g_ptr_array_unref(p_old);
    g_ptr_array_unref(p_entries);
 }
 
@@ -981,7 +1092,10 @@ _mark_index(Navigator *p_nav, guint u_index) {
       return;
    }
    GFile *p_file = (GFile *)g_ptr_array_index(p_nav->p_files, u_index);
-   if (!g_hash_table_contains(p_nav->p_marks, p_file)) {
+   /* Not a removed entry: it is listed only as a placeholder, its file is
+    * gone, and a mark on it would be a target no action can act on. */
+   if (!g_hash_table_contains(p_nav->p_removed, p_file) &&
+       !g_hash_table_contains(p_nav->p_marks, p_file)) {
       g_hash_table_add(p_nav->p_marks, g_object_ref(p_file));
    }
 }
@@ -1027,6 +1141,25 @@ navigator_extend_marks(Navigator *p_nav, GFile *p_anchor, GFile *p_from,
    if (p_nav->p_last_mark != NULL &&
        !g_hash_table_contains(p_nav->p_marks, p_nav->p_last_mark)) {
       g_clear_object(&p_nav->p_last_mark); /* the `V` anchor was given back */
+   }
+   _emit_changed(p_nav, GGAZE_NAV_MARKS);
+}
+
+void
+navigator_unmark_range(Navigator *p_nav, GFile *p_from, GFile *p_to) {
+   g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
+   gint i_a = _find_index_by_file(p_nav, p_from);
+   gint i_b = _find_index_by_file(p_nav, p_to);
+   if (i_a < 0 || i_b < 0) {
+      return;
+   }
+   for (gint i = MIN(i_a, i_b); i <= MAX(i_a, i_b); i++) {
+      g_hash_table_remove(p_nav->p_marks,
+                          g_ptr_array_index(p_nav->p_files, (guint)i));
+   }
+   if (p_nav->p_last_mark != NULL &&
+       !g_hash_table_contains(p_nav->p_marks, p_nav->p_last_mark)) {
+      g_clear_object(&p_nav->p_last_mark); /* the `V` anchor went with it */
    }
    _emit_changed(p_nav, GGAZE_NAV_MARKS);
 }
@@ -1082,6 +1215,15 @@ navigator_rescan(Navigator *p_nav) {
    g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
    _relist(p_nav);
    _emit_changed(p_nav, GGAZE_NAV_LISTING | GGAZE_NAV_CURSOR);
+}
+
+void
+navigator_refresh(Navigator *p_nav) {
+   g_return_if_fail(GGAZE_IS_NAVIGATOR(p_nav));
+   g_hash_table_remove_all(p_nav->p_removed);
+   _relist(p_nav);
+   _emit_changed(p_nav,
+                 GGAZE_NAV_LISTING | GGAZE_NAV_CURSOR | GGAZE_NAV_REMOVED);
 }
 
 gboolean

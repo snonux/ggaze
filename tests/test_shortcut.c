@@ -398,8 +398,9 @@ test_shortcut_full_table_registered(void) {
     * crop/straighten tool keys) do not. Keep this in step with the table:
     * 70 before wb2 + c / R / ] / [ = 74; 6i2 moved the eight digits to the
     * panel (-8) and added x (+1) = 67; Backspace (parent folder) = 68;
-    * Shift+Up / Shift+Down (extend the marks) = 70. */
-   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 70);
+    * Shift+Up / Shift+Down (extend the marks) = 70; Ctrl+r (refresh) =
+    * 71. */
+   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 71);
    g_object_unref(p_sc);
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(200);
@@ -445,8 +446,9 @@ test_help_window_from_table(void) {
     * next / previous, toggle the selected, strength down / up, five
     * steps down / up: +7) = 63, + Backspace (parent folder) = 64, + Page
     * Up / Page Down (rows of their own since they page the grid) and
-    * Shift+Up / Shift+Down (extend the marks) = 68. */
-   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 68);
+    * Shift+Up / Shift+Down (extend the marks) = 68, + Ctrl+r (refresh)
+    * = 69. */
+   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 69);
    gtk_window_destroy(GTK_WINDOW(p_w));
    drain_main(200);
 }

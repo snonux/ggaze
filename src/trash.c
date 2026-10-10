@@ -13,9 +13,11 @@
 #include "pathutil.h"
 
 struct Trash {
-   GFile *p_dir;      /* the shoot dir; .Trash = p_dir/.Trash */
-   GFile *p_last_src; /* original path of the last binned file */
-   GFile *p_last_dst; /* .Trash path of the last binned file */
+   GFile *p_dir; /* the shoot dir; .Trash = p_dir/.Trash */
+   /* The last batch binned, for the undo: GFile* pairs (owned refs), the
+    * original path at 2n and the .Trash path at 2n+1, in bin order. One
+    * file for a plain trash_bin; trash_bin_more adds to it. */
+   GPtrArray *p_last;
 };
 
 static GFile *
@@ -26,10 +28,9 @@ _trash_dir(Trash *p_t) {
 Trash *
 trash_new(GFile *p_shoot_dir) {
    g_return_val_if_fail(G_IS_FILE(p_shoot_dir), NULL);
-   Trash *p_t      = g_new(Trash, 1);
-   p_t->p_dir      = (GFile *)g_object_ref(p_shoot_dir);
-   p_t->p_last_src = NULL;
-   p_t->p_last_dst = NULL;
+   Trash *p_t  = g_new(Trash, 1);
+   p_t->p_dir  = (GFile *)g_object_ref(p_shoot_dir);
+   p_t->p_last = g_ptr_array_new_with_free_func((GDestroyNotify)g_object_unref);
    return (p_t);
 }
 
@@ -38,14 +39,15 @@ trash_delete(Trash *p_t) {
    if (p_t == NULL) {
       return;
    }
-   g_clear_object(&p_t->p_last_dst);
-   g_clear_object(&p_t->p_last_src);
+   g_clear_pointer(&p_t->p_last, g_ptr_array_unref);
    g_clear_object(&p_t->p_dir);
    g_free(p_t);
 }
 
-gboolean
-trash_bin(Trash *p_t, GFile *p_file, GError **p_err) {
+/* Move p_file into .Trash and add it to the undo batch, which b_more keeps
+ * and extends; without it a successful move starts a new batch. */
+static gboolean
+_bin(Trash *p_t, GFile *p_file, gboolean b_more, GError **p_err) {
    g_return_val_if_fail(p_t != NULL, FALSE);
    g_return_val_if_fail(G_IS_FILE(p_file), FALSE);
    GFile *p_td = _trash_dir(p_t);
@@ -72,14 +74,25 @@ trash_bin(Trash *p_t, GFile *p_file, GError **p_err) {
    gboolean b_ok = g_file_move(p_file, p_dst, G_FILE_COPY_NOFOLLOW_SYMLINKS,
                                NULL, NULL, NULL, p_err);
    if (b_ok) {
-      g_clear_object(&p_t->p_last_src);
-      g_clear_object(&p_t->p_last_dst);
-      p_t->p_last_src = (GFile *)g_object_ref(p_file);
-      p_t->p_last_dst = p_dst; /* take ownership (ref'd by get_child) */
+      if (!b_more) {
+         g_ptr_array_set_size(p_t->p_last, 0);
+      }
+      g_ptr_array_add(p_t->p_last, g_object_ref(p_file));
+      g_ptr_array_add(p_t->p_last, p_dst); /* take ownership */
    } else {
       g_object_unref(p_dst);
    }
    return (b_ok);
+}
+
+gboolean
+trash_bin(Trash *p_t, GFile *p_file, GError **p_err) {
+   return (_bin(p_t, p_file, FALSE, p_err));
+}
+
+gboolean
+trash_bin_more(Trash *p_t, GFile *p_file, GError **p_err) {
+   return (_bin(p_t, p_file, TRUE, p_err));
 }
 
 gboolean
@@ -91,17 +104,22 @@ trash_permanently_delete(GFile *p_file, GError **p_err) {
 gboolean
 trash_restore_last(Trash *p_t, GError **p_err) {
    g_return_val_if_fail(p_t != NULL, FALSE);
-   if (p_t->p_last_dst == NULL || p_t->p_last_src == NULL) {
+   if (p_t->p_last->len == 0) {
       return (FALSE);
    }
-   gboolean b_ok =
-      g_file_move(p_t->p_last_dst, p_t->p_last_src,
-                  G_FILE_COPY_NOFOLLOW_SYMLINKS, NULL, NULL, NULL, p_err);
-   if (b_ok) {
-      g_clear_object(&p_t->p_last_src);
-      g_clear_object(&p_t->p_last_dst);
+   /* Newest first; a file that will not go back stays in the batch with
+    * the ones before it, so a second undo can try again. */
+   while (p_t->p_last->len >= 2) {
+      guint  u_i   = p_t->p_last->len - 2;
+      GFile *p_src = (GFile *)g_ptr_array_index(p_t->p_last, u_i);
+      GFile *p_dst = (GFile *)g_ptr_array_index(p_t->p_last, u_i + 1);
+      if (!g_file_move(p_dst, p_src, G_FILE_COPY_NOFOLLOW_SYMLINKS, NULL, NULL,
+                       NULL, p_err)) {
+         return (FALSE);
+      }
+      g_ptr_array_set_size(p_t->p_last, (gint)u_i);
    }
-   return (b_ok);
+   return (TRUE);
 }
 
 guint
@@ -145,8 +163,7 @@ trash_empty(Trash *p_t, guint *p_deleted, GError **p_err) {
    }
    g_object_unref(p_td);
    /* Whatever was restorable is gone now. */
-   g_clear_object(&p_t->p_last_src);
-   g_clear_object(&p_t->p_last_dst);
+   g_ptr_array_set_size(p_t->p_last, 0);
    if (p_deleted != NULL) {
       *p_deleted = u_done;
    }
@@ -156,5 +173,5 @@ trash_empty(Trash *p_t, guint *p_deleted, GError **p_err) {
 gboolean
 trash_can_undo(Trash *p_t) {
    g_return_val_if_fail(p_t != NULL, FALSE);
-   return (p_t->p_last_dst != NULL);
+   return (p_t->p_last->len > 0);
 }

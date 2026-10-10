@@ -238,9 +238,14 @@ wait_for_status_prefix(GgazeWindow *p_win, const char *c_prefix) {
  * hold-Space subtest above them reads it too). */
 static const char *status_text(GgazeWindow *p_win);
 
+/* Activate a window action. A trash or delete it starts runs its disk work
+ * on a worker thread; flushed here, so the caller sees the same state the
+ * action used to leave behind synchronously (a no-op when the action is
+ * waiting behind a prompt, or is another one). */
 static void
 fire(GgazeWindow *p_win, const char *c_action) {
    gtk_widget_activate_action(GTK_WIDGET(p_win), c_action, NULL);
+   ggaze_window_flush_file_ops(p_win);
 }
 
 static GtkWidget *find_panel(GgazeWindow *p_win);

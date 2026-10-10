@@ -72,7 +72,9 @@ void ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy);
 
 /* Shift + a cursor key: move the highlight one cell (i_dx = -1 / +1) or one
  * row (i_dy = -1 / +1) and mark everything between the cell the run of
- * such moves started on and the new one; moving back unmarks again. */
+ * such moves started on and the new one; moving back unmarks again. The
+ * selection stays when the keys are released and is dropped (unmarked) by
+ * the next cursor move made without Shift -- a plain cursor key, a click. */
 void ggaze_grid_extend_selection(GgazeGrid *p_grid, int i_dx, int i_dy);
 
 /* The same by one page: the rows that fit the viewport less one (at least

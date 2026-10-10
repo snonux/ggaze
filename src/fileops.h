@@ -61,6 +61,21 @@ void fileops_trash(FileOps *p_fo, GFile *p_target);
  * one was current, report successes and failures. */
 void fileops_delete_files(FileOps *p_fo, GList *p_files);
 
+/* The same two without making the caller wait for the disk: the files are
+ * removed on a worker thread, in key-press order, and each is dimmed,
+ * advanced past and reported from the main loop as it lands (what the
+ * window's `d` and `D` use). A file already queued is not queued again.
+ * The trash takes the whole captured set (the marks, else the current
+ * file) as ONE undo batch: `u` brings all of it back. */
+void fileops_trash_async(FileOps *p_fo, GList *p_files);
+void fileops_delete_files_async(FileOps *p_fo, GList *p_files);
+
+/* Wait for the background removals started so far and apply their results
+ * now. Before anything else touches the Trash engine (the worker borrows
+ * it): fileops_undo and fileops_set_folder do it themselves; the window's
+ * Empty Trash must. Returns at once when nothing is pending. */
+void fileops_flush(FileOps *p_fo);
+
 /* `m`: move the captured set to destination u_dest_idx, dim what moved,
  * advance if one was current, record for undo, report. TRUE iff the mover
  * reported overall success. */

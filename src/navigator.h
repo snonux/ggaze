@@ -112,8 +112,12 @@ void     navigator_mark_range(Navigator *p_nav, GFile *p_from, GFile *p_to);
  * unmark what only the old stretch covered, so moving back towards the
  * anchor shrinks the selection. Emits "changed" (marks). No-op when one of
  * the three is not listed. */
-void   navigator_extend_marks(Navigator *p_nav, GFile *p_anchor, GFile *p_from,
-                              GFile *p_to);
+void navigator_extend_marks(Navigator *p_nav, GFile *p_anchor, GFile *p_from,
+                            GFile *p_to);
+/* Unmark everything from p_from to p_to (inclusive): how a Shift+cursor
+ * selection is dropped again. Emits "changed" (marks). No-op when one of the
+ * two is not listed. */
+void   navigator_unmark_range(Navigator *p_nav, GFile *p_from, GFile *p_to);
 void   navigator_mark_all(Navigator *p_nav);
 void   navigator_clear_marks(Navigator *p_nav);
 guint  navigator_get_mark_count(Navigator *p_nav);
@@ -128,6 +132,11 @@ GFile *navigator_get_last_mark(Navigator *p_nav); /* (transfer none) */
 /* Re-read the directory; if the current file is gone, fall back to nearest;
  * emit "changed". */
 void navigator_rescan(Navigator *p_nav);
+
+/* The same, forgetting the removed/dimmed entries first: the listing is
+ * what is on disk and the grid's placeholders for trashed / deleted files
+ * are gone (the "refresh" key). */
+void navigator_refresh(Navigator *p_nav);
 
 /* FALSE iff the last (re)listing could not enumerate the folder (vanished,
  * unreadable); navigator_get_error() then holds the reason. */
