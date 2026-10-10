@@ -77,8 +77,9 @@ void ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy);
  * the next cursor move made without Shift -- a plain cursor key, a click. */
 void ggaze_grid_extend_selection(GgazeGrid *p_grid, int i_dx, int i_dy);
 
-/* The same by one page: the rows that fit the viewport less one (at least
- * one), stopping at the grid's first / last row. */
+/* The same by one page: the complete rows the viewport shows (at least
+ * one), stopping at the grid's first / last row; the view scrolls by the
+ * same distance, so the cursor keeps its place on screen. */
 void ggaze_grid_move_page(GgazeGrid *p_grid, int i_dy);
 
 /* Borrowed pointer to the currently-selected cell's file (NULL if none). The

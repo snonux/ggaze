@@ -142,7 +142,7 @@ drift from the live bindings.
 |----------------|--------|
 | `h` / `Left`   | previous image |
 | `l` / `Right` | next image |
-| `PageUp` / `PageDown` | grid: cursor one page of rows up / down; large view: previous / next image |
+| `PageUp` / `PageDown` | grid: cursor (and view) one full page up / down — as many rows as are visible; large view: previous / next image |
 | `Shift`+arrows | grid: extend the marks from where the run of such moves began to the new cell (moving back unmarks again); it stays when the keys are released and is dropped by the next cursor move without `Shift` (marks set with `v` elsewhere stay); large view: pan |
 | `j` / `Down`   | cursor down one row (grid) / pan down (large) |
 | `k` / `Up`     | cursor up one row (grid) / pan up (large) |

@@ -767,8 +767,8 @@ _nearest_cell_in_row_direction(GgazeGrid *p_grid, GtkWidget *p_cur, int i_dy) {
    return (st.p_best);
 }
 
-/* How many rows a page move covers: the rows that fit the viewport, less
- * one so the row the cursor leaves stays in sight as context -- and always
+/* How many rows a page move covers: the complete rows the viewport shows,
+ * so Page Down puts the cursor exactly one screenful further -- and always
  * at least one. p_cur's laid-out height is the row height (the flow box is
  * homogeneous). */
 static int
@@ -781,15 +781,16 @@ _rows_per_page(GgazeGrid *p_grid, GtkWidget *p_cur) {
    GtkAdjustment *p_vadj = gtk_scrolled_window_get_vadjustment(
       GTK_SCROLLED_WINDOW(p_grid->p_scrolled));
    int i_rows = (int)(gtk_adjustment_get_page_size(p_vadj) / r.size.height);
-   return (MAX(1, i_rows - 1));
+   return (MAX(1, i_rows));
 }
 
 /* Move the grid cursor i_rows rows down (i_dy = +1) or up (i_dy = -1),
  * each step to the cell of the next row closest to the column it came
  * from, stopping at the grid's edge. Updates navigator.current so the
  * header and large-view preview track the move (the "changed" emission
- * re-selects via _on_nav_changed). */
-static void
+ * re-selects via _on_nav_changed). Returns the cell the cursor was sent
+ * to, or NULL when there was nowhere to go. */
+static GtkWidget *
 _move_cursor_rows(GgazeGrid *p_grid, GtkWidget *p_cur, int i_dy, int i_rows) {
    GtkWidget *p_best = p_cur;
    for (int i = 0; i < i_rows; i++) {
@@ -800,19 +801,20 @@ _move_cursor_rows(GgazeGrid *p_grid, GtkWidget *p_cur, int i_dy, int i_rows) {
       p_best = p_next;
    }
    if (p_best == p_cur) {
-      return;
+      return (NULL);
    }
    if (_cell_folder(p_best) != NULL || _cell_folder(p_cur) != NULL) {
       /* Onto or off a folder cell: the highlight moves by itself (a folder
        * is never navigator.current); landing on an image, the selection
        * handler brings current along through the gate. */
       _select_cell(p_grid, p_best);
-      return;
+      return (p_best);
    }
    GFile *p_f = _cell_file(p_best);
    if (p_f != NULL) {
       _grid_select(p_grid, p_f);
    }
+   return (p_best);
 }
 
 /* One row down (i_dy = +1) or up (i_dy = -1). */
@@ -825,13 +827,42 @@ ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy) {
    }
 }
 
-/* One page of rows down or up (Page Down / Page Up). */
+/* The vertical position of p_child in the flow box (0 when not laid out). */
+static double
+_cell_top(GgazeGrid *p_grid, GtkWidget *p_child) {
+   graphene_rect_t r;
+   if (!gtk_widget_compute_bounds(p_child, p_grid->p_flow, &r)) {
+      return (0.0);
+   }
+   return ((double)r.origin.y);
+}
+
+/* One page down or up (Page Down / Page Up): the cursor moves by the rows
+ * the viewport shows and the view scrolls by the same distance, so the
+ * cursor keeps its place on screen and the next screenful of pictures
+ * comes up under it. Moving the focus alone only scrolled far enough to
+ * bring the new cell into sight -- one row for a cursor in the top row. */
 void
 ggaze_grid_move_page(GgazeGrid *p_grid, int i_dy) {
    g_return_if_fail(GGAZE_IS_GRID(p_grid));
    GtkWidget *p_cur = _selected_cell(p_grid);
-   if (p_grid->p_nav != NULL && p_cur != NULL) {
+   if (p_grid->p_nav == NULL || p_cur == NULL) {
+      return;
+   }
+   GtkAdjustment *p_vadj = gtk_scrolled_window_get_vadjustment(
+      GTK_SCROLLED_WINDOW(p_grid->p_scrolled));
+   double     d_view = gtk_adjustment_get_value(p_vadj);
+   double     d_from = _cell_top(p_grid, p_cur);
+   GtkWidget *p_to =
       _move_cursor_rows(p_grid, p_cur, i_dy, _rows_per_page(p_grid, p_cur));
+   /* Only when the cursor really went there (the select gate may have
+    * deferred the move behind a prompt). */
+   if (p_to != NULL && _selected_cell(p_grid) == p_to) {
+      double d_max = gtk_adjustment_get_upper(p_vadj) -
+                     gtk_adjustment_get_page_size(p_vadj);
+      gtk_adjustment_set_value(p_vadj,
+                               CLAMP(d_view + _cell_top(p_grid, p_to) - d_from,
+                                     0.0, MAX(d_max, 0.0)));
    }
 }
 

@@ -461,8 +461,8 @@ assert_current(Navigator *p_nav, const char *c_expected) {
    g_free(c_name);
 }
 
-/* Page Down / Page Up move the cursor by the rows that fit the viewport
- * less one (here: a 2-column grid three rows high -> two rows, four cells),
+/* Page Down / Page Up move the cursor by the complete rows the viewport
+ * shows (a full screenful of pictures),
  * stopping at the last / first row; Shift + a cursor key marks from where
  * the run began to the new cell, and gives marks back on the way home. */
 static void
@@ -501,7 +501,7 @@ test_grid_page_and_shift_select(void) {
    }
    guint u_rows =
       (guint)(gtk_widget_get_height(GTK_WIDGET(p_grid)) / r0.size.height);
-   guint u_page = MAX(1u, u_rows > 0 ? u_rows - 1 : 1u) * u_cols;
+   guint u_page = MAX(1u, u_rows) * u_cols;
    g_assert_cmpuint(u_page, <, u_count);
 
    ggaze_grid_move_page(p_grid, 1);
