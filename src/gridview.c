@@ -7,6 +7,12 @@
  * get a check badge. Resize (+/-) updates the cell size and reflows. Enter or
  * double-click emits "activate". Cursor follows navigator.current.
  *
+ * Ahead of the images come the folder cells: ".." when the owner names a
+ * parent to go back to, then the navigator's sub-folders. They carry no
+ * image -- never navigator.current, never marked -- so the highlight can
+ * rest on one while current stays where it was; Enter or a double-click on
+ * one emits "open-folder" instead of "activate".
+ *
  * Copyright (c) 2026 ggaze contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
  *:*/
@@ -22,6 +28,8 @@ typedef struct {
    gboolean b_done;     /* thumbnail painted for the current size bucket */
    gboolean b_stale;    /* the file was rewritten while a request was in
                          * flight: ask again when that one lands */
+   GdkTexture *p_ready; /* decoded, held back until every cell before this
+                         * one has its first thumbnail (owned, or NULL) */
 } CellData;
 
 static const char *CELL_DATA_KEY = "ggaze-cell-data";
@@ -32,6 +40,7 @@ struct _GgazeGrid {
    Thumbnail          *p_thumb;
    GtkWidget          *p_flow;     /* GtkFlowBox */
    GtkWidget          *p_scrolled; /* GtkScrolledWindow */
+   GFile              *p_parent;   /* the ".." cell's folder (owned) or NULL */
    int                 i_size;
    gboolean            b_hide_trashed;
    guint               u_nav_handler;
@@ -45,10 +54,11 @@ G_DEFINE_TYPE(GgazeGrid, ggaze_grid, GTK_TYPE_WIDGET)
 
 /* Signals (see gridview.h). The grid never names a window action: it says
  * what the user asked for and the owner decides what that means. */
-static guint u_activate_signal = 0;
-static guint u_navigate_signal = 0;
-static guint u_mark_signal     = 0;
-static guint u_mark_all_signal = 0;
+static guint u_activate_signal    = 0;
+static guint u_navigate_signal    = 0;
+static guint u_mark_signal        = 0;
+static guint u_mark_all_signal    = 0;
+static guint u_open_folder_signal = 0;
 
 static void _queue_visible_thumbnails(GgazeGrid *p_grid);
 
@@ -63,6 +73,44 @@ static void _queue_visible_thumbnails(GgazeGrid *p_grid);
 static GFile *
 _cell_file(GtkWidget *p_child) {
    return ((GFile *)g_object_get_data(G_OBJECT(p_child), "file"));
+}
+
+/* The folder a folder cell stands for (borrowed), or NULL for an image
+ * cell. */
+static GFile *
+_cell_folder(GtkWidget *p_child) {
+   return ((GFile *)g_object_get_data(G_OBJECT(p_child), "folder"));
+}
+
+/* What a cell is identified by across a refresh: its file or its folder. */
+static GFile *
+_cell_key(GtkWidget *p_child) {
+   GFile *p_f = _cell_file(p_child);
+   return ((p_f != NULL) ? p_f : _cell_folder(p_child));
+}
+
+/* The highlighted cell, or NULL. */
+static GtkWidget *
+_selected_cell(GgazeGrid *p_grid) {
+   if (p_grid->p_flow == NULL) {
+      return (NULL);
+   }
+   GList *p_sel =
+      gtk_flow_box_get_selected_children(GTK_FLOW_BOX(p_grid->p_flow));
+   GtkWidget *p_child = (p_sel != NULL) ? GTK_WIDGET(p_sel->data) : NULL;
+   g_list_free(p_sel);
+   return (p_child);
+}
+
+/* Highlight p_child and, only while the grid is on screen (see
+ * _select_current), move keyboard focus onto it. */
+static void
+_select_cell(GgazeGrid *p_grid, GtkWidget *p_child) {
+   gtk_flow_box_select_child(GTK_FLOW_BOX(p_grid->p_flow),
+                             GTK_FLOW_BOX_CHILD(p_child));
+   if (gtk_widget_get_mapped(GTK_WIDGET(p_grid))) {
+      gtk_widget_grab_focus(p_child);
+   }
 }
 
 /* The cell's content box (picture + caption), or NULL. */
@@ -132,6 +180,7 @@ _cell_data_free(gpointer p_void) {
    CellData *p_d = (CellData *)p_void;
    g_clear_object(&p_d->p_file);
    g_clear_object(&p_d->p_expected);
+   g_clear_object(&p_d->p_ready);
    g_free(p_d);
 }
 
@@ -158,6 +207,73 @@ _grid_select(GgazeGrid *p_grid, GFile *p_file) {
 
 static void _request_thumbnail(GtkWidget *p_pic);
 
+/* The cell's picture (first child of its box), or NULL. */
+static GtkWidget *
+_cell_picture(GtkWidget *p_child) {
+   GtkWidget *p_box = _cell_box(p_child);
+   return ((p_box != NULL) ? gtk_widget_get_first_child(p_box) : NULL);
+}
+
+/* Paint the decoded thumbnails that are waiting, front to back, up to the
+ * first cell that is still empty with its request in flight. The pool
+ * decodes several files at once and a small one overtakes a big one, so
+ * painting each result as it landed filled the grid in scattered order --
+ * pictures popping up here and there read as the grid being shuffled.
+ * Held back like this the grid fills strictly from the top: everything
+ * above the front is final, nothing appears below a gap. A cell that
+ * already shows a thumbnail (a re-request after a resize or a rewrite)
+ * holds nobody up, nor does one that failed or was never asked for. */
+static void
+_paint_ready_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
+   (void)p_grid;
+   gboolean  *p_blocked = (gboolean *)p_data;
+   GtkWidget *p_pic     = _cell_picture(p_child);
+   CellData  *p_d       = (p_pic != NULL) ? _cell_data(p_pic) : NULL;
+   if (*p_blocked || p_d == NULL) {
+      return;
+   }
+   if (p_d->p_ready != NULL) {
+      gtk_picture_set_paintable(GTK_PICTURE(p_pic),
+                                (GdkPaintable *)p_d->p_ready);
+      g_clear_object(&p_d->p_ready);
+   } else if (p_d->p_expected != NULL &&
+              gtk_picture_get_paintable(GTK_PICTURE(p_pic)) == NULL) {
+      *p_blocked = TRUE;
+   }
+}
+
+static void
+_paint_ready(GtkWidget *p_pic) {
+   GgazeGrid *p_grid =
+      GGAZE_GRID(gtk_widget_get_ancestor(p_pic, GGAZE_TYPE_GRID));
+   if (p_grid != NULL) {
+      gboolean b_blocked = FALSE;
+      _foreach_cell(p_grid, _paint_ready_step, &b_blocked);
+   }
+}
+
+/* A request is over (decoded, failed or cancelled): keep its texture for
+ * _paint_ready, ask again if the file was rewritten meanwhile, and let the
+ * cells this one was holding up paint. */
+static void
+_thumb_settle(GtkWidget *p_pic, CellData *p_d, GdkTexture *p_tex) {
+   /* Only keep it if this request is still for this cell's file. */
+   if (p_tex != NULL && p_d->p_expected != NULL &&
+       g_file_equal(p_d->p_expected, p_d->p_file)) {
+      g_set_object(&p_d->p_ready, p_tex);
+      p_d->b_done = TRUE; /* no re-request until the size changes */
+   }
+   g_clear_object(&p_d->p_expected);
+   if (p_d->b_stale) {
+      /* The file was rewritten while this request read it: what it decoded
+       * (if anything) is shown until the fresh thumbnail replaces it. */
+      p_d->b_stale = FALSE;
+      p_d->b_done  = FALSE;
+      _request_thumbnail(p_pic);
+   }
+   _paint_ready(p_pic);
+}
+
 static void
 _thumb_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    (void)p_src;
@@ -167,11 +283,11 @@ _thumb_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
       g_object_unref(p_pic);
       return;
    }
-   /* If the grid was detached/disposed after this
-    * request was issued, drop the result without touching the (possibly
-    * orphaned) picture. g_task_propagate_pointer also yields NULL for a
-    * cancelled task, but checking the cancellable explicitly keeps the
-    * widget-touch path out of cancelled grids entirely. */
+   /* If the grid was detached/disposed after this request was issued, drop
+    * the result without painting the (possibly orphaned) picture.
+    * g_task_propagate_pointer also yields NULL for a cancelled task, but
+    * checking the cancellable explicitly keeps the widget-touch path out of
+    * cancelled grids entirely. */
    GCancellable *p_cancel = g_task_get_cancellable(G_TASK(p_res));
    if (p_cancel != NULL && g_cancellable_is_cancelled(p_cancel)) {
       g_clear_object(&p_d->p_expected);
@@ -180,25 +296,9 @@ _thumb_finish_cb(GObject *p_src, GAsyncResult *p_res, gpointer p_data) {
    }
    GError     *p_err = NULL;
    GdkTexture *p_tex = thumbnail_get_finish(p_res, &p_err);
-   if (p_tex != NULL) {
-      /* Only apply if this request is still for this cell's file. */
-      if (p_d->p_expected != NULL &&
-          g_file_equal(p_d->p_expected, p_d->p_file)) {
-         gtk_picture_set_paintable(GTK_PICTURE(p_pic), (GdkPaintable *)p_tex);
-         p_d->b_done = TRUE; /* no re-request until the size changes */
-      }
-      g_object_unref(p_tex);
-   } else {
-      g_clear_error(&p_err);
-   }
-   g_clear_object(&p_d->p_expected);
-   if (p_d->b_stale) {
-      /* The file was rewritten while this request read it: what it painted
-       * (if anything) stays up until the fresh thumbnail replaces it. */
-      p_d->b_stale = FALSE;
-      p_d->b_done  = FALSE;
-      _request_thumbnail(p_pic);
-   }
+   g_clear_error(&p_err);
+   _thumb_settle(p_pic, p_d, p_tex);
+   g_clear_object(&p_tex);
    g_object_unref(p_pic);
 }
 
@@ -326,12 +426,55 @@ _make_cell(GgazeGrid *p_grid, GFile *p_file) {
    return (p_child);
 }
 
+/* A folder cell: the same box as an image cell, with a folder icon where
+ * the thumbnail goes, so both kinds line up in the flow. The ".." cell is
+ * the one for p_grid->p_parent. */
+static GtkWidget *
+_make_folder_cell(GgazeGrid *p_grid, GFile *p_folder) {
+   GtkWidget *p_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+   gtk_widget_set_size_request(p_box, p_grid->i_size + 4, p_grid->i_size + 18);
+   gboolean b_up =
+      (p_grid->p_parent != NULL && g_file_equal(p_folder, p_grid->p_parent));
+   GtkWidget *p_icon =
+      gtk_image_new_from_icon_name(b_up ? "go-up-symbolic" : "folder-symbolic");
+   gtk_image_set_pixel_size(GTK_IMAGE(p_icon), p_grid->i_size / 2);
+   gtk_widget_set_size_request(p_icon, p_grid->i_size, p_grid->i_size);
+   gtk_box_append(GTK_BOX(p_box), p_icon);
+   char      *c_name  = b_up ? g_strdup("..") : g_file_get_basename(p_folder);
+   GtkWidget *p_label = gtk_label_new(c_name);
+   g_free(c_name);
+   gtk_label_set_max_width_chars(GTK_LABEL(p_label), 20);
+   gtk_label_set_ellipsize(GTK_LABEL(p_label), PANGO_ELLIPSIZE_END);
+   gtk_widget_add_css_class(p_label, "caption");
+   gtk_box_append(GTK_BOX(p_box), p_label);
+
+   GtkWidget *p_child = gtk_flow_box_child_new();
+   gtk_flow_box_child_set_child(GTK_FLOW_BOX_CHILD(p_child), p_box);
+   g_object_set_data_full(G_OBJECT(p_child), "folder", g_object_ref(p_folder),
+                          (GDestroyNotify)g_object_unref);
+   return (p_child);
+}
+
+/* Tell the owner to open p_folder. It may replace this grid in response, so
+ * the folder is held across the emission. */
+static void
+_emit_open_folder(GgazeGrid *p_grid, GFile *p_folder) {
+   g_object_ref(p_folder);
+   g_signal_emit(p_grid, u_open_folder_signal, 0, p_folder);
+   g_object_unref(p_folder);
+}
+
 static void
 _on_child_activated(GtkFlowBox *p_flow, GtkFlowBoxChild *p_child,
                     gpointer p_data) {
    (void)p_flow;
-   GgazeGrid *p_grid = GGAZE_GRID(p_data);
-   GFile     *p_file = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
+   GgazeGrid *p_grid   = GGAZE_GRID(p_data);
+   GFile     *p_folder = _cell_folder(GTK_WIDGET(p_child));
+   if (p_folder != NULL) {
+      _emit_open_folder(p_grid, p_folder);
+      return;
+   }
+   GFile *p_file = (GFile *)g_object_get_data(G_OBJECT(p_child), "file");
    if (p_file != NULL) {
       _grid_select(p_grid, p_file);
    }
@@ -359,6 +502,11 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
       return (FALSE); /* other chords belong to the window */
    }
    if (u_kv == GDK_KEY_Return || u_kv == GDK_KEY_KP_Enter) {
+      GFile *p_folder = ggaze_grid_get_selected_folder(p_grid);
+      if (p_folder != NULL) {
+         _emit_open_folder(p_grid, p_folder);
+         return (TRUE);
+      }
       /* Sync navigator.current to the highlighted cell before activating, so
        * Enter opens the arrow-selected image, not a stale current. */
       ggaze_grid_sync_current(p_grid);
@@ -376,6 +524,9 @@ _on_flow_key(GtkEventControllerKey *p_key, guint u_kv, guint u_kc,
       return (TRUE);
    }
    if (u_kv == GDK_KEY_Left || u_kv == GDK_KEY_Right) {
+      if (ggaze_grid_step_folder(p_grid, (u_kv == GDK_KEY_Left) ? -1 : 1)) {
+         return (TRUE);
+      }
       g_signal_emit(p_grid, u_navigate_signal, 0,
                     (u_kv == GDK_KEY_Left) ? -1 : 1);
       return (TRUE);
@@ -414,8 +565,8 @@ ggaze_grid_mark_at_pos(GgazeGrid *p_grid, gint i_x, gint i_y) {
    }
    GtkFlowBoxChild *p_child =
       gtk_flow_box_get_child_at_pos(GTK_FLOW_BOX(p_grid->p_flow), i_x, i_y);
-   if (p_child == NULL) {
-      return (FALSE);
+   if (p_child == NULL || _cell_folder(GTK_WIDGET(p_child)) != NULL) {
+      return (FALSE); /* nothing there, or a folder: no mark to toggle */
    }
    /* Select the cell (this is what win.mark acts on), keep navigator.current
     * in step with it through the gate, then ask the owner to toggle the mark
@@ -459,13 +610,16 @@ _select_current(GgazeGrid *p_grid) {
    GtkWidget *p_child =
       _find_cell(p_grid, navigator_get_current(p_grid->p_nav));
    if (p_child == NULL) {
-      return;
+      /* No image to rest on (a folder of sub-folders only): the first
+       * folder cell takes the highlight, so the keys have a cursor. */
+      GtkWidget *p_first = gtk_widget_get_first_child(p_grid->p_flow);
+      if (p_first == NULL || _cell_folder(p_first) == NULL ||
+          _selected_cell(p_grid) != NULL) {
+         return;
+      }
+      p_child = p_first;
    }
-   gtk_flow_box_select_child(GTK_FLOW_BOX(p_grid->p_flow),
-                             GTK_FLOW_BOX_CHILD(p_child));
-   if (gtk_widget_get_mapped(GTK_WIDGET(p_grid))) {
-      gtk_widget_grab_focus(p_child);
-   }
+   _select_cell(p_grid, p_child);
 }
 
 /* The grid came on screen (toggle from the large view, folder open): put
@@ -474,7 +628,13 @@ static void
 _on_map(GtkWidget *p_widget, gpointer p_data) {
    (void)p_data;
    GgazeGrid *p_grid = GGAZE_GRID(p_widget);
-   if (p_grid->p_nav != NULL) {
+   if (p_grid->p_nav == NULL) {
+      return;
+   }
+   GtkWidget *p_sel = _selected_cell(p_grid);
+   if (p_sel != NULL && _cell_folder(p_sel) != NULL) {
+      gtk_widget_grab_focus(p_sel); /* the highlight rests on a folder */
+   } else {
       _select_current(p_grid);
    }
 }
@@ -578,7 +738,15 @@ ggaze_grid_move_cursor(GgazeGrid *p_grid, int i_dy) {
    GtkWidget *p_cur = GTK_WIDGET(p_sel->data);
    g_list_free(p_sel);
    GtkWidget *p_best = _nearest_cell_in_row_direction(p_grid, p_cur, i_dy);
-   GFile     *p_f    = (p_best != NULL) ? _cell_file(p_best) : NULL;
+   if (p_best != NULL &&
+       (_cell_folder(p_best) != NULL || _cell_folder(p_cur) != NULL)) {
+      /* Onto or off a folder cell: the highlight moves by itself (a folder
+       * is never navigator.current); landing on an image, the selection
+       * handler brings current along through the gate. */
+      _select_cell(p_grid, p_best);
+      return;
+   }
+   GFile *p_f = (p_best != NULL) ? _cell_file(p_best) : NULL;
    if (p_f != NULL) {
       _grid_select(p_grid, p_f);
    }
@@ -618,19 +786,23 @@ ggaze_grid_update_mark_badge(GgazeGrid *p_grid, GFile *p_file) {
 }
 
 /* Put p_file's cell at u_pos: the kept one from p_cells (GFile -> its
- * flow-box child), its mark/removed look brought up to date, or a new one. */
+ * flow-box child), an image cell's mark/removed look brought up to date,
+ * or a new one of the kind b_folder says. */
 static void
-_place_cell(GgazeGrid *p_grid, GHashTable *p_cells, GFile *p_file,
-            guint u_pos) {
+_place_cell(GgazeGrid *p_grid, GHashTable *p_cells, GFile *p_file, guint u_pos,
+            gboolean b_folder) {
    GtkWidget *p_child = (GtkWidget *)g_hash_table_lookup(p_cells, p_file);
    if (p_child == NULL) {
-      p_child = _make_cell(p_grid, p_file);
+      p_child = b_folder ? _make_folder_cell(p_grid, p_file)
+                         : _make_cell(p_grid, p_file);
       gtk_flow_box_insert(GTK_FLOW_BOX(p_grid->p_flow), p_child, (int)u_pos);
       return;
    }
-   GtkWidget *p_box = _cell_box(p_child);
-   _set_marked(p_box, navigator_is_marked(p_grid->p_nav, p_file));
-   _set_removed(p_box, navigator_is_removed(p_grid->p_nav, p_file));
+   if (!b_folder) {
+      GtkWidget *p_box = _cell_box(p_child);
+      _set_marked(p_box, navigator_is_marked(p_grid->p_nav, p_file));
+      _set_removed(p_box, navigator_is_removed(p_grid->p_nav, p_file));
+   }
    if (gtk_flow_box_child_get_index(GTK_FLOW_BOX_CHILD(p_child)) !=
        (int)u_pos) {
       /* Moved (a re-sort, a file inserted before it): the same widget, its
@@ -642,13 +814,22 @@ _place_cell(GgazeGrid *p_grid, GHashTable *p_cells, GFile *p_file,
    }
 }
 
-/* The files that get a cell, in listing order (borrowed from the
- * navigator): everything listed, minus the removed ones while those are
- * hidden. */
+/* What gets a cell, in flow order (borrowed GFiles): the folders first --
+ * ".." when there is a parent to go back to, then the sub-folders --
+ * followed by everything listed, minus the removed files while those are
+ * hidden. *p_folders receives how many of the entries are folders. */
 static GPtrArray *
-_wanted_files(GgazeGrid *p_grid) {
+_wanted_files(GgazeGrid *p_grid, guint *p_folders) {
    GPtrArray *p_wanted = g_ptr_array_new();
-   guint      u_n      = navigator_get_count(p_grid->p_nav);
+   if (p_grid->p_parent != NULL) {
+      g_ptr_array_add(p_wanted, p_grid->p_parent);
+   }
+   guint u_dirs = navigator_get_subdir_count(p_grid->p_nav);
+   for (guint u_i = 0; u_i < u_dirs; u_i++) {
+      g_ptr_array_add(p_wanted, navigator_get_subdir(p_grid->p_nav, u_i));
+   }
+   *p_folders = p_wanted->len;
+   guint u_n  = navigator_get_count(p_grid->p_nav);
    for (guint u_i = 0; u_i < u_n; u_i++) {
       GFile *p_file = navigator_get_file(p_grid->p_nav, u_i);
       if (p_file != NULL && !(p_grid->b_hide_trashed &&
@@ -672,7 +853,7 @@ typedef struct {
 static void
 _sort_out_cell_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
    Reconcile *p_rc = (Reconcile *)p_data;
-   GFile     *p_f  = _cell_file(p_child);
+   GFile     *p_f  = _cell_key(p_child);
    if (p_f != NULL && g_hash_table_contains(p_rc->p_wanted, p_f)) {
       g_hash_table_insert(p_rc->p_cells, p_f, p_child);
    } else {
@@ -694,7 +875,8 @@ ggaze_grid_refresh(GgazeGrid *p_grid) {
    if (p_grid->p_cancel == NULL) {
       p_grid->p_cancel = g_cancellable_new();
    }
-   GPtrArray *p_wanted = _wanted_files(p_grid);
+   guint      u_folders = 0;
+   GPtrArray *p_wanted  = _wanted_files(p_grid, &u_folders);
    Reconcile  st_rc;
    st_rc.p_wanted =
       g_hash_table_new((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal);
@@ -706,12 +888,18 @@ ggaze_grid_refresh(GgazeGrid *p_grid) {
    _foreach_cell(p_grid, _sort_out_cell_step, &st_rc);
    for (guint u_i = 0; u_i < p_wanted->len; u_i++) {
       _place_cell(p_grid, st_rc.p_cells,
-                  (GFile *)g_ptr_array_index(p_wanted, u_i), u_i);
+                  (GFile *)g_ptr_array_index(p_wanted, u_i), u_i,
+                  u_i < u_folders);
    }
    g_hash_table_unref(st_rc.p_cells);
    g_hash_table_unref(st_rc.p_wanted);
    g_ptr_array_unref(p_wanted);
-   _select_current(p_grid);
+   /* A highlight resting on a folder cell that is still there stays: only
+    * a cursor move takes it back to navigator.current. */
+   GtkWidget *p_sel = _selected_cell(p_grid);
+   if (p_sel == NULL || _cell_folder(p_sel) == NULL) {
+      _select_current(p_grid);
+   }
 }
 
 /* A file the navigator reports as rewritten gets its thumbnail requested
@@ -822,6 +1010,7 @@ ggaze_grid_dispose(GObject *p_obj) {
       g_cancellable_cancel(p_grid->p_cancel);
       g_clear_object(&p_grid->p_cancel);
    }
+   g_clear_object(&p_grid->p_parent);
    if (p_grid->p_nav != NULL && p_grid->u_nav_handler != 0) {
       g_signal_handler_disconnect(p_grid->p_nav, p_grid->u_nav_handler);
       p_grid->u_nav_handler = 0;
@@ -858,6 +1047,9 @@ ggaze_grid_class_init(GgazeGridClass *p_klass) {
    u_mark_signal = g_signal_new("mark-requested", G_TYPE_FROM_CLASS(p_klass),
                                 G_SIGNAL_RUN_LAST, 0, NULL, NULL,
                                 g_cclosure_marshal_generic, G_TYPE_NONE, 0);
+   u_open_folder_signal = g_signal_new(
+      "open-folder", G_TYPE_FROM_CLASS(p_klass), G_SIGNAL_RUN_LAST, 0, NULL,
+      NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 1, G_TYPE_FILE);
    u_mark_all_signal = g_signal_new(
       "mark-all-requested", G_TYPE_FROM_CLASS(p_klass), G_SIGNAL_RUN_LAST, 0,
       NULL, NULL, g_cclosure_marshal_generic, G_TYPE_NONE, 0);
@@ -947,6 +1139,9 @@ _resize_cell_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
    }
    GtkWidget *p_pic = gtk_widget_get_first_child(p_box);
    if (p_pic != NULL) {
+      if (GTK_IS_IMAGE(p_pic)) { /* a folder cell's icon */
+         gtk_image_set_pixel_size(GTK_IMAGE(p_pic), p_grid->i_size / 2);
+      }
       gtk_widget_set_size_request(p_pic, p_grid->i_size, p_grid->i_size);
       CellData *p_d = _cell_data(p_pic);
       if (p_d != NULL) {
@@ -1001,14 +1196,88 @@ ggaze_grid_detach(GgazeGrid *p_grid) {
    p_grid->p_nav = NULL;
 }
 
+static void
+_count_image_cell_step(GgazeGrid *p_grid, GtkWidget *p_child, gpointer p_data) {
+   (void)p_grid;
+   if (_cell_file(p_child) != NULL) {
+      (*(guint *)p_data)++;
+   }
+}
+
 guint
 ggaze_grid_get_count(GgazeGrid *p_grid) {
    g_return_val_if_fail(GGAZE_IS_GRID(p_grid), 0);
-   guint      u_count = 0;
+   guint u_count = 0;
+   _foreach_cell(p_grid, _count_image_cell_step, &u_count);
+   return (u_count);
+}
+
+/* --- folder cells -------------------------------------------------------- */
+
+void
+ggaze_grid_set_parent_folder(GgazeGrid *p_grid, GFile *p_parent) {
+   g_return_if_fail(GGAZE_IS_GRID(p_grid));
+   if (p_grid->p_parent == p_parent ||
+       (p_grid->p_parent != NULL && p_parent != NULL &&
+        g_file_equal(p_grid->p_parent, p_parent))) {
+      return;
+   }
+   g_set_object(&p_grid->p_parent, p_parent);
+   if (p_grid->p_nav != NULL) {
+      ggaze_grid_refresh(p_grid);
+   }
+}
+
+guint
+ggaze_grid_get_folder_count(GgazeGrid *p_grid) {
+   g_return_val_if_fail(GGAZE_IS_GRID(p_grid), 0);
+   if (p_grid->p_nav == NULL) {
+      return (0);
+   }
+   return (navigator_get_subdir_count(p_grid->p_nav) +
+           ((p_grid->p_parent != NULL) ? 1 : 0));
+}
+
+GFile *
+ggaze_grid_get_selected_folder(GgazeGrid *p_grid) {
+   g_return_val_if_fail(GGAZE_IS_GRID(p_grid), NULL);
+   GtkWidget *p_sel = _selected_cell(p_grid);
+   return ((p_sel != NULL) ? _cell_folder(p_sel) : NULL);
+}
+
+gboolean
+ggaze_grid_select_folder(GgazeGrid *p_grid, GFile *p_folder) {
+   g_return_val_if_fail(GGAZE_IS_GRID(p_grid), FALSE);
+   if (p_grid->p_flow == NULL || p_folder == NULL) {
+      return (FALSE);
+   }
    GtkWidget *p_child = gtk_widget_get_first_child(p_grid->p_flow);
    while (p_child != NULL) {
-      u_count++;
+      GFile *p_f = _cell_folder(p_child);
+      if (p_f != NULL && g_file_equal(p_f, p_folder)) {
+         _select_cell(p_grid, p_child);
+         return (TRUE);
+      }
       p_child = gtk_widget_get_next_sibling(p_child);
    }
-   return (u_count);
+   return (FALSE);
+}
+
+gboolean
+ggaze_grid_step_folder(GgazeGrid *p_grid, int i_dir) {
+   g_return_val_if_fail(GGAZE_IS_GRID(p_grid), FALSE);
+   GtkWidget *p_sel = _selected_cell(p_grid);
+   if (p_sel == NULL) {
+      return (FALSE);
+   }
+   GtkWidget *p_to = (i_dir < 0) ? gtk_widget_get_prev_sibling(p_sel)
+                                 : gtk_widget_get_next_sibling(p_sel);
+   if (_cell_folder(p_sel) == NULL &&
+       (p_to == NULL || _cell_folder(p_to) == NULL)) {
+      return (FALSE); /* image to image: the owner's prev/next */
+   }
+   if (p_to != NULL) {
+      _select_cell(p_grid, p_to);
+   }
+   return (TRUE);
 }

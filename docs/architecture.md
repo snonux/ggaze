@@ -177,7 +177,12 @@ ggaze
   (`CHANGES_DONE_HINT`, not every `CHANGED`). The grid therefore reconciles
   its cells in place and the window re-shows the picture only when the
   current file itself is hit, so a folder a batch job is writing to does not
-  make either view blink. Owns no GTK state; testable standalone.
+  make either view blink. Also lists the folder's sub-folders
+  (`navigator_get_subdir*`, dot-folders excluded) apart from the listing,
+  for the grid's folder cells; `GgazeWindow` opens one through the normal
+  open path as a *browse* move that keeps its browse root (the folder
+  opened from outside), which is where the grid's `..` stops. Owns no GTK
+  state; testable standalone.
 - **trash** — moves a file to `<dir>/.Trash/` (creating it lazily), preserving
   relative path uniqueness (suffix `-1`, `-2`… on collision). `D` calls
   `g_file_delete` instead. Tracks the last trashed item for `u` undo/restore.

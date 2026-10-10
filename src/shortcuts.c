@@ -185,6 +185,8 @@ static const ShortcutEntry SHORTCUTS[] = {
    {GDK_KEY_O, GDK_SHIFT_MASK, "win.open-folder", "Open folder", "Files"},
    {GDK_KEY_O, GDK_CONTROL_MASK | GDK_SHIFT_MASK, "win.open-folder",
     "Open folder", "Files"},
+   {GDK_KEY_BackSpace, 0, "win.parent-folder",
+    "Up to the parent folder (grid, after entering a sub-folder)", "Files"},
    {GDK_KEY_e, 0, "win.open-external", "Open in external program", "Files"},
    {GDK_KEY_exclam, 0, "win.run-script", "Run a configured shell script",
     "Files"},

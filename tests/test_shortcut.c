@@ -397,8 +397,8 @@ test_shortcut_full_table_registered(void) {
     * (hold-Space) and the mode-scoped rows (the panel's digits, the modal
     * crop/straighten tool keys) do not. Keep this in step with the table:
     * 70 before wb2 + c / R / ] / [ = 74; 6i2 moved the eight digits to the
-    * panel (-8) and added x (+1) = 67. */
-   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 67);
+    * panel (-8) and added x (+1) = 67; Backspace (parent folder) = 68. */
+   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 68);
    g_object_unref(p_sc);
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(200);
@@ -442,8 +442,8 @@ test_help_window_from_table(void) {
     * = 54, + 7i2's edit undo (u, Ctrl+z) and redo (U, Ctrl+Shift+Z)
     * rows in the Edit panel group (+2) = 56, + 8i2's card rows (select
     * next / previous, toggle the selected, strength down / up, five
-    * steps down / up: +7) = 63. */
-   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 63);
+    * steps down / up: +7) = 63, + Backspace (parent folder) = 64. */
+   g_assert_cmpint(count_help_rows(GTK_WIDGET(p_w)), ==, 64);
    gtk_window_destroy(GTK_WINDOW(p_w));
    drain_main(200);
 }

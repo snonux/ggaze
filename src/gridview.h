@@ -78,7 +78,7 @@ GFile *ggaze_grid_get_selected_file(GgazeGrid *p_grid);
  * without rebuilding the grid. No-op if the file's cell isn't present. */
 void ggaze_grid_update_mark_badge(GgazeGrid *p_grid, GFile *p_file);
 
-/* Number of cells currently in the grid. */
+/* Number of image cells currently in the grid (folder cells not counted). */
 guint ggaze_grid_get_count(GgazeGrid *p_grid);
 
 /* Toggle the mark on the cell at (i_x, i_y) in the grid's flowbox
@@ -93,10 +93,39 @@ guint ggaze_grid_get_count(GgazeGrid *p_grid);
  * a two-line wrapper around this. */
 gboolean ggaze_grid_mark_at_pos(GgazeGrid *p_grid, gint i_x, gint i_y);
 
+/* --- folder cells ---------------------------------------------------------
+ *
+ * Ahead of the image cells the grid shows one cell per sub-folder of the
+ * navigator's folder and, when a parent is set, a ".." cell before those.
+ * A folder cell is never navigator.current and cannot be marked; the
+ * highlight may rest on one while current stays where it was. */
+
+/* The folder the ".." cell leads to (refs it), or NULL for no such cell. */
+void ggaze_grid_set_parent_folder(GgazeGrid *p_grid, GFile *p_parent);
+
+/* Number of folder cells (".." included). */
+guint ggaze_grid_get_folder_count(GgazeGrid *p_grid);
+
+/* The folder of the highlighted cell (transfer none), NULL when the
+ * highlight is on an image or nowhere. */
+GFile *ggaze_grid_get_selected_folder(GgazeGrid *p_grid);
+
+/* Put the highlight on p_folder's cell. FALSE when it has none. */
+gboolean ggaze_grid_select_folder(GgazeGrid *p_grid, GFile *p_folder);
+
+/* One linear step (i_dir < 0 back, else forward) of the highlight when a
+ * folder cell is involved: from one, or from an image onto the folder cell
+ * next to it. TRUE iff the grid took the step (also at the grid's edge,
+ * where it stays put); FALSE for an image-to-image step, which is the
+ * owner's prev/next. */
+gboolean ggaze_grid_step_folder(GgazeGrid *p_grid, int i_dir);
+
 /* Disconnect from the navigator (call before the navigator is freed). */
 void ggaze_grid_detach(GgazeGrid *p_grid);
 
 /* Signals (the grid names no window action; the owner connects these):
+ *   "open-folder"         Enter / double-click on a folder cell; one GFile
+ *                         argument, the folder to open
  *   "activate"            Enter / double-click on a cell (owner opens the
  *                         large view on the current file).
  *   "navigate" (gint dir) Left (-1) / Right (+1) pressed in the grid.

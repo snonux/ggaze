@@ -15,6 +15,7 @@
 
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <stdlib.h>
 
 /* --- helpers ------------------------------------------------------------- */
@@ -570,6 +571,48 @@ test_monitor_reports_exact_changes(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* Sub-folders are listed apart from the images, by name, without the
+ * dot-folders; one appearing later is a LISTING change for the views. */
+static void
+test_subdirs(void) {
+   char *c_dir = make_temp_dir();
+   write_file(c_dir, "a.jpg", "x", 1);
+   const char *c_subs[] = {"zeta", "alpha", ".Trash"};
+   for (gsize u = 0; u < G_N_ELEMENTS(c_subs); u++) {
+      char *c_sub = g_build_filename(c_dir, c_subs[u], NULL);
+      g_assert_cmpint(g_mkdir(c_sub, 0700), ==, 0);
+      g_free(c_sub);
+   }
+   GFile     *p_dirf = g_file_new_for_path(c_dir);
+   Navigator *p_nav  = navigator_new(p_dirf, GGAZE_SORT_NAME, TRUE, TRUE);
+   navigator_set_debounce_ms(p_nav, 5);
+   g_assert_cmpint(navigator_get_count(p_nav), ==, 1);
+   g_assert_cmpuint(navigator_get_subdir_count(p_nav), ==, 2);
+   assert_name(navigator_get_subdir(p_nav, 0), "alpha");
+   assert_name(navigator_get_subdir(p_nav, 1), "zeta");
+   g_assert_null(navigator_get_subdir(p_nav, 2));
+
+   ChangeLog st_log = {0, 0, NULL, FALSE};
+   g_signal_connect(p_nav, "changed", G_CALLBACK(log_changed_cb), &st_log);
+   char *c_new = g_build_filename(c_dir, "beta", NULL);
+   g_assert_cmpint(g_mkdir(c_new, 0700), ==, 0);
+   g_assert_true(pump_until(_log_has_emission, &st_log, 2000));
+   g_assert_cmpuint(st_log.u_flags, ==, GGAZE_NAV_LISTING);
+   g_assert_cmpuint(navigator_get_subdir_count(p_nav), ==, 3);
+   assert_name(navigator_get_subdir(p_nav, 1), "beta");
+
+   navigator_delete(p_nav);
+   g_object_unref(p_dirf);
+   for (gsize u = 0; u < G_N_ELEMENTS(c_subs); u++) {
+      char *c_sub = g_build_filename(c_dir, c_subs[u], NULL);
+      g_rmdir(c_sub);
+      g_free(c_sub);
+   }
+   g_rmdir(c_new);
+   g_free(c_new);
+   cleanup_temp_dir(c_dir);
+}
+
 static void
 on_changed_cb(Navigator *p_nav, guint u_flags, gpointer p_data) {
    (void)p_nav;
@@ -922,6 +965,7 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/navigator/remove_before_cursor",
                    test_remove_before_cursor);
    g_test_add_func("/navigator/monitor_add", test_monitor_add);
+   g_test_add_func("/navigator/subdirs", test_subdirs);
    g_test_add_func("/navigator/monitor_reports_exact_changes",
                    test_monitor_reports_exact_changes);
    g_test_add_func("/navigator/changed_signal", test_changed_signal);

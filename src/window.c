@@ -102,6 +102,10 @@ struct _GgazeWindow {
    gint64       i_esc_at;    /* monotonic us of the last grid Esc (two-step
                               * quit), 0 = none */
    GtkWidget *p_status_page; /* AdwStatusPage: the "empty" stack child */
+   GFile     *p_browse_root; /* the folder the last open from outside (CLI,
+                              * `o`/`O`, a drop) landed in (owned, NULL
+                              * before any): the grid's ".." leads back up
+                              * to it from its sub-folders, never above */
    GtkWidget *p_menu_btn;    /* header-bar main menu (F10) */
    gboolean   b_disposed;    /* set in dispose; async callbacks check it */
    gboolean   b_soft_noted;  /* the viewer shows a scaled-down preview
@@ -145,23 +149,30 @@ struct _GgazeWindow {
 G_DEFINE_TYPE(GgazeWindow, ggaze_window, GTK_TYPE_APPLICATION_WINDOW)
 
 /* --- forward decls ------------------------------------------------------- */
-static void     _load_current(GgazeWindow *p_win);
-static void     _show_texture(GgazeWindow *p_win, GdkTexture *p_tex,
-                              gboolean b_decoded);
-static void     _update_header(GgazeWindow *p_win);
-static void     _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
-static void     _show_info(GgazeWindow *p_win);
-static void     _dismiss_info_for_nav(GgazeWindow *p_win);
-static void     _show_status(GgazeWindow *p_win, const char *c_msg);
-static void     _sync_info_plot(GgazeWindow *p_win);
-static gboolean _slideshow_tick(gpointer p_data);
-static void     _apply_viewer_prefs(GgazeWindow *p_win);
-static void     _load_engine_lists(GgazeWindow *p_win);
-static void     _set_grid_size(GgazeWindow *p_win, int i_size);
-static void     _update_empty_state(GgazeWindow *p_win);
-static void     _action_enter_large(GSimpleAction *p_a, GVariant *p_v,
-                                    gpointer p_data);
+static void          _load_current(GgazeWindow *p_win);
+static void          _show_texture(GgazeWindow *p_win, GdkTexture *p_tex,
+                                   gboolean b_decoded);
+static void          _update_header(GgazeWindow *p_win);
+static void          _on_grid_activate(GgazeGrid *p_grid, gpointer p_data);
+static void          _show_info(GgazeWindow *p_win);
+static void          _dismiss_info_for_nav(GgazeWindow *p_win);
+static void          _show_status(GgazeWindow *p_win, const char *c_msg);
+static void          _sync_info_plot(GgazeWindow *p_win);
+static gboolean      _slideshow_tick(gpointer p_data);
+static void          _apply_viewer_prefs(GgazeWindow *p_win);
+static void          _load_engine_lists(GgazeWindow *p_win);
+static void          _set_grid_size(GgazeWindow *p_win, int i_size);
+static void          _update_empty_state(GgazeWindow *p_win);
+static GgazeViewMode _get_view(GgazeWindow *p_win);
+static void          _browse_to(GgazeWindow *p_win, GFile *p_folder);
+static GFile        *_browse_parent(GgazeWindow *p_win);
+static void _open_gated(GgazeWindow *p_win, GFile *p_arg, gboolean b_grid,
+                        gboolean b_browse);
+static void _action_enter_large(GSimpleAction *p_a, GVariant *p_v,
+                                gpointer p_data);
 static void _action_menu(GSimpleAction *p_a, GVariant *p_v, gpointer p_data);
+static void _action_parent_folder(GSimpleAction *p_a, GVariant *p_v,
+                                  gpointer p_data);
 static void _action_empty_trash(GSimpleAction *p_a, GVariant *p_v,
                                 gpointer p_data);
 static void _on_viewer_navigate(GgazeViewer *p_v, gint i_dir, gpointer p_data);
@@ -315,11 +326,25 @@ _proceed_grid_select(gpointer p_data) {
    return (G_SOURCE_REMOVE);
 }
 
+/* TRUE iff the grid is showing and its highlight rests on a folder cell.
+ * navigator.current is then NOT what the user is looking at (a folder is
+ * never current), so an action on "the current image" would hit a picture
+ * that is not highlighted -- `d`, `D` and `m` must not. */
+static gboolean
+_folder_cell_selected(GgazeWindow *p_win) {
+   return (p_win->p_grid != NULL && _get_view(p_win) == GGAZE_VIEW_GRID &&
+           ggaze_grid_get_selected_folder(p_win->p_grid) != NULL);
+}
+
 /* The files a marks-or-current action (`D` delete, `m` move) acts on,
  * captured ONCE at key-press time -- see fileops_capture_targets for why the
  * decision itself is perishable. Transfer full. */
 static GList *
 _capture_targets(GgazeWindow *p_win) {
+   if (p_win->p_nav != NULL && navigator_get_mark_count(p_win->p_nav) == 0 &&
+       _folder_cell_selected(p_win)) {
+      return (NULL); /* no marks, and the highlight is not on an image */
+   }
    return (fileops_capture_targets(p_win->p_fileops));
 }
 
@@ -537,6 +562,15 @@ _update_empty_state(GgazeWindow *p_win) {
       }
       return;
    }
+   /* No image, but folders to go to (sub-folders, or ".." back up): the
+    * grid with its folder cells is the page to show, not "No images". */
+   if (p_win->p_grid != NULL && navigator_is_readable(p_win->p_nav) &&
+       ggaze_grid_get_folder_count(p_win->p_grid) > 0) {
+      if (_get_view(p_win) != GGAZE_VIEW_GRID) {
+         _set_view(p_win, GGAZE_VIEW_GRID);
+      }
+      return;
+   }
    char *c_folder = g_file_get_basename(navigator_get_dir(p_win->p_nav));
    guint u_total  = navigator_get_count(p_win->p_nav);
    char *c_title  = NULL;
@@ -572,10 +606,23 @@ _stop_slideshow_for_nav(GgazeWindow *p_win) {
    _slideshow_stop(p_win, "Slideshow stopped");
 }
 
+/* h/l (and Left/Right) in the grid while a folder cell is involved: the
+ * highlight steps over the folder cells itself, since they are not in the
+ * navigator. TRUE iff the grid took the step; an image-to-image step is the
+ * navigator's as before. */
+static gboolean
+_step_over_folder_cells(GgazeWindow *p_win, int i_dir) {
+   return (p_win->p_grid != NULL && _get_view(p_win) == GGAZE_VIEW_GRID &&
+           ggaze_grid_step_folder(p_win->p_grid, i_dir));
+}
+
 static void
 _action_prev(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
+   if (_step_over_folder_cells(GGAZE_WINDOW(p_data), -1)) {
+      return;
+   }
    _stop_slideshow_for_nav(GGAZE_WINDOW(p_data));
    save_gate_maybe_save_then(GGAZE_WINDOW(p_data)->p_save_gate, _proceed_prev,
                              p_data, NULL);
@@ -585,6 +632,9 @@ static void
 _action_next(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
+   if (_step_over_folder_cells(GGAZE_WINDOW(p_data), 1)) {
+      return;
+   }
    _stop_slideshow_for_nav(GGAZE_WINDOW(p_data));
    save_gate_maybe_save_then(GGAZE_WINDOW(p_data)->p_save_gate, _proceed_next,
                              p_data, NULL);
@@ -856,6 +906,10 @@ _action_trash(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    if (!_require_folder(p_win)) {
       return;
    }
+   if (_folder_cell_selected(p_win)) {
+      _show_status(p_win, "Select an image to trash");
+      return;
+   }
    GFile *p_cur = navigator_get_current(p_win->p_nav);
    save_gate_maybe_save_then(p_win->p_save_gate, _proceed_trash,
                              _file_ctx_new(p_win, p_cur), _file_ctx_free);
@@ -1034,6 +1088,9 @@ _action_mark(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
    if (p_win->p_nav == NULL) {
       return;
+   }
+   if (_folder_cell_selected(p_win)) {
+      return; /* a folder cannot be marked */
    }
    GFile *p_target = NULL;
    if (_get_view(p_win) == GGAZE_VIEW_GRID && p_win->p_grid != NULL) {
@@ -2942,6 +2999,7 @@ static const GActionEntry ACTIONS[] = {
    {.name = "slideshow", .activate = _action_slideshow},
    {.name = "info", .activate = _action_info},
    {.name = "back", .activate = _action_back},
+   {.name = "parent-folder", .activate = _action_parent_folder},
    {.name = "preferences", .activate = _action_preferences},
    {.name = "enhance", .activate = _action_enhance},
    {.name = "enhance-save", .activate = _action_enhance_save},
@@ -3089,6 +3147,63 @@ _on_grid_activate(GgazeGrid *p_grid, gpointer p_data) {
    _load_current(p_win);
 }
 
+/* --- folder browsing (the grid's folder cells) --------------------------- */
+
+typedef struct {
+   GgazeWindow *p_win;    /* owned ref */
+   GFile       *p_folder; /* owned ref */
+} _BrowseCtx;
+
+static void
+_browse_ctx_free(gpointer p_data) {
+   _BrowseCtx *p_ctx = (_BrowseCtx *)p_data;
+   g_object_unref(p_ctx->p_win);
+   g_object_unref(p_ctx->p_folder);
+   g_free(p_ctx);
+}
+
+static gboolean
+_browse_idle_cb(gpointer p_data) {
+   _BrowseCtx *p_ctx = (_BrowseCtx *)p_data;
+   if (!p_ctx->p_win->b_disposed) {
+      _open_gated(p_ctx->p_win, p_ctx->p_folder, TRUE, TRUE);
+   }
+   return (G_SOURCE_REMOVE);
+}
+
+/* Open p_folder in the grid as a move within the place being browsed (a
+ * folder cell, "..", Backspace): through the same Save/Discard/Cancel gate
+ * as any open, keeping the browse root. From an idle, because the request
+ * comes out of the grid's own key or activation handler and the open
+ * replaces that grid. */
+static void
+_browse_to(GgazeWindow *p_win, GFile *p_folder) {
+   _BrowseCtx *p_ctx = g_new(_BrowseCtx, 1);
+   p_ctx->p_win      = (GgazeWindow *)g_object_ref(p_win);
+   p_ctx->p_folder   = (GFile *)g_object_ref(p_folder);
+   g_idle_add_full(G_PRIORITY_DEFAULT, _browse_idle_cb, p_ctx,
+                   _browse_ctx_free);
+}
+
+/* Backspace: up to the parent folder, as the grid's ".." cell does -- only
+ * in the grid, and only below the folder the user opened. */
+static void
+_action_parent_folder(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
+   (void)p_a;
+   (void)p_v;
+   GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (p_win->p_nav == NULL || _get_view(p_win) != GGAZE_VIEW_GRID) {
+      return;
+   }
+   GFile *p_up = _browse_parent(p_win);
+   if (p_up == NULL) {
+      _show_status(p_win, "Already in the folder that was opened");
+      return;
+   }
+   _browse_to(p_win, p_up);
+   g_object_unref(p_up);
+}
+
 /* Enter (global): in the grid, open the highlighted image large -- the same
  * thing the flowbox's own Enter does, but through the shortcuts table so
  * the `?` help lists it and it works when focus wandered off the grid. */
@@ -3105,6 +3220,11 @@ _action_enter_large(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
 #endif
    if (p_win->p_nav == NULL || _get_view(p_win) != GGAZE_VIEW_GRID ||
        p_win->p_grid == NULL) {
+      return;
+   }
+   GFile *p_folder = ggaze_grid_get_selected_folder(p_win->p_grid);
+   if (p_folder != NULL) {
+      _browse_to(p_win, p_folder);
       return;
    }
    ggaze_grid_sync_current(p_win->p_grid);
@@ -3394,6 +3514,7 @@ ggaze_window_dispose(GObject *p_obj) {
       }
       g_clear_object(&p_win->p_nav);
    }
+   g_clear_object(&p_win->p_browse_root);
    popup_list_delete(&p_win->p_open_ext_pop);
    popup_list_delete(&p_win->p_run_script_pop);
    popup_list_delete(&p_win->p_move_pop);
@@ -4127,6 +4248,27 @@ _on_grid_mark_all_requested(GgazeGrid *p_grid, gpointer p_data) {
    gtk_widget_activate_action(GTK_WIDGET(p_data), "win.mark-all", NULL);
 }
 
+static void
+_on_grid_open_folder(GgazeGrid *p_grid, GFile *p_folder, gpointer p_data) {
+   (void)p_grid;
+   _browse_to(GGAZE_WINDOW(p_data), p_folder);
+}
+
+/* The folder the grid's ".." cell (and Backspace) leads to: the parent of
+ * the open folder while that lies below the browse root, else NULL -- the
+ * way back up ends at the folder the user opened. Transfer full. */
+static GFile *
+_browse_parent(GgazeWindow *p_win) {
+   if (p_win->p_nav == NULL || p_win->p_browse_root == NULL) {
+      return (NULL);
+   }
+   GFile *p_dir = navigator_get_dir(p_win->p_nav);
+   if (!g_file_has_prefix(p_dir, p_win->p_browse_root)) {
+      return (NULL);
+   }
+   return (g_file_get_parent(p_dir));
+}
+
 /* Replace the "grid" stack page with a fresh GgazeGrid bound to the window's
  * (already-built) navigator, and give the folder a fresh Trash instance. */
 static void
@@ -4152,6 +4294,11 @@ _open_rebuild_grid(GgazeWindow *p_win, gboolean b_hide_trashed) {
                     G_CALLBACK(_on_grid_mark_requested), p_win);
    g_signal_connect(p_win->p_grid, "mark-all-requested",
                     G_CALLBACK(_on_grid_mark_all_requested), p_win);
+   g_signal_connect(p_win->p_grid, "open-folder",
+                    G_CALLBACK(_on_grid_open_folder), p_win);
+   GFile *p_up = _browse_parent(p_win);
+   ggaze_grid_set_parent_folder(p_win->p_grid, p_up);
+   g_clear_object(&p_up);
    /* Route every grid/thumbnail selection through the dirty-preview gate
     * (tu0 review round 2, issue 1) instead of letting gridview.c call
     * navigator_set_current_file() directly. */
@@ -4267,9 +4414,13 @@ _open_rebuild(GgazeWindow *p_win, GFile *p_dir, GFile *p_start) {
  * _open_rebuild, so the cursor is placed before the "changed" handler is
  * connected and the choke point, the load and the enhance panel's preview
  * batch below run exactly once (gd2: opening the folder and placing the
- * cursor afterwards ran them twice for any start file not sorted first). */
+ * cursor afterwards ran them twice for any start file not sorted first).
+ * b_browse marks an open that moves within the place being browsed (a
+ * folder cell, "..", Backspace): the browse root stays, where every other
+ * open makes its folder the new root. */
 static void
-_open_now(GgazeWindow *p_win, GFile *p_arg, gboolean b_grid) {
+_open_now(GgazeWindow *p_win, GFile *p_arg, gboolean b_grid,
+          gboolean b_browse) {
    GFile   *p_dir    = NULL;
    GFile   *p_start  = NULL;
    gboolean b_is_dir = _open_resolve_target(p_arg, &p_dir, &p_start);
@@ -4282,8 +4433,24 @@ _open_now(GgazeWindow *p_win, GFile *p_arg, gboolean b_grid) {
       g_clear_object(&p_start);
       return;
    }
+   /* The folder being left, to put the highlight back on its cell when
+    * this open goes up to its parent ("..", Backspace). */
+   GFile *p_from = (b_browse && p_win->p_nav != NULL)
+                      ? g_object_ref(navigator_get_dir(p_win->p_nav))
+                      : NULL;
+   if (!b_browse) {
+      g_set_object(&p_win->p_browse_root, p_dir); /* a new place to browse */
+   }
    _open_leave_previous(p_win);
    _open_rebuild(p_win, p_dir, p_start);
+   if (p_from != NULL) {
+      /* Only on the way UP: going down, the folder left is the new grid's
+       * ".." cell, and the highlight belongs on the first image. */
+      if (g_file_has_parent(p_from, p_dir)) {
+         ggaze_grid_select_folder(p_win->p_grid, p_from);
+      }
+      g_object_unref(p_from);
+   }
    g_clear_object(&p_dir);
    g_clear_object(&p_start);
 
@@ -4298,15 +4465,16 @@ _open_now(GgazeWindow *p_win, GFile *p_arg, gboolean b_grid) {
 }
 
 typedef struct {
-   GgazeWindow *p_win;  /* owned ref */
-   GFile       *p_arg;  /* owned ref */
-   gboolean     b_grid; /* land in the grid even for a file arg */
+   GgazeWindow *p_win;    /* owned ref */
+   GFile       *p_arg;    /* owned ref */
+   gboolean     b_grid;   /* land in the grid even for a file arg */
+   gboolean     b_browse; /* a move within the browse root (see _open_now) */
 } _OpenCtx;
 
 static gboolean
 _proceed_open(gpointer p_data) {
    _OpenCtx *p_ctx = (_OpenCtx *)p_data;
-   _open_now(p_ctx->p_win, p_ctx->p_arg, p_ctx->b_grid);
+   _open_now(p_ctx->p_win, p_ctx->p_arg, p_ctx->b_grid, p_ctx->b_browse);
    return (G_SOURCE_REMOVE);
 }
 
@@ -4322,11 +4490,13 @@ _open_ctx_free(gpointer p_data) {
 /* Both public opens: queue _open_now(p_arg, b_grid) behind the Save/
  * Discard/Cancel gate (the ctx owns its refs on every exit path). */
 static void
-_open_gated(GgazeWindow *p_win, GFile *p_arg, gboolean b_grid) {
+_open_gated(GgazeWindow *p_win, GFile *p_arg, gboolean b_grid,
+            gboolean b_browse) {
    _OpenCtx *p_ctx = g_new(_OpenCtx, 1);
    p_ctx->p_win    = (GgazeWindow *)g_object_ref(p_win);
    p_ctx->p_arg    = (GFile *)g_object_ref(p_arg);
    p_ctx->b_grid   = b_grid;
+   p_ctx->b_browse = b_browse;
    save_gate_maybe_save_then(p_win->p_save_gate, _proceed_open, p_ctx,
                              _open_ctx_free);
 }
@@ -4344,7 +4514,7 @@ void
 ggaze_window_open(GgazeWindow *p_win, GFile *p_arg) {
    g_return_if_fail(GGAZE_IS_WINDOW(p_win));
    g_return_if_fail(G_IS_FILE(p_arg));
-   _open_gated(p_win, p_arg, FALSE);
+   _open_gated(p_win, p_arg, FALSE, FALSE);
 }
 
 /* Several files: open the FIRST one's folder in the grid with it current
@@ -4364,7 +4534,7 @@ ggaze_window_open_files(GgazeWindow *p_win, GFile **pp_files, gint i_n_files) {
       return;
    }
    g_return_if_fail(G_IS_FILE(pp_files[0]));
-   _open_gated(p_win, pp_files[0], i_n_files > 1);
+   _open_gated(p_win, pp_files[0], i_n_files > 1, FALSE);
 }
 
 /* Step the cursor by i_dir and give a cue at the folder edge: "Wrapped to

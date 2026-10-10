@@ -76,6 +76,14 @@ gboolean navigator_set_current(Navigator *p_nav, guint u_index);
 gboolean navigator_set_current_file(Navigator *p_nav,
                                     GFile     *p_file); /* by path */
 
+/* The folder's sub-folders, sorted by name: dot-folders (.Trash) are left
+ * out, a symlink to a folder counts. They are not part of the listing --
+ * never current, never marked, not counted -- and exist for the grid's
+ * folder cells; a change to them is reported as GGAZE_NAV_LISTING. */
+guint navigator_get_subdir_count(Navigator *p_nav);
+/* navigator_get_subdir: (transfer none), NULL past the end */
+GFile *navigator_get_subdir(Navigator *p_nav, guint u_index);
+
 /* --- navigation (honour wrap) ------------------------------------------- */
 gboolean navigator_prev(Navigator *p_nav);
 gboolean navigator_next(Navigator *p_nav);

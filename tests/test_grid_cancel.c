@@ -19,6 +19,7 @@
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <gtk/gtk.h>
 
 /* --- helpers ------------------------------------------------------------ */
@@ -337,6 +338,146 @@ test_grid_loads_newly_visible_after_resize(void) {
    cleanup_temp_dir(c_dir);
 }
 
+/* Pump until the window's grid shows u_images image cells and u_folders
+ * folder cells (up to 3 s); asserts it does. A folder open is deferred (an
+ * idle, then the save gate), so the grid is replaced a few turns later. */
+static void
+wait_for_grid(GgazeWindow *p_win, guint u_images, guint u_folders) {
+   for (guint u = 0; u < 3000; u++) {
+      GgazeGrid *p_grid = window_grid(p_win);
+      if (p_grid != NULL && ggaze_grid_get_count(p_grid) == u_images &&
+          ggaze_grid_get_folder_count(p_grid) == u_folders) {
+         break;
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_cmpuint(ggaze_grid_get_count(window_grid(p_win)), ==, u_images);
+   g_assert_cmpuint(ggaze_grid_get_folder_count(window_grid(p_win)), ==,
+                    u_folders);
+   drain_main(50);
+}
+
+/* A folder that holds only a sub-folder opens on the grid with a folder
+ * cell -- not on the "No images" page -- and that cell is the way in:
+ * Enter opens the sub-folder, whose grid has a ".." cell (and Backspace)
+ * leading back, with the highlight back on the folder that was left. The
+ * way up ends at the folder that was opened. */
+static void
+test_browse_sub_folders(void) {
+   GError *p_err  = NULL;
+   char   *c_root = g_dir_make_tmp("ggaze-browse-XXXXXX", &p_err);
+   g_assert_no_error(p_err);
+   char *c_sub = g_build_filename(c_root, "sub", NULL);
+   g_assert_cmpint(g_mkdir(c_sub, 0700), ==, 0);
+   copy_fixture(c_sub, "plain.jpg");
+   GFile *p_root = g_file_new_for_path(c_root);
+   GFile *p_sub  = g_file_new_for_path(c_sub);
+
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_root);
+   wait_for_grid(p_win, 0, 1);
+   GtkStack *p_stack = ggaze_window_get_stack(p_win);
+   g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
+   GFile *p_sel = ggaze_grid_get_selected_folder(window_grid(p_win));
+   g_assert_nonnull(p_sel);
+   g_assert_true(g_file_equal(p_sel, p_sub));
+
+   gtk_widget_activate_action(GTK_WIDGET(p_win), "win.enter-large", NULL);
+   wait_for_grid(p_win, 1, 1); /* plain.jpg and ".." */
+   g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
+   g_assert_null(ggaze_grid_get_selected_folder(window_grid(p_win)));
+
+   gtk_widget_activate_action(GTK_WIDGET(p_win), "win.parent-folder", NULL);
+   wait_for_grid(p_win, 0, 1);
+   g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
+   p_sel = ggaze_grid_get_selected_folder(window_grid(p_win));
+   g_assert_nonnull(p_sel);
+   g_assert_true(g_file_equal(p_sel, p_sub));
+
+   /* At the opened folder: nowhere further up to go. */
+   gtk_widget_activate_action(GTK_WIDGET(p_win), "win.parent-folder", NULL);
+   drain_main(200);
+   wait_for_grid(p_win, 0, 1);
+
+   g_object_unref(p_root);
+   g_object_unref(p_sub);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(300);
+   cleanup_temp_dir(c_root);
+   g_free(c_sub);
+}
+
+/* Write a u_side x u_side noise PNG (slow to decode and scale next to the
+ * small fixture) as c_dir/c_name. */
+static void
+write_big_png(const char *c_dir, const char *c_name, int u_side) {
+   GdkPixbuf *p_pix =
+      gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, u_side, u_side);
+   guchar *p_px  = gdk_pixbuf_get_pixels(p_pix);
+   gsize   u_len = (gsize)gdk_pixbuf_get_rowstride(p_pix) * (gsize)u_side;
+   GRand  *p_rnd = g_rand_new_with_seed(7);
+   for (gsize u = 0; u < u_len; u++) {
+      p_px[u] = (guchar)g_rand_int_range(p_rnd, 0, 256);
+   }
+   g_rand_free(p_rnd);
+   char   *c_path = g_build_filename(c_dir, c_name, NULL);
+   GError *p_err  = NULL;
+   g_assert_true(gdk_pixbuf_save(p_pix, c_path, "png", &p_err, NULL));
+   g_assert_no_error(p_err);
+   g_free(c_path);
+   g_object_unref(p_pix);
+}
+
+/* The grid fills from the top: a thumbnail is never painted while a cell
+ * before it is still waiting for its first one. The first file here decodes
+ * far slower than the ones after it, so with the pool's parallel workers
+ * the later results land first -- painted as they landed, the grid filled
+ * in scattered order. (With a single worker the order holds trivially.) */
+static void
+test_grid_fills_from_the_top(void) {
+   const guint u_count = 6;
+   char       *c_dir   = make_large_folder(u_count);
+   write_big_png(c_dir, "image-00.png", 3000); /* sorts first, decodes last */
+   GFile     *p_dir   = g_file_new_for_path(c_dir);
+   Navigator *p_nav   = navigator_new(p_dir, GGAZE_SORT_NAME, FALSE, FALSE);
+   Thumbnail *p_thumb = thumbnail_new();
+   GgazeGrid *p_grid  = GGAZE_GRID(ggaze_grid_new(p_nav, p_thumb, 128, FALSE));
+   GtkWindow *p_win   = GTK_WINDOW(gtk_window_new());
+   gtk_window_set_child(p_win, GTK_WIDGET(p_grid));
+   gtk_window_set_default_size(p_win, 1100, 400); /* all seven visible */
+   gtk_window_present(p_win);
+
+   GtkWidget *p_pics[7];
+   for (guint u = 0; u <= u_count; u++) {
+      p_pics[u] = grid_picture(p_grid, u);
+      g_assert_nonnull(p_pics[u]);
+   }
+   for (guint u_ms = 0; u_ms < 20000; u_ms++) {
+      gboolean b_gap = FALSE;
+      for (guint u = 0; u <= u_count; u++) {
+         gboolean b_painted =
+            gtk_picture_get_paintable(GTK_PICTURE(p_pics[u])) != NULL;
+         g_assert_false(b_painted && b_gap); /* painted below an empty cell */
+         b_gap = b_gap || !b_painted;
+      }
+      if (!b_gap) {
+         break; /* every cell painted */
+      }
+      g_main_context_iteration(g_main_context_default(), FALSE);
+      g_usleep(1000);
+   }
+   g_assert_nonnull(gtk_picture_get_paintable(GTK_PICTURE(p_pics[u_count])));
+
+   ggaze_grid_detach(p_grid);
+   gtk_window_destroy(p_win);
+   thumbnail_delete(p_thumb);
+   navigator_delete(p_nav);
+   g_object_unref(p_dir);
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+
 int
 main(int i_argc, char **c_argv) {
    g_test_init(&i_argc, &c_argv, NULL);
@@ -356,5 +497,7 @@ main(int i_argc, char **c_argv) {
                    test_grid_refresh_with_inflight);
    g_test_add_func("/grid/loads_newly_visible_after_resize",
                    test_grid_loads_newly_visible_after_resize);
+   g_test_add_func("/grid/fills_from_the_top", test_grid_fills_from_the_top);
+   g_test_add_func("/grid/browse_sub_folders", test_browse_sub_folders);
    return (g_test_run());
 }

@@ -36,9 +36,11 @@ typedef struct {
 } Entry;
 
 struct _Navigator {
-   GObject     parent_instance;
-   GFile      *p_dir;     /* owned */
-   GPtrArray  *p_files;   /* GFile* (owned refs), sorted/filtered */
+   GObject    parent_instance;
+   GFile     *p_dir;      /* owned */
+   GPtrArray *p_files;    /* GFile* (owned refs), sorted/filtered */
+   GPtrArray *p_subdirs;  /* GFile* (owned refs): the folder's visible
+                           * sub-folders, sorted by name */
    gint        i_current; /* -1 if empty */
    GgazeSort   e_sort;
    gboolean    b_wrap;
@@ -203,12 +205,30 @@ _is_live_index(Navigator *p_nav, guint u_index) {
    return (!g_hash_table_contains(p_nav->p_removed, p_file));
 }
 
+/* Order two sub-folders by the collation of their basenames. */
+static gint
+_compare_subdirs(gconstpointer p_a, gconstpointer p_b) {
+   char *c_a   = g_file_get_basename(*(GFile *const *)p_a);
+   char *c_b   = g_file_get_basename(*(GFile *const *)p_b);
+   char *c_ka  = _collate_key_for(c_a);
+   char *c_kb  = _collate_key_for(c_b);
+   gint  i_cmp = strcmp(c_ka, c_kb);
+   g_free(c_ka);
+   g_free(c_kb);
+   g_free(c_a);
+   g_free(c_b);
+   return (i_cmp);
+}
+
 /* Enumerate p_nav's folder into Entry structs (regular image files only,
  * dotfiles skipped) and collect the lowercase stems of the JPEGs seen, for
- * the RAW-sidecar pruning. Returns NULL (with c_error set) when the folder
- * cannot be enumerated. */
+ * the RAW-sidecar pruning. The folder's sub-folders (dot-folders such as
+ * .Trash skipped; a symlink to a folder counts) are listed into p_subdirs
+ * on the way, for the grid's folder cells. Returns NULL (with c_error set
+ * and no sub-folders) when the folder cannot be enumerated. */
 static GPtrArray *
 _enumerate_entries(Navigator *p_nav, GHashTable *p_jpeg_stems) {
+   g_ptr_array_set_size(p_nav->p_subdirs, 0);
    GError          *p_err  = NULL;
    GFileEnumerator *p_enum = g_file_enumerate_children(
       p_nav->p_dir,
@@ -227,6 +247,11 @@ _enumerate_entries(Navigator *p_nav, GHashTable *p_jpeg_stems) {
    while ((p_info = g_file_enumerator_next_file(p_enum, NULL, NULL)) != NULL) {
       const char *c_name = g_file_info_get_name(p_info);
       const char *c_ct   = g_file_info_get_content_type(p_info);
+      if (c_name != NULL && c_name[0] != '.' &&
+          g_file_info_get_file_type(p_info) == G_FILE_TYPE_DIRECTORY) {
+         g_ptr_array_add(p_nav->p_subdirs,
+                         g_file_get_child(p_nav->p_dir, c_name));
+      }
       if (c_name == NULL || c_name[0] == '.' ||
           g_file_info_get_file_type(p_info) != G_FILE_TYPE_REGULAR ||
           !_is_image_file(c_name, c_ct)) {
@@ -247,6 +272,7 @@ _enumerate_entries(Navigator *p_nav, GHashTable *p_jpeg_stems) {
       g_ptr_array_add(p_entries, p_e);
    }
    g_object_unref(p_enum);
+   g_ptr_array_sort(p_nav->p_subdirs, _compare_subdirs);
    return (p_entries);
 }
 
@@ -367,6 +393,7 @@ _emit_changed(Navigator *p_nav, guint u_flags) {
  * say afterwards what actually changed. */
 typedef struct {
    GPtrArray *p_files;   /* GFile* (owned refs), the old order */
+   GPtrArray *p_subdirs; /* GFile* (owned refs), the old sub-folders */
    GFile     *p_current; /* owned ref, NULL if nothing was current */
    guint      u_removed;
    gboolean   b_readable;
@@ -380,6 +407,12 @@ _snapshot_take(Navigator *p_nav, ListingSnapshot *p_snap) {
       g_ptr_array_add(p_snap->p_files,
                       g_object_ref(g_ptr_array_index(p_nav->p_files, u_i)));
    }
+   p_snap->p_subdirs =
+      g_ptr_array_new_with_free_func((GDestroyNotify)g_object_unref);
+   for (guint u_i = 0; u_i < p_nav->p_subdirs->len; u_i++) {
+      g_ptr_array_add(p_snap->p_subdirs,
+                      g_object_ref(g_ptr_array_index(p_nav->p_subdirs, u_i)));
+   }
    GFile *p_cur       = navigator_get_current(p_nav);
    p_snap->p_current  = (p_cur != NULL) ? g_object_ref(p_cur) : NULL;
    p_snap->u_removed  = g_hash_table_size(p_nav->p_removed);
@@ -389,26 +422,35 @@ _snapshot_take(Navigator *p_nav, ListingSnapshot *p_snap) {
 static void
 _snapshot_clear(ListingSnapshot *p_snap) {
    g_clear_pointer(&p_snap->p_files, g_ptr_array_unref);
+   g_clear_pointer(&p_snap->p_subdirs, g_ptr_array_unref);
    g_clear_object(&p_snap->p_current);
 }
 
-/* TRUE iff the listing differs from the snapshot in a way a view has to
- * follow: another file set or order, a changed removed set (a trashed file
- * reappeared and was un-removed), or the folder became (un)readable. */
+/* TRUE iff both arrays hold the same files in the same order. */
 static gboolean
-_listing_differs(Navigator *p_nav, const ListingSnapshot *p_snap) {
-   if (p_snap->p_files->len != p_nav->p_files->len ||
-       p_snap->u_removed != g_hash_table_size(p_nav->p_removed) ||
-       p_snap->b_readable != (p_nav->c_error == NULL)) {
-      return (TRUE);
+_same_files(GPtrArray *p_a, GPtrArray *p_b) {
+   if (p_a->len != p_b->len) {
+      return (FALSE);
    }
-   for (guint u_i = 0; u_i < p_nav->p_files->len; u_i++) {
-      if (!g_file_equal(g_ptr_array_index(p_snap->p_files, u_i),
-                        g_ptr_array_index(p_nav->p_files, u_i))) {
-         return (TRUE);
+   for (guint u_i = 0; u_i < p_a->len; u_i++) {
+      if (!g_file_equal(g_ptr_array_index(p_a, u_i),
+                        g_ptr_array_index(p_b, u_i))) {
+         return (FALSE);
       }
    }
-   return (FALSE);
+   return (TRUE);
+}
+
+/* TRUE iff the listing differs from the snapshot in a way a view has to
+ * follow: another file set or order, other sub-folders, a changed removed
+ * set (a trashed file reappeared and was un-removed), or the folder became
+ * (un)readable. */
+static gboolean
+_listing_differs(Navigator *p_nav, const ListingSnapshot *p_snap) {
+   return (p_snap->u_removed != g_hash_table_size(p_nav->p_removed) ||
+           p_snap->b_readable != (p_nav->c_error == NULL) ||
+           !_same_files(p_snap->p_files, p_nav->p_files) ||
+           !_same_files(p_snap->p_subdirs, p_nav->p_subdirs));
 }
 
 /* TRUE iff navigator.current names another file than in the snapshot. */
@@ -550,6 +592,7 @@ navigator_dispose(GObject *p_obj) {
    g_clear_pointer(&p_nav->p_touched, g_hash_table_unref);
    g_clear_pointer(&p_nav->p_modified, g_hash_table_unref);
    g_clear_pointer(&p_nav->p_files, g_ptr_array_unref);
+   g_clear_pointer(&p_nav->p_subdirs, g_ptr_array_unref);
    g_clear_object(&p_nav->p_dir);
    g_clear_object(&p_nav->p_last_mark);
    g_clear_pointer(&p_nav->c_error, g_free);
@@ -568,6 +611,8 @@ navigator_class_init(NavigatorClass *p_klass) {
 static void
 navigator_init(Navigator *p_nav) {
    p_nav->p_files =
+      g_ptr_array_new_with_free_func((GDestroyNotify)g_object_unref);
+   p_nav->p_subdirs =
       g_ptr_array_new_with_free_func((GDestroyNotify)g_object_unref);
    p_nav->p_marks =
       g_hash_table_new_full((GHashFunc)g_file_hash, (GEqualFunc)g_file_equal,
@@ -1035,6 +1080,21 @@ navigator_remove(Navigator *p_nav, GFile *p_file) {
    }
    _emit_changed(p_nav, GGAZE_NAV_LISTING | GGAZE_NAV_CURSOR);
    return (TRUE);
+}
+
+guint
+navigator_get_subdir_count(Navigator *p_nav) {
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), 0);
+   return (p_nav->p_subdirs->len);
+}
+
+GFile *
+navigator_get_subdir(Navigator *p_nav, guint u_index) {
+   g_return_val_if_fail(GGAZE_IS_NAVIGATOR(p_nav), NULL);
+   if (u_index >= p_nav->p_subdirs->len) {
+      return (NULL);
+   }
+   return ((GFile *)g_ptr_array_index(p_nav->p_subdirs, u_index));
 }
 
 gboolean

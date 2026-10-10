@@ -33,6 +33,22 @@ The **KISS** part — things gthumb has that ggaze deliberately drops:
 - **CLI arg**: `ggaze IMG_0001.jpg` opens that file (large view, its folder as
   the navigator); `ggaze ~/Downloads/Camera/` opens the folder directly in the
   grid.
+- **Sub-folders**: the grid shows the open folder's sub-folders as folder
+  cells ahead of the images (sorted by name; dot-folders such as `.Trash`
+  are left out, a symlink to a folder counts). `Enter` or a double-click on
+  one opens it in the grid; from there a `..` cell (and `Backspace`) leads
+  back up, with the highlight back on the folder that was left. The way up
+  ends at the folder that was opened from outside (CLI, `o`/`O`, a drop) —
+  `..` never climbs above it. `h`/`l`/`j`/`k` and the arrows move the
+  highlight over folder cells like over images; a folder is never the
+  current image and cannot be marked, and `d`/`D`/`m` do nothing while the
+  highlight rests on one (unless files are marked). A folder with
+  sub-folders but no images shows these cells, not the "No images" page.
+- **Thumbnails fill from the top**: a decoded thumbnail is not painted while
+  a cell before it still waits for its first one, so the grid fills in
+  order and nothing above the fill front changes again. Cells are kept
+  across a folder rescan (new, removed and moved ones aside), so a folder
+  being written to does not blank the grid.
 - **Drag-and-drop**: drop a file or a folder onto the window to open it — a
   folder opens the grid; a file opens it (large view, parent folder as
   navigator); multiple files open the first file's folder in the grid with the
@@ -155,6 +171,7 @@ drift from the live bindings.
 | `U` / `Ctrl+Shift+Z` | redo the edit step undone last (edit panel open, large view only; elsewhere nothing) |
 | `o` / `Ctrl+o` | open image dialog (image filter) |
 | `O` / `Ctrl+Shift+o` | open folder dialog |
+| `Backspace` | up to the parent folder (grid, after entering a sub-folder) |
 | `,` / `Ctrl+,` | preferences (destinations, editors, scripts, presets, sort, …) |
 | `F10`          | main menu (every action, with its keys) |
 | `?` / `F1`     | shortcuts overlay |

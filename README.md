@@ -79,6 +79,7 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `f` / `F11`        | fullscreen |
 | `S` / `F5`         | slideshow |
 | `o` / `O`          | open image / open folder dialog (`Ctrl+o`, `Ctrl+Shift+o`) |
+| `Enter` / `Backspace` | on a folder cell in the grid: open that sub-folder / back up to the parent |
 | `,`               | preferences |
 | `F10`             | main menu |
 | `?` / `F1`         | shortcuts overlay |
