@@ -35,6 +35,13 @@
   </recommends>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.2.1" date="2026-10-15">
+      <description>
+        <p>Browse sub-folders, keep the grid stable while culling, move by
+        whole pages and extend selections with Shift+arrows or H/J/K/L.
+        Backspace steps out of the large view while keeping marks and edits.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-09-26">
       <description>
         <p>A single edit panel with adjustable preset strength, crop, straighten, rotate and undo/redo, a fast screen-resolution edit preview, ICC colour management for enhanced copies, animated GIF/WebP playback and touch gestures.</p>

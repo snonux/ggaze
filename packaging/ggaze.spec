@@ -1,5 +1,5 @@
 Name:    ggaze
-Version: 0.2.0
+Version: 0.2.1
 Release: 1%{?dist}
 Summary: Fast native image viewer for culling camera shoots
 
@@ -49,6 +49,11 @@ on. No library, no database, no sidecars.
 %license LICENSE
 
 %changelog
+* Thu Oct 15 2026 ggaze contributors <paul@buetow.org> - 0.2.1-1
+- Browse sub-folders and keep the grid stable while culling
+- Page-wise grid navigation and Shift+cursor or H/J/K/L selection
+- Contextual Backspace preserves marks and edits when leaving large view
+
 * Sat Sep 26 2026 ggaze contributors <paul@buetow.org> - 0.2.0-1
 - Edit panel: presets with adjustable strength, crop, straighten, rotate,
   undo/redo, key-hint bar; user presets in the panel
