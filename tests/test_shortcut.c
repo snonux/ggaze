@@ -26,11 +26,18 @@
 #include "viewer.h"
 #include "window.h"
 #include "shortcuts.h"
+#include "ggaze-config.h"
+#include "gtk_helpers.h"
 
 #include <gdk/gdk.h>
 #include <gio/gio.h>
 #include <glib.h>
 #include <gtk/gtk.h>
+
+#if GGAZE_HAVE_GEGL
+#include <gegl.h>
+#include "enhancer-gegl.h"
+#endif
 
 /* --- helpers ------------------------------------------------------------ */
 
@@ -399,8 +406,8 @@ test_shortcut_full_table_registered(void) {
     * 70 before wb2 + c / R / ] / [ = 74; 6i2 moved the eight digits to the
     * panel (-8) and added x (+1) = 67; Backspace (parent folder) = 68;
     * Shift+Up / Shift+Down (extend the marks) = 70; Ctrl+r (refresh) =
-    * 71. */
-   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 71);
+    * 71; Shift+J / Shift+K = 73. */
+   g_assert_cmpint(g_list_model_get_n_items(G_LIST_MODEL(p_sc)), ==, 73);
    g_object_unref(p_sc);
    gtk_window_destroy(GTK_WINDOW(p_win));
    drain_main(200);
@@ -453,8 +460,262 @@ test_help_window_from_table(void) {
    drain_main(200);
 }
 
+/* Route through the edit capture path first, then the installed global
+ * shortcut. This preserves the same tool/panel priority as a key press. */
+static void
+press_key(GgazeWindow *p_win, guint u_key, GdkModifierType e_mods) {
+   if (ggaze_window_edit_key(p_win, u_key, e_mods)) {
+      return;
+   }
+   GtkShortcutController *p_sc = find_shortcut_controller(GTK_WIDGET(p_win));
+   GtkShortcut           *p_s =
+      find_shortcut_by_key(p_sc, gdk_keyval_to_lower(u_key), e_mods);
+   g_assert_nonnull(p_s);
+   fire_shortcut(GTK_WIDGET(p_win), p_s);
+   g_object_unref(p_s);
+   g_object_unref(p_sc);
+   drain_main(50);
+}
+
+static GgazeGrid *
+window_grid(GgazeWindow *p_win) {
+   return (GGAZE_GRID(
+      gtk_stack_get_child_by_name(ggaze_window_get_stack(p_win), "grid")));
+}
+
+static guint
+marked_cells(GtkWidget *p_root) {
+   guint u_n = gtk_widget_has_css_class(p_root, "ggaze-marked") ? 1 : 0;
+   for (GtkWidget *p_c = gtk_widget_get_first_child(p_root); p_c != NULL;
+        p_c            = gtk_widget_get_next_sibling(p_c)) {
+      u_n += marked_cells(p_c);
+   }
+   return (u_n);
+}
+
+static GgazeWindow *
+open_shortcut_folder(char **pc_dir) {
+   *pc_dir = g_dir_make_tmp("ggaze-shortcut-XXXXXX", NULL);
+   g_assert_nonnull(*pc_dir);
+   copy_fixture(*pc_dir, "plain.jpg");
+   GFile *p_dir = g_file_new_for_path(*pc_dir);
+   GFile *p_src = g_file_get_child(p_dir, "plain.jpg");
+   for (guint u = 0; u < 16; u++) {
+      char  *c_name = g_strdup_printf("image-%02u.jpg", u);
+      GFile *p_dst  = g_file_get_child(p_dir, c_name);
+      g_assert_true(
+         g_file_copy(p_src, p_dst, G_FILE_COPY_NONE, NULL, NULL, NULL, NULL));
+      g_object_unref(p_dst);
+      g_free(c_name);
+   }
+   GgazeWindow *p_win = new_window();
+   ggaze_window_open(p_win, p_dir);
+   gtk_window_set_default_size(GTK_WINDOW(p_win), 600, 500);
+   gtk_window_present(GTK_WINDOW(p_win));
+   GGTEST_WAIT_FOR_TEXTURE(p_win, 6, 3);
+   drain_main(200);
+   g_object_unref(p_src);
+   g_object_unref(p_dir);
+   return (p_win);
+}
+
+/* J/K use the same row selection as Shift+arrows, including shrinking a
+ * range and refusing to cross the first row. Backspace preserves both a
+ * range and the highlighted file, including repeated presses at the root. */
+static void
+test_shift_jk_and_backspace_marks(void) {
+   char        *c_dir   = NULL;
+   GgazeWindow *p_win   = open_shortcut_folder(&c_dir);
+   GgazeGrid   *p_grid  = window_grid(p_win);
+   GFile       *p_first = g_object_ref(ggaze_grid_get_selected_file(p_grid));
+   press_key(p_win, GDK_KEY_J, GDK_SHIFT_MASK);
+   GFile *p_down  = g_object_ref(ggaze_grid_get_selected_file(p_grid));
+   guint  u_marks = marked_cells(GTK_WIDGET(p_grid));
+   g_assert_false(g_file_equal(p_first, p_down));
+   g_assert_cmpuint(u_marks, >, 1);
+   press_key(p_win, GDK_KEY_K, GDK_SHIFT_MASK);
+   g_assert_true(g_file_equal(p_first, ggaze_grid_get_selected_file(p_grid)));
+   g_assert_cmpuint(marked_cells(GTK_WIDGET(p_grid)), ==, 1);
+   press_key(p_win, GDK_KEY_K, GDK_SHIFT_MASK); /* first-row boundary */
+   g_assert_true(g_file_equal(p_first, ggaze_grid_get_selected_file(p_grid)));
+   press_key(p_win, GDK_KEY_Down, GDK_SHIFT_MASK);
+   g_assert_true(g_file_equal(p_down, ggaze_grid_get_selected_file(p_grid)));
+   g_assert_cmpuint(marked_cells(GTK_WIDGET(p_grid)), ==, u_marks);
+   press_key(p_win, GDK_KEY_Return, 0);
+   GGTEST_WAIT_FOR_VIEW(p_win, 6, 3);
+   press_key(p_win, GDK_KEY_BackSpace, 0);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "grid");
+   for (guint u = 0; u < 3; u++) {
+      press_key(p_win, GDK_KEY_BackSpace, 0);
+      g_assert_true(g_file_equal(p_down, ggaze_grid_get_selected_file(p_grid)));
+      g_assert_cmpuint(marked_cells(GTK_WIDGET(p_grid)), ==, u_marks);
+      g_assert_true(gtk_widget_get_visible(GTK_WIDGET(p_win)));
+   }
+   /* Escape still clears marks as its own first grid step. */
+   press_key(p_win, GDK_KEY_Escape, 0);
+   g_assert_cmpuint(marked_cells(GTK_WIDGET(p_grid)), ==, 0);
+   g_object_unref(p_down);
+   g_object_unref(p_first);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+
+static void
+test_shift_jk_pan_and_slideshow(void) {
+   char        *c_dir = NULL;
+   GgazeWindow *p_win = open_shortcut_folder(&c_dir);
+   press_key(p_win, GDK_KEY_Return, 0);
+   GgazeViewer *p_viewer = GGTEST_WAIT_FOR_VIEW(p_win, 6, 3);
+   /* A large canvas makes a real pan observable even at the small test
+    * window's fit scale; decoding is already verified by the load wait. */
+   GBytes *p_bytes =
+      g_bytes_new_take(g_malloc0(2000 * 2000 * 4), 2000 * 2000 * 4);
+   GdkTexture *p_tex = gdk_memory_texture_new(2000, 2000, GDK_MEMORY_R8G8B8A8,
+                                              p_bytes, 2000 * 4);
+   ggaze_viewer_set_texture(p_viewer, p_tex);
+   ggaze_viewer_toggle_fit_100(p_viewer);
+   gdouble d_start, d_down, d_end;
+   ggaze_viewer_get_pan(p_viewer, NULL, &d_start);
+   press_key(p_win, GDK_KEY_J, GDK_SHIFT_MASK);
+   ggaze_viewer_get_pan(p_viewer, NULL, &d_down);
+   g_assert_cmpfloat(d_down, !=, d_start);
+   press_key(p_win, GDK_KEY_K, GDK_SHIFT_MASK);
+   ggaze_viewer_get_pan(p_viewer, NULL, &d_end);
+   g_assert_cmpfloat(d_end, ==, d_start);
+   g_assert_cmpuint(marked_cells(GTK_WIDGET(window_grid(p_win))), ==, 0);
+   press_key(p_win, GDK_KEY_S, GDK_SHIFT_MASK);
+   press_key(p_win, GDK_KEY_BackSpace, 0);
+   g_assert_cmpstr(
+      gtk_label_get_text(GTK_LABEL(ggaze_window_get_info_label(p_win))), ==,
+      "Slideshow stopped");
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "large");
+   press_key(p_win, GDK_KEY_BackSpace, 0);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "grid");
+   g_object_unref(p_tex);
+   g_bytes_unref(p_bytes);
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+
+/* Fullscreen is acknowledged asynchronously by the window manager. Bare
+ * Xvfb has none; run this subtest under a WM to cover the real transition. */
+static void
+test_backspace_fullscreen(void) {
+   char        *c_dir = NULL;
+   GgazeWindow *p_win = open_shortcut_folder(&c_dir);
+   press_key(p_win, GDK_KEY_Return, 0);
+   GGTEST_WAIT_FOR_VIEW(p_win, 6, 3);
+   press_key(p_win, GDK_KEY_f, 0);
+   for (guint u = 0; u < 2000 && !gtk_window_is_fullscreen(GTK_WINDOW(p_win));
+        u++) {
+      drain_main(1);
+   }
+   if (!gtk_window_is_fullscreen(GTK_WINDOW(p_win))) {
+      g_test_skip("Window manager did not acknowledge fullscreen");
+   } else {
+      press_key(p_win, GDK_KEY_BackSpace, 0);
+      for (guint u = 0; u < 2000 && gtk_window_is_fullscreen(GTK_WINDOW(p_win));
+           u++) {
+         drain_main(1);
+      }
+      g_assert_false(gtk_window_is_fullscreen(GTK_WINDOW(p_win)));
+      g_assert_cmpstr(
+         gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+         "large");
+      press_key(p_win, GDK_KEY_BackSpace, 0);
+      g_assert_cmpstr(
+         gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+         "grid");
+   }
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+
+#if GGAZE_HAVE_GEGL
+/* Crop J/K still resize the rectangle; Backspace cancels only the tool,
+ * then closes the panel without discarding the committed edit. Navigating
+ * from the grid afterwards must still ask Save/Discard/Cancel. */
+static void
+test_backspace_edit_steps(void) {
+   char        *c_dir = NULL;
+   GgazeWindow *p_win = open_shortcut_folder(&c_dir);
+   /* The crop minimum is eight pixels: use a real larger source so both
+    * vertical edges have room to shrink and grow. */
+   char      *c_path = g_build_filename(c_dir, "crop.png", NULL);
+   GdkPixbuf *p_pix  = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 200, 100);
+   gdk_pixbuf_fill(p_pix, 0x808080ff);
+   g_assert_true(gdk_pixbuf_save(p_pix, c_path, "png", NULL, NULL));
+   g_object_unref(p_pix);
+   GFile *p_file = g_file_new_for_path(c_path);
+   ggaze_window_open(p_win, p_file);
+   GGTEST_WAIT_FOR_VIEW(p_win, 200, 100);
+   g_object_unref(p_file);
+   g_free(c_path);
+   press_key(p_win, GDK_KEY_bracketright, 0); /* committed quarter turn */
+   g_assert_true(ggaze_window_enhance_is_dirty(p_win));
+   press_key(p_win, GDK_KEY_c, 0);
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_CROP);
+   for (guint u = 0; u < 5000 && !ggaze_window_enhance_is_settled(p_win); u++) {
+      drain_main(1);
+   }
+   g_assert_true(ggaze_window_enhance_is_settled(p_win));
+   CropRect t_before, t_after;
+   gint     i_w, i_h;
+   g_assert_true(ggaze_window_tool_crop_rect(p_win, &t_before, &i_w, &i_h));
+   press_key(p_win, GDK_KEY_j, GDK_CONTROL_MASK); /* room to grow */
+   press_key(p_win, GDK_KEY_k, GDK_CONTROL_MASK);
+   g_assert_true(ggaze_window_tool_crop_rect(p_win, &t_before, &i_w, &i_h));
+   press_key(p_win, GDK_KEY_J, GDK_SHIFT_MASK);
+   g_assert_true(ggaze_window_tool_crop_rect(p_win, &t_after, &i_w, &i_h));
+   g_assert_cmpfloat(t_after.d_h, >, t_before.d_h);
+   g_assert_cmpfloat(t_after.d_y, ==, t_before.d_y);
+   t_before = t_after;
+   press_key(p_win, GDK_KEY_K, GDK_SHIFT_MASK);
+   g_assert_true(ggaze_window_tool_crop_rect(p_win, &t_after, &i_w, &i_h));
+   g_assert_cmpfloat(t_after.d_h, >, t_before.d_h);
+   g_assert_cmpfloat(t_after.d_y, <, t_before.d_y);
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_CROP);
+   press_key(p_win, GDK_KEY_BackSpace, 0);
+   g_assert_cmpint(ggaze_window_get_tool(p_win), ==, GGAZE_TOOL_NONE);
+   g_assert_cmpint(ggaze_window_get_key_mode(p_win), ==, GGAZE_KEY_MODE_PANEL);
+   g_assert_true(ggaze_window_enhance_is_dirty(p_win));
+   press_key(p_win, GDK_KEY_BackSpace, 0);
+   g_assert_cmpint(ggaze_window_get_key_mode(p_win), ==, GGAZE_KEY_MODE_NONE);
+   g_assert_true(ggaze_window_enhance_is_dirty(p_win));
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "large");
+   press_key(p_win, GDK_KEY_BackSpace, 0);
+   g_assert_cmpstr(
+      gtk_stack_get_visible_child_name(ggaze_window_get_stack(p_win)), ==,
+      "grid");
+   press_key(p_win, GDK_KEY_l, 0);
+   GtkWindow *p_dialog = ggtest_wait_for_dialog(GTK_WINDOW(p_win), "Cancel");
+   g_assert_nonnull(p_dialog);
+   g_assert_true(ggtest_click_dialog_button(GTK_WINDOW(p_win), "Cancel"));
+   drain_main(100);
+   g_assert_true(ggaze_window_enhance_is_dirty(p_win));
+   gtk_window_destroy(GTK_WINDOW(p_win));
+   drain_main(300);
+   cleanup_temp_dir(c_dir);
+}
+#endif
+
 int
 main(int i_argc, char **c_argv) {
+#if GGAZE_HAVE_GEGL
+   gegl_init(&i_argc, &c_argv);
+   enhancer_babl_ready();
+#endif
    g_test_init(&i_argc, &c_argv, NULL);
    g_log_set_always_fatal(G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL);
    if (!gtk_init_check()) {
@@ -474,5 +735,13 @@ main(int i_argc, char **c_argv) {
                    test_shortcut_full_table_registered);
    g_test_add_func("/shortcut/help_window_from_table",
                    test_help_window_from_table);
+   g_test_add_func("/shortcut/shift_jk_backspace_marks",
+                   test_shift_jk_and_backspace_marks);
+   g_test_add_func("/shortcut/backspace_fullscreen", test_backspace_fullscreen);
+   g_test_add_func("/shortcut/shift_jk_pan_slideshow",
+                   test_shift_jk_pan_and_slideshow);
+#if GGAZE_HAVE_GEGL
+   g_test_add_func("/shortcut/backspace_edit_steps", test_backspace_edit_steps);
+#endif
    return (g_test_run());
 }

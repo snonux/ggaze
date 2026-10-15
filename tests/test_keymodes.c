@@ -172,6 +172,36 @@ test_edit_undo_keys(void) {
    g_assert_null(shortcuts_global_action(GDK_KEY_U, GDK_SHIFT_MASK));
 }
 
+/* Shifted vertical vi keys share the arrows' selection action; plain and
+ * Caps Lock letters retain cursor navigation, and Ctrl/Alt are not aliases. */
+static void
+test_vertical_selection_aliases(void) {
+   static const struct {
+      guint           u_key;
+      GdkModifierType e_mods;
+      const char     *c_action;
+   } CASES[] = {
+      {GDK_KEY_J, GDK_SHIFT_MASK, "win.extend-down"},
+      {GDK_KEY_j, GDK_SHIFT_MASK, "win.extend-down"},
+      {GDK_KEY_K, GDK_SHIFT_MASK, "win.extend-up"},
+      {GDK_KEY_k, GDK_SHIFT_MASK, "win.extend-up"},
+      {GDK_KEY_Down, GDK_SHIFT_MASK, "win.extend-down"},
+      {GDK_KEY_Up, GDK_SHIFT_MASK, "win.extend-up"},
+      {GDK_KEY_j, 0, "win.cursor-down"},
+      {GDK_KEY_K, GDK_LOCK_MASK, "win.cursor-up"},
+      {GDK_KEY_J, GDK_SHIFT_MASK | GDK_CONTROL_MASK, NULL},
+      {GDK_KEY_K, GDK_SHIFT_MASK | GDK_ALT_MASK, NULL},
+   };
+   for (gsize u = 0; u < G_N_ELEMENTS(CASES); u++) {
+      g_assert_cmpstr(shortcuts_global_action(CASES[u].u_key, CASES[u].e_mods),
+                      ==, CASES[u].c_action);
+   }
+   g_assert_null(
+      shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_J, GDK_SHIFT_MASK));
+   g_assert_null(
+      shortcuts_mode_action(GGAZE_KEY_MODE_PANEL, GDK_KEY_K, GDK_SHIFT_MASK));
+}
+
 /* The digits and `0` are no longer global: only the panel binds 1-8, and
  * `0` is zoom and nothing else. c / r / [ / ] / x / s are global (they
  * open the panel or explain themselves); R is free. */
@@ -532,6 +562,8 @@ main(int i_argc, char **c_argv) {
    g_test_add_func("/keymodes/panel_keys_are_scoped",
                    test_panel_keys_are_scoped);
    g_test_add_func("/keymodes/global_keys", test_global_keys);
+   g_test_add_func("/keymodes/vertical_selection_aliases",
+                   test_vertical_selection_aliases);
    g_test_add_func("/keymodes/edit_undo_keys", test_edit_undo_keys);
    g_test_add_func("/keymodes/crop_ops", test_crop_ops);
    g_test_add_func("/keymodes/straighten_ops", test_straighten_ops);

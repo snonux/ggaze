@@ -51,7 +51,7 @@ Keyboard first: every action has a vi-style key and a traditional one
 |-----|--------|
 | `h` / `l`, `←`/`→` | previous / next image |
 | `PgUp` / `PgDn` | grid: cursor one page up / down; large view: previous / next image |
-| `Shift`+arrows | grid: multi-select (extends the marks; moving back unmarks; a cursor move without `Shift` drops the selection); large view: pan |
+| `H`/`J`/`K`/`L`, `Shift`+arrows | grid: multi-select (extends the marks; moving back unmarks; a cursor move without `Shift` drops the selection); large view: pan |
 | `g` / `G`, `Home` / `End` | first / last image |
 | `Enter` / `Esc`    | grid → large / large → grid (`t` toggles; `Esc` twice in the grid quits) |
 | `j` / `k`, `↓`/`↑` | cursor row down / up (grid) · pan (large) |
@@ -82,7 +82,8 @@ Keyboard first: every action has a vi-style key and a traditional one
 | `S` / `F5`         | slideshow |
 | `o` / `O`          | open image / open folder dialog (`Ctrl+o`, `Ctrl+Shift+o`) |
 | `Ctrl+r` | refresh the folder (clears the grey boxes left by trashed / deleted images) |
-| `Enter` / `Backspace` | on a folder cell in the grid: open that sub-folder / back up to the parent |
+| `Enter` / `Backspace` | grid: open the highlighted image/folder / go to the parent (bounded by the opened folder) |
+| `Backspace` | large view, one step per press: stop slideshow → cancel tool → close edit panel (keeps edits) → leave fullscreen → grid (keeps marks/cursor); never quits |
 | `,`               | preferences |
 | `F10`             | main menu |
 | `?` / `F1`         | shortcuts overlay |

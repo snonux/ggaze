@@ -143,7 +143,7 @@ drift from the live bindings.
 | `h` / `Left`   | previous image |
 | `l` / `Right` | next image |
 | `PageUp` / `PageDown` | grid: cursor (and view) one full page up / down — as many rows as are visible; large view: previous / next image |
-| `Shift`+arrows | grid: extend the marks from where the run of such moves began to the new cell (moving back unmarks again); it stays when the keys are released and is dropped by the next cursor move without `Shift` (marks set with `v` elsewhere stay); large view: pan |
+| `H`/`J`/`K`/`L`, `Shift`+arrows | grid: extend the marks from where the run of such moves began to the new cell (moving back unmarks again); it stays when the keys are released and is dropped by the next cursor move without `Shift` (marks set with `v` elsewhere stay); large view: pan |
 | `j` / `Down`   | cursor down one row (grid) / pan down (large) |
 | `k` / `Up`     | cursor up one row (grid) / pan up (large) |
 | `H` / `L`, `Shift+Left` / `Shift+Right` | pan left / right (large) |
@@ -184,7 +184,7 @@ drift from the live bindings.
 | `U` / `Ctrl+Shift+Z` | redo the edit step undone last (edit panel open, large view only; elsewhere nothing) |
 | `o` / `Ctrl+o` | open image dialog (image filter) |
 | `O` / `Ctrl+Shift+o` | open folder dialog |
-| `Backspace` | up to the parent folder (grid, after entering a sub-folder) |
+| `Backspace` | large view, one step per press: stop slideshow → cancel tool → close the visible edit panel (keeps edits) → leave fullscreen → grid (keeps marks and cursor); in the grid, up to the parent folder, bounded by the folder that was opened. Never clears marks or quits; navigating away from an unsaved edit still prompts Save/Discard/Cancel |
 | `,` / `Ctrl+,` | preferences (destinations, editors, scripts, presets, sort, …) |
 | `F10`          | main menu (every action, with its keys) |
 | `?` / `F1`     | shortcuts overlay |

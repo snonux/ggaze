@@ -1474,22 +1474,32 @@ _back_enhance_step(GgazeWindow *p_win) {
 }
 #endif
 
+/* The transient view steps shared by Esc and large-view Backspace. Neither
+ * path discards edits; only Esc goes on to clear marks or quit. */
+static gboolean
+_back_view_step(GgazeWindow *p_win) {
+   if (p_win->u_slideshow != 0) {
+      _slideshow_stop(p_win, "Slideshow stopped");
+      return (TRUE);
+   }
+#if GGAZE_HAVE_GEGL
+   if (_back_enhance_step(p_win)) {
+      return (TRUE);
+   }
+#endif
+   if (gtk_window_is_fullscreen(GTK_WINDOW(p_win))) {
+      gtk_window_unfullscreen(GTK_WINDOW(p_win));
+      return (TRUE);
+   }
+   return (FALSE);
+}
+
 static void
 _action_back(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
-   if (p_win->u_slideshow != 0) {
-      _slideshow_stop(p_win, "Slideshow stopped");
-      return;
-   }
-#if GGAZE_HAVE_GEGL
-   if (_back_enhance_step(p_win)) {
-      return;
-   }
-#endif
-   if (gtk_window_is_fullscreen(GTK_WINDOW(p_win))) {
-      gtk_window_unfullscreen(GTK_WINDOW(p_win));
+   if (_back_view_step(p_win)) {
       return;
    }
    if (p_win->p_nav != NULL && navigator_get_mark_count(p_win->p_nav) > 0) {
@@ -3229,13 +3239,19 @@ _browse_to(GgazeWindow *p_win, GFile *p_folder) {
                    _browse_ctx_free);
 }
 
-/* Backspace: up to the parent folder, as the grid's ".." cell does -- only
- * in the grid, and only below the folder the user opened. */
+/* Backspace: one view step in large view, retaining marks and edits; in the
+ * grid, up as its ".." cell does, bounded by the folder the user opened. */
 static void
 _action_parent_folder(GSimpleAction *p_a, GVariant *p_v, gpointer p_data) {
    (void)p_a;
    (void)p_v;
    GgazeWindow *p_win = GGAZE_WINDOW(p_data);
+   if (_get_view(p_win) == GGAZE_VIEW_LARGE) {
+      if (!_back_view_step(p_win)) {
+         _set_view(p_win, GGAZE_VIEW_GRID);
+      }
+      return;
+   }
    if (p_win->p_nav == NULL || _get_view(p_win) != GGAZE_VIEW_GRID) {
       return;
    }

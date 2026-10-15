@@ -936,9 +936,9 @@ test('full_lifecycle', test_full_lifecycle,
 
 test_shortcut = executable(
    'test_shortcut', ['test_shortcut.c', ggaze_conf_h],
-   include_directories : [inc, src_inc],
-   dependencies : ggaze_deps,
-   link_with : ggaze_lib, install : false,
+   include_directories : [inc, src_inc, test_helpers_inc],
+   dependencies : ggaze_deps + (gegl_dep.found() ? [gegl_dep] : []),
+   link_with : [ggaze_lib, test_helpers_lib], install : false,
 )
 test('shortcut', test_shortcut,
    suite : 'integration', env : fixtures_env)

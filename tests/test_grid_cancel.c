@@ -388,6 +388,18 @@ test_browse_sub_folders(void) {
    g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
    g_assert_null(ggaze_grid_get_selected_folder(window_grid(p_win)));
 
+   /* Backspace in the large view returns to this folder's grid first;
+    * only the following press climbs to the parent. */
+   gtk_widget_activate_action(GTK_WIDGET(p_win), "win.enter-large", NULL);
+   for (guint u = 0; u < 3000 && viewer_texture(p_win) == NULL; u++) {
+      drain_main(1);
+   }
+   g_assert_nonnull(viewer_texture(p_win));
+   drain_main(100);
+   g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "large");
+   gtk_widget_activate_action(GTK_WIDGET(p_win), "win.parent-folder", NULL);
+   wait_for_grid(p_win, 1, 1);
+   g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
    gtk_widget_activate_action(GTK_WIDGET(p_win), "win.parent-folder", NULL);
    wait_for_grid(p_win, 0, 1);
    g_assert_cmpstr(gtk_stack_get_visible_child_name(p_stack), ==, "grid");
